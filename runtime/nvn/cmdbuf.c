@@ -29,7 +29,12 @@ static CmdRec *raw_rec(uint64_t at, uint32_t op, uint32_t size) {
 
 NVN(nvnCommandBufferAddCommandMemory) {
     NvnCmdBuf *cb = cb_of(A(0));
-    uint64_t mem = HOST(NvnPool, A(1))->storage + A(2), size = A(3);
+    NvnPool *pool = HOST(NvnPool, A(1));
+    if (!cb || !pool)
+        FATAL("nvnCommandBufferAddCommandMemory: command buffer %llx (%s) / pool %llx (%s) not initialized, word0 %llx\n",
+              (unsigned long long)A(0), cb ? "ok" : "null", (unsigned long long)A(1), pool ? "ok" : "null",
+              (unsigned long long)*(uint64_t *)(uintptr_t)A(1));
+    uint64_t mem = pool->storage + A(2), size = A(3);
     if (cb->recording && cb->mem) {
         // chain the list being recorded into the new chunk
         CmdRec *j = raw_rec(cb->mem + cb->used, CMD_JUMP, sizeof(CmdRec));

@@ -28,7 +28,10 @@ struct KThread {
 #endif
     uint64_t entry, tlr, id;
     uint32_t handle;
-    int prio, core;
+    int prio, core;      // core: the ideal core (svcSetThreadCoreMask / CreateThread)
+    uint32_t core_mask;  // the cores it may run on
+    int run_core;        // the emulated core it holds while running guest code, -1 = none (kernel.c "cores")
+    bool core_shared;    // it took run_core beside its owner (that one ran without an svc for too long)
     bool cancel, in_sync_wait;
     // wait state (protected by g_klock)
     WaitKind wait_kind;

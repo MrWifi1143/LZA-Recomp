@@ -108,8 +108,18 @@ static void *render_main(void *arg) {
     return NULL;
 }
 
+// A game thread waiting for the render thread gives its emulated core up (runtime/kernel.c "cores") and takes it
+// again once it lets go of lk (lk_unlock; nothing on the render thread itself, which is no guest thread).
+void kernel_block_begin(void);
+void kernel_block_end(void);
+static void lk_unlock(void) {
+    pthread_mutex_unlock(&lk);
+    kernel_block_end();
+}
+
 // Waits on c_done for up to 5 ms (the caller holds lk); false once a reboot is stopping the guest threads.
 static bool wait_done(void) {
+    kernel_block_begin();
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     ts.tv_nsec += 5000000;
@@ -130,12 +140,12 @@ static uint64_t push(Job j) {
         pthread_attr_destroy(&attr);
     }
     while (qtail - qhead >= QN)
-        if (!wait_done()) { pthread_mutex_unlock(&lk); return 0; }
+        if (!wait_done()) { lk_unlock(); return 0; }
     queue[qtail % QN] = j;
     qtail++;
     uint64_t t = ++enq;
     pthread_cond_signal(&c_work);
-    pthread_mutex_unlock(&lk);
+    lk_unlock();
     return t;
 }
 
@@ -152,9 +162,9 @@ void rt_present(NvnTexture *t) {
     if (!rt_active()) { backend_present(t); return; }
     pthread_mutex_lock(&lk);
     while (pres_enq - pres_fin >= MAX_PRESENTS)
-        if (!wait_done()) { pthread_mutex_unlock(&lk); return; }
+        if (!wait_done()) { lk_unlock(); return; }
     pres_enq++;
-    pthread_mutex_unlock(&lk);
+    lk_unlock();
     Job j = {.kind = RJ_PRESENT, .tex = t};
     push(j);
     uint64_t n = __atomic_add_fetch(&game_frames, 1, __ATOMIC_RELAXED);
@@ -170,8 +180,9 @@ void rt_call(void (*fn)(void *), void *arg) {
     Job j = {.kind = RJ_CALL, .fn = fn, .arg = arg, .done = &done};
     if (!push(j)) { return; }  // (a reboot: the call is dropped with the guest thread's work)
     pthread_mutex_lock(&lk);
+    kernel_block_begin();
     while (!done) pthread_cond_wait(&c_done, &lk);  // (the render thread never waits for the game: this ends)
-    pthread_mutex_unlock(&lk);
+    lk_unlock();
 }
 
 // Everything queued so far has run.
@@ -181,13 +192,13 @@ void rt_drain(void) {
     uint64_t target = enq;
     while (fin < target)
         if (!wait_done()) break;
-    pthread_mutex_unlock(&lk);
+    lk_unlock();
 }
 
 uint64_t rt_fence_ticket(void) {
     pthread_mutex_lock(&lk);
     uint64_t t = enq;
-    pthread_mutex_unlock(&lk);
+    lk_unlock();
     return t;
 }
 
@@ -196,9 +207,9 @@ void rt_wait_ticket(uint64_t ticket) {
     if (!ticket) return;
     pthread_mutex_lock(&lk);
     while (fin < ticket)
-        if (!wait_done()) { pthread_mutex_unlock(&lk); return; }
+        if (!wait_done()) { lk_unlock(); return; }
     uint64_t seq = seq_after[ticket & 1023];
-    pthread_mutex_unlock(&lk);
+    lk_unlock();
     renderer_wait_seq(seq);
 }
 
@@ -210,6 +221,6 @@ void rt_reset(void) {
     while (qhead != qtail || busy) pthread_cond_wait(&c_done, &lk);
     dropping = false;
     pres_enq = pres_fin = 0;
-    pthread_mutex_unlock(&lk);
+    lk_unlock();
     __atomic_store_n(&game_frames, renderer_present_count(), __ATOMIC_RELAXED);
 }

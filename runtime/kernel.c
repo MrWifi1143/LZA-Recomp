@@ -94,10 +94,93 @@ static void deadline(struct timespec *ts, int64_t timeout_ns) {
     if (ts->tv_nsec >= 1000000000) { ts->tv_sec++; ts->tv_nsec -= 1000000000; }
 }
 
+// ------------------------------------------------------------------ cores
+// Horizon runs one thread at a time per core and switches only when the running thread blocks (an svc) or a
+// higher-priority thread becomes ready; there is no time slicing between threads of equal priority. Engines rely on
+// it: PLA pins its job workers to cores and keeps per-core state, indexed by GetCurrentProcessorNumber, that the
+// threads of a core touch without locks; run side by side as free host threads they corrupted it (render workers
+// crashing on each other's jobs). So a guest thread runs guest code only while it holds one of the 4 emulated cores
+// in its mask (pinned threads their own core, floating ones any free one), gives it up wherever it blocks (kwait,
+// SleepThread, kernel_block_begin) and takes one again at the next point holding no lock (rt_svc's end, an HLE
+// call's dispatch, kernel_block_end). A thread that waited CORE_STEAL_NS for a core whose owner runs without any svc
+// takes it beside the owner (Horizon would preempt a lower-priority owner; a spin-wait must not hang).
+// LARECOMP_FREE_CORES=1: the old way (every thread free).
+#define NCORES 4
+#define CORE_STEAL_NS 20000000ull
+static pthread_mutex_t g_core_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_core_cond = PTHREAD_COND_INITIALIZER;
+static KThread *g_core_owner[NCORES];
+
+static bool cores_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        on = !ENV("LARECOMP_FREE_CORES");
+        if (!on) LOG("[kernel] cores: every guest thread runs freely (LARECOMP_FREE_CORES)\n");
+    }
+    return on;
+}
+
+static void core_acquire(KThread *t) {
+    if (!t || t->run_core >= 0 || !cores_on()) return;
+    uint32_t mask = t->core_mask & 0xF;
+    if (!mask) mask = 1u << t->core;
+    pthread_mutex_lock(&g_core_lock);
+    uint64_t start = 0;
+    for (;;) {
+        int pick = -1;
+        if ((mask >> t->core & 1) && !g_core_owner[t->core]) pick = t->core;
+        for (int i = 0; pick < 0 && i < NCORES; i++)
+            if ((mask >> i & 1) && !g_core_owner[i]) pick = i;
+        if (pick >= 0) {
+            g_core_owner[pick] = t;
+            t->run_core = pick;
+            t->core_shared = false;
+            break;
+        }
+        uint64_t now = plat_now_ns();
+        if (!start) start = now;
+        if (now - start >= CORE_STEAL_NS) {
+            pick = (mask >> t->core & 1) ? t->core : __builtin_ctz(mask);
+            static int logged;
+            if (logged++ < 20)
+                LOG("[kernel] thread %llx (prio %d) runs on core %d beside thread %llx (prio %d): no svc for 20 ms\n",
+                    (unsigned long long)t->id, t->prio, pick, (unsigned long long)g_core_owner[pick]->id,
+                    g_core_owner[pick]->prio);
+            t->run_core = pick;
+            t->core_shared = true;
+            break;
+        }
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 2000000;
+        if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+        pthread_cond_timedwait(&g_core_cond, &g_core_lock, &ts);
+    }
+    pthread_mutex_unlock(&g_core_lock);
+}
+
+// (may be called holding g_klock: g_core_lock is taken last and never waits here)
+static void core_release(KThread *t) {
+    if (!t || t->run_core < 0) return;
+    pthread_mutex_lock(&g_core_lock);
+    if (!t->core_shared && g_core_owner[t->run_core] == t) g_core_owner[t->run_core] = NULL;
+    t->run_core = -1;
+    t->core_shared = false;
+    pthread_cond_broadcast(&g_core_cond);
+    pthread_mutex_unlock(&g_core_lock);
+}
+
+void kernel_block_begin(void) { core_release(t_cur); }
+void kernel_block_end(void) { core_acquire(t_cur); }
+void kernel_core_reacquire(void) {
+    if (__builtin_expect(t_cur && t_cur->run_core < 0, 0)) core_acquire(t_cur);
+}
+
 // Sleep on the current thread's condition. Returns false on timeout. Caller holds g_klock.
 static pthread_cond_t g_nothread_cond = PTHREAD_COND_INITIALIZER;
 static bool kwait(int64_t timeout_ns, const struct timespec *ts) {
     pthread_cond_t *cv = t_cur ? &t_cur->cond : &g_nothread_cond;
+    core_release(t_cur);  // (taken again at rt_svc's end, holding no lock)
     if (timeout_ns < 0) {
         pthread_cond_wait(cv, &g_klock);
         return true;
@@ -191,7 +274,11 @@ static void *thread_main(void *arg) {
     t_cur = t;
     crash_handler_install();
     rt_set_fpcr(0);
-    if (!setjmp(t->unwind)) guest_call(&t->cpu, t->entry);
+    if (!setjmp(t->unwind)) {
+        core_acquire(t);
+        guest_call(&t->cpu, t->entry);
+    }
+    core_release(t);
     pthread_mutex_lock(&g_klock);
     t->finished = true;
     kernel_signal(&t->obj);
@@ -208,6 +295,8 @@ static KThread *thread_new(uint64_t entry, uint64_t arg, uint64_t stack_top, int
     t->entry = entry;
     t->prio = prio;
     t->core = core < 0 ? 0 : core;
+    t->core_mask = 1u << t->core;
+    t->run_core = -1;
     t->id = next_thread_id++;
     t->cpu.x[0] = arg;
     t->cpu.sp = stack_top & ~15ull;
@@ -491,12 +580,17 @@ enum { ARB_SIGNAL = 0, ARB_SIGNAL_INC_EQ = 1, ARB_SIGNAL_MOD_EQ = 2 };
 
 static uint32_t svc_wait_for_address(uint64_t addr, uint32_t type, int32_t value, int64_t timeout) {
     pthread_mutex_lock(&g_klock);
+    // The guest changes these words with its own atomics, outside g_klock: every kernel update is a compare-and-swap
+    // (as Horizon's KAddressArbiter does); a plain load + store lost those changes, and with them wakeups (PLA hung
+    // at random with every thread waiting).
     int32_t cur = (int32_t)__atomic_load_n(u32p(addr), __ATOMIC_SEQ_CST);
     bool wait;
     if (type == ARB_WAIT_LESS) wait = cur < value;
     else if (type == ARB_DEC_WAIT_LESS) {
-        wait = cur < value;
-        if (wait) __atomic_store_n(u32p(addr), (uint32_t)(cur - 1), __ATOMIC_SEQ_CST);
+        uint32_t c32 = (uint32_t)cur;
+        while ((wait = (int32_t)c32 < value) &&
+               !__atomic_compare_exchange_n(u32p(addr), &c32, c32 - 1, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+        }
     } else if (type == ARB_WAIT_EQ) wait = cur == value;
     else { pthread_mutex_unlock(&g_klock); return R_INVALID_ENUM; }
     if (!wait) { pthread_mutex_unlock(&g_klock); return R_INVALID_STATE; }
@@ -529,8 +623,11 @@ static uint32_t svc_signal_to_address(uint64_t addr, uint32_t type, int32_t valu
     if (type == ARB_SIGNAL) {
         arbiter_wake(addr, count);
     } else if (type == ARB_SIGNAL_INC_EQ) {
-        if (cur != value) r = R_INVALID_STATE;
-        else { __atomic_store_n(u32p(addr), (uint32_t)(cur + 1), __ATOMIC_SEQ_CST); arbiter_wake(addr, count); }
+        uint32_t expect = (uint32_t)value;
+        if (!__atomic_compare_exchange_n(u32p(addr), &expect, (uint32_t)value + 1, false, __ATOMIC_SEQ_CST,
+                                         __ATOMIC_SEQ_CST))
+            r = R_INVALID_STATE;
+        else arbiter_wake(addr, count);
     } else if (type == ARB_SIGNAL_MOD_EQ) {
         int waiting = 0;
         for (KThread *t = g_waitlist; t; t = t->wnext)
@@ -538,8 +635,12 @@ static uint32_t svc_signal_to_address(uint64_t addr, uint32_t type, int32_t valu
         int32_t nv;
         if (count <= 0) nv = waiting > 0 ? value - 2 : value + 1;
         else nv = waiting == 0 ? value + 1 : (waiting <= count ? value - 1 : value);
-        if (cur != value) r = R_INVALID_STATE;
-        else { __atomic_store_n(u32p(addr), (uint32_t)nv, __ATOMIC_SEQ_CST); arbiter_wake(addr, count); }
+        uint32_t expect = (uint32_t)value;
+        bool ok = nv != value ? __atomic_compare_exchange_n(u32p(addr), &expect, (uint32_t)nv, false, __ATOMIC_SEQ_CST,
+                                                            __ATOMIC_SEQ_CST)
+                              : cur == value;
+        if (!ok) r = R_INVALID_STATE;
+        else arbiter_wake(addr, count);
     } else {
         r = R_INVALID_ENUM;
     }
@@ -621,7 +722,10 @@ void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
         self->cur_svc = (int)imm;
     }
     svc_entry(c, imm, pc);
-    if (self) self->cur_svc = -1;
+    if (self) {
+        self->cur_svc = -1;
+        core_acquire(self);  // (no-op unless the svc gave its core up)
+    }
     rt_unwind_point();
 }
 
@@ -758,6 +862,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     case 0x0A: longjmp(t_cur->unwind, 1);  // ExitThread: back to thread_main, which signals the thread object
     case 0x0B: {  // SleepThread (in slices of at most 50 ms: a reboot doesn't wait out a long sleep)
         int64_t ns = (int64_t)x[0];
+        core_release(t_cur);  // (a yield too: another thread of this core may run; taken again at rt_svc's end)
         if (ns <= 0) { sched_yield(); break; }
         for (uint64_t end = plat_now_ns() + (uint64_t)ns, now; !g_rt_unwind && (now = plat_now_ns()) < end;) {
             uint64_t d = end - now < 50000000 ? end - now : 50000000;
@@ -778,15 +883,30 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         x[0] = o ? R_OK : R_INVALID_HANDLE;
         break;
     }
-    case 0x0E: {  // GetThreadCoreMask(_, _, handle)
+    case 0x0E: {  // GetThreadCoreMask(_, _, handle) -> ideal core, mask
         KObject *o = handle_get((uint32_t)x[2]);
         x[0] = o ? R_OK : R_INVALID_HANDLE;
         x[1] = o ? (uint64_t)((KThread *)o)->core : 0;
-        x[2] = 0xF;
+        x[2] = o ? ((KThread *)o)->core_mask : 0;
         break;
     }
-    case 0x0F: x[0] = R_OK; break;  // SetThreadCoreMask
-    case 0x10: x[0] = t_cur->core; break;  // GetCurrentProcessorNumber
+    case 0x0F: {  // SetThreadCoreMask(handle, ideal core, mask)
+        // Job systems pin a worker per core and index per-core state with GetCurrentProcessorNumber (PLA: its
+        // render workers on cores 0-2 shared one slot while this was ignored, and crashed on each other's work).
+        // ideal >= 0 pins; -2 = the process default (core 0 here); -1 / -3 keep the core unless the mask excludes it.
+        KObject *o = handle_get((uint32_t)x[0]);
+        if (!o) { x[0] = R_INVALID_HANDLE; break; }
+        KThread *t = (KThread *)o;
+        int ideal = (int32_t)x[1];
+        uint32_t mask = (uint32_t)x[2] & 0xF;
+        if (ideal >= 0 && ideal < 4) t->core = ideal;
+        else if (ideal == -2) t->core = 0;
+        if (mask && !(mask >> t->core & 1)) t->core = __builtin_ctz(mask);
+        t->core_mask = mask ? mask : 1u << t->core;
+        x[0] = R_OK;
+        break;
+    }
+    case 0x10: x[0] = t_cur->run_core >= 0 ? t_cur->run_core : t_cur->core; break;  // GetCurrentProcessorNumber
     case 0x11: case 0x12: case 0x17: {  // SignalEvent / ClearEvent / ResetSignal
         pthread_mutex_lock(&g_klock);
         KObject *o = handle_get((uint32_t)x[0]);

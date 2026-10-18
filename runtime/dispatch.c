@@ -192,6 +192,7 @@ static __thread struct { uint64_t addr; GuestFn fn; } dcache[DCACHE];
 
 static GuestFn dispatch_slow(Cpu *c) {
     uint64_t pc = c->pc;
+    kernel_core_reacquire();  // (after host code that blocked: no lock is held here)
     if (pc >= HLE_BASE && pc < HLE_BASE + HLE_SIZE) {
         rt_unwind_point();  // (HLE calls aren't cached below, so every one passes here: a reboot's safe point)
         int i = (int)((pc - HLE_BASE) / 16);

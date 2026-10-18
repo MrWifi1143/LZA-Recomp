@@ -194,12 +194,18 @@ NVN(nvnMemoryPoolInitialize) {
     p->storage = G(uint64_t, A(1), 0x10);
     p->size = G(uint64_t, A(1), 0x18);
     p->flags = G(uint32_t, A(1), 8);
+    if (ENV("LARECOMP_LOG_POOLS"))
+        LOG("[nvn] pool %llx: storage %llx size %#llx flags %#x (lr %llx)\n", (unsigned long long)A(0),
+            (unsigned long long)p->storage, (unsigned long long)p->size, p->flags, (unsigned long long)c->x[30]);
     SET_HOST(A(0), p);
     RET(1);
 }
 // Objects the game destroys (frame interpolation, exec.c: a recorded frame that may reference them is not replayed)
 uint64_t g_nvn_destroyed;
-NVN(nvnMemoryPoolFinalize) { g_nvn_destroyed++; rt_drain(); free(HOST(NvnPool, A(0))); SET_HOST(A(0), 0); }
+NVN(nvnMemoryPoolFinalize) {
+    if (ENV("LARECOMP_LOG_POOLS")) LOG("[nvn] pool %llx finalized (lr %llx)\n", (unsigned long long)A(0), (unsigned long long)c->x[30]);
+    g_nvn_destroyed++; rt_drain(); free(HOST(NvnPool, A(0))); SET_HOST(A(0), 0);
+}
 NVN(nvnMemoryPoolSetDebugLabel) { (void)c; }
 NVN(nvnMemoryPoolMap) { RET(HOST(NvnPool, A(0))->storage); }
 NVN(nvnMemoryPoolGetBufferAddress) { RET(HOST(NvnPool, A(0))->storage); }  // GPU address == CPU address
@@ -736,7 +742,11 @@ static void present_pace(int interval) {
     if (logged != period) { logged = period; LOG("[nvn] present pacing: %.1f fps (interval %d)\n", 1e9 / period, interval); }
     uint64_t now = plat_now_ns();
     if (!next || now > next + 2 * period) next = now;  // first frame / fell behind: start over, no burst
-    else plat_sleep_until_ns(next);
+    else {
+        kernel_block_begin();  // (the emulated core is free while the game thread waits: runtime/kernel.c)
+        plat_sleep_until_ns(next);
+        kernel_block_end();
+    }
     next += period;
 }
 

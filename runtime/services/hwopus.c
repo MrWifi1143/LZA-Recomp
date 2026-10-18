@@ -75,13 +75,14 @@ static int opus_decode(OpusDec *d, const uint8_t *data, uint32_t size, int16_t *
 static void opus_decoder(Service *s, IpcReq *req, IpcResp *resp) {
     OpusDec *d = s->state;
     switch (req->cmd) {
-    case 0: case 4: case 6: {  // DecodeInterleaved*(in packet buffer, out PCM buffer)
+    case 0: case 4: case 6: case 8: {  // DecodeInterleaved*(in packet buffer, out PCM buffer); 8: the 12.0.0+
+                                       // DecodeInterleaved (PLA), 6's buffers, reset flag and output
         IpcBuf *in = in_buf(req, 0), *out = out_buf(req, 0);
         if (!in || !out || in->size < 8) { resp->result = 111 | (6 << 9); return; }  // (module 111 codec: bad input)
         const uint8_t *p = (const uint8_t *)(uintptr_t)in->addr;
         uint32_t size = be32(p);
         if (8 + (uint64_t)size > in->size) { resp->result = 111 | (6 << 9); return; }
-        if (req->cmd == 6 && req->data_size >= 1 && IN(uint8_t, 0)) {
+        if ((req->cmd == 6 || req->cmd == 8) && req->data_size >= 1 && IN(uint8_t, 0)) {
             pthread_mutex_lock(&d->lock);
             avcodec_flush_buffers(d->ctx);  // reset: a new stream
             pthread_mutex_unlock(&d->lock);
