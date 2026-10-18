@@ -87,7 +87,7 @@ static bool known_pair(uint16_t sp, uint8_t lv) {
 static void find_party(void) {
     uint64_t a = 0x7000000000ull;
     int found = 0;
-    while (a < 0x7800000000ull) {
+    while (a < 0x8000000000ull) {
         MEMORY_BASIC_INFORMATION mbi;
         if (!VirtualQuery((void *)(uintptr_t)a, &mbi, sizeof mbi)) break;
         uint64_t base = (uint64_t)(uintptr_t)mbi.BaseAddress, size = mbi.RegionSize;
@@ -130,7 +130,7 @@ static size_t g_npages, g_cappages;
 static void snap_take(void) {
     static const uint8_t zero[4096];
     uint64_t a = 0x7200000000ull, bytes = 0;
-    while (a < 0x7800000000ull) {
+    while (a < 0x8000000000ull) {
         MEMORY_BASIC_INFORMATION mbi;
         if (!VirtualQuery((void *)(uintptr_t)a, &mbi, sizeof mbi)) break;
         uint64_t base = (uint64_t)(uintptr_t)mbi.BaseAddress, size = mbi.RegionSize;

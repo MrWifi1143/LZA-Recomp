@@ -112,6 +112,7 @@ static int nregions;
 static uint64_t heap_size;
 static uint64_t tls_next = TLS_BASE;
 uint64_t g_program_id;  // from main.npdm's ACI0 (runtime/main.c)
+uint64_t g_system_resource_size;  // main.npdm META+0x14: nonzero enables nn::os virtual address memory (PLA: 16 MB)
 static uint64_t g_user_exception_ctx;  // (HLE heap: wiped by a reboot, kernel_reset forgets it)
 uint64_t kernel_heap_size(void) { return heap_size; }  // bytes from HEAP_BASE set by SetHeapSize
 // Writable guest data regions (heap, mapped/physical memory, module .data): for debug/runtime memory scans.
@@ -901,7 +902,8 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         case 13: v = GUEST_HI - GUEST_LO; break;
         case 14: v = STACK_BASE; break;
         case 15: v = STACK_SIZE; break;
-        case 16: case 17: v = 0; break;
+        case 16: v = g_system_resource_size; break;  // SystemResourceSizeTotal
+        case 17: v = 0; break;                       // SystemResourceSizeUsed
         case 18: v = g_program_id; break;
         case 20:  // UserExceptionContextAddress: nn::os::SetDyingMessageRegion stores its region at +0x1c0
             if (!g_user_exception_ctx) g_user_exception_ctx = (uint64_t)(uintptr_t)hle_alloc(0x1000);
@@ -913,13 +915,16 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         x[1] = v;
         break;
     }
+    // Map/UnmapPhysicalMemory: the alias region's pages are already reserved (zero until first touch). The kernel
+    // maps only the pages of the range not mapped yet, so pages already in use keep their contents (nn::os virtual
+    // address memory maps overlapping ranges: zeroing them wiped PLA's heap headers). nn::os tracks these
+    // regions itself, so they are not added to the svcQueryMemory list (one per page would overflow it).
     case 0x2C:  // MapPhysicalMemory(addr, size)
-        memset((void *)x[0], 0, x[1]);
-        region_add(x[0], x[1], 0x7, 3);
+        plat_commit(x[0], x[1]);
         x[0] = R_OK;
         break;
-    case 0x2D:  // UnmapPhysicalMemory
-        region_remove(x[0]);
+    case 0x2D:  // UnmapPhysicalMemory(addr, size)
+        plat_decommit(x[0], x[1]);
         x[0] = R_OK;
         break;
     case 0x34: x[0] = svc_wait_for_address(x[0], (uint32_t)x[1], (int32_t)x[2], (int64_t)x[3]); break;

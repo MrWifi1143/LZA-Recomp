@@ -137,6 +137,7 @@ static uint64_t resolve(Module *m, uint32_t symidx) {
     uint64_t a = loader_find_symbol(name);
     if (a) return a;
     if ((s->info >> 4) == 2) return 0;  // weak undefined
+    LOG("[loader] %s: no implementation of %s (logging stub)\n", m->name, name);
     return hle_register(name, NULL);
 }
 

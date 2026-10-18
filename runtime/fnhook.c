@@ -127,7 +127,7 @@ typedef struct { uint64_t addr; int nargs; struct { int reg, deref; uint32_t len
 static Dump dumps[32];
 static int ndumps, dump_max = 4;
 
-static bool guest_ptr(uint64_t p) { return p >= 0x7000000000ull && p < 0x7800000000ull; }
+static bool guest_ptr(uint64_t p) { return p >= 0x7000000000ull && p < 0x8000000000ull; }
 
 static void hexdump(const char *what, uint64_t p, uint32_t len) {
     LOG("[hook]   %s @%llx (%u bytes):\n", what, (unsigned long long)p, len);

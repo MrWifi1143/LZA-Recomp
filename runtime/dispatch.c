@@ -158,6 +158,34 @@ GuestFn dispatch_lookup(uint64_t addr) {
     return NULL;
 }
 
+// ---- guest setjmp / longjmp. The generated code takes a host __builtin_setjmp at every guest setjmp call
+// (tools/gen.py), keyed by the guest return address and sp. The guest's own longjmp restores the guest registers and
+// branches to that return address, which is no function: dispatch_slow finds the point and longjmps the host back into
+// the generated function that made it. Per thread; a point whose sp is below the caller's belongs to a frame that has
+// returned and is reused first.
+typedef struct { uint64_t ret, sp; void *buf[5]; } JmpPoint;
+#define NJMP 256
+static __thread JmpPoint jmp_points[NJMP];
+static __thread unsigned jmp_next;
+
+void **rt_setjmp_point(Cpu *c, uint64_t ret) {
+    JmpPoint *free_p = NULL;
+    for (unsigned i = 0; i < NJMP; i++) {
+        JmpPoint *p = &jmp_points[i];
+        if (p->ret == ret && p->sp == c->sp) return p->buf;
+        if (!free_p && (!p->ret || p->sp < c->sp)) free_p = p;
+    }
+    if (!free_p) free_p = &jmp_points[jmp_next++ % NJMP];
+    free_p->ret = ret;
+    free_p->sp = c->sp;
+    return free_p->buf;
+}
+
+static void setjmp_resume(Cpu *c) {
+    for (unsigned i = 0; i < NJMP; i++)
+        if (jmp_points[i].ret == c->pc && jmp_points[i].sp == c->sp) __builtin_longjmp(jmp_points[i].buf, 1);
+}
+
 // Small direct-mapped cache in front of the binary search
 #define DCACHE 4096
 static __thread struct { uint64_t addr; GuestFn fn; } dcache[DCACHE];
@@ -178,6 +206,7 @@ static GuestFn dispatch_slow(Cpu *c) {
         if (overrides[i].addr == pc) return overrides[i].fn;
     GuestFn f = dispatch_lookup(pc);
     if (!f) {
+        setjmp_resume(c);  // (returns only if no guest setjmp point matches)
         uint64_t off;
         const char *s = loader_symbol_at(c->x[30], &off);
         FATAL("no function at %llx (lr=%llx %s+%llx)\n", pc, c->x[30], s ? s : "?", off);
@@ -254,6 +283,18 @@ void rt_fatal_trace(void) {
         for (int i = 0; i < 31; i += 4)
             fprintf(stderr, "  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx\n", i, c->x[i], i + 1,
                     c->x[i + 1], i + 2, c->x[i + 2], i + 3, c->x[i + 3]);
+        // guest call stack: the lifted code keeps the guest's frame records (x29 -> {x29, x30}) on the guest stack
+        fprintf(stderr, "guest backtrace (frame pointers):\n");
+        uint64_t fp = c->x[29], lr = c->x[30];
+        for (int i = 0; i < 24; i++) {
+            uint64_t off = 0;
+            const char *s = loader_symbol_at(lr, &off);
+            fprintf(stderr, "  #%-2d %llx %s+%llx\n", i, (unsigned long long)lr, s ? s : "?", (unsigned long long)off);
+            if (fp < GUEST_LO || fp >= GUEST_HI || (fp & 7)) break;
+            lr = ((uint64_t *)(uintptr_t)fp)[1];
+            fp = ((uint64_t *)(uintptr_t)fp)[0];
+            if (!lr) break;
+        }
     }
     plat_fatal_notice();
     // our crash handler also catches SIGABRT: without this abort() re-entered it forever (a 5 GB log)

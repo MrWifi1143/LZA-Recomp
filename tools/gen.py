@@ -53,6 +53,33 @@ class Module:
         self.cache = {}
         self.stats = Counter()
         self.mu = None
+        self.setjmp_targets = self._setjmp_targets()
+        self.stats['setjmp_sites'] = 0
+
+    SETJMP_NAMES = {'setjmp', '_setjmp', '__setjmp', 'sigsetjmp', '__sigsetjmp'}
+
+    def _setjmp_targets(self):
+        """Addresses whose call is a setjmp: the module's own setjmp functions and its PLT stubs for imported ones
+        (adrp x16, page; ldr x17, [x16, #off]; add x16, x16, #off; br x17 -> the GOT slot's JUMP_SLOT symbol)."""
+        n, out = self.nso, set()
+        for name, info, shndx, value, size in n.syms:
+            if shndx and name in self.SETJMP_NAMES:
+                out.add(self.base + value)
+        slots = {off: n.syms[sym][0] for off, typ, sym, add in n.relocs if typ == 1026 and sym}  # R_AARCH64_JUMP_SLOT
+        for i in range(3, len(self.words)):
+            if self.words[i] != 0xD61F0220:  # br x17
+                continue
+            adrp, ldr = self.words[i - 3], self.words[i - 2]
+            if (adrp & 0x9F00001F) != 0x90000010 or (ldr & 0xFFC003FF) != 0xF9400211:
+                continue
+            pc = self.lo + (i - 3) * 4
+            imm = ((adrp >> 5) & 0x7FFFF) << 2 | ((adrp >> 29) & 3)
+            if imm & (1 << 20):
+                imm -= 1 << 21
+            slot = (pc & ~0xFFF) + (imm << 12) + ((ldr >> 10) & 0xFFF) * 8 - self.base
+            if slots.get(slot) in self.SETJMP_NAMES:
+                out.add(pc)
+        return out
 
     def in_text(self, a):
         return self.lo <= a < self.hi and a % 4 == 0
@@ -463,7 +490,15 @@ class Module:
                 out.append(f'    if ({ins.cond}) {{ {jump(ins.target)} }}')
             elif k == 'bl':
                 t = ins.target
-                if self.in_text(t):
+                if t in self.setjmp_targets:
+                    # setjmp: a host setjmp point for the guest's return address and sp. The guest longjmp restores
+                    # the guest registers and branches to that return address, and rt_dispatch (which finds no
+                    # function there) longjmps back here; the call is skipped and the code goes on with x0 = value.
+                    refs.add(t)
+                    self.stats['setjmp_sites'] += 1
+                    out.append(f'    c->x[30] = {hx(a + 4)}; if (!__builtin_setjmp(rt_setjmp_point(c, {hx(a + 4)}))) '
+                               f'{fname(t)}(c);')
+                elif self.in_text(t):
                     refs.add(t)
                     out.append(f'    c->x[30] = {hx(a + 4)}; {fname(t)}(c);')
                 else:
@@ -478,7 +513,8 @@ class Module:
                 if jt:
                     cases = ' '.join(f'case {hx(t)}: goto L_{t:x};' for t in jt)
                     out.append(f'    switch ({ins.target}) {{ {cases} default: break; }}')
-                    out.append(f'    c->pc = {ins.target}; goto L_dispatch;')
+                    out.append(f'    c->pc = {ins.target}; goto L_dispatch;' if all_labels else
+                               f'    c->pc = {ins.target}; __attribute__((musttail)) return rt_dispatch(c);')
                     continue
                 out.append(f'    c->pc = {ins.target}; __attribute__((musttail)) return rt_dispatch(c);')
             elif k == 'ret':

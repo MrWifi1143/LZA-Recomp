@@ -36,6 +36,8 @@ void rt_svc(Cpu *c, uint32_t imm, uint64_t pc);
 void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) __attribute__((noreturn));
 void rt_udf(Cpu *c, uint64_t pc) __attribute__((noreturn));
 uint64_t rt_ticks(void);
+// guest setjmp: the host __builtin_setjmp buffer for the call returning to `ret` at this sp (runtime/dispatch.c)
+void **rt_setjmp_point(Cpu *c, uint64_t ret);
 
 #if defined(__aarch64__)
 static inline uint64_t rt_get_fpcr(void) { uint64_t v; __asm__ volatile("mrs %0, fpcr" : "=r"(v)); return v; }

@@ -754,7 +754,7 @@ NVN(nvnQueuePresentTexture) {
             if (*eq != '=') break;
             char *end;
             uint32_t v = (uint32_t)strtoull(eq + 1, &end, 0);
-            if (pa >= 0x7000000000ull && pa < 0x7800000000ull) *(uint32_t *)(uintptr_t)pa = v;
+            if (pa >= 0x7000000000ull && pa < 0x8000000000ull) *(uint32_t *)(uintptr_t)pa = v;
             p = *end == ';' ? end + 1 : end;
         }
     }

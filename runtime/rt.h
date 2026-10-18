@@ -12,9 +12,10 @@
 
 // ---- address space layout (guest addresses == host addresses)
 // macOS reserves 0x2_0000_0000-0x70_0000_0000, and guest addresses must fit in 39 bits, so the
-// guest lives in a 12.5 GB window at 0x70_0000_0000 claimed at startup (see main.c).
+// guest lives in the 64 GB window 0x70_0000_0000-0x80_0000_0000 claimed at startup (see main.c; reserved without
+// backing, pages commit on first touch).
 #define GUEST_LO     0x7000000000ull
-#define GUEST_HI     0x7320000000ull
+#define GUEST_HI     0x8000000000ull
 #define MAIN_BASE    0x7000000000ull
 #define SDK_BASE     0x7008000000ull   // PLA: main is 67 MB, so it gets a 128 MB slot
 #define SUBSDK0_BASE 0x700A000000ull
@@ -25,8 +26,10 @@
 #define TLS_SIZE     0x0000100000ull
 #define HLE_HEAP     0x7092000000ull   // guest-visible memory owned by host code
 #define HLE_HEAP_SIZE 0x000E000000ull
-#define ALIAS_BASE   0x7100000000ull   // alias region (svcMapMemory targets)
-#define ALIAS_SIZE   0x0100000000ull
+// alias region (svcMapMemory targets, and nn::os virtual address memory: PLA's nninitStartup reserves 32 GB for
+// its nn::mem::StandardAllocator there, backed page by page with svcMapPhysicalMemory)
+#define ALIAS_BASE   0x7400000000ull
+#define ALIAS_SIZE   0x0C00000000ull
 #define HEAP_BASE    0x7240000000ull
 #define HEAP_MAX     0x00D0000000ull   // 3.25 GB
 
@@ -84,5 +87,6 @@ int ui_run(void);  // window loop; returns the reboot kind requested (the window
 void guest_call(Cpu *c, uint64_t addr);   // call guest function at addr (saves/restores x30)
 uint64_t guest_sym(const char *name);     // cached loader_find_symbol, fatal if missing
 extern uint64_t g_program_id;  // the game's program (title) id, from main.npdm
+extern uint64_t g_system_resource_size;  // main.npdm: the process's system resource (svcGetInfo 16)
 void *hle_alloc(uint64_t size);           // zeroed guest-visible memory (never freed)
 extern const char *g_romfs_dir;
