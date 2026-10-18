@@ -228,6 +228,26 @@ VkDescriptorSetLayout vk_set_layout(const VkBindingInfo *b, int n, uint32_t set,
 
 // ================================================================== built-in shaders
 static const char *builtin_src(const char *name, int *stage) {
+    if (!strcmp(name, "drawtex.vert")) {  // DrawTexture: two triangles from dst (NDC) / src (uv) rectangles
+        *stage = STAGE_VERTEX;
+        return "#version 450\n"
+               "layout(push_constant) uniform P { vec4 dst; vec4 src; } pc;\n"
+               "layout(location = 0) out vec2 uv;\n"
+               "void main() {\n"
+               "  const vec2 k[6] = vec2[6](vec2(0, 0), vec2(1, 0), vec2(0, 1), vec2(1, 0), vec2(1, 1), vec2(0, 1));\n"
+               "  vec2 c = k[gl_VertexIndex];\n"
+               "  gl_Position = vec4(mix(pc.dst.xy, pc.dst.zw, c), 0.0, 1.0);\n"
+               "  uv = mix(pc.src.xy, pc.src.zw, c);\n"
+               "}\n";
+    }
+    if (!strcmp(name, "drawtex.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(location = 0) in vec2 uv;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "void main() { o = texture(t, uv); }\n";
+    }
     if (!strcmp(name, "present.vert")) {
         *stage = STAGE_VERTEX;
         // pv[0].x: flip (lower-left origin), pv[1]: uv crop (origin, size). Fullscreen triangle; Vulkan NDC y points down.

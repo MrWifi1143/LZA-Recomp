@@ -135,8 +135,25 @@ HLE_FUNC("_ZN2nn4lmem21AllocateFromFrameHeapEPNS0_6detail8HeapHeadEmi", heap_all
     if (!c->x[0]) fail_once("frame heap allocation", lr, size);
 }
 
+uint64_t g_stdheap_used;  // bytes of the heap window given to StandardAllocators from STDHEAP_BASE (exec.c: GPU import)
+
+// Initialize(NULL, size): the allocator reserves virtual address space and backs it on demand (nn::os virtual address
+// memory). Shaders read the game's data through the imported heap window only, so it gets a fixed block there instead.
+static void std_virtual_to_block(Cpu *c) {
+    if (c->x[1] || ENV("LARECOMP_VIRTUAL_HEAP")) return;
+    uint64_t want = c->x[2], left = STDHEAP_SIZE - g_stdheap_used;
+    uint64_t size = want < left ? want : left;
+    if (size < 0x100000) return;  // (no room: the virtual way)
+    c->x[1] = STDHEAP_BASE + g_stdheap_used;
+    c->x[2] = size;
+    g_stdheap_used += (size + 0xFFFF) & ~0xFFFFull;
+    LOG("[heaps] standard allocator: %#llx bytes of virtual memory asked, a %#llx-byte block at %llx given\n",
+        (unsigned long long)want, (unsigned long long)size, (unsigned long long)c->x[1]);
+}
+
 // nn::mem::StandardAllocator::Initialize(void *addr, size_t size[, bool])
 HLE_FUNC("_ZN2nn3mem17StandardAllocator10InitializeEPvm", heap_std_init) {
+    std_virtual_to_block(c);
     uint64_t lr = c->x[30], size = c->x[2];
     CALL("_ZN2nn3mem17StandardAllocator10InitializeEPvm");
     if (ENV("LARECOMP_LOG_HEAPS"))
@@ -144,6 +161,7 @@ HLE_FUNC("_ZN2nn3mem17StandardAllocator10InitializeEPvm", heap_std_init) {
 }
 
 HLE_FUNC("_ZN2nn3mem17StandardAllocator10InitializeEPvmb", heap_std_init_b) {
+    std_virtual_to_block(c);
     uint64_t lr = c->x[30], size = c->x[2];
     if (ENV("LARECOMP_LOG_HEAPS"))
         LOG("[heaps] standard allocator init addr %#llx size %#llx cache %d from lr %llx\n", (unsigned long long)c->x[1],

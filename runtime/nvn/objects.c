@@ -368,6 +368,10 @@ static NvnTexture *texture_from_builder(uint64_t b) {
     t->addr = t->pool ? t->pool->storage + t->pool_offset : 0;
     builder_layout(b, &t->layout);
     t->debug_id = next_debug_id++;
+    if (ENV("LARECOMP_LOG_TEX"))
+        LOG("[tex] #%u %llx %ux%ux%u lv%u fmt %#x target %u flags %#x swz %u%u%u%u stride %llu\n", t->debug_id,
+            (unsigned long long)t->addr, t->width, t->height, t->depth, t->levels, t->format, t->target, t->flags,
+            t->swizzle[0], t->swizzle[1], t->swizzle[2], t->swizzle[3], (unsigned long long)t->stride);
     return t;
 }
 

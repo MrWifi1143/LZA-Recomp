@@ -863,6 +863,17 @@ static void vk_end_pass_at(int line) {
     if (prof && line < 4096) prof_end_line[line]++;
     vkCmdEndRendering(vk_cmd());
     in_pass = false;
+    static long pass_fmt = -2;  // LARECOMP_DEBUG_PASS_FMT=<nvn format>: every pass rendering to that format, all frames
+    if (pass_fmt == -2) pass_fmt = getenv("LARECOMP_DEBUG_PASS_FMT") ? strtol(getenv("LARECOMP_DEBUG_PASS_FMT"), NULL, 0) : -1;
+    if (pass_fmt >= 0 && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend && (long)st.rt.color[0]->format == pass_fmt && st.rt.color[0]->width < 1000) {
+        static int n;
+        if (n < 400) {
+            char path[256];
+            snprintf(path, sizeof path, "build/fmtpass_%05llu_%03d_%ux%u.png", (unsigned long long)renderer_present_count(), n++,
+                     st.rt.color[0]->width, st.rt.color[0]->height);
+            renderer_save_texture_tex(st.rt.color[0]->backend, path);
+        }
+    }
     if (g_debug_frame && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {
         char path[256];
         static uint64_t debug_pass_frame = ~0ull;
@@ -882,6 +893,22 @@ static void begin_pass(void) {
     vk_end_pass();
     if (dl_on == 2) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=2: each pass its own submission)
     st.rt_dirty = false;
+    if (getenv("LARECOMP_LOG_SMALL_PASSES")) {  // (research: every distinct pass with a target under 1000 px wide)
+        static uint64_t seen[256];
+        static int nseen;
+        for (int i = 0; i < st.rt.ncolor; i++) {
+            NvnTexture *t = st.rt.color[i];
+            if (!t || t->width >= 1000) continue;
+            uint64_t key = (uint64_t)t->width << 40 | (uint64_t)t->height << 20 | t->format << 4 | (uint64_t)i;
+            int k = 0;
+            while (k < nseen && seen[k] != key) k++;
+            if (k == nseen && nseen < 256) {
+                seen[nseen++] = key;
+                LOG("[pass] target %d of %d: %ux%u fmt %#x (frame %llu)\n", i, st.rt.ncolor, t->width, t->height, t->format,
+                    (unsigned long long)renderer_present_count());
+            }
+        }
+    }
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);  // passes, copies and dispatches see each other's results
     {
@@ -1331,6 +1358,22 @@ static void translate_program(void *arg) {
         LOG("[shader] FS translate failed: %s\n", p->fi->error);
         atomic_store(&p->state, 2);
         return;
+    }
+    if (getenv("LARECOMP_GLSL_OVERRIDE_DIR")) {  // <code address>_fs.glsl replaces a fragment program's GLSL too
+        char path[512];
+        FILE *f;
+        {
+            snprintf(path, sizeof path, "%s/%llx_fs.glsl", getenv("LARECOMP_GLSL_OVERRIDE_DIR"), (unsigned long long)p->code[1]);
+            f = fopen(path, "rb");
+            if (f) {
+                fseek(f, 0, SEEK_END);
+                long n = ftell(f);
+                fseek(f, 0, SEEK_SET);
+                char *s = malloc((size_t)n + 1);
+                if (s && fread(s, 1, (size_t)n, f) == (size_t)n) { s[n] = 0; p->fi->msl = s; LOG("[exp] GLSL override: %s\n", path); }
+                fclose(f);
+            }
+        }
     }
     p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
     save_glsl(p->vi->msl, p->code[0], "vs");
@@ -2024,7 +2067,9 @@ static uint64_t gmem_tried;  // heap size the import was last attempted for (gme
 static VkDescriptorBufferInfo gmem_info(void) {
     static int off = -1;
     if (off < 0) off = getenv("LARECOMP_VK_NO_GMEM") != NULL || !g_vk.host_import;
-    uint64_t want = (kernel_heap_size() + 0xFFFF) & ~0xFFFFull;
+    extern uint64_t g_stdheap_used;  // (runtime/hle/heaps.c: the StandardAllocator block above the heap)
+    uint64_t heap = kernel_heap_size(), std_end = g_stdheap_used ? STDHEAP_BASE + g_stdheap_used - HEAP_BASE : 0;
+    uint64_t want = ((heap > std_end ? heap : std_end) + 0xFFFF) & ~0xFFFFull;
     if (want > HEAP_MAX) want = HEAP_MAX;
     if (!off && want > gmem_size && !gmem_import(want)) {
         LOG("[vk] guest heap import failed (%llu MB): shader global memory reads return zero\n", (unsigned long long)(want >> 20));
@@ -2177,6 +2222,124 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
     if (!view) view = vk_dummy_view(st_->type);
     if (!smp) smp = vk_default_sampler(true);
     *out = (VkDescriptorImageInfo){smp, view, VK_IMAGE_LAYOUT_GENERAL};
+}
+
+// ---- nvnCommandBufferDrawTexture: the texture's src rectangle (texels) onto the dst rectangle (render target pixels)
+// of colour target 0, with the bound blend state and channel mask; no game shaders, no depth test. Pipelines are kept
+// per pass formats + blend state (like the clear pipelines).
+static VkPipelineLayout drawtex_layout;
+static VkDescriptorSetLayout drawtex_set_layout;
+static PipeEnt drawtex_tab[256];
+
+static VkPipeline drawtex_pipeline(uint32_t write_mask, bool blend, const uint8_t *bf) {
+    uint64_t key = 0xcbf29ce484222325ull;
+    MIX(write_mask); MIX(blend); MIX(pass_ncolor); MIX(pass_depth); MIX(pass_stencil); MIX(pass_samples);
+    if (blend) for (int i = 1; i < 7; i++) MIX(bf[i]);
+    for (uint32_t i = 0; i < pass_ncolor; i++) MIX(pass_color[i]);
+    if (!key) key = 1;
+    uint32_t slot = (uint32_t)key & 255;
+    for (int p = 0; p < 256; p++, slot = (slot + 1) & 255) {
+        if (drawtex_tab[slot].key == key) return drawtex_tab[slot].pipe;
+        if (!drawtex_tab[slot].key) break;
+    }
+    if (!drawtex_layout) {
+        VkDescriptorSetLayoutBinding b = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+        VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b};
+        VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &drawtex_set_layout));
+        VkPushConstantRange r = {VK_SHADER_STAGE_VERTEX_BIT, 0, 32};
+        VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
+                                         .pSetLayouts = &drawtex_set_layout, .pushConstantRangeCount = 1, .pPushConstantRanges = &r};
+        VK_CHECK(vkCreatePipelineLayout(g_vk.dev, &ci, NULL, &drawtex_layout));
+    }
+    VkPipelineShaderStageCreateInfo stages[2] = {
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,
+         .module = vk_builtin_shader("drawtex.vert"), .pName = "main"},
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+         .module = vk_builtin_shader("drawtex.frag"), .pName = "main"}};
+    VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+                                                 .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+    VkPipelineViewportStateCreateInfo vs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
+    VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+                                                 .polygonMode = VK_POLYGON_MODE_FILL, .lineWidth = 1};
+    VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+                                               .rasterizationSamples = (VkSampleCountFlagBits)pass_samples};
+    VkPipelineDepthStencilStateCreateInfo ds = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    VkPipelineColorBlendAttachmentState cba[8] = {0};
+    cba[0].colorWriteMask = write_mask & 0xF;
+    if (blend) {
+        cba[0].blendEnable = VK_TRUE;
+        cba[0].srcColorBlendFactor = blend_factor(bf[1]);
+        cba[0].dstColorBlendFactor = blend_factor(bf[2]);
+        cba[0].srcAlphaBlendFactor = blend_factor(bf[3]);
+        cba[0].dstAlphaBlendFactor = blend_factor(bf[4]);
+        cba[0].colorBlendOp = blend_op(bf[5]);
+        cba[0].alphaBlendOp = blend_op(bf[6]);
+    }
+    VkPipelineColorBlendStateCreateInfo cb = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+                                              .attachmentCount = pass_ncolor, .pAttachments = cba};
+    VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+                                           .dynamicStateCount = NDYN, .pDynamicStates = DYN};
+    VkPipelineRenderingCreateInfo rinfo = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = pass_ncolor,
+                                           .pColorAttachmentFormats = pass_color, .depthAttachmentFormat = pass_depth,
+                                           .stencilAttachmentFormat = pass_stencil};
+    VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &rinfo, .stageCount = 2,
+                                       .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vs,
+                                       .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
+                                       .pColorBlendState = &cb, .pDynamicState = &dy, .layout = drawtex_layout};
+    VkPipeline p = VK_NULL_HANDLE;
+    if (vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p) != VK_SUCCESS) LOG("[vk] draw texture pipeline failed\n");
+    drawtex_tab[slot].key = key;
+    drawtex_tab[slot].pipe = p;
+    return p;
+}
+
+static void draw_texture(CmdRec *r) {
+    const float *dst = (const float *)r->extra, *src = dst + 4;
+    uint64_t h = r->x[0];
+    uint32_t tic = h & 0xFFFFF, tsc = (uint32_t)(h >> 20) & 0xFFF;
+    NvnTexture *rt = st.rt.ncolor ? st.rt.color[0] : NULL;
+    if (!rt || !h || !st.tpool || tic >= (uint32_t)st.tpool->count) return;
+    NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
+    if (!e->tex || !e->tex->width || !e->tex->height) return;
+    begin_pass();
+    if (!pass_ncolor || pass_color[0] == VK_FORMAT_UNDEFINED || rt_kind(rt->format)) return;
+    VkImageView view = vk_view(e->tex, &e->view, e->has_view, false, TEXTYPE_2D);
+    if (!view) return;
+    VkSampler smp = st.spool && tsc < (uint32_t)st.spool->count ? vk_sampler(&((NvnSamplerDesc *)st.spool->entries)[tsc])
+                                                                : vk_default_sampler(true);
+    bool blend = (st.color_state[0] & 1) != 0;
+    VkPipeline p = drawtex_pipeline(st.channel_mask & 0xF, blend, st.blend[0]);
+    if (!p) return;
+    VkCommandBuffer cb = vk_cmd();
+    vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
+    VkRect2D rect = scissor_rect();
+    if (!rect.extent.width || !rect.extent.height) return;
+    VkDescriptorSet ds = vk_alloc_set(drawtex_set_layout);
+    VkDescriptorImageInfo ii = {smp, view, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,
+                              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
+    vkUpdateDescriptorSets(g_vk.dev, 1, &w, 0, NULL);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, drawtex_layout, 0, 1, &ds, 0, NULL);
+    dyn_defaults(cb);
+    int pw, ph;
+    pass_size(&pw, &ph);
+    VkViewport vp = {0, 0, (float)(pw ? pw : (int)pass_w), (float)(ph ? ph : (int)pass_h), 0, 1};
+    vkCmdSetViewport(cb, 0, 1, &vp);
+    vkCmdSetScissor(cb, 0, 1, &rect);
+    // dst: render target pixels of the guest's size (the pass may be scaled) -> NDC (Vulkan y down; NVN's lower-left
+    // window origin counts y up); src: texels -> uv
+    float gw = (float)rt->width, gh = (float)rt->height, tw = (float)e->tex->width, th = (float)e->tex->height;
+    bool up = nvn_window_origin() == 0;
+    float pc[8] = {dst[0] / gw * 2 - 1, up ? 1 - dst[1] / gh * 2 : dst[1] / gh * 2 - 1,
+                   dst[2] / gw * 2 - 1, up ? 1 - dst[3] / gh * 2 : dst[3] / gh * 2 - 1,
+                   src[0] / tw, src[1] / th, src[2] / tw, src[3] / th};
+    vkCmdPushConstants(cb, drawtex_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 32, pc);
+    vkCmdDraw(cb, 6, 1, 0, 0);
+    if (g_debug_frame)
+        LOG("[drawtex] tex %ux%u f%#x (%.1f,%.1f)-(%.1f,%.1f) -> rt %ux%u (%.1f,%.1f)-(%.1f,%.1f) blend %d\n", e->tex->width,
+            e->tex->height, e->tex->format, src[0], src[1], src[2], src[3], rt->width, rt->height, dst[0], dst[1], dst[2], dst[3], blend);
 }
 
 // Writes the descriptor set of one stage. gx..gz: compute group counts (driver constants).
@@ -2406,7 +2569,23 @@ static void draw_(CmdRec *r, bool indexed) {
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
     Prog *pr = get_program(st.program, &vkey, &fkey);
     if (pr) wait_built(&pr->state);
-    if (!pr || atomic_load(&pr->state) != 1) { SKIP(pr ? 1 + (atomic_load(&pr->state) > 1) : 3); return; }
+    if (!pr || atomic_load(&pr->state) != 1) {
+        if (pr && atomic_load(&pr->state) > 1 && getenv("LARECOMP_LOG_FAILED_DRAWS")) {  // what a failed program draws to
+            static void *seen[64];
+            static int nseen;
+            int k = 0;
+            while (k < nseen && seen[k] != pr) k++;
+            if (k == nseen && nseen < 64) {
+                seen[nseen++] = pr;
+                NvnTexture *t0 = st.rt.ncolor ? st.rt.color[0] : NULL;
+                LOG("[draw] failed program %p (vs %llx fs %llx) -> color %ux%u fmt %#x, %d targets\n", (void *)pr,
+                    (unsigned long long)st.program->stages[0].code_addr, (unsigned long long)st.program->stages[1].code_addr,
+                    t0 ? t0->width : 0, t0 ? t0->height : 0, t0 ? t0->format : 0, st.rt.ncolor);
+            }
+        }
+        SKIP(pr ? 1 + (atomic_load(&pr->state) > 1) : 3);
+        return;
+    }
     {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
         static uint64_t last_fs, last_hash;
         uint64_t fs = st.program->stages[1].code_addr;
@@ -3592,6 +3771,7 @@ static void exec_list(uint64_t handle, int depth) {
             break;
         case CMD_DISPATCH: dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]); break;
         case CMD_DRAW_ARRAYS: draw(r, false); break;
+        case CMD_DRAW_TEXTURE: draw_texture(r); break;
         case CMD_DRAW_ELEMENTS: draw(r, true); break;
         case CMD_UPDATE_UNIFORM_BUFFER:
             memcpy((void *)(uintptr_t)(r->x[0] + r->x[2]), x, r->x[3]);
@@ -3629,9 +3809,32 @@ static void exec_list(uint64_t handle, int depth) {
             last_draws = g_draws_total;
             break;
         }
-        case CMD_COPY_TEXTURE_TO_TEXTURE: { const TexRefRec *t = x; copy_texture(&t[0], &t[1], r->x[6]); break; }
+        case CMD_COPY_TEXTURE_TO_TEXTURE: {
+            const TexRefRec *t = x;
+            if (getenv("LARECOMP_LOG_SMALL_PASSES")) {
+                NvnTexture *s_ = (NvnTexture *)(uintptr_t)t[0].tex, *d_ = (NvnTexture *)(uintptr_t)t[1].tex;
+                static int n;
+                if (d_ && d_->width < 1000 && n++ < 40)
+                    LOG("[copy] tex %ux%u f%#x (%d,%d %dx%d) -> tex %ux%u f%#x (%d,%d %dx%d)\n", s_ ? s_->width : 0, s_ ? s_->height : 0,
+                        s_ ? s_->format : 0, t[0].region[0], t[0].region[1], t[0].region[3], t[0].region[4], d_->width, d_->height,
+                        d_->format, t[1].region[0], t[1].region[1], t[1].region[3], t[1].region[4]);
+            }
+            copy_texture(&t[0], &t[1], r->x[6]);
+            break;
+        }
         case CMD_DOWNSAMPLE: { const TexRefRec *t = x; copy_texture(&t[0], &t[1], 1); break; }
-        case CMD_COPY_BUFFER_TO_TEXTURE: copy_buffer_to_texture(r->x[0], x); break;
+        case CMD_COPY_BUFFER_TO_TEXTURE: {
+            if (getenv("LARECOMP_LOG_SMALL_PASSES")) {
+                const TexRefRec *t = x;
+                NvnTexture *d_ = (NvnTexture *)(uintptr_t)t->tex;
+                static int n;
+                if (d_ && d_->width < 1000 && n++ < 40)
+                    LOG("[copy] buffer %llx -> tex %ux%u f%#x (%d,%d %dx%d)\n", (unsigned long long)r->x[0], d_->width, d_->height,
+                        d_->format, t->region[0], t->region[1], t->region[3], t->region[4]);
+            }
+            copy_buffer_to_texture(r->x[0], x);
+            break;
+        }
         case CMD_COPY_TEXTURE_TO_BUFFER: copy_texture_to_buffer(x, r->x[3]); break;
         case CMD_COPY_BUFFER_TO_BUFFER:
             renderer_flush();

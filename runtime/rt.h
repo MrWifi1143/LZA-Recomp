@@ -32,6 +32,11 @@
 #define ALIAS_SIZE   0x0C00000000ull
 #define HEAP_BASE    0x7240000000ull
 #define HEAP_MAX     0x00D0000000ull   // 3.25 GB
+// The game's virtual-memory StandardAllocator (PLA: Initialize(NULL, 32 GB)) gets this fixed block of the heap window
+// instead (runtime/hle/heaps.c): shader global memory (LDG/STG) reaches the heap window only (imported as a GPU buffer,
+// pinned), and the allocator spreads its allocations over its whole reservation. Above the heap SetHeapSize gives.
+#define STDHEAP_BASE (HEAP_BASE + 0x0010000000ull)
+#define STDHEAP_SIZE 0x00B0000000ull     // 2.75 GB
 
 // ---- loader.c
 typedef struct Module {

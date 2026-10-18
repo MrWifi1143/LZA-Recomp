@@ -113,6 +113,20 @@ static const char *reg(Ctx *c, int r, char *buf) {
 #define F(expr) fmt_f(alloca(512), (expr))
 static char *fmt_f(char *b, const char *e) { sprintf(b, "as_type<float>(%s)", e); return b; }
 
+// VMNMX operand: byte / halfword / word `sel` of x (bit 3: signed), zero- or sign-extended to 32 bits
+static void video_sel(char *o, const char *x, int sel) {
+    int base = sel & 7, sgn = sel & 8;
+    if (base <= 3) {
+        if (sgn) sprintf(o, "uint(int(%s << %du) >> 24)", x, 24 - 8 * base);
+        else sprintf(o, "((%s >> %du) & 0xffu)", x, 8 * base);
+    } else if (base <= 5) {
+        if (sgn) sprintf(o, "uint(int(%s << %du) >> 16)", x, 16 - 16 * (base - 4));
+        else sprintf(o, "((%s >> %du) & 0xffffu)", x, 16 * (base - 4));
+    } else {
+        sprintf(o, "(%s)", x);
+    }
+}
+
 static const char *pred(Ctx *c, int p, bool neg, char *buf) {
     if (p == PT) return neg ? "false" : "true";
     c->pred_used[p] = 1;
@@ -1217,6 +1231,56 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (sgn) sprintf(t, "uint(%s ? min(int(%s), int(%s)) : max(int(%s), int(%s)))", p, x, y, x, y);
         else sprintf(t, "(%s ? min(%s, %s) : max(%s, %s))", p, x, y, x, y);
         set_reg(c, d, t);
+    } else if (OPM(0x5bd0000000000000ull, 0xfff8000000000000ull) || OPM(0x4bd0000000000000ull, 0xfff0000000000000ull) ||
+               OPM(0x36d0000000000000ull, 0xfef8000000000000ull)) {  // LEA: d = (+-a << shift) + b (envytools gm107)
+        uint32_t sh = (uint32_t)bits(w, 39, 5);
+        const char *bv = B(false);
+        if (bits(w, 45, 1)) sprintf(t, "((0u - %s) << %uu) + %s", R(a), sh, bv);
+        else sprintf(t, "(%s << %uu) + %s", R(a), sh, bv);
+        set_reg(c, d, t);
+    } else if (OPM(0x5bd8000000000000ull, 0xfff8000000000000ull) || OPM(0x1800000000000000ull, 0xfc00000000000000ull)) {
+        // LEA.HI: d = low word of ((c:a) >> (32 - shift)) + b, c the high word of a 64-bit value
+        bool reg_form = (w >> 56) == 0x5b;
+        uint32_t sh = (uint32_t)(reg_form ? bits(w, 28, 5) : bits(w, 51, 5));
+        const char *bv = reg_form ? R((int)bits(w, 20, 8)) : cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, alloca(128));
+        const char *hi = R((int)bits(w, 39, 8)), *lo = R(a);
+        if (bits(w, reg_form ? 37 : 56, 1)) fail(c, "LEA.HI with .neg at %#x", pc);
+        if (sh == 0) sprintf(t, "%s + %s", hi, bv);
+        else sprintf(t, "((%s >> %uu) | (%s << %uu)) + %s", lo, 32 - sh, hi, sh, bv);
+        set_reg(c, d, t);
+    } else if (OPM(0x3a00000000000000ull, 0xfe00000000000000ull)) {  // VMNMX (video min/max; Ryujinx InstEmitVideoMinMax)
+        int sa = (int)(bits(w, 36, 3) | bits(w, 48, 1) << 3), sb = (int)(bits(w, 28, 3) | bits(w, 49, 1) << 3);
+        int vop = (int)bits(w, 51, 3);
+        bool dfmt = bits(w, 54, 1), mx = bits(w, 56, 1);
+        char ea[96], eb[96], r[400];
+        video_sel(ea, R(a), sa);
+        if (bits(w, 50, 1)) video_sel(eb, R((int)bits(w, 20, 8)), sb);
+        else {
+            uint32_t imm = (uint32_t)bits(w, 20, 16);
+            if (sb & 8) imm = (uint32_t)(int32_t)(int16_t)imm;
+            sprintf(eb, "%uu", imm);
+        }
+        if ((sa & 8) != (sb & 8)) {  // mixed signedness: max fits a u32, min an s32; a "negative" unsigned operand wins
+            if (mx) sprintf(r, "max(%s, %s)", ea, eb);
+            else sprintf(r, "uint(min(int(%s), int(%s)))", ea, eb);
+            const char *u = (sa & 8) ? eb : ea;
+            char tmp[400];
+            sprintf(tmp, "(int(%s) < 0 ? %s : %s)", u, u, r);
+            strcpy(r, tmp);
+        } else if (sa & 8) sprintf(r, "uint(%s(int(%s), int(%s)))", mx ? "max" : "min", ea, eb);
+        else sprintf(r, "%s(%s, %s)", mx ? "max" : "min", ea, eb);
+        const char *cc = R((int)bits(w, 39, 8));
+        switch (vop) {
+        case 0: sprintf(t, "((%s & 0xffffu) | (%s << 16u))", cc, r); break;          // MRG_16H
+        case 1: sprintf(t, "((%s & 0xffff0000u) | (%s & 0xffffu))", cc, r); break;   // MRG_16L
+        case 2: sprintf(t, "((%s & 0xffffff00u) | (%s & 0xffu))", cc, r); break;     // MRG_8B0
+        case 3: sprintf(t, "((%s & 0xff00ffffu) | ((%s & 0xffu) << 16u))", cc, r); break;  // MRG_8B2
+        case 4: sprintf(t, "(%s + %s)", r, cc); break;                                // ACC
+        case 5: if (dfmt) sprintf(t, "uint(min(int(%s), int(%s)))", r, cc); else sprintf(t, "min(%s, %s)", r, cc); break;
+        case 6: if (dfmt) sprintf(t, "uint(max(int(%s), int(%s)))", r, cc); else sprintf(t, "max(%s, %s)", r, cc); break;
+        default: sprintf(t, "%s", r);
+        }
+        set_reg(c, d, t);
     } else if (OPM(0x5c48000000000000ull, 0xfff8000000000000ull) || OPM(0x4c48000000000000ull, 0xfff8000000000000ull) ||
                OPM(0x3848000000000000ull, 0xfef8000000000000ull)) {  // SHL
         const char *bv = B(false);
@@ -1659,7 +1723,9 @@ static void glsl_rewrite(Ctx *c, Str *o, const char *src) {
         {"int4", "ivec4"}, {"uint2", "uvec2"}, {"uint3", "uvec3"}, {"uint4", "uvec4"}, {"bool2", "bvec2"},
         {"ulong", "uint64_t"}, {"long", "int64_t"}, {"rsqrt", "inversesqrt"}, {"rint", "roundEven"},
         {"front_facing", "gl_FrontFacing"}, {"point_coord", "gl_PointCoord"}, {"lane", "gl_SubgroupInvocationID"},
-        {"vid", "uint(gl_VertexIndex)"}, {"iid", "uint(gl_InstanceIndex)"},
+        // Maxwell's instance id excludes the draw's base instance (like GL's gl_InstanceID); Vulkan's gl_InstanceIndex
+        // includes it (PLA batches its text glyphs with a base instance: they read the wrong glyph's data, off screen)
+        {"vid", "uint(gl_VertexIndex)"}, {"iid", "uint(gl_InstanceIndex - gl_BaseInstanceARB)"},
     };
     const char *p = src;
     while (*p) {
@@ -1744,6 +1810,7 @@ static const char glsl_prelude[] =
     "#extension GL_KHR_shader_subgroup_shuffle : require\n"
     "#extension GL_KHR_shader_subgroup_shuffle_relative : require\n"
     "#extension GL_EXT_texture_shadow_lod : require\n"
+    "#extension GL_ARB_shader_draw_parameters : require\n"
     "#define cbr(cb, off) cb[min((off) >> 4, uint(cb.length() - 1))][((off) >> 2) & 3u]\n"
     "uint as_u(float x) { return floatBitsToUint(x); }\n"
     "uint as_u(uint x) { return x; }\n"

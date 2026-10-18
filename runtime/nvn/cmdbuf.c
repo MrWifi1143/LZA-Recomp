@@ -473,7 +473,22 @@ PLAIN(nvnCommandBufferDrawElementsIndirect, CMD_DRAW_ELEMENTS_INDIRECT)
 NVN(nvnCommandBufferMultiDrawArraysIndirectCount) { (void)c; }
 NVN(nvnCommandBufferMultiDrawElementsIndirectCount) { (void)c; }
 NVN(nvnCommandBufferDrawTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferDrawTexture) { (void)c; }
+// nvnCommandBufferDrawTexture(cmd, NVNtextureHandle, const NVNdrawTextureRegion *dst, const NVNdrawTextureRegion *src):
+// a textured rectangle without game shaders (PLA draws its text glyphs this way). Region = {x0, y0, x1, y1} floats: dst in
+// render target pixels, src in texels. Recorded: x[0] the handle, extra the 8 floats (exec.c draw_texture).
+NVN(nvnCommandBufferDrawTexture) {
+    Snap s = snap(c);
+    obj_mark(c, cb_of(s.x[0]));
+    float reg[8] = {0};
+    if (s.x[2]) memcpy(reg, (void *)(uintptr_t)s.x[2], 16);
+    if (s.x[3]) memcpy(reg + 4, (void *)(uintptr_t)s.x[3], 16);
+    CmdRec *r = record(c, CMD_DRAW_TEXTURE, sizeof reg, &s);
+    memcpy(r->extra, reg, sizeof reg);
+    static int logged;
+    if (logged++ < 3)
+        LOG("[nvn] DrawTexture handle %llx dst (%.1f,%.1f)-(%.1f,%.1f) src (%.1f,%.1f)-(%.1f,%.1f)\n", (unsigned long long)s.x[1],
+            reg[0], reg[1], reg[2], reg[3], reg[4], reg[5], reg[6], reg[7]);
+}
 PLAIN(nvnCommandBufferDispatchCompute, CMD_DISPATCH)
 PLAIN(nvnCommandBufferDispatchComputeIndirect, CMD_DISPATCH_INDIRECT)
 NVN(nvnCommandBufferBeginTransformFeedback) { (void)c; }

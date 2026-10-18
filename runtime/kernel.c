@@ -824,6 +824,10 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         uint64_t size = x[1];
         if (size > HEAP_MAX) { x[0] = R_OUT_OF_RESOURCE; break; }
         heap_size = size;
+        if (HEAP_BASE + size > STDHEAP_BASE) {
+            extern uint64_t g_stdheap_used;
+            if (g_stdheap_used) LOG("[kernel] warning: heap of %#llx bytes overlaps the StandardAllocator block\n", (unsigned long long)size);
+        }
         region_remove(HEAP_BASE);
         if (size) region_add(HEAP_BASE, size, 5, 3);
         x[0] = R_OK;
