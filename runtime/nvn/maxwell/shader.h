@@ -43,6 +43,8 @@ typedef struct {
     bool flip_y;            // lower-left window origin
     uint32_t vs_out_mask;   // fragment: varyings the vertex shader provides
     uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
+    uint8_t xfb_count[4];   // vertex: transform feedback capture (exec.c): components per buffer, 0 = none
+    uint16_t xfb_stride[4]; //   and the buffers' strides in bytes
 } ShaderKey;
 
 typedef struct {

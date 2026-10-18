@@ -667,6 +667,21 @@ static void set_shaders(Cpu *c, int stride) {
         p->stages[stage].const_size = *(const uint32_t *)(control + 0x6FC);
         p->stages[stage].content_hash = shader_content_hash(&p->stages[stage]);
         p->stage_mask |= 1u << stage;
+        if (stage == 0) {
+            // Transform feedback layout (GLSLC control section, worked out on PLA's skinning shader: 0x20.. 0x22 at
+            // 0xdc + i * 0x80 = the varyings, then per buffer the component count at 0x4dc + b * 0x80 and the strides
+            // as 4 u16 at 0x6dc). Captured components follow the shader's written outputs in order (exec.c).
+            for (int b = 0; b < 4; b++) {
+                uint32_t n_ = *(const uint32_t *)(control + 0x4dc + b * 0x80);
+                uint16_t s_ = *(const uint16_t *)(control + 0x6dc + b * 2);
+                bool ok = n_ <= 32 && s_ <= 512 && !(s_ & 3) && n_ * 4 <= s_;
+                p->xfb_count[b] = ok ? (uint8_t)n_ : 0;
+                p->xfb_stride[b] = ok && n_ ? s_ : 0;
+            }
+            if (p->xfb_count[0] && getenv("LARECOMP_LOG_XFB"))
+                LOG("[xfb] program %llx layout: %u/%u %u/%u %u/%u %u/%u\n", (unsigned long long)code, p->xfb_count[0], p->xfb_stride[0],
+                    p->xfb_count[1], p->xfb_stride[1], p->xfb_count[2], p->xfb_stride[2], p->xfb_count[3], p->xfb_stride[3]);
+        }
     }
     RET(1);
 }

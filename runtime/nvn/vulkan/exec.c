@@ -1,3 +1,4 @@
+#include <ctype.h>
 // Executes recorded NVN command lists with Vulkan (port of renderer.m; same structure, same behaviour).
 #include <SDL3/SDL_cpuinfo.h>
 #include <immintrin.h>
@@ -675,6 +676,8 @@ static struct {
     uint64_t copy_row_stride, copy_image_stride;
     uint64_t obj;       // frame interpolation: the game object the current draws belong to (CMD_OBJECT), 0 = none
     uint32_t obj_draw;  // draws of that object so far in this run of it
+    bool xfb_active, raster_discard;  // transform feedback (CMD_XFB_*), SetRasterizerDiscard
+    uint64_t xfb_addr[4], xfb_size[4];
 } st;
 
 // frame interpolation (prototype, LARECOMP_INTERP=1): the hooks below; the rest at the end of this file
@@ -1059,7 +1062,7 @@ static const VkDynamicState DYN[] = {
     VK_DYNAMIC_STATE_CULL_MODE, VK_DYNAMIC_STATE_FRONT_FACE, VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY,
     VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE, VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE, VK_DYNAMIC_STATE_DEPTH_COMPARE_OP,
     VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE, VK_DYNAMIC_STATE_STENCIL_OP, VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE,
-    VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE};
+    VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE, VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE};
 #define NDYN (sizeof DYN / sizeof DYN[0])
 
 // Fixed-function state that isn't part of a pipeline is set explicitly on every bind (it persists across pipelines).
@@ -1081,6 +1084,7 @@ static void dyn_defaults(VkCommandBuffer cb) {
     vkCmdSetStencilOp(cb, VK_STENCIL_FACE_FRONT_AND_BACK, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP,
                       VK_COMPARE_OP_ALWAYS);
     vkCmdSetPrimitiveRestartEnable(cb, VK_FALSE);
+    vkCmdSetRasterizerDiscardEnable(cb, VK_FALSE);
 }
 
 typedef struct { uint64_t key; VkPipeline pipe; } PipeEnt;
@@ -1244,6 +1248,54 @@ static void compile_program(void *arg) {
     atomic_store(&p->state, p->vs && p->fs ? 1 : 2);
 }
 
+// Transform feedback (NVN programs carry the capture layout in their control section, objects.c): the vertex shader gets
+// float outputs decorated for capture, assigned from the outputs it wrote (components in attribute order fill the
+// buffers' slots in turn, 4 bytes each) at the end of main.
+static void xfb_rewrite(Prog *p) {
+    const char *src = p->vi->msl;
+    bool wrote[32][4] = {{false}};
+    for (const char *q = src; (q = strchr(q, 'v')); q++) {  // "vN[c] = " component writes
+        if (q > src && (isalnum((unsigned char)q[-1]) || q[-1] == '_')) continue;
+        int n, cpos = 0;
+        unsigned comp;
+        if (sscanf(q, "v%d[%u] =%n", &n, &comp, &cpos) == 2 && cpos && n >= 0 && n < 32 && comp < 4) wrote[n][comp] = true;
+    }
+    int order[128][2], no = 0;
+    for (int n = 0; n < 32; n++) for (int k = 0; k < 4; k++) if (wrote[n][k] && no < 128) { order[no][0] = n; order[no][1] = k; no++; }
+    int need = 0;
+    for (int b = 0; b < 4; b++) need += p->vkey.xfb_count[b];
+    if (need > no || need > 12) {
+        LOG("[xfb] vertex program %llx: %d captured components but %d written outputs: not captured\n", (unsigned long long)p->code[0], need, no);
+        return;
+    }
+    char *decl = malloc(4096), *asg = malloc(4096);
+    size_t dl = 0, al = 0;
+    int k = 0;
+    for (int b = 0; b < 4; b++) {
+        if (!p->vkey.xfb_count[b]) continue;
+        dl += (size_t)snprintf(decl + dl, 4096 - dl, "layout(xfb_buffer = %d, xfb_stride = %u) out;\n", b, p->vkey.xfb_stride[b]);
+        for (int i = 0; i < p->vkey.xfb_count[b]; i++, k++) {
+            dl += (size_t)snprintf(decl + dl, 4096 - dl, "layout(location = %d, xfb_buffer = %d, xfb_offset = %d) out float xfb%d;\n",
+                                   20 + k, b, i * 4, k);
+            al += (size_t)snprintf(asg + al, 4096 - al, "  xfb%d = v%d[%d];\n", k, order[k][0], order[k][1]);
+        }
+    }
+    const char *m = strstr(src, "void main() {"), *e = strrchr(src, '}');
+    if (!m || !e || e < m) { free(decl); free(asg); return; }
+    size_t len = strlen(src);
+    char *o = malloc(len + dl + al + 1), *w = o;
+    memcpy(w, src, (size_t)(m - src)); w += m - src;
+    memcpy(w, decl, dl); w += dl;
+    memcpy(w, m, (size_t)(e - m)); w += e - m;
+    memcpy(w, asg, al); w += al;
+    memcpy(w, e, len - (size_t)(e - src) + 1);
+    p->vi->msl = o;
+    free(decl);
+    free(asg);
+    static int logged;
+    if (logged++ < 4) LOG("[xfb] vertex program %llx captures %d components\n", (unsigned long long)p->code[0], need);
+}
+
 static void translate_program(void *arg) {
     Prog *p = arg;
     maxwell_gmem_base = HEAP_BASE;
@@ -1375,6 +1427,7 @@ static void translate_program(void *arg) {
             }
         }
     }
+    if (p->vkey.xfb_count[0]) xfb_rewrite(p);
     p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
     save_glsl(p->vi->msl, p->code[0], "vs");
     save_glsl(p->fi->msl, p->code[1], "fs");
@@ -1399,6 +1452,10 @@ static void bind_program_stages(NvnProgram *p, uint32_t mask) {
         if (!(mask & bit)) continue;
         if (p && (p->stage_mask & bit)) next.stages[i] = p->stages[i], next.stage_mask |= bit;
         else memset(&next.stages[i], 0, sizeof next.stages[i]), next.stage_mask &= ~bit;
+        if (i == 0) {  // (the transform feedback layout belongs to the vertex stage)
+            bool vs = p && (p->stage_mask & 1);
+            for (int b = 0; b < 4; b++) { next.xfb_count[b] = vs ? p->xfb_count[b] : 0; next.xfb_stride[b] = vs ? p->xfb_stride[b] : 0; }
+        }
     }
     if (!next.stage_mask) { st.program = NULL; return; }
     if (p && next.stage_mask == p->stage_mask &&
@@ -2046,7 +2103,8 @@ static bool gmem_import(uint64_t size) {
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = size,
                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
-                                      VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT};  // (uniforms read in place: cbuf_info)
+                                      VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |  // (uniforms read in place: cbuf_info)
+                                      (g_vk.xfb ? VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT : 0)};  // (CMD_XFB_*)
     VkBuffer buf;
     if (vkCreateBuffer(g_vk.dev, &bi, NULL, &buf) != VK_SUCCESS) { vkFreeMemory(g_vk.dev, mem, NULL); return false; }
     vkBindBufferMemory(g_vk.dev, buf, mem, 0);
@@ -2564,6 +2622,13 @@ static void draw_(CmdRec *r, bool indexed) {
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
+    if (st.xfb_active && getenv("LARECOMP_LOG_XFB")) {
+        static int n;
+        if (n++ < 5) LOG("[xfb] draw while active: program %p vs %llx layout %u/%u\n", (void *)st.program,
+                         (unsigned long long)st.program->stages[0].code_addr, st.program->xfb_count[0], st.program->xfb_stride[0]);
+    }
+    if (st.xfb_active && g_vk.xfb)  // transform feedback: the vertex program's capture layout (translate_program: xfb outputs)
+        for (int b = 0; b < 4; b++) { vkey.xfb_count[b] = st.program->xfb_count[b]; vkey.xfb_stride[b] = st.program->xfb_stride[b]; }
     vkey.depth_minus_one = nvn_depth_mode() == 0;
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
@@ -2712,6 +2777,7 @@ static void draw_(CmdRec *r, bool indexed) {
     wait_built(&pp->state);
     if (atomic_load(&pp->state) != 1) { SKIP(5 + (atomic_load(&pp->state) > 1)); return; }
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe);
+    vkCmdSetRasterizerDiscardEnable(cb, st.raster_discard);
     uint64_t prof_td_ = prof ? SDL_GetTicksNS() : 0;
     if (prof) prof_key += prof_td_ - prof_tk_;
 
@@ -2972,9 +3038,33 @@ static void draw_(CmdRec *r, bool indexed) {
     if (exp_hit && exp_mode == 2) { VkRect2D one = {{0, 0}, {1, 1}}; vkCmdSetScissor(cb, 0, 1, &one); }
     bool gp_q = g_gpuprof_frame && gp_draw_marks && gps_qp && gp_n && gps_n < GP_MAX;
     if (gp_q) vkCmdBeginQuery(cb, gps_qp, (uint32_t)gps_n, 0);
+    // Transform feedback: the program captures its outputs (xfb outputs of its GLSL) into the bound guest buffers, which
+    // lie in the imported heap (gmem_buf); the draws that read them as vertex data later read them in place (gpuw).
+    bool xfb_on = st.xfb_active && g_vk.xfb && pr->vkey.xfb_count[0];
+    if (xfb_on) {
+        VkDescriptorBufferInfo gi = gmem_info();
+        VkBuffer bufs[4];
+        VkDeviceSize offs[4], sizes[4];
+        uint32_t nb = 0;
+        for (int b = 0; b < 4 && pr->vkey.xfb_count[b]; b++) {
+            uint64_t a = st.xfb_addr[b], n = st.xfb_size[b];
+            if (!gmem_buf || gi.buffer != gmem_buf || a < HEAP_BASE || a + n > HEAP_BASE + gmem_size || (a & 3)) { xfb_on = false; break; }
+            bufs[nb] = gmem_buf; offs[nb] = a - HEAP_BASE; sizes[nb] = n; nb++;
+        }
+        static int logged;
+        if (!xfb_on && logged++ < 10) LOG("[xfb] capture skipped: buffer %llx outside the imported heap\n", (unsigned long long)st.xfb_addr[0]);
+        if (xfb_on) {
+            g_vk.bind_xfb(cb, 0, nb, bufs, offs, sizes);
+            g_vk.begin_xfb(cb, 0, 0, NULL, NULL);
+        }
+    }
     if (exp_hit && exp_mode == 1) { /* skipped */ }
     else if (!use_index) vkCmdDraw(cb, count, inst_eff, first, base_inst);
     else vkCmdDrawIndexed(cb, icount, inst_eff, 0, base_vertex, base_inst);
+    if (xfb_on) {
+        g_vk.end_xfb(cb, 0, 0, NULL, NULL);
+        for (int b = 0; b < 4 && pr->vkey.xfb_count[b]; b++) gpuw_note(st.xfb_addr[b], st.xfb_size[b]);
+    }
     if (gp_q) { vkCmdEndQuery(cb, gps_qp, (uint32_t)gps_n); gp_stat[gp_n - 1] = gps_n + 1; gps_n++; }
     if (exp_hit && exp_mode == 2) apply_scissor();
     stat_draws++;
@@ -3636,6 +3726,10 @@ static void exec_list(uint64_t handle, int depth) {
         if (ip_replaying && ip_skip_op(r->op)) { p += r->size; continue; }
         switch (r->op) {
         case CMD_END: return;
+        case CMD_XFB_BEGIN: st.xfb_active = true; { static int n; if (getenv("LARECOMP_LOG_XFB") && n++ < 3) LOG("[xfb] begin executed\n"); } break;
+        case CMD_XFB_END: st.xfb_active = false; break;
+        case CMD_XFB_BIND: if (r->x[0] < 4) { st.xfb_addr[r->x[0]] = r->x[1]; st.xfb_size[r->x[0]] = r->x[2]; } break;
+        case CMD_SET_RASTER_DISCARD: st.raster_discard = r->x[0] != 0; break;
         case CMD_OBJECT: st.obj = r->x[0]; st.obj_draw = 0; { static int d; if (getenv("LARECOMP_OBJDBG") && vk_frame_counter() == 1450 && d++ < 80) LOG("[objdbg] depth %d object %llx\n", depth,(unsigned long long)r->x[0]); } break;
         case CMD_JUMP: p = r->x[0]; continue;
         case CMD_CALL: {

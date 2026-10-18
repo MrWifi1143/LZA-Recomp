@@ -75,6 +75,8 @@ typedef struct NvnProgram {
     NvnShaderStage stages[6];
     uint32_t stage_mask;
     void *backend;
+    uint8_t xfb_count[4];    // transform feedback layout from the vertex stage's control section (objects.c)
+    uint16_t xfb_stride[4];
 } NvnProgram;
 
 typedef struct NvnWindow {
@@ -99,6 +101,8 @@ typedef struct {
     bool recording;
     uint64_t guest;  // the guest NVNcommandBuffer*
     uint64_t obj_tag;  // frame interpolation: the game object the list's last CMD_OBJECT named (cmdbuf.c)
+    void *last_prog;   // (research, LARECOMP_LOG_XFB) the host program last bound while recording
+    uint8_t xfb_active;
 } NvnCmdBuf;
 
 // One recorded command: header, the call's integer and float arguments, then copied data.
@@ -126,6 +130,7 @@ enum {
     CMD_BARRIER, CMD_SIGNAL_EVENT, CMD_WAIT_EVENT, CMD_REPORT_COUNTER, CMD_DISCARD_COLOR,
     CMD_DISCARD_DEPTH_STENCIL, CMD_SET_COPY_STRIDES, CMD_DRAW_TEXTURE, CMD_RESOLVE_DEPTH,
     CMD_OBJECT,  // (ours) x[0]: the game object the following draws belong to, 0 = none (frame interpolation)
+    CMD_XFB_BEGIN, CMD_XFB_END, CMD_XFB_BIND, CMD_SET_RASTER_DISCARD,
     CMD_COUNT
 };
 

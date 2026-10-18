@@ -10,6 +10,9 @@
 
 static NvnCmdBuf *cb_of(uint64_t guest) { return HOST(NvnCmdBuf, guest); }
 
+// Not implemented (a no-op): the first call is logged, so a game that relies on one shows up in the log
+#define STUB(n) NVN(n) { static int once_; if (!once_++) LOG("[nvn] %s called: not implemented (no-op)\n", #n); (void)c; }
+
 NVN(nvnCommandBufferInitialize) {
     NvnCmdBuf *cb = calloc(1, sizeof *cb);
     cb->guest = A(0);
@@ -17,7 +20,7 @@ NVN(nvnCommandBufferInitialize) {
     RET(1);
 }
 NVN(nvnCommandBufferFinalize) { free(cb_of(A(0))); SET_HOST(A(0), 0); }
-NVN(nvnCommandBufferSetDebugLabel) { (void)c; }
+STUB(nvnCommandBufferSetDebugLabel)
 
 static CmdRec *raw_rec(uint64_t at, uint32_t op, uint32_t size) {
     CmdRec *r = (CmdRec *)(uintptr_t)at;
@@ -44,7 +47,7 @@ NVN(nvnCommandBufferAddCommandMemory) {
     cb->size = size;
     cb->used = 0;
 }
-NVN(nvnCommandBufferAddControlMemory) { (void)c; }
+STUB(nvnCommandBufferAddControlMemory)
 NVN(nvnCommandBufferGetCommandMemorySize) { RET(cb_of(A(0))->size); }
 NVN(nvnCommandBufferGetCommandMemoryUsed) { RET(cb_of(A(0))->used); }
 NVN(nvnCommandBufferGetCommandMemoryFree) {
@@ -58,7 +61,7 @@ NVN(nvnCommandBufferSetMemoryCallback) { cb_of(A(0))->callback = A(1); }
 NVN(nvnCommandBufferGetMemoryCallback) { RET(cb_of(A(0))->callback); }
 NVN(nvnCommandBufferSetMemoryCallbackData) { cb_of(A(0))->callback_data = A(1); }
 NVN(nvnCommandBufferGetMemoryCallbackData) { RET(cb_of(A(0))->callback_data); }
-NVN(nvnCommandBufferSetCommandMemoryCallbackEnabled) { (void)c; }
+STUB(nvnCommandBufferSetCommandMemoryCallbackEnabled)
 
 // Reserve a record. May call back into the guest for more memory, so callers snapshot their
 // arguments first.
@@ -173,6 +176,28 @@ NVN(nvnCommandBufferBindProgram) {
     CmdRec *r = record(c, CMD_BIND_PROGRAM, 0, &s);
     r->x[0] = s.x[1] ? (uint64_t)(uintptr_t)HOST(NvnProgram, s.x[1]) : 0;  // host program (0: unbind the stages)
     r->x[1] = s.x[2];                                                      // NVNshaderStageBits
+    if (r->x[0]) cb_of(s.x[0])->last_prog = (void *)(uintptr_t)r->x[0];
+}
+
+// (research) LARECOMP_LOG_XFB: transform feedback use - buffers, begin/end, and the vertex program of each draw recorded
+// while it is active, with its control section dumped to build/xfb_<code address>.bin
+static void xfb_note_draw(Cpu *c) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_LOG_XFB") != NULL;
+    NvnCmdBuf *cb = cb_of(c->x[0]);
+    if (!on || !cb->xfb_active || !cb->last_prog) return;
+    NvnProgram *p = cb->last_prog;
+    static uint64_t seen[64];
+    static int n;
+    uint64_t code = p->stages[0].code_addr;
+    for (int i = 0; i < n; i++) if (seen[i] == code) return;
+    if (n < 64) seen[n++] = code;
+    LOG("[xfb] draw with vertex program %llx (stages %#x)\n", (unsigned long long)code, p->stage_mask);
+    char path[96];
+    snprintf(path, sizeof path, "build/xfb_%llx.bin", (unsigned long long)code);
+    FILE *f = fopen(path, "wb");
+    if (f && p->stages[0].control) { fwrite(p->stages[0].control, 1, 0x800, f); }
+    if (f) fclose(f);
 }
 NVN(nvnCommandBufferBindBlendState) { record_copy(c, CMD_BIND_BLEND, 1, 8); }
 NVN(nvnCommandBufferBindChannelMaskState) { record_copy(c, CMD_BIND_CHANNEL_MASK, 1, 4); }
@@ -228,11 +253,22 @@ NVN(nvnCommandBufferBindSeparateTexture) {
     r->x[0] = s.x[1]; r->x[1] = s.x[2]; r->x[2] = 1;
     memcpy(r->extra, &s.x[3], 8);
 }
-NVN(nvnCommandBufferBindSeparateSamplers) { (void)c; }
-NVN(nvnCommandBufferBindSeparateSampler) { (void)c; }
-NVN(nvnCommandBufferBindTransformFeedbackBuffers) { (void)c; }
-NVN(nvnCommandBufferBindTransformFeedbackBuffer) { (void)c; }
-NVN(nvnCommandBufferBindCoverageModulationTable) { (void)c; }
+STUB(nvnCommandBufferBindSeparateSamplers)
+STUB(nvnCommandBufferBindSeparateSampler)
+NVN(nvnCommandBufferBindTransformFeedbackBuffers) {  // (cmd, first, count, const NVNbufferRange {address, size}*)
+    Snap s_ = snap(c);
+    const uint64_t *rg = (const uint64_t *)(uintptr_t)s_.x[3];
+    for (uint32_t i = 0; rg && i < (uint32_t)s_.x[2] && i < 4; i++) {
+        Snap one = s_;
+        one.x[1] = s_.x[1] + i; one.x[2] = rg[2 * i]; one.x[3] = rg[2 * i + 1];
+        record(c, CMD_XFB_BIND, 0, &one);
+    }
+}
+NVN(nvnCommandBufferBindTransformFeedbackBuffer) {  // (cmd, index, NVNbufferAddress, size)
+    { Snap s_ = snap(c); record(c, CMD_XFB_BIND, 0, &s_); }
+    if (getenv("LARECOMP_LOG_XFB")) { static int n; if (n++ < 12) LOG("[xfb] bind buffer %d: %llx size %#llx\n", (int)c->x[1], (unsigned long long)c->x[2], (unsigned long long)c->x[3]); }
+}
+STUB(nvnCommandBufferBindCoverageModulationTable)
 
 NVN(nvnCommandBufferSetTexturePool) {
     Snap s = snap(c);
@@ -308,25 +344,25 @@ PLAIN(nvnCommandBufferSetLineWidth, CMD_SET_LINE_WIDTH)
 PLAIN(nvnCommandBufferSetPointSize, CMD_SET_POINT_SIZE)
 PLAIN(nvnCommandBufferSetSampleMask, CMD_SET_SAMPLE_MASK)
 PLAIN(nvnCommandBufferSetRenderEnable, CMD_SET_RENDER_ENABLE)
-NVN(nvnCommandBufferSetRenderEnableConditional) { (void)c; }
-NVN(nvnCommandBufferSetDepthClamp) { (void)c; }
-NVN(nvnCommandBufferSetRasterizerDiscard) { (void)c; }
-NVN(nvnCommandBufferSetConservativeRasterEnable) { (void)c; }
-NVN(nvnCommandBufferSetConservativeRasterDilate) { (void)c; }
-NVN(nvnCommandBufferSetSubpixelPrecisionBias) { (void)c; }
-NVN(nvnCommandBufferSetViewportSwizzles) { (void)c; }
-NVN(nvnCommandBufferSetStencilCullCriteria) { (void)c; }
-NVN(nvnCommandBufferSetColorReductionEnable) { (void)c; }
-NVN(nvnCommandBufferSetColorReductionThresholds) { (void)c; }
-NVN(nvnCommandBufferSetTiledCacheAction) { (void)c; }
-NVN(nvnCommandBufferSetTiledCacheTileSize) { (void)c; }
-NVN(nvnCommandBufferSetShaderScratchMemory) { (void)c; }
-NVN(nvnCommandBufferSetPatchSize) { (void)c; }
-NVN(nvnCommandBufferSetInnerTessellationLevels) { (void)c; }
-NVN(nvnCommandBufferSetOuterTessellationLevels) { (void)c; }
-NVN(nvnCommandBufferSetProgramSubroutines) { (void)c; }
-NVN(nvnCommandBufferSaveZCullData) { (void)c; }
-NVN(nvnCommandBufferRestoreZCullData) { (void)c; }
+STUB(nvnCommandBufferSetRenderEnableConditional)
+STUB(nvnCommandBufferSetDepthClamp)
+NVN(nvnCommandBufferSetRasterizerDiscard) { Snap s_ = snap(c); record(c, CMD_SET_RASTER_DISCARD, 0, &s_); }
+STUB(nvnCommandBufferSetConservativeRasterEnable)
+STUB(nvnCommandBufferSetConservativeRasterDilate)
+STUB(nvnCommandBufferSetSubpixelPrecisionBias)
+STUB(nvnCommandBufferSetViewportSwizzles)
+STUB(nvnCommandBufferSetStencilCullCriteria)
+STUB(nvnCommandBufferSetColorReductionEnable)
+STUB(nvnCommandBufferSetColorReductionThresholds)
+STUB(nvnCommandBufferSetTiledCacheAction)
+STUB(nvnCommandBufferSetTiledCacheTileSize)
+STUB(nvnCommandBufferSetShaderScratchMemory)
+STUB(nvnCommandBufferSetPatchSize)
+STUB(nvnCommandBufferSetInnerTessellationLevels)
+STUB(nvnCommandBufferSetOuterTessellationLevels)
+STUB(nvnCommandBufferSetProgramSubroutines)
+STUB(nvnCommandBufferSaveZCullData)
+STUB(nvnCommandBufferRestoreZCullData)
 
 static uint64_t copy_row_stride, copy_image_stride;
 RT_ON_RESET(cmdbuf_reset) { copy_row_stride = copy_image_stride = 0; }
@@ -381,10 +417,10 @@ NVN(nvnCommandBufferDiscardColor) {
     r->x[2] = 0xF;  // all channels
     r->x[5] = 0;    // float clear
 }
-NVN(nvnCommandBufferDiscardDepthStencil) { (void)c; }
+STUB(nvnCommandBufferDiscardDepthStencil)
 
 // ---- draws (all integer arguments fit in x1..x7)
-NVN(nvnCommandBufferDrawArrays) { draw_chain(c, "arrays", c->x[3]); Snap s = snap(c); obj_mark(c, cb_of(s.x[0])); CmdRec *r = record(c, CMD_DRAW_ARRAYS, 0, &s); r->x[3] = 0; r->x[4] = 1; }
+NVN(nvnCommandBufferDrawArrays) { xfb_note_draw(c); draw_chain(c, "arrays", c->x[3]); Snap s = snap(c); obj_mark(c, cb_of(s.x[0])); CmdRec *r = record(c, CMD_DRAW_ARRAYS, 0, &s); r->x[3] = 0; r->x[4] = 1; }
 NVN(nvnCommandBufferDrawArraysInstanced) { draw_chain(c, "arrays_inst", c->x[3]); Snap s = snap(c); obj_mark(c, cb_of(s.x[0])); record(c, CMD_DRAW_ARRAYS, 0, &s); }
 // Debug: LARECOMP_TRACE_COUNT=<n> logs the guest call chain of indexed draws with n indices.
 // LARECOMP_TRACE_COUNT: the command lists that hold the traced draw (recorded once, called every frame): their
@@ -452,6 +488,7 @@ static void draw_chain(Cpu *c, const char *kind, uint64_t count) {
 }
 
 NVN(nvnCommandBufferDrawElements) {
+    xfb_note_draw(c);
     trace_draw(c, c->x[3]);
     draw_chain(c, "elements", c->x[3]);
     Snap s = snap(c);
@@ -470,9 +507,9 @@ NVN(nvnCommandBufferDrawElementsBaseVertex) {
 NVN(nvnCommandBufferDrawElementsInstanced) { trace_draw(c, c->x[3]); draw_chain(c, "elements_inst", c->x[3]); Snap s = snap(c); obj_mark(c, cb_of(s.x[0])); record(c, CMD_DRAW_ELEMENTS, 0, &s); }
 PLAIN(nvnCommandBufferDrawArraysIndirect, CMD_DRAW_ARRAYS_INDIRECT)
 PLAIN(nvnCommandBufferDrawElementsIndirect, CMD_DRAW_ELEMENTS_INDIRECT)
-NVN(nvnCommandBufferMultiDrawArraysIndirectCount) { (void)c; }
-NVN(nvnCommandBufferMultiDrawElementsIndirectCount) { (void)c; }
-NVN(nvnCommandBufferDrawTransformFeedback) { (void)c; }
+STUB(nvnCommandBufferMultiDrawArraysIndirectCount)
+STUB(nvnCommandBufferMultiDrawElementsIndirectCount)
+STUB(nvnCommandBufferDrawTransformFeedback)
 // nvnCommandBufferDrawTexture(cmd, NVNtextureHandle, const NVNdrawTextureRegion *dst, const NVNdrawTextureRegion *src):
 // a textured rectangle without game shaders (PLA draws its text glyphs this way). Region = {x0, y0, x1, y1} floats: dst in
 // render target pixels, src in texels. Recorded: x[0] the handle, extra the 8 floats (exec.c draw_texture).
@@ -491,10 +528,18 @@ NVN(nvnCommandBufferDrawTexture) {
 }
 PLAIN(nvnCommandBufferDispatchCompute, CMD_DISPATCH)
 PLAIN(nvnCommandBufferDispatchComputeIndirect, CMD_DISPATCH_INDIRECT)
-NVN(nvnCommandBufferBeginTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferEndTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferPauseTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferResumeTransformFeedback) { (void)c; }
+NVN(nvnCommandBufferBeginTransformFeedback) {  // (cmd, NVNbufferAddress control buffer)
+    { Snap s_ = snap(c); record(c, CMD_XFB_BEGIN, 0, &s_); }
+    cb_of(c->x[0])->xfb_active = 1;
+    if (getenv("LARECOMP_LOG_XFB")) { static int n; if (n++ < 6) LOG("[xfb] BeginTransformFeedback control %llx\n", (unsigned long long)c->x[1]); }
+}
+NVN(nvnCommandBufferEndTransformFeedback) {  // (cmd, NVNbufferAddress control buffer)
+    { Snap s_ = snap(c); record(c, CMD_XFB_END, 0, &s_); }
+    cb_of(c->x[0])->xfb_active = 0;
+    if (getenv("LARECOMP_LOG_XFB")) { static int n; if (n++ < 6) LOG("[xfb] EndTransformFeedback control %llx\n", (unsigned long long)c->x[1]); }
+}
+NVN(nvnCommandBufferPauseTransformFeedback) { Snap s_ = snap(c); record(c, CMD_XFB_END, 0, &s_); }
+NVN(nvnCommandBufferResumeTransformFeedback) { Snap s_ = snap(c); record(c, CMD_XFB_BEGIN, 0, &s_); }
 
 // ---- copies
 typedef struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; } TexRef;
@@ -542,9 +587,9 @@ NVN(nvnCommandBufferDownsampleTextureView) {
     CmdRec *r = record(c, CMD_DOWNSAMPLE, sizeof t, &s);
     memcpy(r->extra, t, sizeof t);
 }
-NVN(nvnCommandBufferTiledDownsample) { (void)c; }
-NVN(nvnCommandBufferTiledDownsampleTextureView) { (void)c; }
-NVN(nvnCommandBufferResolveDepthBuffer) { (void)c; }
+STUB(nvnCommandBufferTiledDownsample)
+STUB(nvnCommandBufferTiledDownsampleTextureView)
+STUB(nvnCommandBufferResolveDepthBuffer)
 // UpdateUniformBuffer(cmd, buffer, size, offset, dataSize, data)
 NVN(nvnCommandBufferUpdateUniformBuffer) { record_copy(c, CMD_UPDATE_UNIFORM_BUFFER, 5, (uint32_t)A(4)); }
 
@@ -559,8 +604,8 @@ PLAIN(nvnCommandBufferBarrier, CMD_BARRIER)
 PLAIN(nvnCommandBufferSignalEvent, CMD_SIGNAL_EVENT)
 PLAIN(nvnCommandBufferWaitEvent, CMD_WAIT_EVENT)
 PLAIN(nvnCommandBufferReportCounter, CMD_REPORT_COUNTER)
-NVN(nvnCommandBufferReportValue) { (void)c; }
-NVN(nvnCommandBufferResetCounter) { (void)c; }
+STUB(nvnCommandBufferReportValue)
+STUB(nvnCommandBufferResetCounter)
 NVN(nvnCommandBufferCallCommands) {
     if (g_ntrace_list) {
         const uint64_t *h = (const uint64_t *)(uintptr_t)A(2);
@@ -574,11 +619,11 @@ NVN(nvnCommandBufferCallCommands) {
     }
     draw_chain(c, "call", A(1)); obj_mark(c, cb_of(A(0))); record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
 NVN(nvnCommandBufferCopyCommands) { obj_mark(c, cb_of(A(0))); record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
-NVN(nvnCommandBufferInsertDebugMarker) { (void)c; }
-NVN(nvnCommandBufferInsertDebugMarkerDynamic) { (void)c; }
-NVN(nvnCommandBufferInsertDebugMarkerStatic) { (void)c; }
-NVN(nvnCommandBufferPushDebugGroup) { (void)c; }
-NVN(nvnCommandBufferPushDebugGroupDynamic) { (void)c; }
-NVN(nvnCommandBufferPushDebugGroupStatic) { (void)c; }
-NVN(nvnCommandBufferPopDebugGroup) { (void)c; }
-NVN(nvnCommandBufferPopDebugGroupId) { (void)c; }
+STUB(nvnCommandBufferInsertDebugMarker)
+STUB(nvnCommandBufferInsertDebugMarkerDynamic)
+STUB(nvnCommandBufferInsertDebugMarkerStatic)
+STUB(nvnCommandBufferPushDebugGroup)
+STUB(nvnCommandBufferPushDebugGroupDynamic)
+STUB(nvnCommandBufferPushDebugGroupStatic)
+STUB(nvnCommandBufferPopDebugGroup)
+STUB(nvnCommandBufferPopDebugGroupId)

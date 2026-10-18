@@ -36,6 +36,10 @@ typedef struct {
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
     bool custom_border, divisor, host_import;
+    bool xfb;  // VK_EXT_transform_feedback (NVN transform feedback: PLA skins its characters with it)
+    PFN_vkCmdBindTransformFeedbackBuffersEXT bind_xfb;
+    PFN_vkCmdBeginTransformFeedbackEXT begin_xfb;
+    PFN_vkCmdEndTransformFeedbackEXT end_xfb;
     // window
     VkSurfaceKHR surface;
     VkSwapchainKHR swapchain;
