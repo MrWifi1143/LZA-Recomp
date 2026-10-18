@@ -397,7 +397,20 @@ class Lifter:
         nbits = 8 << size
         addr = XS(rn)
         if o1:
-            raise Unsupported('exclusive pair / CAS')
+            # LDXP/LDAXP/STXP/STLXP (o2 == 0, size 2/3); CAS/CASP are not lifted
+            if o2 or size < 2:
+                raise Unsupported('CAS')
+            rt2 = bits(w, 10, 5)
+            if size == 2:  # 2x32: one 64-bit exclusive
+                if L:
+                    return Insn('op', f'{{ uint64_t v = ldx64(c, {addr}); {set_reg(1, rt, "(uint32_t)v")} '
+                                      f'{set_reg(1, rt2, "v >> 32")} }}')
+                return Insn('op', f'{{ uint32_t st = stx64(c, {addr}, (uint64_t){W(rt)} | (uint64_t){W(rt2)} << 32); '
+                                  f'{set_reg(0, rs, "st")} }}')
+            if L:
+                return Insn('op', f'{{ uint64_t lo, hi; ldxp64(c, {addr}, &lo, &hi); {set_reg(1, rt, "lo")} '
+                                  f'{set_reg(1, rt2, "hi")} }}')
+            return Insn('op', f'{{ uint32_t st = stxp64(c, {addr}, {X(rt)}, {X(rt2)}); {set_reg(0, rs, "st")} }}')
         if o2 == 0:
             if L:
                 return Insn('op', set_reg(1, rt, f'ldx{nbits}(c, {addr})'))

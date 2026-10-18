@@ -17,7 +17,7 @@ from collections import Counter
 import unicorn as uc
 from unicorn import arm64_const as A
 
-from analyze import eh_frame_functions
+from analyze import eh_frame_functions, eh_frame_ranges
 from lifter import Insn, Lifter, Unsupported, bits, emit_asm_batch, hx, sext
 from nso import Nso, R_AARCH64_RELATIVE
 
@@ -35,6 +35,9 @@ def fname(a):
 
 def sanitize(sym):
     return 'hle_' + re.sub(r'[^A-Za-z0-9_]', '_', sym)
+
+
+ALL_LABELS_MAX = 8192  # instructions: above this, only unresolved tables get the all-instruction fallback
 
 
 class Module:
@@ -76,8 +79,25 @@ class Module:
         for name, info, shndx, value, size in n.syms:
             if shndx and (info & 0xF) == 2:
                 starts.add(b + value)
+        # code pointers in data: function addresses, but also label tables of computed gotos (musl's printf_core in
+        # newer SDKs) whose targets lie inside a function; those stay labels of their function (L_dispatch)
+        ranges = sorted({(b + a, sz) for a, sz in eh_frame_ranges(n)} |
+                        {(b + value, size) for name, info, shndx, value, size in n.syms
+                         if shndx and (info & 0xF) == 2 and size})
+        range_starts = [r[0] for r in ranges]
+        def inside(a):
+            i = bisect.bisect_right(range_starts, a) - 1
+            for j in range(i, max(i - 4, -1), -1):  # (overlapping ranges, e.g. a symbol and its FDE: a few back)
+                if range_starts[j] < a < range_starts[j] + ranges[j][1]:
+                    return True
+            return False
+        self.inside = inside
+        self.interior_skipped = 0
         for off, typ, sym, add in n.relocs:
             if typ == R_AARCH64_RELATIVE:
+                if inside(b + add):
+                    self.interior_skipped += 1
+                    continue
                 starts.add(b + add)
         starts = sorted(a for a in starts if self.in_text(a))
         return starts
@@ -90,10 +110,34 @@ class Module:
             n = self.nso
             mu.mem_map(self.base, len(n.image))
             mu.mem_write(self.base, bytes(n.image))
+            # read-only: stores replayed with made-up pointers must not change code or tables that later
+            # resolutions read (the emulator is shared by every function of the module)
+            mu.mem_protect(self.base, len(n.image), uc.UC_PROT_READ | uc.UC_PROT_EXEC)
             mu.mem_map(SCRATCH_MEM, 0x100000)
             mu.reg_write(A.UC_ARM64_REG_CPACR_EL1, 0x300000)
             self.mu = mu
         return self.mu
+
+    def _step_to(self, frm, to, skip_faults=False):
+        """Single-step the emulator from frm to to (Unicorn's `until` is unreliable mid translation-block). The image
+        is read-only, so a store through a made-up pointer faults and is skipped. Before the cmp only address
+        materialization matters (the index is set at the cmp), so with skip_faults any faulting instruction there
+        (the index fetched through a chain of loads) is skipped too instead of giving up on the table."""
+        mu = self.mu
+        pc = frm
+        for _ in range(64):
+            if pc == to:
+                return True
+            try:
+                mu.emu_start(pc, 0, count=1)
+                pc = mu.reg_read(A.UC_ARM64_REG_PC)
+            except uc.UcError:
+                w = self.word(pc) if self.in_text(pc) else 0
+                is_store = (w & 0x0A000000) == 0x08000000 and not bits(w, 22, 1) and not bits(w, 23, 1)
+                if not (skip_faults or is_store):
+                    raise
+                pc += 4
+        return False
 
     def jump_table(self, br_pc, entry, end):
         """Resolve `br xN` targets from a bounds-checked jump table, or None."""
@@ -138,14 +182,7 @@ class Module:
         mu = self.emu()
         rn = bits(self.word(br_pc), 5, 5)
 
-        def step_to(frm, to):
-            pc = frm
-            for _ in range(64):
-                if pc == to:
-                    return True
-                mu.emu_start(pc, 0, count=1)
-                pc = mu.reg_read(A.UC_ARM64_REG_PC)
-            return False
+        step_to = self._step_to
 
         targets = []
         try:
@@ -239,15 +276,7 @@ class Module:
         mu = self.emu()
         targets = []
 
-        def step_to(frm, to):
-            # single-step: Unicorn's `until` is unreliable mid translation-block
-            pc = frm
-            for _ in range(64):
-                if pc == to:
-                    return True
-                mu.emu_start(pc, 0, count=1)
-                pc = mu.reg_read(A.UC_ARM64_REG_PC)
-            return False
+        step_to = self._step_to
 
         try:
             for i in range(count):
@@ -262,7 +291,7 @@ class Module:
                     if (w2 & 0x1F000000) == 0x10000000 or (w2 & 0xFF800000) == 0x91000000:
                         mu.emu_start(a2, 0, count=1)
                     a2 += 4
-                if not step_to(start, cmp):
+                if not step_to(start, cmp, skip_faults=True):
                     return None
                 self._set_index(mu, idx_regs, i)
                 if not step_to(cmp, br_pc):
@@ -376,8 +405,10 @@ class Module:
             return f'__attribute__((musttail)) return {fname(t)}(c);'
 
         # Functions with jump tables also get the all-instruction fallback: a table whose emulation
-        # missed some cases then still reaches the right instruction instead of aborting.
-        all_labels = bool(tables)
+        # missed some cases then still reaches the right instruction instead of aborting. Not for huge functions
+        # whose tables all resolved (PLA has some of 30k+ instructions: clang runs out of memory on such a switch);
+        # their tables enumerate every index, and a miss still reports "no function at" through rt_dispatch.
+        all_labels = 'all' in tables.values() or (bool(tables) and (end - entry) // 4 <= ALL_LABELS_MAX)
         if all_labels:
             labels = set(range(entry, end, 4))
         rando_here = [a for a in range(entry, end, 4) if a - self.base in RANDO_CODE]
@@ -541,7 +572,7 @@ def main():
             imm = ((w >> 5) & 0x7FFFF) << 2 | ((w >> 29) & 3)
             if imm & (1 << 20):
                 imm -= 1 << 21
-            if m.in_text(pc + imm):
+            if m.in_text(pc + imm) and not m.inside(pc + imm):
                 start_set.add(pc + imm)
         elif (w & 0x9F000000) == 0x90000000:  # ADRP
             imm = ((w >> 5) & 0x7FFFF) << 2 | ((w >> 29) & 3)
@@ -552,7 +583,7 @@ def main():
             rn, rd = (w >> 5) & 31, w & 31
             if rn in adrp_regs and i - adrp_regs[rn][1] <= 8:
                 t = adrp_regs[rn][0] + ((w >> 10) & 0xFFF)
-                if m.in_text(t):
+                if m.in_text(t) and not m.inside(t):
                     start_set.add(t)
     scanned = {}
     rounds = 0
@@ -575,7 +606,7 @@ def main():
         labels, ext, tables = scanned[(a, end)]
         entries[a] = (end, labels, tables)
     print(f'{args.name}: {len(starts)} boundaries, {len(entries)} functions, {rounds} rounds, {dict(m.stats)}, '
-          f'{time.time() - t0:.0f}s', file=sys.stderr)
+          f'{m.interior_skipped} interior code pointers kept as labels, {time.time() - t0:.0f}s', file=sys.stderr)
 
     os.makedirs(args.outdir, exist_ok=True)
     order = sorted(entries)

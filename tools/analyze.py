@@ -46,6 +46,33 @@ def eh_frame_functions(n):
     return starts
 
 
+def eh_frame_ranges(n):
+    """(start, size) of every function from .eh_frame_hdr's table and each FDE's pc_range. Assumes the usual
+    pc_begin encoding (pcrel sdata4) and checks it against the table; FDEs that don't match are skipped."""
+    img, hdr = n.image, n.eh_start
+    if not hdr or hdr >= len(img):
+        return []
+    ver, ptr_enc, cnt_enc, tbl_enc = img[hdr:hdr + 4]
+    off = hdr + 4
+    _, sz = read_encoded(img, off, ptr_enc, hdr)
+    off += sz
+    count, sz = read_encoded(img, off, cnt_enc, hdr)
+    off += sz
+    out = []
+    for _ in range(count):
+        loc, sz = read_encoded(img, off, tbl_enc, hdr)
+        off += sz
+        fde, sz = read_encoded(img, off, tbl_enc, hdr)
+        off += sz
+        if not 0 <= fde < len(img) - 16:
+            continue
+        begin = fde + 8 + struct.unpack_from('<i', img, fde + 8)[0]
+        size = struct.unpack_from('<I', img, fde + 12)[0]
+        if begin == loc and size:
+            out.append((loc, size))
+    return out
+
+
 def discover(n):
     text_lo, text_hi = n.text[0], n.text[0] + n.text[1]
     in_text = lambda a: text_lo <= a < text_hi and a % 4 == 0
