@@ -18,6 +18,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "../paths.h"
 #include "../platform.h"
 
 #ifndef MAP_FIXED_NOREPLACE
@@ -82,8 +83,8 @@ static void log_to_file_without_terminal(void) {
     struct stat st;
     if (env && *env) snprintf(dir, sizeof dir, "%s", env);
     else if (stat("extracted", &st) == 0 && S_ISDIR(st.st_mode)) return;  // dev mode: wherever stderr goes already
-    else if (xdg && *xdg == '/') snprintf(dir, sizeof dir, "%s/lasrecomp", xdg);
-    else snprintf(dir, sizeof dir, "%s/.local/share/lasrecomp", home && *home ? home : "/tmp");
+    else if (xdg && *xdg == '/') snprintf(dir, sizeof dir, "%s/plarecomp", xdg);
+    else snprintf(dir, sizeof dir, "%s/.local/share/plarecomp", home && *home ? home : "/tmp");
     for (char *c = dir + 1; *c; c++)
         if (*c == '/') { *c = 0; mkdir(dir, 0755); *c = '/'; }
     mkdir(dir, 0755);

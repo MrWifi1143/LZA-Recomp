@@ -33,3 +33,4 @@ NVIDIA Corporation/
 fonts/*.bfttf
 fonts/*.ttf
 
+__pycache__/

@@ -108,8 +108,8 @@ GAMELIB_SRCS := tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools
 GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(GENFLAGS)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
 
 RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
-RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn $(DEPINC) $(OSFLAGS)
-CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn $(DEPINC)
+RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn -Ithird_party $(DEPINC) $(OSFLAGS)
+CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn -Ithird_party $(DEPINC)
 
 all: $(EXE) $(if $(GEN_SRC),$(GAMELIB))
 
@@ -174,10 +174,10 @@ $(B)/imgui/imgui_impl_%.o: $(IMGUI)/backends/imgui_impl_%.cpp
 PY := $(firstword $(wildcard .venv/Scripts/python.exe) $(wildcard .venv/bin/python) $(wildcard tools/venv/bin/python) $(wildcard tools/venv/Scripts/python.exe))
 
 gen:
-	cd tools && $(abspath $(PY)) gen.py sdk ../extracted/exefs/sdk 0x7004000000 ../$(GEN)/sdk --hle ../runtime/hle/hle_symbols.txt $(GENSIMD) $(GENTRACE)
+	cd tools && $(abspath $(PY)) gen.py sdk ../extracted/exefs/sdk 0x7008000000 ../$(GEN)/sdk --hle ../runtime/hle/hle_symbols.txt $(GENSIMD) $(GENTRACE)
 	cd tools && $(abspath $(PY)) gen.py main ../extracted/exefs/main 0x7000000000 ../$(GEN)/main $(GENSIMD) $(GENTRACE)
-	cd tools && $(abspath $(PY)) gen.py subsdk0 ../extracted/exefs/subsdk0 0x7006000000 ../$(GEN)/subsdk0 $(GENSIMD) $(GENTRACE)
-	cd tools && $(abspath $(PY)) gen.py subsdk1 ../extracted/exefs/subsdk1 0x7008000000 ../$(GEN)/subsdk1 $(GENSIMD) $(GENTRACE)
+	cd tools && $(abspath $(PY)) gen.py subsdk0 ../extracted/exefs/subsdk0 0x700A000000 ../$(GEN)/subsdk0 $(GENSIMD) $(GENTRACE)
+	cd tools && $(abspath $(PY)) gen.py subsdk1 ../extracted/exefs/subsdk1 0x700C000000 ../$(GEN)/subsdk1 $(GENSIMD) $(GENTRACE)
 
 gen-objs: $(GEN_OBJ)
 
