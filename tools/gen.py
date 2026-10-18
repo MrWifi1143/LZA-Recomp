@@ -37,7 +37,8 @@ def sanitize(sym):
     return 'hle_' + re.sub(r'[^A-Za-z0-9_]', '_', sym)
 
 
-ALL_LABELS_MAX = 8192  # instructions: above this, only unresolved tables get the all-instruction fallback
+ALL_LABELS_MAX = 1024  # instructions: above this, only unresolved tables get the all-instruction fallback
+OPTNONE_MIN = 2048     # instructions: a function this big with the fallback is compiled without optimization
 
 
 class Module:
@@ -432,12 +433,17 @@ class Module:
             return f'__attribute__((musttail)) return {fname(t)}(c);'
 
         # Functions with jump tables also get the all-instruction fallback: a table whose emulation
-        # missed some cases then still reaches the right instruction instead of aborting. Not for huge functions
-        # whose tables all resolved (PLA has some of 30k+ instructions: clang runs out of memory on such a switch);
-        # their tables enumerate every index, and a miss still reports "no function at" through rt_dispatch.
+        # missed some cases then still reaches the right instruction instead of aborting. Only small functions get
+        # it for tables that resolved: those enumerate every index (a miss still reports "no function at" through
+        # rt_dispatch), and every instruction a label in a big function makes clang crawl (minutes for a function of
+        # a few thousand instructions in PLA) or run out of memory (30k+). A big function that needs it (an
+        # unresolved table) is compiled without optimization instead.
         all_labels = 'all' in tables.values() or (bool(tables) and (end - entry) // 4 <= ALL_LABELS_MAX)
         if all_labels:
             labels = set(range(entry, end, 4))
+            if (end - entry) // 4 > OPTNONE_MIN:
+                out[0] = '__attribute__((optnone, noinline)) ' + out[0]
+                self.stats['optnone'] += 1
         rando_here = [a for a in range(entry, end, 4) if a - self.base in RANDO_CODE]
         if rando_here:
             labels = set(labels)
@@ -684,7 +690,7 @@ def main():
         # (the start screen's setup reads these for its progress bar: runtime/gamebuild.c)
         print(f'{args.name}: progress {ci}/{len(order)} files {nchunks}', file=sys.stderr, flush=True)
     for fn in os.listdir(args.outdir):  # an earlier run's extra chunks
-        mm = re.fullmatch(re.escape(args.name) + r'_(\d{3})\.c', fn)
+        mm = re.fullmatch(re.escape(args.name) + r'_(\d+)\.c', fn)  # (PLA's main: over 1000 chunks)
         if mm and int(mm.group(1)) >= nchunks:
             os.remove(os.path.join(args.outdir, fn))
     import io
