@@ -532,12 +532,15 @@ static uint32_t svc_arbitrate_unlock(uint64_t addr) {
 static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t tag, int64_t timeout) {
     pthread_mutex_lock(&g_klock);
     KThread *t = t_cur;
-    mutex_release(mutex);
     t->wait_kind = WAIT_CONDVAR;
     t->wait_addr = key;
     t->wait_mutex = mutex;
     t->wait_tag = tag;
+    // The has-waiters flag goes to the key BEFORE the mutex is released (as Horizon's KConditionVariable::Wait does):
+    // the SDK's Signal skips the svc while the key reads 0, so a thread taking the just-released mutex and signalling
+    // before the flag was written lost the wakeup (PLA hung at random with every thread waiting on condvars).
     __atomic_store_n(u32p(key), 1, __ATOMIC_SEQ_CST);
+    mutex_release(mutex);
     uint32_t r = block_current(timeout);
     // Timed out / cancelled: the mutex is NOT reacquired here. As on the console, the caller does it: the SDK's
     // InternalConditionVariableImplByHorizon::TimedWait calls InternalCriticalSection::Enter on 0xea01 (TimedOut).

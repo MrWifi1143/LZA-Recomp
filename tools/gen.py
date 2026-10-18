@@ -121,10 +121,12 @@ class Module:
             return False
         self.inside = inside
         self.interior_skipped = 0
+        self.interior_ptrs = set()
         for off, typ, sym, add in n.relocs:
             if typ == R_AARCH64_RELATIVE:
                 if inside(b + add):
                     self.interior_skipped += 1
+                    self.interior_ptrs.add(b + add)
                     continue
                 starts.add(b + add)
         starts = sorted(a for a in starts if self.in_text(a))
@@ -172,7 +174,28 @@ class Module:
         r = self._jump_table_fallthrough(br_pc, entry, end)
         if r is None:
             r = self._jump_table_taken(br_pc, entry, end)
+        if r is None:
+            r = self._jump_table_masked(br_pc, entry, end)
         return r
+
+    def _jump_table_masked(self, br_pc, entry, end):
+        """Form: and wI, wX, #(2^k - 1) ... <table lookup with wI> ... br. No bounds check: the mask bounds the index
+        (small switches, e.g. on a vector lane: PLA's f_70027b6628 picks one of 4 lane inserts)."""
+        a = br_pc - 4
+        while a >= entry and br_pc - a <= 4 * 48:
+            if self.lift(a).kind not in ('op', 'asm'):
+                return None
+            w = self.word(a)
+            if (w & 0x7F800000) == 0x12000000:  # AND (immediate)
+                n_bit, immr, imms = bits(w, 22, 1), bits(w, 16, 6), bits(w, 10, 6)
+                # a run of low ones in a 32-bit (N=0, imms < 32) or 64-bit (N=1) element, not rotated
+                if immr == 0 and (n_bit or imms < 32) and imms < 8:
+                    s = a
+                    while s - 4 >= entry and a - (s - 4) <= 4 * 12 and self.lift(s - 4).kind in ('op', 'asm'):
+                        s -= 4
+                    return self._emulate_table(br_pc, entry, end, s, w & 31, 1 << (imms + 1), a + 4)
+            a -= 4
+        return None
 
     def _index_regs(self, start, at, idx):
         """The index register plus registers holding the same value in start..at: sources it was
@@ -224,7 +247,7 @@ class Module:
                     if (w2 & 0x1F000000) == 0x10000000 or (w2 & 0xFF800000) == 0x91000000:
                         mu.emu_start(a2, 0, count=1)
                     a2 += 4
-                if set_at != start and not step_to(start, set_at):
+                if set_at != start and not step_to(start, set_at, skip_faults=True):
                     return None
                 self._set_index(mu, [idx], i)
                 if not step_to(set_at, br_pc):
@@ -409,13 +432,17 @@ class Module:
             return ['return;']
         raise Unsupported(k)
 
-    def emit_function(self, entry, end, labels, tables, hle):
+    def emit_function(self, entry, end, labels, tables, hle, aliases=None):
         out = [f'void {fname(entry)}(Cpu *c) {{']
         if entry in hle:
             out.append(f'    {sanitize(hle[entry])}(c);')
             out.append('}')
             return out
         out.append(f'    FN_ENTER({hx(entry)});')
+        if aliases:  # entered through an alias stub: go to its label
+            cases = ' '.join(f'case {hx(p)}: goto L_{p:x};' for p in aliases)
+            out.append(f'    if (__builtin_expect(c->alias_pc != 0, 0)) {{ uint64_t t_ = c->alias_pc; c->alias_pc = 0; '
+                       f'switch (t_) {{ {cases} default: break; }} }}')
         batch = []
         refs = set()
 
@@ -614,8 +641,8 @@ def main():
             imm = ((w >> 5) & 0x7FFFF) << 2 | ((w >> 29) & 3)
             if imm & (1 << 20):
                 imm -= 1 << 21
-            if m.in_text(pc + imm) and not m.inside(pc + imm):
-                start_set.add(pc + imm)
+            if m.in_text(pc + imm):
+                (m.interior_ptrs if m.inside(pc + imm) else start_set).add(pc + imm)
         elif (w & 0x9F000000) == 0x90000000:  # ADRP
             imm = ((w >> 5) & 0x7FFFF) << 2 | ((w >> 29) & 3)
             if imm & (1 << 20):
@@ -625,8 +652,8 @@ def main():
             rn, rd = (w >> 5) & 31, w & 31
             if rn in adrp_regs and i - adrp_regs[rn][1] <= 8:
                 t = adrp_regs[rn][0] + ((w >> 10) & 0xFFF)
-                if m.in_text(t) and not m.inside(t):
-                    start_set.add(t)
+                if m.in_text(t):
+                    (m.interior_ptrs if m.inside(t) else start_set).add(t)
     scanned = {}
     rounds = 0
     while True:
@@ -647,8 +674,22 @@ def main():
         end = order[i + 1] if i + 1 < len(order) else m.hi
         labels, ext, tables = scanned[(a, end)]
         entries[a] = (end, labels, tables)
+    # Code pointers inside a function (a label table of computed gotos, or several entry points sharing a tail: PLA
+    # calls tiny thunks through a pointer table) don't split it; each gets an alias stub f_<addr> that enters the
+    # containing function at that label (c->alias_pc), so both a computed goto and a call through it work.
+    aliases = {}  # containing function -> its interior entry points
+    alias_of = {}
+    keys = sorted(entries)
+    for p in sorted(m.interior_ptrs):
+        if p in entries:
+            continue
+        i = bisect.bisect_right(keys, p) - 1
+        if i < 0 or not (keys[i] < p < entries[keys[i]][0]) or keys[i] in hle:
+            continue
+        aliases.setdefault(keys[i], []).append(p)
+        alias_of[p] = keys[i]
     print(f'{args.name}: {len(starts)} boundaries, {len(entries)} functions, {rounds} rounds, {dict(m.stats)}, '
-          f'{m.interior_skipped} interior code pointers kept as labels, {time.time() - t0:.0f}s', file=sys.stderr)
+          f'{len(alias_of)} interior entry points (alias stubs), {time.time() - t0:.0f}s', file=sys.stderr)
 
     os.makedirs(args.outdir, exist_ok=True)
     order = sorted(entries)
@@ -667,7 +708,9 @@ def main():
                 a = order[ci]
                 ci += 1
                 end, labels, tables = entries[a]
-                lines = m.emit_function(a, end, labels, tables, hle)
+                lines = m.emit_function(a, end, labels | set(aliases.get(a, ())), tables, hle, aliases.get(a))
+                for p in aliases.get(a, ()):
+                    lines.append(f'void {fname(p)}(Cpu *c) {{ c->alias_pc = {hx(p)}; {fname(a)}(c); }}')
                 r = getattr(m, '_refs', set())
                 m._refs = set()
             n = sum(len(l) + 1 for l in lines)
@@ -677,6 +720,7 @@ def main():
             body += lines
             size += n
             fns.append(a)
+            fns += aliases.get(a, [])
             refs |= r
             if n > args.big_fn:
                 break
@@ -693,6 +737,7 @@ def main():
         mm = re.fullmatch(re.escape(args.name) + r'_(\d+)\.c', fn)  # (PLA's main: over 1000 chunks)
         if mm and int(mm.group(1)) >= nchunks:
             os.remove(os.path.join(args.outdir, fn))
+    order = sorted(set(order) | {p for p, a in alias_of.items() if a in set(order)})
     import io
     with io.StringIO() as f:
         f.write('#include "cpu.h"\n')

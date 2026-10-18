@@ -17,7 +17,8 @@ typedef struct __attribute__((aligned(16))) Cpu {
     uint64_t fpcr;           // 320: guest FPCR/FPSR (portable FP/SIMD lowering only; the asm path uses the host's)
     uint64_t fpsr;           // 328
     uint64_t excl_val2;      // 336: high half of an exclusive pair (LDXP)
-    uint8_t _pad[512 - 344];
+    uint64_t alias_pc;       // 344: entry label for a call through an alias stub (tools/gen.py), 0 = the function start
+    uint8_t _pad[512 - 352];
     __uint128_t v[32];       // 512
 } Cpu;
 
