@@ -44,7 +44,7 @@ def func_of(addr):
 
 
 def mod(addr):
-    for name, base in (('subsdk1', 0x7008000000), ('subsdk0', 0x7006000000), ('sdk', 0x7004000000), ('main', 0x7000000000)):
+    for name, base in (('subsdk1', 0x700C000000), ('subsdk0', 0x700A000000), ('sdk', 0x7008000000), ('main', 0x7000000000)):
         if addr >= base:
             return '%s+%x' % (name, addr - base)
     return hex(addr)

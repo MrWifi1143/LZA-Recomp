@@ -35,6 +35,7 @@ static void rtld_init_sdk(Cpu *c) {  // the SDK, then the subsdk modules that li
     for (int i = 1; i < g_nmodules; i++) module_init(c, &g_modules[i]);
 }
 static void rtld_init_main(Cpu *c) { module_init(c, &g_modules[0]); }
+static void rtld_fini(Cpu *c) { (void)c; }  // newer SDKs (PLA): called after nnMain returns
 
 // Claim the guest address range before anything else can map there. The host allocator places
 // regions at random addresses in the same window; on a collision, re-exec for a fresh layout.
@@ -153,12 +154,16 @@ static void boot(const char *root) {
     }
     LOG("main thread: prio %d, stack 0x%x, program id %016llx\n", prio, stack_size, (unsigned long long)g_program_id);
 
-    uint64_t start = loader_find_symbol("_ZN2nn4init5StartEmmPFvvES2_");
+    // older SDKs: nn::init::Start(thread_handle, args_region, init_sdk, init_main); newer ones (PLA) add a third
+    // callback run after nnMain returns
+    uint64_t start = loader_find_symbol("_ZN2nn4init5StartEmmPFvvES2_S2_");
+    if (!start) start = loader_find_symbol("_ZN2nn4init5StartEmmPFvvES2_");
     if (!start) FATAL("nn::init::Start not found\n");
     uint64_t init_fn = hle_register("<rtld_init_sdk>", rtld_init_sdk);
-    uint64_t fini_fn = hle_register("<rtld_init_main>", rtld_init_main);
+    uint64_t main_fn = hle_register("<rtld_init_main>", rtld_init_main);
+    uint64_t fini_fn = hle_register("<rtld_fini>", rtld_fini);
     KThread *t = kernel_create_main_thread(start, stack_size, prio);
-    kernel_run_main(t, t->handle, 0, init_fn, fini_fn);  // nn::init::Start(thread_handle, args_region, init, fini)
+    kernel_run_main(t, t->handle, 0, init_fn, main_fn, fini_fn);
 }
 
 int main(int argc, char **argv) {
