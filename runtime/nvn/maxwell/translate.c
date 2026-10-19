@@ -1000,14 +1000,15 @@ static void emit_surface(Ctx *c, uint64_t w, uint32_t pc, bool red, bool bindles
 
 // ATOM (result to d) / RED (no result): a 32-bit atomic on global memory at [Ra (+ Ra + 1 with .E) + imm20]. Sizes
 // U32 / S32 / F32 (add); ops add, min, max, inc, dec, and, or, xor, exch. GLSL atomics where they match, else a
-// compare-and-swap loop (signed min / max, the wrapping inc / dec, float add). 64-bit forms: not translated.
+// compare-and-swap loop (signed min / max, the wrapping inc / dec, float add). 64-bit: add only (two words + carry).
 static void emit_gatomic(Ctx *c, uint64_t w, bool red) {
     if (!c->glsl) { fail(c, "global atomic (MSL)"); return; }
     int a = (int)bits(w, 8, 8), d = red ? RZ : (int)bits(w, 0, 8), b = red ? (int)bits(w, 0, 8) : (int)bits(w, 20, 8);
     int size = red ? (int)bits(w, 20, 3) : (int)bits(w, 49, 3), op = red ? (int)bits(w, 23, 3) : (int)bits(w, 52, 4);
     bool wide = bits(w, 48, 1);
     int64_t off = sbits(w, 28, 20);
-    if (size == 2 || size >= 4 || op > 8 || (size == 3 && op != 0)) { fail(c, "global atomic size %d op %d", size, op); return; }
+    bool s64 = size == 2 || size == 5;
+    if ((s64 && op != 0) || size == 4 || size > 5 || op > 8 || (size == 3 && op != 0)) { fail(c, "global atomic size %d op %d", size, op); return; }
     c->info->uses_gmem = true;
     c->uses_gmem_store = true;
     c->info->gmem_stores = true;
@@ -1018,6 +1019,15 @@ static void emit_gatomic(Ctx *c, uint64_t w, bool red) {
     const char *v = R(b);
     sp(&c->body, "    { ulong ga = %s - 0x%llxul; bool ok = ga < 0x%llxul; uint wi = uint(ga >> 2); uint av = %s, old = 0u;\n", addr,
        (unsigned long long)maxwell_gmem_base, (unsigned long long)maxwell_gmem_size, v);
+    if (s64) {  // 64-bit add: the low word, then the high word plus the carry - the sum is exact (adds commute); the old
+                // value a result would return is the two halves read apart
+        sp(&c->body, "      uint avh = %s, oldh = 0u;\n", b == RZ || b + 1 >= RZ ? "0u" : R(b + 1));
+        sp(&c->body, "      if (ok) { old = atomicAdd(gmem_.w[wi], av); oldh = atomicAdd(gmem_.w[wi + 1u], avh + (old + av < old ? 1u : 0u)); }\n");
+        if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = old;\n", d); }
+        if (d != RZ && d + 1 < RZ) { c->reg_used[d + 1] = 1; sp(&c->body, "      r%d = oldh;\n", d + 1); }
+        sp(&c->body, "    }\n");
+        return;
+    }
     static const char *const direct[9] = {"atomicAdd", "atomicMin", "atomicMax", NULL, NULL, "atomicAnd", "atomicOr", "atomicXor",
                                           "atomicExchange"};
     const char *nv = NULL;  // the new value from `prev` (CAS loop)
