@@ -426,7 +426,9 @@ static const struct { uint8_t id[8]; uint64_t entry; const char *name; } k_legen
 };
 static uint64_t g_pla60_entry;  // the interval-2 frame time of the running build (0: off)
 static bool g_pla60_patched;
+static uint64_t g_pla60_ns = 16666667;  // the frame time: 60 fps, or LARECOMP_LEGENDS_FPS=<n> (experimental: 90, 120, 144...)
 bool pla60_enabled(void) { return g_pla60_entry != 0; }
+uint64_t pla60_period_ns(void) { return g_pla60_ns; }
 
 void pla60_configure(const char *exefs) {
     char p[1100];
@@ -438,14 +440,16 @@ void pla60_configure(const char *exefs) {
         if (fread(id, 1, 8, f) != 8) memset(id, 0, 8);
         fclose(f);
     }
-    const char *e = getenv("LARECOMP_PLA_60FPS");
+    const char *e = getenv("LARECOMP_PLA_60FPS"), *n = getenv("LARECOMP_LEGENDS_FPS");
     bool on = e ? atoi(e) != 0 : g_settings.fps == 60;
+    g_pla60_ns = 16666667;
+    if (n && atoi(n) > 30) on = true, g_pla60_ns = 1000000000ull / (uint64_t)atoi(n);
     g_pla60_entry = 0;
     g_pla60_patched = false;
     for (size_t i = 0; on && i < sizeof k_legends60 / sizeof *k_legends60; i++)
         if (!memcmp(id, k_legends60[i].id, 8)) {
             g_pla60_entry = k_legends60[i].entry;
-            LOG("[fps60] %s at 60 fps\n", k_legends60[i].name);
+            LOG("[fps60] %s at %.0f fps\n", k_legends60[i].name, 1e9 / (double)g_pla60_ns);
         }
 }
 
@@ -455,6 +459,6 @@ void pla60_present(void) {
     volatile uint64_t *ft = (volatile uint64_t *)(uintptr_t)g_pla60_entry;
     if (*ft != 33333334u) return;
     plat_protect(g_pla60_entry & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);
-    *ft = 16666667u;
+    *ft = g_pla60_ns;
     g_pla60_patched = true;
 }
