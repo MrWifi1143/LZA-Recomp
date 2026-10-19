@@ -441,8 +441,8 @@ void pla60_configure(const char *exefs) {
         fclose(f);
     }
     const char *e = getenv("LARECOMP_PLA_60FPS"), *n = getenv("LARECOMP_LEGENDS_FPS");
-    bool on = e ? atoi(e) != 0 : g_settings.fps == 60;
-    g_pla60_ns = 16666667;
+    bool on = e ? atoi(e) != 0 : g_settings.fps >= 60;
+    g_pla60_ns = !e && g_settings.fps > 60 ? 1000000000ull / (uint64_t)g_settings.fps : 16666667;
     if (n && atoi(n) > 30) on = true, g_pla60_ns = 1000000000ull / (uint64_t)atoi(n);
     g_pla60_entry = 0;
     g_pla60_patched = false;
