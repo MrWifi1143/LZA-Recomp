@@ -2738,12 +2738,14 @@ static void draw(CmdRec *r, bool indexed) {
 }
 // A draw whose program or pipeline is still being built waits for it, up to a budget per frame, instead of being
 // skipped (objects popping in on entering an area). At 30 fps a frame has ~27 ms to spare (uncapped, the overworld
-// runs at ~160 fps), so 20 ms per frame hides the pop-in with a warm cache (~1 ms per program) without costing frames;
-// a cold cache (first visit) spends the budget and skips the rest as before. LARECOMP_SHADER_WAIT_MS=<ms> (0: never).
+// runs at ~160 fps), so 20 ms per frame hid the pop-in with a warm cache (~1 ms per program). Legends Z-A brings ~40 new
+// programs at once when a scene starts (its pipelines ~6 ms each): at 20 ms its characters popped in piece by piece
+// even warm; 100 ms (a hitch at the cut, where the game loads anyway) took the skipped draws from 267 to 41 on its
+// opening without more frames over 50 ms. A cold cache still skips what is left. LARECOMP_SHADER_WAIT_MS=<ms> (0: never).
 static bool wait_built(_Atomic int *state) {
     if (atomic_load(state) != 0) return true;
     static int64_t budget = -1;
-    if (budget < 0) budget = (getenv("LARECOMP_SHADER_WAIT_MS") ? atoi(getenv("LARECOMP_SHADER_WAIT_MS")) : 20) * 1000000ll;
+    if (budget < 0) budget = (getenv("LARECOMP_SHADER_WAIT_MS") ? atoi(getenv("LARECOMP_SHADER_WAIT_MS")) : 100) * 1000000ll;
     if (sync_shaders()) return true;  // (built already)
     extern uint64_t vk_frame_counter(void);
     static uint64_t frame;
