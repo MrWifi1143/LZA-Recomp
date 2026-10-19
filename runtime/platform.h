@@ -31,6 +31,7 @@ int plat_protect(uint64_t addr, uint64_t size, int prot);  // 0 on success
 
 // ---- time
 uint64_t plat_now_ns(void);                // monotonic
+int plat_cpu_count(void);                  // logical CPUs this process may run on (its affinity mask)
 void plat_sleep_until_ns(uint64_t t);      // precise wait for plat_now_ns() >= t
 void plat_thread_realtime(uint64_t period_ns);  // periodic timing thread (vsync): don't coalesce its timers
 

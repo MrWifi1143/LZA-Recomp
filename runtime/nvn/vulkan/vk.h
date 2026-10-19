@@ -112,6 +112,9 @@ void vk_defer_image(VkImage img, VmaAllocation mem);
 void vk_defer_view(VkImageView v);
 void vk_views_forget(TexBackend *b);  // drop (deferred) the cached views of an image being replaced
 uint64_t vk_frame_counter(void);
+bool vcache_get(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off);  // vertex stream in VRAM (vcache.c)
+void vcache_reset(void);
+extern uint64_t g_vcache_hits, g_vcache_uploads;
 
 // ---- shaders / pipelines (shaders.c)
 VkShaderModule vk_compile_glsl(const char *src, int stage, const char *name);  // NULL on failure (logged)

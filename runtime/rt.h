@@ -36,6 +36,14 @@
 // instead (runtime/hle/heaps.c): shader global memory (LDG/STG) reaches the heap window only (imported as a GPU buffer,
 // pinned), and the allocator spreads its allocations over its whole reservation. Above the heap SetHeapSize gives.
 #define STDHEAP_BASE (HEAP_BASE + 0x0010000000ull)
+
+// Write tracking for heap pages host code keeps copies of (runtime/pagewatch.c)
+bool pagewatch_supported(void);
+bool pagewatch_fault(uint64_t addr);                 // crash handler: a store to a watched page (true: handled, retry)
+void pagewatch_prewrite(uint64_t addr, uint64_t n);  // before host code writes guest memory without CPU stores
+bool pagewatch_dirty(uint64_t addr, uint64_t n);
+void pagewatch_protect(uint64_t addr, uint64_t n);
+void pagewatch_reset(void);
 #define STDHEAP_SIZE 0x00B0000000ull     // 2.75 GB
 
 // ---- loader.c

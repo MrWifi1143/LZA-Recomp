@@ -114,8 +114,8 @@ static Sub *sub(void) {
 }
 
 static void begin_cb(VkCommandBuffer *cb, bool *begun) {
-    g_dyn_epoch++;  // (draw_'s state cache: dc)
     if (*begun) return;
+    g_dyn_epoch++;  // (draw_'s state cache: dc)
     if (!*cb) {
         VkCommandBufferAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = g_vk.pool,
                                           .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
@@ -631,7 +631,7 @@ static void run_job(void (*fn)(void *), void *arg) {
     if (!started) {
         started = true;
         // first entry into an area builds dozens of pipelines at once: use most of the CPU (draws wait for them)
-        int n = SDL_GetNumLogicalCPUCores() - 4;
+        int n = plat_cpu_count() - 4;
         if (n < 4) n = 4;
         if (n > 16) n = 16;
         for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }
@@ -774,7 +774,17 @@ const char *renderer_stats(void) {
     {
         size_t n = strlen(stats_text);
         snprintf(stats_text + n, sizeof stats_text - n, " | vertex ranges %llu copied, %llu in place", (unsigned long long)stat_vtx_copied, (unsigned long long)stat_vtx_direct);
+        if (g_vcache_hits || g_vcache_uploads)
+            n = strlen(stats_text), snprintf(stats_text + n, sizeof stats_text - n, ", %llu in VRAM (%llu uploaded)", (unsigned long long)g_vcache_hits, (unsigned long long)g_vcache_uploads);
         stat_vtx_copied = stat_vtx_direct = 0;
+        g_vcache_hits = g_vcache_uploads = 0;
+        if (ENV("LARECOMP_VCACHE_LOG")) {
+            extern uint64_t g_vcache_why[8], g_vcache_gpuw;
+            LOG("[vcache] misses: big/outside %llu volatile %llu became volatile %llu gpuw %llu; entries %llu; bytes partial %llu full %llu\n", (unsigned long long)g_vcache_why[0],
+                (unsigned long long)g_vcache_why[1], (unsigned long long)g_vcache_why[2], (unsigned long long)g_vcache_gpuw, (unsigned long long)g_vcache_why[5],
+                (unsigned long long)g_vcache_why[3], (unsigned long long)g_vcache_why[4]);
+            g_vcache_why[0] = g_vcache_why[1] = g_vcache_why[2] = g_vcache_why[3] = g_vcache_why[4] = g_vcache_gpuw = 0;
+        }
     }
     stat_feedback_copies = stat_upload_bytes = stat_shader_wait_ns = 0;
     if (g_exp_count[0] | g_exp_count[1] | g_exp_count[2] | g_exp_count[3]) {
@@ -2438,10 +2448,13 @@ static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSi
 // unless a compute dispatch may write it, or it is large: Legends Z-A's draws name whole buffers (MBs each, ~6 GB a second
 // copied in its opening scene, 8 fps; read in place: 30 fps).
 #define VTX_COPY_MAX (256u << 10)
-volatile int g_heal_tex, g_heal_vtx;  // (LARECOMP_HEAL_KEYS research keys, runtime/hle/input.c)
+volatile int g_heal_tex, g_heal_vtx;
+uint64_t g_vcache_gpuw;  // (vertex streams the GPU may write: never in the VRAM cache)  // (LARECOMP_HEAL_KEYS research keys, runtime/hle/input.c)
 static bool vtx_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {
     if (g_heal_vtx) gpuw_unknown = true;
-    if (ring_gpu_enabled() && !gpuw_overlaps(addr, size) && (size <= VTX_COPY_MAX || !guest_direct(addr, size, buf, off))) {
+    static uint64_t copy_max;
+    if (!copy_max) copy_max = getenv("LARECOMP_VK_VTX_COPY_MAX") ? strtoull(getenv("LARECOMP_VK_VTX_COPY_MAX"), NULL, 0) : VTX_COPY_MAX;
+    if (ring_gpu_enabled() && !gpuw_overlaps(addr, size) && (size <= copy_max || !guest_direct(addr, size, buf, off))) {
         stat_vtx_copied++;
         return false;
     }
@@ -2459,6 +2472,7 @@ static int g_cs_n;  // (compute program table below)
 // address (the old Prog / Pipe objects are leaked, so pipeline keys holding their pointers can't collide), compute
 // programs, shared copies - and the heap import: its pages are replaced (re-imported on first use).
 void vk_exec_reset(void) {
+    vcache_reset();
     memset(prog_tab, 0, sizeof prog_tab);
     memset(pipe_tab, 0, sizeof pipe_tab);
     g_cs_n = 0;
@@ -3271,7 +3285,8 @@ static void draw_(CmdRec *r, bool indexed) {
             uint32_t isz = itype == 1 ? 2 : 4;
             itype_vk = itype == 1 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
             icount = count;
-            if (iaddr % isz == 0 && vtx_direct(iaddr, (uint64_t)count * isz, &ib.buf, &ib.off)) {
+            uint64_t in = (uint64_t)count * isz;
+            if (iaddr % isz == 0 && ((!gpuw_overlaps(iaddr, in) && vcache_get(iaddr, in, &ib.buf, &ib.off)) || vtx_direct(iaddr, in, &ib.buf, &ib.off))) {
                 scan_src = src; scan_isz = isz; scan_restart = restart;  // max_index only if a stream gets copied
             } else {
                 ib = transient_gpu_copy(src, (uint64_t)count * isz + 4, 4);
@@ -3308,7 +3323,13 @@ static void draw_(CmdRec *r, bool indexed) {
             Range v = st.vbuf[s];
             VkBuffer dbuf;
             VkDeviceSize doff;
-            if (v.addr && v.size && vtx_direct(v.addr, v.size, &dbuf, &doff)) {
+            bool gw = v.addr && v.size && gpuw_overlaps(v.addr, v.size) && !ENV("LARECOMP_VCACHE_IGNORE_GPUW");
+            g_vcache_gpuw += gw;
+            if (ENV("LARECOMP_LOG_VSTREAM") && g_gpuprof_frame)  // (research: the stream ranges of a profiled frame)
+                LOG("[vstream] %llx +%llu stride %u div %u gpuw %d max_index %u inst %u\n", (unsigned long long)v.addr, (unsigned long long)v.size,
+                    (unsigned)k.stride[s], (unsigned)k.divisor[s], gw, max_index, inst);
+            if (v.addr && v.size && ((!gw && vcache_get(v.addr, v.size, &dbuf, &doff)) ||
+                                     vtx_direct(v.addr, v.size, &dbuf, &doff))) {
                 vkCmdBindVertexBuffers(cb, (uint32_t)s, 1, &dbuf, &doff);
                 continue;
             }

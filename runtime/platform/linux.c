@@ -52,6 +52,12 @@ int plat_protect(uint64_t addr, uint64_t size, int prot) {
     return mprotect((void *)(uintptr_t)addr, size, p);
 }
 
+int plat_cpu_count(void) {
+    cpu_set_t s;
+    if (sched_getaffinity(0, sizeof s, &s) == 0 && CPU_COUNT(&s) > 0) return CPU_COUNT(&s);
+    return SDL_GetNumLogicalCPUCores();
+}
+
 // ---- time
 uint64_t plat_now_ns(void) {
     struct timespec ts;
@@ -197,8 +203,11 @@ void plat_print_backtrace(void) {
     }
 }
 
+bool pagewatch_fault(uint64_t addr);  // (runtime/pagewatch.c)
+
 static void crash_handler(int sig, siginfo_t *si, void *ctx) {
     ucontext_t *uc = ctx;
+    if (sig == SIGSEGV && pagewatch_fault((uint64_t)(uintptr_t)si->si_addr)) return;  // (a page the renderer keeps a copy of)
     static volatile int depth;
     if (sig == SIGABRT && depth++ > 0) { signal(SIGABRT, SIG_DFL); abort(); }  // (nested: just die)
     uint64_t fa = (uint64_t)(uintptr_t)si->si_addr;
