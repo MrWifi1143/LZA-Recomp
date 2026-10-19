@@ -3,7 +3,8 @@
 // on every decoder (its 6-channel audio out played silence).
 //
 // IHardwareOpusDecoderManager: 0 Open(params {u32 rate, u32 channels}, u32 work size, transfer memory),
-//   1 GetWorkBufferSize(params), 2 OpenForMultiStream, 3 GetWorkBufferSizeForMultiStream (multistream: not seen yet).
+//   1 GetWorkBufferSize(params), 2 OpenForMultiStream, 3 GetWorkBufferSizeForMultiStream (multistream: not seen yet),
+//   4 OpenEx / 5 GetWorkBufferSizeEx / 8 GetWorkBufferSizeExEx (params ex: rate and channels first, as above).
 // IHardwareOpusDecoder: 0 DecodeInterleavedOld, 4 DecodeInterleavedWithPerfOld, 6 DecodeInterleaved(u8 reset).
 //   Input buffer: {u32 size BE, u32 final range BE} + packet. Output: s16 interleaved at the opened rate.
 //   Returns u32 bytes consumed, u32 samples per channel (+ u64 time in microseconds for 4 / 6).
@@ -124,7 +125,8 @@ static uint32_t work_size(uint32_t channels) { return 0x4000 + channels * 0x8000
 SERVICE("hwopus", hwopus) {
     (void)s;
     switch (req->cmd) {
-    case 0: {  // OpenHardwareOpusDecoder(params, work size, transfer memory)
+    case 0:    // OpenHardwareOpusDecoder(params, work size, transfer memory)
+    case 4: {  // OpenHardwareOpusDecoderEx (12.0.0+): params ex {u32 rate, u32 channels, u8 large frames, pad} (Z-A)
         OpusDec *d = calloc(1, sizeof *d);
         d->rate = IN(uint32_t, 0);
         d->channels = IN(uint32_t, 4);
@@ -143,6 +145,8 @@ SERVICE("hwopus", hwopus) {
         break;
     }
     case 1:  // GetWorkBufferSize(params)
+    case 5:  // GetWorkBufferSizeEx(params ex), 12.0.0+
+    case 8:  // GetWorkBufferSizeExEx(params ex), 14.0.0+ (Legends Z-A: with 0 it opened no decoder, its Opus was silent)
         OUT(uint32_t, 0) = work_size(IN(uint32_t, 4));
         resp_size(resp, 4);
         break;
