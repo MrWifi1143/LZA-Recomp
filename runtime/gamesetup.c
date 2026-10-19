@@ -1,5 +1,5 @@
 // Game file setup (runtime/gamesetup.h). The picked folder is searched a few levels deep (dump tools nest the files):
-// exefs/ is the folder with main and main.npdm, the RomFS either a romfs.bin image or the folder with bin/message.
+// exefs/ is the folder with main and main.npdm, the RomFS either a romfs.bin image or the folder with bin/message (arc/data.trpfs in Z-A).
 // exefs/ is copied into <data root>/extracted (hard links where the file system allows), the RomFS image is copied
 // or built (runtime/romfs_build.c), then the game code is recompiled from exefs/ (runtime/gamebuild.c).
 #include "gamesetup.h"
@@ -27,6 +27,7 @@
 #define TITLE_EEVEE 0x0100187003A36000ull
 #define TITLE_PIKACHU 0x010003F003A34000ull
 #define TITLE_PLA 0x01001F5010DFA000ull  // Pokemon Legends: Arceus
+#define TITLE_ZA 0x0100F43008C44000ull   // Pokemon Legends: Z-A
 static const uint8_t EEVEE_100[8] = {0x0a, 0x3f, 0x0d, 0x21, 0xe6, 0x7d, 0xad, 0x80};    // Let's Go, Eevee! v1.0.0 main
 static const uint8_t PIKACHU_100[8] = {0x1c, 0x37, 0x56, 0x92, 0xde, 0x4f, 0x4b, 0x87};  // Let's Go, Pikachu! v1.0.0
 
@@ -65,7 +66,7 @@ static uint64_t program_id(const char *exefs) {
 
 static bool game_ok(const char *exefs) {
     uint64_t id = program_id(exefs);
-    return id == TITLE_EEVEE || id == TITLE_PIKACHU || id == TITLE_PLA;
+    return id == TITLE_EEVEE || id == TITLE_PIKACHU || id == TITLE_PLA || id == TITLE_ZA;
 }
 
 int game_build(const char *exefs) {
@@ -105,7 +106,7 @@ const char *game_version(const char *exefs) {
 
 const char *game_name(const char *exefs) {
     uint64_t id = program_id(exefs);
-    return id == TITLE_EEVEE ? "Eevee" : id == TITLE_PIKACHU ? "Pikachu" : id == TITLE_PLA ? "Legends: Arceus" : NULL;
+    return id == TITLE_EEVEE ? "Eevee" : id == TITLE_PIKACHU ? "Pikachu" : id == TITLE_PLA ? "Legends: Arceus" : id == TITLE_ZA ? "Legends: Z-A" : NULL;
 }
 
 bool setup_ready(void) {
@@ -124,6 +125,8 @@ static void find_game(const char *dir, int depth, Found *f) {
     }
     snprintf(p, sizeof p, "%s/bin/message", dir);
     if (!f->romfs[0] && is_dir(p)) snprintf(f->romfs, sizeof f->romfs, "%s", dir);
+    snprintf(p, sizeof p, "%s/arc/data.trpfs", dir);  // (Legends: Z-A's RomFS)
+    if (!f->romfs[0] && is_file(p)) snprintf(f->romfs, sizeof f->romfs, "%s", dir);
     snprintf(p, sizeof p, "%s/romfs.bin", dir);
     if (!f->romfs_bin[0] && is_file(p)) snprintf(f->romfs_bin, sizeof f->romfs_bin, "%s", p);
     DIR *d = opendir(dir);

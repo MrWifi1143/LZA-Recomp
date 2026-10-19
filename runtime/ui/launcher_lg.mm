@@ -290,31 +290,31 @@ static void game_files_section(SDL_Window *win) {
     if (ready) {
         const char *name = game_name("extracted/exefs");
         ImGui::TextColored(k_green, g_pt ? "Pokémon %s - pronto para jogar" : "Pokémon %s - ready to play",
-                           name ? name : "Legends: Arceus");
+                           name ? name : "Legends: Z-A");
         ImGui::SameLine();
         if (ImGui::SmallButton(T("Change...", "Trocar..."))) SDL_ShowOpenFolderDialog(picked_game, NULL, win, NULL, false);
         return;
     }
     if (st >= SETUP_FAIL_NOT_FOUND) {
         static const char *const en[] = {"No game files found in that folder.", "Those are packed game files (.xci / .nsp).",
-                                         "That's not a supported game (Pokémon Legends: Arceus).", "The files couldn't be copied.",
+                                         "That's not a supported game (Pokémon Legends: Z-A).", "The files couldn't be copied.",
                                          "The game code didn't build.", "The game code builder is missing from this copy."};
         static const char *const pt[] = {"Nenhum arquivo do jogo nessa pasta.", "Esses são arquivos do jogo empacotados (.xci / .nsp).",
-                                         "Esse não é um jogo suportado (Pokémon Legends: Arceus).", "Os arquivos não puderam ser copiados.",
+                                         "Esse não é um jogo suportado (Pokémon Legends: Z-A).", "Os arquivos não puderam ser copiados.",
                                          "O código do jogo não compilou.", "O compilador do código do jogo não está nesta cópia."};
         static const char *const en_h[] = {"Choose the folder that holds exefs and romfs.", "Extract them first (exefs and romfs).",
-                                           "Pick the folder of your own extracted Pokémon Legends: Arceus.", "Check there are about 6 GB free and try again.",
+                                           "Pick the folder of your own extracted Pokémon Legends: Z-A.", "Check there are about 6 GB free and try again.",
                                            "Check there are about 2 GB free and try again; details in lasrecomp.log.", "Download the release again."};
         static const char *const pt_h[] = {"Escolha a pasta que tem exefs e romfs.", "Extraia antes (exefs e romfs).",
-                                           "Escolha a pasta do seu Pokémon Legends: Arceus extraído.", "Confira se há uns 6 GB livres e tente de novo.",
+                                           "Escolha a pasta do seu Pokémon Legends: Z-A extraído.", "Confira se há uns 6 GB livres e tente de novo.",
                                            "Confira se há uns 2 GB livres e tente de novo; detalhes no lasrecomp.log.", "Baixe a release de novo."};
         int k = st - SETUP_FAIL_NOT_FOUND;
         ImGui::TextColored(k_red, "%s", T(en[k], pt[k]));
         ImGui::TextDisabled("%s", T(en_h[k], pt_h[k]));
     } else {
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 900);
-        ImGui::TextUnformatted(T("Select the folder with your own extracted Pokémon Legends: Arceus (exefs and romfs).",
-                                 "Selecione a pasta com o seu Pokémon Legends: Arceus extraído (exefs e romfs)."));
+        ImGui::TextUnformatted(T("Select the folder with your own extracted Pokémon Legends: Z-A (exefs and romfs).",
+                                 "Selecione a pasta com o seu Pokémon Legends: Z-A extraído (exefs e romfs)."));
         ImGui::PopTextWrapPos();
     }
     if (ImGui::Button(T("Select game folder...", "Selecionar pasta do jogo..."), ImVec2(-FLT_MIN, 0)))
