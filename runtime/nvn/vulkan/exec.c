@@ -896,6 +896,11 @@ static void vk_end_pass_at(int line) {
         if (multi) snprintf(path, sizeof path, "build/pass_%llu_%03d.png", (unsigned long long)debug_pass_frame, debug_pass_no++);
         else snprintf(path, sizeof path, "build/pass_%03d.png", debug_pass_no++);
         renderer_save_texture_tex(st.rt.color[0]->backend, path);
+        for (int i = 1; i < st.rt.ncolor && !multi; i++)  // (the other color targets: build/pass_NNN_c<i>.png)
+            if (st.rt.color[i] && st.rt.color[i]->backend) {
+                snprintf(path, sizeof path, "build/pass_%03d_c%d.png", debug_pass_no - 1, i);
+                renderer_save_texture_tex(st.rt.color[i]->backend, path);
+            }
     }
 }
 
@@ -2310,6 +2315,11 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
         }
     }
     if (h && st.spool && tsc < (uint32_t)st.spool->count) smp = vk_sampler(&((NvnSamplerDesc *)st.spool->entries)[tsc]);
+    if (g_debug_frame && h && st.spool && tsc < (uint32_t)st.spool->count) {
+        const NvnSamplerDesc *sd = &((NvnSamplerDesc *)st.spool->entries)[tsc];
+        LOG("[draw]   sampler %u (tex %u): min %u mag %u wrap %u/%u lod %.2f..%.2f bias %.2f aniso %.1f\n", tsc, tic, sd->min_filter,
+            sd->mag_filter, sd->wrap[0], sd->wrap[1], sd->lod_min, sd->lod_max, sd->lod_bias, sd->max_aniso);
+    }
     if (!view) view = vk_dummy_view(st_->type);
     if (!smp) smp = vk_default_sampler(true);
     *out = (VkDescriptorImageInfo){smp, view, VK_IMAGE_LAYOUT_GENERAL};
@@ -2894,6 +2904,9 @@ static void draw_(CmdRec *r, bool indexed) {
         bool on = (st.poly[3] & 4) && !off;
         if (on) memcpy(f, st.poly_offset, sizeof f);
         if (equal_tol) { f[1] -= 8; on = true; }  // (see the EQUAL comment above: a few depth ulps nearer)
+        static float force[2] = {-1, 0};  // (research) LARECOMP_FORCE_DEPTH_BIAS=<const>,<slope>: on depth-only-ish D32F passes
+        if (force[0] < 0) { const char *e = getenv("LARECOMP_FORCE_DEPTH_BIAS"); force[0] = 0; if (e) sscanf(e, "%f,%f", &force[0], &force[1]); }
+        if ((force[0] || force[1]) && st.rt.depth && st.rt.depth->format == 0x34) { f[1] = force[0]; f[2] = 0; f[0] = force[1]; on = true; }
         vkCmdSetDepthBiasEnable(cb, on);
         vkCmdSetDepthBias(cb, f[1], f[2], f[0]);
     }
@@ -3149,9 +3162,9 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
         pr->vi->cbuf_mask, pr->fi->cbuf_mask, st.rt.ncolor);
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) LOG(" %ux%u/f%#x", st.rt.color[i]->width, st.rt.color[i]->height, st.rt.color[i]->format);
     if (st.rt.depth) LOG(" d%#x %p", st.rt.depth->format, (void *)st.rt.depth);
-    LOG(" | vp %.0f %.0f %.0f %.0f | attrs %#x blend %#x ds %02x%02x%02x poly %02x%02x chmask %08x\n", st.viewport[0][0], st.viewport[0][1],
-        st.viewport[0][2], st.viewport[0][3], pr->vi->attr_mask, st.color_state[0], st.ds[0], st.ds[1], st.ds[2], st.poly[0], st.poly[1],
-        st.channel_mask);
+    LOG(" | vp %.0f %.0f %.0f %.0f | attrs %#x blend %#x ds %02x%02x%02x poly %02x%02x off %x (%.3g %.3g %.3g) chmask %08x\n",
+        st.viewport[0][0], st.viewport[0][1], st.viewport[0][2], st.viewport[0][3], pr->vi->attr_mask, st.color_state[0], st.ds[0],
+        st.ds[1], st.ds[2], st.poly[0], st.poly[1], st.poly[3], st.poly_offset[0], st.poly_offset[1], st.poly_offset[2], st.channel_mask);
     LOG("[draw]   attribs:");  // format / stream / offset per attribute, and the streams' strides
     for (int i = 0; i < st.nattrib; i++)
         if ((pr->vi->attr_mask >> i) & 1)
@@ -3881,7 +3894,14 @@ static void exec_list(uint64_t handle, int depth) {
             }
             break;
         }
-        case CMD_SET_POLYGON_OFFSET: memcpy(st.poly_offset, r->f, sizeof st.poly_offset); break;
+        case CMD_SET_POLYGON_OFFSET:
+            memcpy(st.poly_offset, r->f, sizeof st.poly_offset);
+            if (getenv("LARECOMP_LOG_POLY_OFFSET")) {
+                static int n;
+                if (n++ < 20) LOG("[poly] offset factor %g units %g clamp %g (x1 %#llx x2 %#llx)\n", r->f[0], r->f[1], r->f[2],
+                                  (unsigned long long)r->x[0], (unsigned long long)r->x[1]);
+            }
+            break;
         case CMD_SET_PRIMITIVE_RESTART: st.prim_restart = r->x[0] != 0; st.restart_index = (uint32_t)r->x[1]; break;
         case CMD_SET_COPY_STRIDES: st.copy_row_stride = r->x[0]; st.copy_image_stride = r->x[1]; break;
         case CMD_CLEAR_COLOR: {
