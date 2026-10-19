@@ -30,10 +30,18 @@ static void plugin_log(const char *fmt, ...) {
     va_end(ap);
 }
 
+static int origin_lower_left(void) {
+    bool renderer_origin_lower_left(void);  // runtime/nvn/renderer.h
+    return renderer_origin_lower_left();
+}
+
 static const LarecompPluginApi g_api = {
     .abi = LARECOMP_PLUGIN_ABI, .log = plugin_log, .register_fnhook = rt_register_fnhook_at,
     .call_original = rt_call_original, .title_id = game_title_id, .queue_lock = vk_queue_lock, .queue_unlock = vk_queue_unlock,
+    .image_origin_lower_left = origin_lower_left,
 };
+
+volatile int g_plugins_cbuf;
 
 static void load_one(const char *path) {
     if (g_n == MAX_PLUGINS) return;
@@ -45,6 +53,7 @@ static void load_one(const char *path) {
     int r = init(&g_api, &hk);
     if (r) { LOG("[plugin] %s stays out (%d)\n", path, r); dlclose(h); return; }
     g_hooks[g_n++] = hk;
+    if (hk.cbuf_bound) g_plugins_cbuf = 1;
     LOG("[plugin] loaded %s\n", path);
 }
 
@@ -109,6 +118,11 @@ void plugins_frame(VkCommandBuffer cb, VkImage image, VkFormat fmt, uint32_t w, 
 void plugins_frame_submitted(void) {
     for (int i = 0; i < g_n; i++)
         if (g_hooks[i].frame_submitted) g_hooks[i].frame_submitted();
+}
+
+void plugins_cbuf_bound(int stage, uint64_t addr, uint32_t size) {
+    for (int i = 0; i < g_n; i++)
+        if (g_hooks[i].cbuf_bound) g_hooks[i].cbuf_bound(stage, addr, size);
 }
 
 void plugins_shutdown(void) {
