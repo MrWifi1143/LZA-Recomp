@@ -38,6 +38,7 @@ typedef struct {
     bool custom_border, divisor, host_import;
     bool xfb;  // VK_EXT_transform_feedback (NVN transform feedback: PLA skins its characters with it)
     bool depth_clamp;  // depthClamp feature (NVN SetDepthClamp)
+    VkShaderStageFlags sg32;  // stages that get a required subgroup size of 32 (the Maxwell warp: vk_sg32)
     PFN_vkCmdBindTransformFeedbackBuffersEXT bind_xfb;
     PFN_vkCmdBeginTransformFeedbackEXT begin_xfb;
     PFN_vkCmdEndTransformFeedbackEXT end_xfb;
@@ -50,6 +51,14 @@ typedef struct {
     VkImage sc_images[8];
     VkImageView sc_views[8];
 } VkG;
+// Guest shaders assume 32-lane warps (ballots, lane ids and masks, shuffles): a stage of g_vk.sg32 is given a required
+// subgroup size of 32 (GPUs whose default differs: AMD's wave64, Intel's 8 / 16); NVIDIA is always 32 (sg32 = 0).
+static inline const void *vk_sg32(VkShaderStageFlagBits stage) {
+    static const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo r = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO, .requiredSubgroupSize = 32};
+    extern VkG g_vk;
+    return (g_vk.sg32 & stage) ? &r : NULL;
+}
 extern VkG g_vk;
 
 // ---- submissions (exec.c)

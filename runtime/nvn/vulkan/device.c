@@ -215,6 +215,21 @@ static void create_device(void) {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR, .pipelineExecutableInfo = VK_TRUE,
         .pNext = f.pNext};
     if (g_pipe_exec_stats) f.pNext = &pe;
+    {   // subgroup size control (vk_sg32): only where 32 is possible but not the only size
+        VkPhysicalDeviceVulkan13Features h13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+        VkPhysicalDeviceFeatures2 hf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &h13};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &hf);
+        VkPhysicalDeviceVulkan13Properties p13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES};
+        VkPhysicalDeviceProperties2 hp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &p13};
+        vkGetPhysicalDeviceProperties2(g_vk.phys, &hp);
+        LOG("[vk] subgroup size %u..%u\n", p13.minSubgroupSize, p13.maxSubgroupSize);
+        if (h13.subgroupSizeControl && p13.minSubgroupSize <= 32 && p13.maxSubgroupSize >= 32 && p13.minSubgroupSize != p13.maxSubgroupSize) {
+            f13.subgroupSizeControl = VK_TRUE;
+            g_vk.sg32 = p13.requiredSubgroupSizeStages & (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT);
+            LOG("[vk] guest shaders run in 32-wide subgroups (stages %#x)\n", g_vk.sg32);
+        } else if (p13.minSubgroupSize != 32 || p13.maxSubgroupSize != 32)
+            LOG("[vk] warning: no 32-wide subgroups: guest shaders' warp operations may misbehave\n");
+    }
     VkPhysicalDeviceFeatures *b = &f.features, *h = &have.features;
     b->independentBlend = h->independentBlend;
     b->dualSrcBlend = h->dualSrcBlend;
