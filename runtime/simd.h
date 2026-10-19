@@ -204,6 +204,27 @@ static const uint8_t simd_aes_isbox[256] = {
     0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d,
 };
 
+// FPCR.FZ (flush to zero, which the Legends games turn on) runs on the fast path with the host's own flushing:
+// MXCSR FTZ + DAZ on x86. c->host_fpcr says which FZ state the host thread is in for this context; an FP op that
+// finds it differing from FPCR (the guest wrote FPCR, a new thread, a fiber resumed: 1 = unknown) sets the host once.
+// Only a non-nearest rounding mode still goes the slow way (fesetround around every op: it took half the CPU time
+// of the Legends' game threads). Differs from ARM only for a result that rounds up to the smallest normal from below
+// (ARM flushes it: tininess before rounding; x86 keeps it).
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+SN int simd_host_fz(Cpu *c) {
+    if (c->fpcr & FPCR_RM) return 0;
+    unsigned m = _mm_getcsr() & ~0x8040u;  // FTZ (bit 15), DAZ (bit 6)
+    if (c->fpcr & FPCR_FZ) m |= 0x8040u;
+    _mm_setcsr(m);
+    c->host_fpcr = c->fpcr & FPCR_FZ;
+    return 1;
+}
+#define SIMD_FAST(c) (__builtin_expect(((c)->fpcr & FPCR_SLOW) == (c)->host_fpcr, 1) || simd_host_fz(c))
+#else
+#define SIMD_FAST(c) (!((c)->fpcr & FPCR_SLOW))
+#endif
+
 SI int simd_fe_mode(uint64_t fpcr) {
     static const int m[4] = {FE_TONEAREST, FE_UPWARD, FE_DOWNWARD, FE_TOWARDZERO};
     return m[(fpcr >> 22) & 3];
@@ -277,7 +298,7 @@ SI float simd_d2s(Cpu *c, double x) {
         return fv_s((uint32_t)(u >> 63) << 31 | 0x7fc00000u | (uint32_t)((u >> 29) & 0x3fffff));
     }
     x = fv_d(u);
-    if (__builtin_expect(c->fpcr & FPCR_SLOW, 0)) {
+    if (!SIMD_FAST(c)) {
         if ((c->fpcr & FPCR_FZ) && __builtin_fabs(x) < 0x1p-126 && x != 0) return fv_s((uint32_t)(u >> 63) << 31);
         return simd_d2s_slow(c, x);
     }

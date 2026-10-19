@@ -709,6 +709,8 @@ void backend_present(NvnTexture *t) {
     if (slow_ms > 0 && total_frames > 2600) SDL_Delay((Uint32)slow_ms);
     extern void fnprof_frame(uint64_t frame);
     if (!rt_on_render_thread()) fnprof_frame(total_frames);
+    extern void sampler_frame(uint64_t frame);  // (runtime/hle/sampler.c: LARECOMP_SAMPLE)
+    sampler_frame(total_frames);
     extern void reboot_test_frame(uint64_t frame);  // runtime/main.c (LARECOMP_REBOOT_AT)
     if (!rt_on_render_thread()) reboot_test_frame(total_frames);
     static long shot_every = -1;
