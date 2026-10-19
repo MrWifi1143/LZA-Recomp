@@ -411,6 +411,7 @@ extern "C" void launcher_lg_run(const char *root) {
         ImGui::Combo(T("Resolution", "Resolução"), &res, g_pt ? res_pt : res_en, 5);
         if (ImGui::Checkbox(T("Fullscreen", "Tela cheia"), &full)) SDL_SetWindowFullscreen(win, full);
         ImGui::Checkbox(T("Anti-aliasing (SMAA)", "Suavizar serrilhado (SMAA)"), &smaa);
+        ImGui::Checkbox(T("60 fps (experimental)", "60 fps (experimental)"), &fps60);
         const char *none = T("None", "Nenhum");
         if (ImGui::BeginCombo(T("Mod", "Mod"), mod ? mods[mod - 1] : none)) {
             if (ImGui::Selectable(none, mod == 0)) mod = 0;
