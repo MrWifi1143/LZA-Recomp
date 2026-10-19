@@ -16,8 +16,8 @@ bool renderer_is_gpu_owned(NvnTexture *t);
 void renderer_flush(void);  // finish all recorded GPU work
 bool renderer_origin_lower_left(void);
 const char *renderer_stats(void);
-bool renderer_format_is_depth(uint32_t f);
-bool renderer_format_has_stencil(uint32_t f);
+static inline bool renderer_format_is_depth(uint32_t f) { return f >= 0x31 && f <= 0x36; }
+static inline bool renderer_format_has_stencil(uint32_t f) { return f == 0x31 || f == 0x35 || f == 0x36; }
 void renderer_mark_gpu_owned(NvnTexture *t);
 void input_handle_event(const SDL_Event *e);
 bool input_user_blocked(const SDL_Event *e);

@@ -639,6 +639,7 @@ void backend_present(NvnTexture *t) {
         if (menu_at < 0) menu_at = getenv("LARECOMP_MENU_AT") ? atol(getenv("LARECOMP_MENU_AT")) : 0;
         if (final && menu_at && (long)total_frames + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }
         menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
+        { extern uint32_t g_dyn_epoch; g_dyn_epoch++; }  // (the menu set its own state: exec.c draw_'s cache)
         static long win_shot = -1;
         if (win_shot < 0) win_shot = getenv("LARECOMP_WINDOW_SHOT") ? atol(getenv("LARECOMP_WINDOW_SHOT")) : 0;
         // (the in-between image: build/window_mid.png, with interpolation on)

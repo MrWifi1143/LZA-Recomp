@@ -127,8 +127,6 @@ static VkFmt fmt_of(uint32_t f) {
     }
 }
 
-bool renderer_format_is_depth(uint32_t f) { return f >= 0x31 && f <= 0x36; }
-bool renderer_format_has_stencil(uint32_t f) { return f == 0x31 || f == 0x35 || f == 0x36; }
 VkFormat vk_format(uint32_t f) { return fmt_of(f).vf; }
 bool vk_format_alpha_one(uint32_t f) { return fmt_of(f).alpha_one; }
 bool renderer_format_alpha_one(uint32_t f) { return fmt_of(f).alpha_one; }
@@ -447,11 +445,18 @@ static uint64_t hash_full(const uint8_t *p, uint64_t n) {
     return h ^ (h >> 31);
 }
 
+// The quick check of a texture the CPU may have changed: 128 chunks of 32 bytes spread over it (each costs one cache
+// miss: 4096 single bytes made this a sixth of the render thread; the full hash every 120 frames is the backstop)
 static uint64_t fnv_sample(const uint8_t *p, uint64_t n) {
-    uint64_t h = 1469598103934665603ull;
-    uint64_t step = n > 4096 ? n / 4096 : 1;
-    for (uint64_t i = 0; i < n; i += step) { h ^= p[i]; h *= 1099511628211ull; }
-    return h ^ n;
+    if (n <= 128 * 32) return hash_full(p, n);
+    uint64_t h = 1469598103934665603ull ^ n, step = (n - 32) / 127;
+    for (uint64_t i = 0; i < 128; i++) {
+        uint64_t v[4];
+        memcpy(v, p + i * step, 32);
+        h = (h ^ v[0] ^ (v[1] << 1) ^ (v[2] << 2) ^ (v[3] << 3)) * 0x9E3779B97F4A7C15ull;
+        h ^= h >> 29;
+    }
+    return h;
 }
 
 static pthread_mutex_t pending_lock = PTHREAD_MUTEX_INITIALIZER;
