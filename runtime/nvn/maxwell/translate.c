@@ -278,6 +278,7 @@ static void attr_load(Ctx *c, int dst, uint32_t addr, const char *idx) {
             }
         } else if (addr == 0x3FC) { c->uses_front_facing = true; strcpy(e, "(front_facing ? 0xFFFFFFFFu : 0u)"); }
         else if (addr == 0x2E0 || addr == 0x2E4) { sprintf(e, "as_type<uint>(point_coord[%d])", (addr >> 2) & 1); }
+        else if (addr == 0x64 && c->glsl) { strcpy(e, "uint(gl_Layer)"); }  // the layer drawn (Z-A's LUT: the slice = blue)
         else { sprintf(e, "0u /* attr %#x */", addr); }
     } else {
         sprintf(e, "0u /* attr %#x */", addr);
@@ -303,6 +304,8 @@ static void attr_store(Ctx *c, int src, uint32_t addr) {
     } else if (addr == 0x6C) {
         c->info->writes_point_size = true;
         sp(&c->body, "    out.psize = as_type<float>(%s);\n", v);
+    } else if (addr == 0x64 && c->glsl) {  // render target layer (array / 3D slice)
+        sp(&c->body, "    gl_Layer = int(%s);\n", v);
     } else {
         sp(&c->body, "    /* store attr %#x */\n", addr);
     }
@@ -684,6 +687,25 @@ static bool glsl_texs(Ctx *c, uint64_t w, bool fetch, int *slot_out, char *call,
     return true;
 }
 
+// TLD4S: a 2D gather of one component (bits 52-53) at (a, b), results to d0, d0 + 1 and d1, d1 + 1 (only d0's pair
+// when d1 is RZ). The depth-compare and offset forms take other operands: not translated.
+static void emit_tld4s(Ctx *c, uint64_t w) {
+    if (!c->glsl) { fail(c, "tld4s (MSL)"); return; }
+    if (bits(w, 50, 1) || bits(w, 51, 1)) { fail(c, "tld4s dc/aoffi"); return; }
+    int d0 = (int)bits(w, 0, 8), d1 = (int)bits(w, 28, 8), a = (int)bits(w, 8, 8), b = (int)bits(w, 20, 8);
+    int slot = tex_slot(c, (uint32_t)bits(w, 36, 13), TEXTYPE_2D, false, false);
+    sp(&c->body, "    { vec4 g = textureGather(t%d, vec2(uintBitsToFloat(%s), uintBitsToFloat(%s)), %d);\n", slot, R(a), R(b),
+       (int)bits(w, 52, 2));
+    static const char *const comp[4] = {"g.x", "g.y", "g.z", "g.w"};
+    for (int k = 0; k < 4; k++) {
+        int base = k < 2 ? d0 : d1, r = base == RZ ? RZ : base + (k & 1);
+        if (r == RZ || r >= RZ) continue;
+        c->reg_used[r] = 1;
+        sp(&c->body, "      r%d = floatBitsToUint(%s);\n", r, comp[k]);
+    }
+    sp(&c->body, "    }\n");
+}
+
 static void emit_texs(Ctx *c, uint64_t w, bool fetch) {
     int d0 = (int)bits(w, 0, 8), d1 = (int)bits(w, 28, 8), a = (int)bits(w, 8, 8), b = (int)bits(w, 20, 8);
     uint32_t index = (uint32_t)bits(w, 36, 13);
@@ -836,6 +858,95 @@ static void emit_tex(Ctx *c, uint64_t w, bool bindless) {
 }
 
 // ------------------------------------------------------------------ instruction translation
+// ---- surfaces (SUST / SURED): storage images
+// NVN puts image handles in driver cbuf 2 from 0x120 (after the 32 texture handles at 0x20), 8 bytes per slot. A bindless
+// access (.B) takes the handle from a register: Z-A's load it just before with MOV r, c[2][0x120 + 8 * slot], which
+// the scan back below finds (the first earlier instruction writing that register).
+static int image_slot_bindless(Ctx *c, uint32_t pc, int reg) {
+    const uint64_t *code = (const uint64_t *)c->code;
+    for (int i = (int)(pc / 8) - 1, n = 0; i >= 0 && n < 256; i--, n++) {
+        if (i % 4 == 0) continue;  // scheduling word
+        uint64_t v = code[i];
+        if ((int)bits(v, 0, 8) != reg) continue;
+        if ((v & 0xfff8000000000000ull) == 0x4c98000000000000ull && bits(v, 34, 5) == 2) {  // MOV r, c[2][off]
+            int off = (int)bits(v, 20, 14) * 4;
+            if (off >= 0x120 && off < 0x160 && !(off & 7)) return (off - 0x120) / 8;
+        }
+        return -1;
+    }
+    return -1;
+}
+
+static int image_binding(Ctx *c, int slot, int dim, bool atomic) {
+    for (int i = 0; i < c->info->nimg; i++)
+        if (c->info->img[i].slot == slot) {
+            if (c->info->img[i].dim != dim || c->info->img[i].atomic != atomic) { fail(c, "image %d used two ways", slot); return 0; }
+            return i;
+        }
+    if (c->info->nimg == 8) { fail(c, "too many images"); return 0; }
+    int i = c->info->nimg++;
+    c->info->img[i] = (ShaderImage){(uint8_t)slot, (uint8_t)dim, atomic, c->key ? c->key->img_kind[slot] : 0};
+    return i;
+}
+
+static const char *image_glsl_dim(int dim) {
+    switch (dim) {
+    case SUDIM_1D: return "1D";
+    case SUDIM_1D_ARRAY: return "1DArray";
+    case SUDIM_2D: return "2D";
+    case SUDIM_2D_ARRAY: return "2DArray";
+    default: return "3D";
+    }
+}
+
+// coordinates from consecutive registers at a (x[, y[, z or layer]]), RZ and past it reading 0
+static void image_coords(Ctx *c, char *o, int a, int dim) {
+    int n = dim == SUDIM_1D ? 1 : dim == SUDIM_1D_ARRAY || dim == SUDIM_2D ? 2 : 3;
+    char r[3][16];
+    for (int k = 0; k < n; k++) {
+        if (a == RZ || a + k >= RZ) strcpy(r[k], "0u");
+        else { c->reg_used[a + k] = 1; sprintf(r[k], "r%d", a + k); }
+    }
+    if (n == 1) sprintf(o, "int(%s)", r[0]);
+    else if (n == 2) sprintf(o, "ivec2(int(%s), int(%s))", r[0], r[1]);
+    else sprintf(o, "ivec3(int(%s), int(%s), int(%s))", r[0], r[1], r[2]);
+}
+
+// SUST.P (formatted: the RGBA mask, data in consecutive registers from d) and SURED, bound (TidB) or bindless (.B).
+// (SUST.D, typed by a size field, has opcodes of its own: not translated.)
+static void emit_surface(Ctx *c, uint64_t w, uint32_t pc, bool red, bool bindless) {
+    if (!c->glsl) { fail(c, "surface access (MSL)"); return; }
+    int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8), dim = (int)bits(w, 33, 3);
+    int slot = bindless ? image_slot_bindless(c, pc, (int)bits(w, 39, 8)) : ((int)bits(w, 36, 13) * 4 - 0x120) / 8;
+    if (slot < 0 || slot >= 8) { fail(c, "surface handle not from c[2] at %#x", pc); return; }
+    if (dim == SUDIM_1D_BUFFER) { fail(c, "buffer surface"); return; }
+    char coord[96];
+    image_coords(c, coord, a, dim);
+    if (!red) {
+        int i = image_binding(c, slot, dim, false), mask = (int)bits(w, 20, 4), n = 0;
+        int kind = c->info->img[i].kind;  // the data registers as the image's type: float / int / uint bits
+        static const char *const zero[3] = {"0.0", "0", "0u"}, *const conv[3] = {"uintBitsToFloat(r%d)", "int(r%d)", "r%d"};
+        static const char *const vec[3] = {"vec4", "ivec4", "uvec4"};
+        char v[4][32];
+        for (int k = 0; k < 4; k++) {
+            if (!(mask >> k & 1)) { strcpy(v[k], zero[kind]); continue; }
+            int r = d == RZ || d + n >= RZ ? RZ : d + n;
+            n++;
+            if (r == RZ) strcpy(v[k], zero[kind]);
+            else { c->reg_used[r] = 1; sprintf(v[k], conv[kind], r); }
+        }
+        sp(&c->body, "    imageStore(img%d, %s, %s(%s, %s, %s, %s));\n", i, coord, vec[kind], v[0], v[1], v[2], v[3]);
+    } else {
+        int size = (int)bits(w, 20, 3), op = (int)bits(w, 24, 3);
+        static const char *const fn[8] = {"imageAtomicAdd", "imageAtomicMin", "imageAtomicMax", NULL, NULL,
+                                          "imageAtomicAnd", "imageAtomicOr", "imageAtomicXor"};
+        if (size > 1 || !fn[op] || (size == 1 && (op == 1 || op == 2))) { fail(c, "SURED size %d op %d", size, op); return; }
+        int i = image_binding(c, slot, dim, true);
+        sp(&c->body, "    %s(img%d, %s, %s);\n", fn[op], i, coord, R(d));
+    }
+    c->info->gmem_stores = true;  // (the shader writes memory: keep it, as for STG)
+}
+
 static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     char t[2048], u[2048];
     int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8);
@@ -929,6 +1040,16 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             set_reg(c, d + i, cb);
         }
         if (overlap) sp(&c->body, "    }\n");
+    } else if (OPM(0xdf00000000000000ull, 0xffc0000000000000ull)) {  // TLD4S
+        emit_tld4s(c, w);
+    } else if (OPM(0xeb20000000000000ull, 0xfff8000000000000ull)) {  // SUST.B (bindless)
+        emit_surface(c, w, pc, false, true);
+    } else if (OPM(0xeb28000000000000ull, 0xfff8000000000000ull)) {  // SUST
+        emit_surface(c, w, pc, false, false);
+    } else if (OPM(0xeb50000000000000ull, 0xfff8000000000000ull)) {  // SURED.B (bindless)
+        emit_surface(c, w, pc, true, true);
+    } else if (OPM(0xeb58000000000000ull, 0xfff8000000000000ull)) {  // SURED
+        emit_surface(c, w, pc, true, false);
     } else if (OPM(0xd000000000000000ull, 0xf600000000000000ull)) {  // TEXS
         emit_texs(c, w, false);
     } else if (OPM(0xd200000000000000ull, 0xf600000000000000ull)) {  // TLDS
@@ -1811,6 +1932,7 @@ static const char glsl_prelude[] =
     "#extension GL_KHR_shader_subgroup_shuffle_relative : require\n"
     "#extension GL_EXT_texture_shadow_lod : require\n"
     "#extension GL_ARB_shader_draw_parameters : require\n"
+    "#extension GL_ARB_shader_viewport_layer_array : require\n"  // (gl_Layer from the vertex shader: 3D / layered targets)
     "#define cbr(cb, off) cb[min((off) >> 4, uint(cb.length() - 1))][((off) >> 2) & 3u]\n"
     "uint as_u(float x) { return floatBitsToUint(x); }\n"
     "uint as_u(uint x) { return x; }\n"
@@ -1920,6 +2042,12 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (tint) {
         sp(&s, "layout(std140, set = %d, binding = 19) uniform Tint { vec4 ltint[2]; };\n", set);
         info->uses_tint = true;
+    }
+    for (int i = 0; i < info->nimg; i++) {
+        const ShaderImage *im = &info->img[i];
+        if (im->atomic) sp(&s, "layout(set = %d, binding = %d, r32ui) uniform uimage%s img%d;\n", set, 64 + i, image_glsl_dim(im->dim), i);
+        else sp(&s, "layout(set = %d, binding = %d) uniform writeonly %simage%s img%d;\n", set, 64 + i,
+                im->kind == 2 ? "u" : im->kind == 1 ? "i" : "", image_glsl_dim(im->dim), i);
     }
     for (int i = 0; i < info->ntex; i++) {
         ShaderTexture *t = &info->tex[i];
@@ -2038,6 +2166,9 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     const uint8_t *code = blob + 0x80;
     // compute programs have neither the 0x30-byte NVN header nor an SPH: code starts at the blob
     if (stage == STAGE_COMPUTE) code = blob;
+    // newer GLSLC (Legends Z-A): a compute program starts with a 0x100-byte header, magic 0x12345679, then the code
+    if (stage == STAGE_COMPUTE && max_size > 0x100 && *(const uint32_t *)blob == 0x12345679u) code = blob + 0x100;
+    c->code = code;
     if (stage == STAGE_FRAGMENT) {
         c->omap_target = *(const uint32_t *)(sph + 0x48);
         c->omap_depth = (*(const uint32_t *)(sph + 0x4C) >> 1) & 1;
@@ -2099,7 +2230,21 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         info->num_insts++;
     }
     free(label);
-    if (c->fail) { free(c->body.buf); free(c); return info; }
+    if (c->fail) {
+        // LARECOMP_DUMP_FAILED_SHADERS=1: the code to build/failed_<stage>_<n>.bin (nvdisasm -b SM50 -raw)
+        static int ndump;
+        if (getenv("LARECOMP_DUMP_FAILED_SHADERS") && ndump < 32) {
+            char path[64];
+            snprintf(path, sizeof path, "build/failed_%d_%02d.bin", stage, ndump++);
+            FILE *f = fopen(path, "wb");
+            if (f) { fwrite(code, 8, end, f); fclose(f); }
+            snprintf(path, sizeof path, "build/failed_%d_%02d.blob", stage, ndump - 1);  // (and the blob's start)
+            if ((f = fopen(path, "wb"))) { fwrite(blob, 1, max_size < 0x400 ? max_size : 0x400, f); fclose(f); }
+        }
+        free(c->body.buf);
+        free(c);
+        return info;
+    }
     if (c->glsl) return glsl_finish(c, any_branch, dbg);
 
     // ---------------------------------------------------------- MSL source

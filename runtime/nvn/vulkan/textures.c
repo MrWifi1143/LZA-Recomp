@@ -287,9 +287,14 @@ static void create_image(NvnTexture *t, TexBackend *b) {
     VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     if (depthfmt) usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     else if (format_supports(vf, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    // NVN_TEXTURE_FLAGS_IMAGE: shaders write it as an image (SUST / SURED: Z-A's exposure and luminance passes)
+    b->storage = !depthfmt && (t->flags & 4) && format_supports(vf, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+    if (b->storage) usage |= VK_IMAGE_USAGE_STORAGE_BIT;
     VkImageCreateFlags flags = 0;
     if (!depthfmt) flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;  // format views (NVN texture views, raw sRGB views)
     if (type == VK_IMAGE_TYPE_2D && layers >= 6 && tw == th && samples == 1) flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    // 3D render targets (Z-A's tonemapping LUT, one slice per instance): rendered through a 2D-array view of the slices
+    if (type == VK_IMAGE_TYPE_3D && (usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
     VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = flags, .imageType = type, .format = vf,
                             .extent = {tw, th, depth}, .mipLevels = levels, .arrayLayers = layers,
                             .samples = (VkSampleCountFlagBits)samples, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage,
@@ -305,6 +310,8 @@ static void create_image(NvnTexture *t, TexBackend *b) {
         VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL));
         depthfmt = false;
     }
+    if (ci.usage != usage) b->storage = false;  // (the fallback image above)
+    b->usage = ci.usage;
     b->format = vf;
     b->width = tw; b->height = th; b->depth = depth; b->layers = layers; b->levels = levels; b->samples = samples;
     b->aspect = depthfmt ? aspect_of(t->format) : VK_IMAGE_ASPECT_COLOR_BIT;
@@ -675,9 +682,11 @@ static void views_forget(TexBackend *b) {
         if (view_tab[i].b == b) { defer((Dead){.view = view_tab[i].view}); view_tab[i].b = NULL; view_tab[i].view = VK_NULL_HANDLE; }
 }
 
+static bool g_view_storage;  // vk_storage_view: the view being made is the storage one (its own cache key and usage)
 VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uint32_t lv0, uint32_t nlv, uint32_t ly0,
                           uint32_t nly, VkComponentMapping sw, VkImageAspectFlags aspect) {
-    uint64_t k1 = (uint64_t)type | (uint64_t)fmt << 8 | (uint64_t)lv0 << 40 | (uint64_t)nlv << 48 | (uint64_t)aspect << 56;
+    uint64_t k1 = (uint64_t)type | (uint64_t)fmt << 8 | (uint64_t)lv0 << 40 | (uint64_t)nlv << 48 | (uint64_t)aspect << 56 |
+                  (uint64_t)g_view_storage << 63;
     uint64_t k2 = (uint64_t)ly0 | (uint64_t)nly << 16 | (uint64_t)sw.r << 32 | (uint64_t)sw.g << 40 | (uint64_t)sw.b << 48 | (uint64_t)sw.a << 56;
     uint64_t h = ((uint64_t)(uintptr_t)b * 0x9E3779B97F4A7C15ull) ^ (k1 * 0xC2B2AE3D27D4EB4Full) ^ (k2 * 0x165667B19E3779F9ull);
     uint32_t slot = (uint32_t)(h ^ (h >> 32)) & (VIEW_TAB - 1);
@@ -690,6 +699,11 @@ VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uin
     prof_views_created++;
     VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = b->image, .viewType = type,
                                 .format = fmt, .components = sw, .subresourceRange = {aspect, lv0, nlv, ly0, nly}};
+    // A storage image's other views (sampled, render target, sRGB / swizzled) leave storage out: their formats may not
+    // support it. Its storage view leaves the rest out.
+    VkImageViewUsageCreateInfo vu = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
+                                     .usage = g_view_storage ? VK_IMAGE_USAGE_STORAGE_BIT : b->usage & ~VK_IMAGE_USAGE_STORAGE_BIT};
+    if (b->storage) vi.pNext = &vu;
     VkImageView v;
     if (vkCreateImageView(g_vk.dev, &vi, NULL, &v) != VK_SUCCESS) {
         static int nfail;
@@ -736,9 +750,14 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
     if (ly0 >= b->layers) ly0 = b->layers - 1;
     if (ly0 + nly > b->layers) nly = b->layers - ly0;
     if (render) {
-        VkImageViewType type = b->base_type == VK_IMAGE_VIEW_TYPE_3D ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
-        if (b->base_type == VK_IMAGE_VIEW_TYPE_3D) return VK_NULL_HANDLE;  // (3D render targets: not used by the game)
-        return vk_image_view(b, type, fmt, lv0, 1, ly0, 1, IDENTITY, b->aspect);
+        if (b->base_type == VK_IMAGE_VIEW_TYPE_3D) {  // every slice of the level (a layered pass: gl_Layer picks one)
+            uint32_t slices = b->depth >> lv0 ? b->depth >> lv0 : 1;
+            uint32_t z0 = v && (v->setmask & 2) ? v->min_layer : 0, nz = v && (v->setmask & 2) && v->num_layers ? v->num_layers : slices;
+            if (z0 >= slices) z0 = 0;
+            if (z0 + nz > slices) nz = slices - z0;
+            return vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D_ARRAY, fmt, lv0, 1, z0, nz, IDENTITY, b->aspect);
+        }
+        return vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, fmt, lv0, 1, ly0, 1, IDENTITY, b->aspect);
     }
     VkImageAspectFlags aspect = b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : b->aspect;
     VkComponentMapping sw = IDENTITY;
@@ -777,6 +796,32 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
     return vk_dummy_view(want_textype);
 }
 
+// The storage view of an NVN image (SUST / SURED): one level, identity swizzle, the image's own format.
+VkImageView vk_storage_view(NvnTexture *t, const NvnTextureView *v, bool has_view, int sudim) {
+    TexBackend *b = vk_tex(t, false);
+    if (!b || !b->storage || b->samples > 1) return VK_NULL_HANDLE;
+    if (!has_view) v = NULL;
+    uint32_t lv = v && (v->setmask & 1) ? v->base_level : 0;
+    uint32_t ly0 = v && (v->setmask & 2) ? v->min_layer : 0;
+    uint32_t nly = v && (v->setmask & 2) && v->num_layers ? v->num_layers : b->layers - (ly0 < b->layers ? ly0 : 0);
+    if (lv >= b->levels) lv = b->levels - 1;
+    if (ly0 >= b->layers) ly0 = b->layers - 1;
+    if (ly0 + nly > b->layers) nly = b->layers - ly0;
+    VkImageViewType type;
+    switch (sudim) {
+    case SUDIM_1D: type = VK_IMAGE_VIEW_TYPE_1D; nly = 1; break;
+    case SUDIM_1D_ARRAY: type = VK_IMAGE_VIEW_TYPE_1D_ARRAY; break;
+    case SUDIM_2D: type = VK_IMAGE_VIEW_TYPE_2D; nly = 1; break;
+    case SUDIM_3D: type = VK_IMAGE_VIEW_TYPE_3D; ly0 = 0; nly = 1; break;
+    default: type = VK_IMAGE_VIEW_TYPE_2D_ARRAY; break;
+    }
+    if ((type == VK_IMAGE_VIEW_TYPE_3D) != (b->base_type == VK_IMAGE_VIEW_TYPE_3D)) return VK_NULL_HANDLE;
+    g_view_storage = true;
+    VkImageView view = vk_image_view(b, type, b->format, lv, 1, ly0, nly, IDENTITY, VK_IMAGE_ASPECT_COLOR_BIT);
+    g_view_storage = false;
+    return view;
+}
+
 // 1x1 black textures for unbound slots, per type
 VkImageView vk_dummy_view(int textype) {
     static TexBackend dummies[10];
@@ -804,6 +849,30 @@ VkImageView vk_dummy_view(int textype) {
     b->layers = cube ? 6 : 1;
     views[textype] = vk_image_view(b, vt, b->format, 0, 1, 0, cube ? 6 : 1, IDENTITY, VK_IMAGE_ASPECT_COLOR_BIT);
     return views[textype];
+}
+
+// 1x1 storage images for image bindings with nothing usable bound: R32_UINT (atomics) or RGBA16F (stores), per SUDIM_*
+VkImageView vk_dummy_storage_view(int sudim, bool atomic) {
+    static TexBackend dummies[2][6];
+    static VkImageView views[2][6];
+    if (sudim < 0 || sudim >= 6 || sudim == SUDIM_1D_BUFFER) sudim = SUDIM_2D;
+    if (views[atomic][sudim]) return views[atomic][sudim];
+    TexBackend *b = &dummies[atomic][sudim];
+    VkFormat f = atomic ? VK_FORMAT_R32_UINT : VK_FORMAT_R16G16B16A16_SFLOAT;
+    VkImageViewType vt = sudim == SUDIM_1D ? VK_IMAGE_VIEW_TYPE_1D : sudim == SUDIM_1D_ARRAY ? VK_IMAGE_VIEW_TYPE_1D_ARRAY
+                       : sudim == SUDIM_2D ? VK_IMAGE_VIEW_TYPE_2D : sudim == SUDIM_3D ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                            .imageType = vt == VK_IMAGE_VIEW_TYPE_3D ? VK_IMAGE_TYPE_3D
+                                       : vt == VK_IMAGE_VIEW_TYPE_1D || vt == VK_IMAGE_VIEW_TYPE_1D_ARRAY ? VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D,
+                            .format = f, .extent = {1, 1, 1}, .mipLevels = 1, .arrayLayers = 1,
+                            .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_STORAGE_BIT};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL));
+    vk_image_init_layout(vk_upload_cmd(), b->image, VK_IMAGE_ASPECT_COLOR_BIT);
+    b->format = f;
+    b->levels = b->layers = 1;
+    views[atomic][sudim] = vk_image_view(b, vt, f, 0, 1, 0, 1, IDENTITY, VK_IMAGE_ASPECT_COLOR_BIT);
+    return views[atomic][sudim];
 }
 
 // ================================================================== samplers
