@@ -114,8 +114,10 @@ void rt_trace_store(uint64_t pc, uint64_t addr, uint64_t old, uint64_t nw, int s
     static inline uint64_t lda##N(uint64_t a) {                                            \
         return __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_ACQUIRE);                       \
     }                                                                                      \
+    /* STLR then LDAR stay in order on ARM (RCsc); a release store + acquire load (two movs on x86) may not, and   \
+       a Chase-Lev deque (Z-A's job system: stlr bottom; ldar top) then lost jobs and hung. Seq-cst: xchg. */       \
     static inline void stl##N(uint64_t a, uint64_t v) {                                    \
-        __atomic_store_n((T *)(uintptr_t)a, (T)v, __ATOMIC_RELEASE);                       \
+        __atomic_store_n((T *)(uintptr_t)a, (T)v, __ATOMIC_SEQ_CST);                       \
     }
 EXCL(8, uint8_t)
 EXCL(16, uint16_t)

@@ -742,9 +742,10 @@ static void *thread_dump_main(void *arg) {
         LOG("[threads] ---- dump\n");
         for (KThread *t = g_threads; t; t = t->anext) {
             if (t->finished) continue;
-            LOG("[threads] id %llu h %x prio %d entry %llx wait %d tag %x addr %llx | svc %02x(%llx, %llx, %llx, %llx) "
+            LOG("[threads] id %llu h %x prio %d entry %llx wait %d tag %x addr %llx (=%x) | svc %02x(%llx, %llx, %llx, %llx) "
                 "@%llx lr %llx\n", (unsigned long long)t->id, t->handle, t->prio, (unsigned long long)t->entry,
-                (int)t->wait_kind, t->wait_tag, (unsigned long long)t->wait_addr, t->cur_svc < 0 ? 0xff : t->cur_svc,
+                (int)t->wait_kind, t->wait_tag, (unsigned long long)t->wait_addr,
+                t->wait_addr >= GUEST_LO && t->wait_addr < GUEST_HI ? *(uint32_t *)(uintptr_t)t->wait_addr : 0, t->cur_svc < 0 ? 0xff : t->cur_svc,
                 (unsigned long long)t->cur_svc_args[0], (unsigned long long)t->cur_svc_args[1],
                 (unsigned long long)t->cur_svc_args[2], (unsigned long long)t->cur_svc_args[3],
                 (unsigned long long)(t->cur_svc < 0 ? t->cpu.pc : t->cur_svc_pc), (unsigned long long)t->cpu.x[30]);
@@ -758,6 +759,14 @@ static void *thread_dump_main(void *arg) {
                 fp = up;
             }
             LOG("\n");
+        }
+        // LARECOMP_THREAD_DUMP_MEM=<addr>:<len>: guest memory with each dump (the state a hang waits on)
+        const char *mem = getenv("LARECOMP_THREAD_DUMP_MEM");
+        if (mem) {
+            uint64_t a = strtoull(mem, NULL, 16) & ~7ull;
+            uint32_t len = strchr(mem, ':') ? (uint32_t)strtoul(strchr(mem, ':') + 1, NULL, 16) : 0x40;
+            for (uint32_t o = 0; o < len && a + o >= GUEST_LO && a + o < GUEST_HI; o += 8)
+                LOG("[threads] mem %llx: %016llx\n", (unsigned long long)(a + o), (unsigned long long)*(uint64_t *)(uintptr_t)(a + o));
         }
         if (every <= 0) break;
         plat_sleep_until_ns(plat_now_ns() + (uint64_t)(every * 1e9));
