@@ -1650,7 +1650,15 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         case 0x25: set_reg(c, d, "ctaid.x"); break;
         case 0x26: set_reg(c, d, "ctaid.y"); break;
         case 0x27: set_reg(c, d, "ctaid.z"); break;
-        case 0x00: set_reg(c, d, "0u"); break;
+        // Lane id and lane masks: Vulkan's subgroup = the Maxwell warp where the subgroup is 32 wide (NVIDIA). They were 0,
+        // which broke warp-aggregated atomics (one lane adds for the ballot's lanes; each lane's slot = popc(ballot & ltmask)):
+        // a Z-A compute shader's per-entry counters then grew without end, its GPU time with them (0.04 -> 6 ms a frame).
+        case 0x00: set_reg(c, d, "gl_SubgroupInvocationID"); break;  // SR_LANEID
+        case 0x38: set_reg(c, d, "gl_SubgroupEqMask.x"); break;      // SR_EQMASK
+        case 0x39: set_reg(c, d, "gl_SubgroupLtMask.x"); break;      // SR_LTMASK
+        case 0x3a: set_reg(c, d, "gl_SubgroupLeMask.x"); break;      // SR_LEMASK
+        case 0x3b: set_reg(c, d, "gl_SubgroupGtMask.x"); break;      // SR_GTMASK
+        case 0x3c: set_reg(c, d, "gl_SubgroupGeMask.x"); break;      // SR_GEMASK
         default: sprintf(t, "0u /* sr %#x */", sr); set_reg(c, d, t);
         }
     } else if (OPM(0x5c30000000000000ull, 0xfff8000000000000ull) || OPM(0x4c30000000000000ull, 0xfff8000000000000ull) ||
