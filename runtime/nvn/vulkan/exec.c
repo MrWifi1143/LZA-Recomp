@@ -2203,11 +2203,16 @@ static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSi
     return true;
 }
 // Vertex / index range of a draw: in place from the game's memory (true) or to be copied (false). With the VRAM ring on, copied
-// unless a compute dispatch may write it.
+// unless a compute dispatch may write it, or it is large: Legends Z-A's draws name whole buffers (MBs each, ~6 GB a second
+// copied in its opening scene, 8 fps; read in place: 30 fps).
+#define VTX_COPY_MAX (256u << 10)
 volatile int g_heal_tex, g_heal_vtx;  // (LARECOMP_HEAL_KEYS research keys, runtime/hle/input.c)
 static bool vtx_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {
     if (g_heal_vtx) gpuw_unknown = true;
-    if (ring_gpu_enabled() && !gpuw_overlaps(addr, size)) { stat_vtx_copied++; return false; }
+    if (ring_gpu_enabled() && !gpuw_overlaps(addr, size) && (size <= VTX_COPY_MAX || !guest_direct(addr, size, buf, off))) {
+        stat_vtx_copied++;
+        return false;
+    }
     bool d = guest_direct(addr, size, buf, off);
     if (d) stat_vtx_direct++;
     return d;
