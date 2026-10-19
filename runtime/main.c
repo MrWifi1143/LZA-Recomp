@@ -133,6 +133,7 @@ static void boot(const char *root) {
     char why[512];
     if (!gamelib_load(root, why, sizeof why)) FATAL("%s\n", why);
     loader_load(exefs);
+    { extern void libcfast_configure(void); libcfast_configure(); }  // (runtime/hle/libcfast.c)
     { extern void settings_load(void); settings_load(); }
     kernel_init();
     dispatch_init();
