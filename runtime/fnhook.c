@@ -1,4 +1,4 @@
-// Guest function hooks. Every generated function starts with FN_ENTER (runtime/cpu.h); while g_fnhook is set it
+// Guest function hooks. Every generated function starts with FN_ENTER (runtime/cpu.h); where a hook may be it
 // calls rt_fnhook first, and a hook that returns 1 has handled the call - the guest function returns at once (the
 // hook sets x0 etc. as the function would). rt_call_original runs the game's own function from inside a hook
 // (wrapping). Cost when no hook is registered: one predictable branch per call.
@@ -17,7 +17,7 @@
 #include "gamesetup.h"
 #include "hle.h"
 
-volatile int g_fnhook;
+uint8_t g_fnhook_bits[1 << 17];  // (runtime/cpu.h FN_HOOKBIT)
 
 typedef int (*FnHook)(Cpu *c, uint64_t addr);
 #define NHOOK 1024
@@ -60,7 +60,7 @@ static void add_hook(uint64_t addr, FnHook fn) {
     while (hooks[s].addr && hooks[s].addr != addr) s = (s + 1) & (NHOOK - 1);
     hooks[s].addr = addr;
     hooks[s].fn = fn;
-    g_fnhook = 1;
+    g_fnhook_bits[(addr >> 5) & 0x1ffff] |= (uint8_t)(1u << ((addr >> 2) & 7));
 }
 
 static void reg(uint64_t addr, FnHook fn, bool user) {
@@ -85,7 +85,7 @@ void rt_fnhook_set_build(int build) {
     if (build == g_build) return;
     g_build = build;
     memset(hooks, 0, sizeof hooks);
-    g_fnhook = 0;
+    memset(g_fnhook_bits, 0, sizeof g_fnhook_bits);
     int n = nregs;
     nregs = 0;
     for (int i = 0; i < n; i++) reg(regs[i].addr, regs[i].fn, regs[i].user);

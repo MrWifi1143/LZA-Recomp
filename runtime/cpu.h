@@ -62,15 +62,17 @@ typedef uint64_t __attribute__((aligned(1), may_alias)) u64u;
 typedef uint8_t __attribute__((may_alias)) u8a;
 
 // Function-entry profiler (runtime/fnprof.c, LARECOMP_FNPROF): one predictable branch per call when off.
-// Function hooks (runtime/fnhook.c): while any is registered, rt_fnhook may handle the call (returns 1: the guest
-// function returns at once, with the registers the hook left).
+// Function hooks (runtime/fnhook.c): rt_fnhook may handle the call (returns 1: the guest function returns at once,
+// with the registers the hook left). Asked only where a hook may be: g_fnhook_bits has a bit per (addr >> 2) modulo
+// 2^20, set for each hooked address - a constant index per function, so a hook elsewhere costs the rest one load.
 extern volatile int g_fnprof;
 void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0);
-extern volatile int g_fnhook;
+extern uint8_t g_fnhook_bits[1 << 17];
 int rt_fnhook(Cpu *c, uint64_t addr);
+#define FN_HOOKBIT(a) ((g_fnhook_bits[((a) >> 5) & 0x1ffff] >> (((a) >> 2) & 7)) & 1)
 #define FN_ENTER(a) do {                                                             \
         if (__builtin_expect(g_fnprof, 0)) fnprof_hit(a, c->x[30], c->x[0]);         \
-        if (__builtin_expect(g_fnhook, 0) && rt_fnhook(c, a)) return;                \
+        if (__builtin_expect(FN_HOOKBIT(a), 0) && rt_fnhook(c, a)) return;           \
     } while (0)
 
 #define LD8(a)  (*(const u8a *)(uintptr_t)(a))
