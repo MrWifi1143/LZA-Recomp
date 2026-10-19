@@ -202,6 +202,8 @@ int main(int argc, char **argv) {
             extern const char *g_game_version;  // (runtime/services/am.c)
             g_game_version = game_version(exefs);
             if (build == GAME_BUILD_OTHER) LOG("[boot] %s: a build without address tables, 60 fps and wild battles stay off\n", exefs);
+            extern void za_fixes_configure(const char *exefs);  // (runtime/hle/za_fixes.c: Legends Z-A workarounds)
+            za_fixes_configure(exefs);
         }
         { extern void fps60_configure(void); fps60_configure(); }  // (runtime/hle/fps60.c: the launcher's 60 fps option)
         { extern void wildbattle_configure(void); wildbattle_configure(); }  // (runtime/hle/wildbattle.c: the wild battles option)
