@@ -26,6 +26,7 @@
 // instruction patches are addresses in the main: only the builds with address tables get them (game_build).
 #define TITLE_EEVEE 0x0100187003A36000ull
 #define TITLE_PIKACHU 0x010003F003A34000ull
+#define TITLE_PLA 0x01001F5010DFA000ull  // Pokemon Legends: Arceus
 static const uint8_t EEVEE_100[8] = {0x0a, 0x3f, 0x0d, 0x21, 0xe6, 0x7d, 0xad, 0x80};    // Let's Go, Eevee! v1.0.0 main
 static const uint8_t PIKACHU_100[8] = {0x1c, 0x37, 0x56, 0x92, 0xde, 0x4f, 0x4b, 0x87};  // Let's Go, Pikachu! v1.0.0
 
@@ -64,7 +65,7 @@ static uint64_t program_id(const char *exefs) {
 
 static bool game_ok(const char *exefs) {
     uint64_t id = program_id(exefs);
-    return id == TITLE_EEVEE || id == TITLE_PIKACHU;
+    return id == TITLE_EEVEE || id == TITLE_PIKACHU || id == TITLE_PLA;
 }
 
 int game_build(const char *exefs) {
@@ -104,7 +105,7 @@ const char *game_version(const char *exefs) {
 
 const char *game_name(const char *exefs) {
     uint64_t id = program_id(exefs);
-    return id == TITLE_EEVEE ? "Eevee" : id == TITLE_PIKACHU ? "Pikachu" : NULL;
+    return id == TITLE_EEVEE ? "Eevee" : id == TITLE_PIKACHU ? "Pikachu" : id == TITLE_PLA ? "Legends: Arceus" : NULL;
 }
 
 bool setup_ready(void) {
