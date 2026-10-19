@@ -414,18 +414,21 @@ __attribute__((constructor)) static void probe_init(void) {
     rt_register_fnhook(strtoull(buf, NULL, 16), probe_hook);
 }
 
-// ---- Legends: Arceus 1.1.1 (main build id AEE8F150DDA1B5A8) at 60 fps, the way the community "60 FPS" cheat does it:
-// the game steps its world by a frame time constant (main+0x397E8D8, in ns: 33333334) and presents every other vsync.
-// With 16666667 there and presents paced at 60 (nvn/objects.c present_pace) the world runs at its own speed: a 10 s
-// walk from the save ends at the same spot at 30 and at 60 fps. The launcher's 60 fps option, or LARECOMP_PLA_60FPS=1
-// (0: off).
+// ---- The Legends games at 60 fps (experimental), the way the community "60 FPS" cheat does it for Legends: Arceus:
+// both step their world by a frame time looked up by present interval in a table of u64 nanoseconds (16666667,
+// 33333334, 50000000... for intervals 1, 2, 3...) and present every other vsync. With the interval-2 entry at 16666667
+// and presents paced at 60 (nvn/objects.c present_pace) the world runs at its own speed - a 10 s walk from the save
+// ends at the same spot at 30 and at 60 fps. The launcher's 60 fps option, or LARECOMP_PLA_60FPS=1 (0: off).
 #include "../platform.h"
-#define PLA_FRAME_TIME (0x7000000000ull + 0x397E8D8)
-static bool g_pla60, g_pla60_patched;
-bool pla60_enabled(void) { return g_pla60; }
+static const struct { uint8_t id[8]; uint64_t entry; const char *name; } k_legends60[] = {
+    {{0xae, 0xe8, 0xf1, 0x50, 0xdd, 0xa1, 0xb5, 0xa8}, 0x7000000000ull + 0x397E8D8, "Legends: Arceus 1.1.1"},
+    {{0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a}, 0x7000000000ull + 0x3393E28, "Legends Z-A"},
+};
+static uint64_t g_pla60_entry;  // the interval-2 frame time of the running build (0: off)
+static bool g_pla60_patched;
+bool pla60_enabled(void) { return g_pla60_entry != 0; }
 
 void pla60_configure(const char *exefs) {
-    static const uint8_t PLA_111[8] = {0xae, 0xe8, 0xf1, 0x50, 0xdd, 0xa1, 0xb5, 0xa8};
     char p[1100];
     snprintf(p, sizeof p, "%s/main", exefs);
     uint8_t id[8] = {0};
@@ -436,17 +439,22 @@ void pla60_configure(const char *exefs) {
         fclose(f);
     }
     const char *e = getenv("LARECOMP_PLA_60FPS");
-    g_pla60 = !memcmp(id, PLA_111, 8) && (e ? atoi(e) != 0 : g_settings.fps == 60);
+    bool on = e ? atoi(e) != 0 : g_settings.fps == 60;
+    g_pla60_entry = 0;
     g_pla60_patched = false;
-    if (g_pla60) LOG("[fps60] Legends: Arceus at 60 fps\n");
+    for (size_t i = 0; on && i < sizeof k_legends60 / sizeof *k_legends60; i++)
+        if (!memcmp(id, k_legends60[i].id, 8)) {
+            g_pla60_entry = k_legends60[i].entry;
+            LOG("[fps60] %s at 60 fps\n", k_legends60[i].name);
+        }
 }
 
-// each present: the frame time constant, once the game is loaded (read-only data: the page made writable first)
+// each present: the table entry, once the game is loaded (read-only data: the page made writable first)
 void pla60_present(void) {
-    if (!g_pla60 || g_pla60_patched) return;
-    volatile uint32_t *ft = (volatile uint32_t *)(uintptr_t)PLA_FRAME_TIME;
+    if (!g_pla60_entry || g_pla60_patched) return;
+    volatile uint64_t *ft = (volatile uint64_t *)(uintptr_t)g_pla60_entry;
     if (*ft != 33333334u) return;
-    plat_protect(PLA_FRAME_TIME & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);
+    plat_protect(g_pla60_entry & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);
     *ft = 16666667u;
     g_pla60_patched = true;
 }
