@@ -2845,6 +2845,7 @@ static CsProg *compute_program(NvnProgram *np) {
     return cp;
 }
 
+static uint64_t cs_logn;  // (LARECOMP_LOG_CS: dispatches of that shader so far)
 static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     g_dyn_epoch++;  // (draw_'s state cache: dc)
     snap_reason = "compute"; snapshots_invalidate(NULL);
@@ -2854,7 +2855,24 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
-    gp_mark(cb, "dispatch %ux%ux%u (local %ux%ux%u)", gx, gy, gz, cp->local[0], cp->local[1], cp->local[2]);
+    gp_mark(cb, "dispatch %ux%ux%u (local %ux%ux%u) cs %llx sbuf0 %llx+%llx", gx, gy, gz, cp->local[0], cp->local[1], cp->local[2],
+            (unsigned long long)st.program->stages[5].code_addr, (unsigned long long)st.sbuf[5][0].addr, (unsigned long long)st.sbuf[5][0].size);
+    if (ENV("LARECOMP_LOG_CS") && strtoull(ENV("LARECOMP_LOG_CS"), NULL, 16) == st.program->stages[5].code_addr && (cs_logn++ % (ENV("LARECOMP_LOG_CS_EVERY") ? atoi(ENV("LARECOMP_LOG_CS_EVERY")) : 600)) == 0) {
+        // (research: a compute shader's storage buffers, every LARECOMP_LOG_CS_EVERY (600) of its dispatches)
+        const uint32_t *a = (const uint32_t *)(uintptr_t)st.sbuf[5][0].addr, *b = (const uint32_t *)(uintptr_t)st.sbuf[5][1].addr;
+        LOG("[cs] frame %llu sbuf0 %llx+%llx: %u %u %u %u | sbuf1 %llx+%llx", (unsigned long long)vk_frame_counter(),
+            (unsigned long long)st.sbuf[5][0].addr, (unsigned long long)st.sbuf[5][0].size, a ? a[0] : 0, a ? a[1] : 0, a ? a[2] : 0, a ? a[3] : 0,
+            (unsigned long long)st.sbuf[5][1].addr, (unsigned long long)st.sbuf[5][1].size);
+        for (uint32_t i = 0; a && b && i < 6 && i < a[0]; i++) {
+            uint32_t idx = a[8 + i * 8];
+            const uint32_t *r = b + idx * 32;
+            LOG(" | e%u idx %u w1 %x n %u %u %u %u", i, idx, r[1], r[24], r[25], r[26], r[27]);
+        }
+        for (int k = 2; k < 6; k++)
+            if (st.sbuf[5][k].addr) LOG(" | sbuf%d %llx+%llx: %u %u", k, (unsigned long long)st.sbuf[5][k].addr, (unsigned long long)st.sbuf[5][k].size,
+                                        ((const uint32_t *)(uintptr_t)st.sbuf[5][k].addr)[0], ((const uint32_t *)(uintptr_t)st.sbuf[5][k].addr)[1]);
+        LOG("\n");
+    }
     dl_note("dispatch %ux%ux%u cs %llx gmem %d", gx, gy, gz, (unsigned long long)st.program->stages[5].code_addr, cp->si->uses_gmem);
     gpuw_stores(cp->si, st.sbuf[5], 16, "compute shader", st.program->stages[5].code_addr);
     for (int i = 0; i < 16; i++) if (st.sbuf[5][i].addr) gpuw_note(st.sbuf[5][i].addr, st.sbuf[5][i].size);  // (any storage buffer it has bound)
