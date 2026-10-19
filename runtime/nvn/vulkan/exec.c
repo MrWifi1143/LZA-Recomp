@@ -2172,7 +2172,13 @@ void camscan(uint64_t cbuf) {
             float d1 = f[1] - eye[1], d2 = f[2] - eye[2];
             if (!(d1 < 0.02f && d1 > -0.02f && d2 < 0.02f && d2 > -0.02f)) continue;
             hits++;
-            if (f[5] > 1.777f && f[5] < 1.778f && getenv("LARECOMP_CAMSCAN_WATCH")) {  // the camera record (quaternion,
+            if (f[-8] > 1.777f && f[-8] < 1.778f && f[-7] == -960.0f && getenv("LARECOMP_CAMSCAN_WATCH")) {
+                // a render camera like Legends: Arceus' (aspect, the 1920x1080 extents, then eye and view): who writes it
+                extern void hwwatch_arm(uint64_t addr, uint64_t len);
+                static int armed;
+                if (armed < 2) armed++, hwwatch_arm(a, 8), hwwatch_arm(a + 0x10, 8);
+            }
+            if (f[5] > 1.777f && f[5] < 1.778f && getenv("LARECOMP_CAMSCAN_WATCH_REC")) {  // the camera record (quaternion,
                 extern void hwwatch_arm(uint64_t addr, uint64_t len);                  // eye, fov, aspect): who writes it
                 static bool armed;
                 if (!armed) {
