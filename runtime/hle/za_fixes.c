@@ -7,6 +7,11 @@
 // uses matches a reference ARM emulator (Unicorn), so the cause is elsewhere. With those weights looked up as 0 the
 // legs follow the animation: correct on flat ground, the feet just don't adapt to slopes and steps.
 // LARECOMP_ZA_FOOT_IK=1 keeps the game's foot IK.
+// Where the cause is (2026-10-19): the lookup returns (owner+0xe0 map [key], default 1.0) x (owner+0xa8 map [key]).
+// The +0xa8 map holds the BipedIK keys at a constant 1.0; the +0xe0 map, the per-frame values that should make the
+// feet let go, stays empty - nothing ever calls its setters (vtable slots 0x700134a100 / 0x700134a2d4) or the
+// command handlers that also fill it (0x7001e70638, and 0x7001e707a0 for +0xa8), for any object, from boot on.
+// A whole animation parameter feed never runs: what drives those handlers is the next thing to find.
 #include <stdlib.h>
 #include <string.h>
 
