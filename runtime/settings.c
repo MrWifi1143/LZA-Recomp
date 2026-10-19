@@ -44,7 +44,7 @@ static void parse_line(const char *line) {
         return;
     }
     if (!strcmp(key, "fullscreen")) g_settings.fullscreen = atoi(val) != 0;
-    else if (!strcmp(key, "fps")) g_settings.fps = atoi(val) == 60 ? 60 : 30;
+    else if (!strcmp(key, "fps")) { int f = atoi(val); g_settings.fps = f == 60 || f == 120 || f == 144 ? f : 30; }
     else if (!strcmp(key, "render_height")) g_settings.res_height = atoi(val) >= 360 && atoi(val) <= 4320 ? atoi(val) : 0;
     else if (!strcmp(key, "volume")) g_settings.volume = (float)atof(val);
     else if (!strcmp(key, "mouse_sens")) g_settings.mouse_sens = (float)atof(val);

@@ -11,7 +11,7 @@ enum { VREAD_AUTO = 0, VREAD_COPY = 1, VREAD_DIRECT = 2 };
 
 typedef struct {
     bool fullscreen;
-    int fps;  // 30 (the game's own) or 60 (interpolated: runtime/nvn/vulkan/exec.c)
+    int fps;  // 30 (the game's own), 60 (Let's Go: interpolated, exec.c), or 60 / 120 / 144 (the Legends: hle/fps60.c)
     int res_mode;        // RES_MATCH, 1..4 (N x the Switch's 1080p), RES_DYNAMIC, RES_Q75/50/25 (share of the display)
     int res_height;      // the launcher's render height in lines (720 / 1080 / 1440 / 2160); 0: res_mode decides
     int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window
