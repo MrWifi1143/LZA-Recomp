@@ -12,6 +12,12 @@
 // feet let go, stays empty - nothing ever calls its setters (vtable slots 0x700134a100 / 0x700134a2d4) or the
 // command handlers that also fill it (0x7001e70638, and 0x7001e707a0 for +0xa8), for any object, from boot on.
 // A whole animation parameter feed never runs: what drives those handlers is the next thing to find.
+// Further (2026-10-19): the setters are reached only from two script-VM natives, 0x700133b140 (script name
+// "f26E9E53B": object, mode 0..2 -> one of three BipedIK keys, value) and 0x700133b390 ("fD081658F"), listed in the
+// natives table at main+0x3BEF6F0 ({function, hashed name} pairs). Neither is ever called while other natives are:
+// the game script that should set the per-frame weights never runs (or takes another branch). Next: find which
+// script (romfs bytecode) references those names and why it doesn't run. (Not the lane-id or skipped-compute bugs
+// fixed the same day: the legs still stretch with LARECOMP_ZA_FOOT_IK=1 after them.)
 #include <stdlib.h>
 #include <string.h>
 
