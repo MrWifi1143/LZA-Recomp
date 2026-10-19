@@ -484,7 +484,7 @@ static uint64_t lock_spin_ns(void) {
     if (ns < 0) {
         const char *e = getenv("LARECOMP_LOCK_SPIN_US");
         long us = e ? atol(e) : 40;
-        if (!e && SDL_GetNumLogicalCPUCores() < 4) us = 0;
+        if (!e && plat_cpu_count() < 4) us = 0;  // (the owner would have to run on the spinner's CPU: sleep at once)
         ns = us > 0 ? us * 1000 : 0;
     }
     return (uint64_t)ns;
@@ -1064,6 +1064,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         break;
     case 0x2D:  // UnmapPhysicalMemory(addr, size)
         if (ENV("LARECOMP_LOG_UNMAP")) LOG("[kernel] UnmapPhysicalMemory %llx +%llx\n", (unsigned long long)x[0], (unsigned long long)x[1]);
+        pagewatch_prewrite(x[0], x[1]);  // (zero pages without a store)
         plat_decommit(x[0], x[1]);
         x[0] = R_OK;
         break;

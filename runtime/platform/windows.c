@@ -79,6 +79,12 @@ int plat_protect(uint64_t addr, uint64_t size, int prot) {
 // ---- time
 static LARGE_INTEGER qpf;
 
+int plat_cpu_count(void) {
+    DWORD_PTR proc, sys;
+    if (GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys) && proc) return __builtin_popcountll((unsigned long long)proc);
+    return (int)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+}
+
 uint64_t plat_now_ns(void) {
     if (!qpf.QuadPart) QueryPerformanceFrequency(&qpf);
     LARGE_INTEGER t;

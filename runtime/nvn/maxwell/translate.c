@@ -995,7 +995,8 @@ static void emit_surface(Ctx *c, uint64_t w, uint32_t pc, bool red, bool bindles
         int i = image_binding(c, slot, dim, true);
         sp(&c->body, "    %s(img%d, %s, %s);\n", fn[op], i, coord, R(d));
     }
-    c->info->gmem_stores = true;  // (the shader writes memory: keep it, as for STG)
+    // (not gmem_stores: an image store writes the image, never guest memory - it had made exec.c read every vertex
+    // stream in place from the game's memory, over PCIe, for the whole session: 4x the GPU time in Legends: Arceus)
 }
 
 // ATOM (result to d) / RED (no result): a 32-bit atomic on global memory at [Ra (+ Ra + 1 with .E) + imm20]. Sizes
