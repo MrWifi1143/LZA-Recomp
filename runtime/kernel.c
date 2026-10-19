@@ -274,6 +274,7 @@ static void *thread_main(void *arg) {
     t_cur = t;
     crash_handler_install();
     rt_set_fpcr(0);
+    t->cpu.host_fpcr = 1;  // (the host FP state this pthread started with is its creator's: simd.h syncs it)
     if (!setjmp(t->unwind)) {
         core_acquire(t);
         guest_call(&t->cpu, t->entry);

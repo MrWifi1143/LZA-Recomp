@@ -99,6 +99,7 @@ int main(int argc, char **argv) {
             memset(&c, 0, sizeof c);
             memcpy(c.v, states[k], 128); memcpy(c.x, states[k] + 128, 32);
             memcpy(&c.nzcv, states[k] + 160, 8); memcpy(&c.fpcr, states[k] + 168, 8); memcpy(&c.sp, states[k] + 176, 8);
+            c.host_fpcr = 1;  /* (simd.h: the host FP state left by the previous test is unknown to this one) */
             if (mem) memcpy(mem, imgs + ((size_t)k << 20), 1 << 20);
             tests[t](&c);
             uint32_t crc = mem ? (uint32_t)crc32(0, mem, 1 << 20) : 0;
@@ -186,7 +187,7 @@ def run(kind, modules, trials, outdir):
                 '#include "cpu.h"\n#include "simd.h"\n' + '\n'.join(fns) + '\n')
         f.write('static void (*const tests[])(Cpu *) = {%s};\n' % ', '.join('t%d' % i for i in range(len(forms))))
         f.write(HARNESS_MAIN)
-    subprocess.run(['clang', '-O1', '-fno-strict-aliasing', '-w', '-march=x86-64-v3', '-I' + os.path.join(HERE, '..', 'runtime'),
+    subprocess.run(['clang', '-O1', '-fno-strict-aliasing', '-fdenormal-fp-math=dynamic', '-w', '-march=x86-64-v3', '-I' + os.path.join(HERE, '..', 'runtime'),
                     src, '-o', exe, '-lm', '-lz'], check=True)
     rnd = random.Random(1234)
     states = states_for(kind, trials, rnd)

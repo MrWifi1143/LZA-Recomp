@@ -37,7 +37,9 @@ EXE_NAME  ?= lasrecomp
 CC       := clang $(CROSS)
 CXX      := clang++ $(CROSS)
 IMGUI    := third_party/imgui
-GENFLAGS := -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
+# -fdenormal-fp-math=dynamic: the guest's FPCR.FZ runs as the host's own flush to zero (MXCSR FTZ/DAZ, simd.h), so the
+# compiler must not assume IEEE denormals (it turned a bit test into a compare with 0.0, which DAZ makes true)
+GENFLAGS := -O1 -fno-strict-aliasing -fdenormal-fp-math=dynamic -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
 
 # The game code (made by `make gen` from your own game files) is its own library next to the app (runtime/gamelib.h);
 # the app itself holds none of it
@@ -108,7 +110,7 @@ GAMELIB_SRCS := tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools
 GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(GENFLAGS)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
 
 RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
-RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn -Ithird_party $(DEPINC) $(OSFLAGS)
+RTFLAGS  := -O2 -g -fno-strict-aliasing -fdenormal-fp-math=dynamic -Wall -Wno-unused-function -Iruntime -Iruntime/nvn -Ithird_party $(DEPINC) $(OSFLAGS)
 CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn -Ithird_party $(DEPINC)
 
 all: $(EXE) $(if $(GEN_SRC),$(GAMELIB))

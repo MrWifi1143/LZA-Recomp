@@ -69,11 +69,13 @@ static void copy_thread_state(Cpu *to, const Cpu *from) {  // what belongs to th
     to->fpcr = from->fpcr;
     to->fpsr = from->fpsr;
     to->excl_addr = ~0ull;
+    to->host_fpcr = from->host_fpcr;  // (the host FP state is the thread's too)
 }
 
 static void fiber_entry(void) {
     publish_left();
     Cpu *c = t_running->cpu;
+    c->host_fpcr = 1;  // (swapcontext loaded the host FP state saved with this context: simd.h syncs it)
     rt_dispatch(c);  // the SDK's trampoline: runs the fiber function, then switches away for good
     FATAL("fiber: a fiber's entry returned (key %llx)\n", (unsigned long long)t_running->key);
 }
@@ -155,6 +157,7 @@ HLE_FUNC("_ZN2nn2os6detail20DispatchFiberContextEPPNS1_22FiberContextForHorizonE
     publish_left();
     t_running = me;
     g_fiber_cpu = me->stack ? me->cpu : NULL;
+    me->cpu->host_fpcr = 1;  // (swapcontext restored the host FP state saved on whichever thread this context left)
     c->x[0] = 0;  // (DispatchFiberContext's saved x0 slot)
 }
 
