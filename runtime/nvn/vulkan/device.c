@@ -14,6 +14,7 @@
 #include "../../settings.h"
 #include "../../ui/menu.h"
 #include "vk.h"
+#include "../../plugin.h"
 #include "../output_scale.h"
 #include "../renderer.h"
 
@@ -35,9 +36,18 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBi
 static void create_instance(void) {
     Uint32 n_sdl = 0;
     const char *const *sdl_ext = SDL_Vulkan_GetInstanceExtensions(&n_sdl);
-    const char *ext[16];
+    const char *ext[48];
     uint32_t n_ext = 0;
     for (Uint32 i = 0; i < n_sdl && n_ext < 14; i++) ext[n_ext++] = sdl_ext[i];
+    {   // plugins' extensions (the VR mod: OpenXR's), once each
+        const char *pe[24];
+        uint32_t np = plugins_vk_instance_extensions(pe, 24);
+        for (uint32_t i = 0; i < np && n_ext < 46; i++) {
+            bool dup = false;
+            for (uint32_t k = 0; k < n_ext; k++) dup |= !strcmp(ext[k], pe[i]);
+            if (!dup) ext[n_ext++] = pe[i];
+        }
+    }
     bool validate = getenv("LARECOMP_VK_VALIDATION") != NULL;
     if (validate) ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
@@ -95,6 +105,8 @@ static void pick_device(void) {
     }
     if (best < 0) FATAL("no Vulkan 1.3 device\n");
     g_vk.phys = pd[best];
+    VkPhysicalDevice want_pd = plugins_vk_physical_device(g_vk.inst);  // (a plugin's: OpenXR names the HMD's GPU)
+    if (want_pd) g_vk.phys = want_pd;
     free(pd);
     vkGetPhysicalDeviceProperties(g_vk.phys, &g_vk.props);
     uint32_t nq = 0;
@@ -143,7 +155,7 @@ static void create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne, sizeof *ep);
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
-    const char *ext[12];
+    const char *ext[48];
     uint32_t n_ext = 0;
     ext[n_ext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     g_vk.custom_border = has_ext(ep, ne, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
@@ -161,6 +173,16 @@ static void create_device(void) {
     if (g_pipe_exec_stats) ext[n_ext++] = VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;
     else if (getenv("LARECOMP_PIPE_STATS")) LOG("[vk] LARECOMP_PIPE_STATS: the driver has no VK_KHR_pipeline_executable_properties\n");
     g_fault_ext = fault;
+    {   // plugins' device extensions, once each and only those the device has
+        const char *pe[24];
+        uint32_t np = plugins_vk_device_extensions(g_vk.phys, pe, 24);
+        for (uint32_t i = 0; i < np && n_ext < 46; i++) {
+            bool dup = false;
+            for (uint32_t k = 0; k < n_ext; k++) dup |= !strcmp(ext[k], pe[i]);
+            if (!dup && has_ext(ep, ne, pe[i])) ext[n_ext++] = pe[i];
+            else if (!dup) LOG("[plugin] device extension %s: not available\n", pe[i]);
+        }
+    }
     free(ep);
 
     // features the backend relies on (all present on current desktop drivers)
@@ -223,6 +245,7 @@ static void create_device(void) {
                              .pQueueCreateInfos = &qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
+    plugins_vk_ready(g_vk.inst, g_vk.phys, g_vk.dev, g_vk.qfam, g_vk.queue);
     if (g_vk.xfb) {
         g_vk.bind_xfb = (PFN_vkCmdBindTransformFeedbackBuffersEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdBindTransformFeedbackBuffersEXT");
         g_vk.begin_xfb = (PFN_vkCmdBeginTransformFeedbackEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdBeginTransformFeedbackEXT");
@@ -468,7 +491,9 @@ void vk_frame_end(const char *shot_path) {
     vk_submit_extra(cur_frame.acquired, done_sem[img], VK_NULL_HANDLE);
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &done_sem[img],
                            .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
+    vk_queue_lock();
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
+    vk_queue_unlock();
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) recreate_swapchain();
     cur_frame.ok = false;
     if (shot_path) {
@@ -581,6 +606,7 @@ void backend_present(NvnTexture *t) {
         if (due > now) SDL_DelayPrecise(due - now);
         b = hold;
     }
+    if (final && plugins_count()) plugins_frame(vk_cmd(), b->image, b->format, b->width, b->height);
     bool have = vk_frame_begin(black);
     uint64_t nd = SDL_GetTicksNS() - t0;
     if (nd > 30000000) {
@@ -641,6 +667,7 @@ void backend_present(NvnTexture *t) {
     } else {
         renderer_submit();
     }
+    if (final && plugins_count()) plugins_frame_submitted();
     }
     extern void vk_prof_frame(uint64_t frame, uint64_t present_ns);
     vk_prof_frame(total_frames, SDL_GetTicksNS() - t0);

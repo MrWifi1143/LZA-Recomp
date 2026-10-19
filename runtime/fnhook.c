@@ -78,6 +78,8 @@ add:
 }
 
 void rt_register_fnhook(uint64_t addr, FnHook fn) { reg(addr, fn, false); }
+// at addr as given, in any build (plugins: runtime/plugin.h)
+void rt_register_fnhook_at(uint64_t addr, FnHook fn) { reg(addr, fn, true); }
 
 void rt_fnhook_set_build(int build) {
     if (build == g_build) return;
