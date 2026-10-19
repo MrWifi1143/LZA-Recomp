@@ -2538,6 +2538,10 @@ static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, int stag
 // ground). A rebuilt translator starts a new cache (the build time is in the hash); off with LARECOMP_NO_XLAT_CACHE=1
 // and while a switch that changes the output is set.
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>
+#define mkdir(p, m) _mkdir(p)
+#endif
 static const char k_xlat_build[] = __DATE__ " " __TIME__;
 const char *maxwell_build_id(void) { return k_xlat_build; }  // (runtime/nvn/vulkan/warmup.c: its marker)
 

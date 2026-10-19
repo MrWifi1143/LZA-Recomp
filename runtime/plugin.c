@@ -1,6 +1,5 @@
 // Runtime plugins (runtime/plugin.h): dlopen'd at startup, hooks called from the Vulkan backend.
 #include <dirent.h>
-#include <dlfcn.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -9,6 +8,22 @@
 
 #include "plugin.h"
 #include "rt.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#define PLUGIN_EXT ".dll"
+static void *dl_open(const char *p) { return (void *)LoadLibraryA(p); }
+static void *dl_sym(void *h, const char *n) { return (void *)GetProcAddress((HMODULE)h, n); }
+static void dl_close(void *h) { FreeLibrary((HMODULE)h); }
+static const char *dl_error(void) { static char b[32]; snprintf(b, sizeof b, "error %lu", GetLastError()); return b; }
+#else
+#include <dlfcn.h>
+#define PLUGIN_EXT ".so"
+static void *dl_open(const char *p) { return dlopen(p, RTLD_NOW | RTLD_LOCAL); }
+static void *dl_sym(void *h, const char *n) { return dlsym(h, n); }
+static void dl_close(void *h) { dl_close(h); }
+static const char *dl_error(void) { return dlerror(); }
+#endif
 
 typedef int (*FnHook)(struct Cpu *c, uint64_t addr);
 void rt_register_fnhook_at(uint64_t addr, FnHook fn);
@@ -45,13 +60,13 @@ volatile int g_plugins_cbuf;
 
 static void load_one(const char *path) {
     if (g_n == MAX_PLUGINS) return;
-    void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
-    if (!h) { LOG("[plugin] %s: %s\n", path, dlerror()); return; }
-    LarecompPluginInitFn init = (LarecompPluginInitFn)dlsym(h, "larecomp_plugin_init");
-    if (!init) { LOG("[plugin] %s: no larecomp_plugin_init\n", path); dlclose(h); return; }
+    void *h = dl_open(path);
+    if (!h) { LOG("[plugin] %s: %s\n", path, dl_error()); return; }
+    LarecompPluginInitFn init = (LarecompPluginInitFn)dl_sym(h, "larecomp_plugin_init");
+    if (!init) { LOG("[plugin] %s: no larecomp_plugin_init\n", path); dl_close(h); return; }
     LarecompPluginHooks hk = {0};
     int r = init(&g_api, &hk);
-    if (r) { LOG("[plugin] %s stays out (%d)\n", path, r); dlclose(h); return; }
+    if (r) { LOG("[plugin] %s stays out (%d)\n", path, r); dl_close(h); return; }
     g_hooks[g_n++] = hk;
     if (hk.cbuf_bound) g_plugins_cbuf = 1;
     LOG("[plugin] loaded %s\n", path);
@@ -64,13 +79,17 @@ void plugins_load(void) {
     if (env) {
         char buf[4096];
         snprintf(buf, sizeof buf, "%s", env);
+#ifdef _WIN32
+        for (char *p = strtok(buf, ";"); p; p = strtok(NULL, ";")) load_one(p);  // (';': Windows paths have a ':')
+#else
         for (char *p = strtok(buf, ":"); p; p = strtok(NULL, ":")) load_one(p);
+#endif
     }
     DIR *d = opendir("plugins");  // (the working directory is the data root)
     if (d) {
         for (struct dirent *e; (e = readdir(d));) {
             size_t n = strlen(e->d_name);
-            if (n > 3 && !strcmp(e->d_name + n - 3, ".so")) {
+            if (n > 4 && !strcmp(e->d_name + n - strlen(PLUGIN_EXT), PLUGIN_EXT)) {
                 char path[1024];
                 snprintf(path, sizeof path, "plugins/%s", e->d_name);
                 load_one(path);

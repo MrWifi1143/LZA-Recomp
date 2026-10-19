@@ -124,8 +124,12 @@ static void find_game(const char *dir, int depth, Found *f) {
         snprintf(p, sizeof p, "%s/main", dir);
         if (is_file(p)) snprintf(f->exefs, sizeof f->exefs, "%s", dir);
     }
-    snprintf(p, sizeof p, "%s/bin/message", dir);
+    snprintf(p, sizeof p, "%s/bin/message", dir);  // (Let's Go; the Legends games: bin/archive (Arceus), arc/data.trpfs (Z-A))
     if (!f->romfs[0] && is_dir(p)) snprintf(f->romfs, sizeof f->romfs, "%s", dir);
+    snprintf(p, sizeof p, "%s/bin/archive", dir);
+    if (!f->romfs[0] && is_dir(p)) snprintf(f->romfs, sizeof f->romfs, "%s", dir);
+    snprintf(p, sizeof p, "%s/arc/data.trpfs", dir);
+    if (!f->romfs[0] && is_file(p)) snprintf(f->romfs, sizeof f->romfs, "%s", dir);
     snprintf(p, sizeof p, "%s/romfs.bin", dir);
     if (!f->romfs_bin[0] && is_file(p)) snprintf(f->romfs_bin, sizeof f->romfs_bin, "%s", p);
     DIR *d = opendir(dir);

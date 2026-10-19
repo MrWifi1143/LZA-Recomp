@@ -122,6 +122,9 @@ static bool find_tools(Tools *t) {
     const char *e = getenv("LARECOMP_GEN");
     if (e && *e) snprintf(t->gen, sizeof t->gen, "%s", e);
     else if (!rt_resource("lasgen" SEP "lasgen" PLAT_EXE_SUFFIX, NULL, t->gen, sizeof t->gen) &&
+             // (a release with a portable Python next to the exe: python/python[.exe] + gen/gen.py and its modules)
+             !(rt_resource("python" SEP "python" PLAT_EXE_SUFFIX, NULL, t->gen, sizeof t->gen) &&
+               rt_resource("gen" SEP "gen.py", NULL, t->gen_script, sizeof t->gen_script)) &&
              !(rt_resource(NULL, "." PLAT_VENV_PYTHON, t->gen, sizeof t->gen) &&  // (a source checkout: .venv)
                rt_resource(NULL, "tools/gen.py", t->gen_script, sizeof t->gen_script)))
         return false;

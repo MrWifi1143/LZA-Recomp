@@ -412,7 +412,7 @@ __attribute__((target("avx2"))) static uint32_t scan_max32_avx2(const uint32_t *
 }
 static uint32_t scan_max_index(const void *src, uint32_t isz, uint32_t n, uint32_t restart) {
     static int avx2 = -1;
-    if (avx2 < 0) avx2 = __builtin_cpu_supports("avx2");
+    if (avx2 < 0) avx2 = plat_cpu_x86_v3();
     uint32_t m = 0;
     if (isz == 2) {
         if (avx2) return scan_max16_avx2(src, n, (uint16_t)restart);

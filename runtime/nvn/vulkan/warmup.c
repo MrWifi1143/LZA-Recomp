@@ -353,7 +353,8 @@ static void *cap_worker(void *arg) {
         WStage v = g_cap.stages[p.vs], f = p.fs >= 0 ? g_cap.stages[p.fs] : (WStage){0};  // (copies: the array may grow)
         pthread_mutex_unlock(&g_cap_lock);
         compile(&v, p.fs >= 0 ? &f : NULL);
-        if (!(++done & (done - 1)) && done >= 64) LOG("[warmup] %llu programs of loaded shader containers compiled\n", (unsigned long long)done);
+        done++;
+        if (!(done & (done - 1)) && done >= 64) LOG("[warmup] %llu programs of loaded shader containers compiled\n", (unsigned long long)done);
     }
     return NULL;
 }
