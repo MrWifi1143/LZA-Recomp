@@ -149,6 +149,7 @@ void backend_pool_written(uint64_t addr, uint64_t size);
 // render thread (vulkan/renderthread.c): with LARECOMP_RENDER_THREAD off these run the backend call on the spot
 bool rt_active(void);
 bool rt_on_render_thread(void);
+bool rt_more_queued(void);  // render thread: more jobs queued after the running one (exec.c batches lists)
 void rt_submit(uint64_t handle);
 void rt_present(NvnTexture *tex);
 void rt_call(void (*fn)(void *), void *arg);
