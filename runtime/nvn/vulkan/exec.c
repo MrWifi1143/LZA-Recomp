@@ -2818,7 +2818,8 @@ static void build_compute(void *arg) {
     if (r != VK_SUCCESS) LOG("[compute] pipeline failed: %d\n", r);
 }
 
-static struct CsEnt { uint64_t addr, content; CsProg *cp; } g_cs_tab[256];  // compute programs by code address and content
+#define CS_MAX 2048
+static struct CsEnt { uint64_t addr, content; CsProg *cp; } g_cs_tab[CS_MAX];  // compute programs by code address and content
 
 static CsProg *compute_program(NvnProgram *np) {
     NvnShaderStage *ss = &np->stages[5];
@@ -2827,7 +2828,7 @@ static CsProg *compute_program(NvnProgram *np) {
     int n = g_cs_n;
     for (int i = 0; i < n; i++) if (tab[i].addr == ss->code_addr && tab[i].content == ss->content_hash) return tab[i].cp;
     CsProg *cp = calloc(1, sizeof *cp);
-    if (n < 256) { tab[n].addr = ss->code_addr; tab[n].content = ss->content_hash; tab[n].cp = cp; g_cs_n = n + 1; }
+    if (n < CS_MAX) { tab[n].addr = ss->code_addr; tab[n].content = ss->content_hash; tab[n].cp = cp; g_cs_n = n + 1; }
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
     ShaderKey k = {0};
@@ -2844,7 +2845,9 @@ static CsProg *compute_program(NvnProgram *np) {
         if (!cp->local[i]) cp->local[i] = 1;
     }
     save_glsl(cp->si->msl, ss->code_addr, "cs");
-    run_job(build_compute, cp);
+    // Built now, not on a worker: a dispatch skipped while its pipeline compiles loses work whose results persist
+    // (counters, simulation state, buffers written once), unlike a draw missing from one frame. A first-use hitch instead.
+    build_compute(cp);
     return cp;
 }
 
