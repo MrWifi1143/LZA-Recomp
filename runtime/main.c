@@ -204,6 +204,12 @@ int main(int argc, char **argv) {
             if (build == GAME_BUILD_OTHER) LOG("[boot] %s: a build without address tables, 60 fps and wild battles stay off\n", exefs);
         }
         { extern void fps60_configure(void); fps60_configure(); }  // (runtime/hle/fps60.c: the launcher's 60 fps option)
+        {   // (runtime/hle/fps60.c: the same option, Legends: Arceus)
+            extern void pla60_configure(const char *exefs);
+            char exefs[1100];
+            snprintf(exefs, sizeof exefs, "%s/exefs", root);
+            pla60_configure(exefs);
+        }
         { extern void wildbattle_configure(void); wildbattle_configure(); }  // (runtime/hle/wildbattle.c: the wild battles option)
         boot(root);
         int kind = ui_run();  // window and input on the main thread; returns when a reboot is requested

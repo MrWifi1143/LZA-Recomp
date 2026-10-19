@@ -776,8 +776,11 @@ static void present_pace(int interval) {
         fps = e ? atoi(e) : -2;  // -2: the game's own interval
     }
     uint64_t period;
-    extern bool fps60_enabled(void), fps60_world(void);
-    if (fps60_enabled()) period = fps60_world() ? 16666667ull : 33333333ull;  // (runtime/hle/fps60.c)
+    extern bool fps60_enabled(void), fps60_world(void), pla60_enabled(void);
+    extern void pla60_present(void);
+    pla60_present();
+    if (pla60_enabled() && fps != 0) period = 16666667ull;  // (runtime/hle/fps60.c: Legends: Arceus)
+    else if (fps60_enabled()) period = fps60_world() ? 16666667ull : 33333333ull;  // (runtime/hle/fps60.c)
     else if (fps == -2) period = (uint64_t)(interval > 0 ? interval : 1) * 16666667ull;
     else if (fps > 0) period = 1000000000ull / (uint64_t)fps;
     else return;

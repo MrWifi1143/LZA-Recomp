@@ -14,6 +14,7 @@
 // LARECOMP_FPS60=1 turns it on (settings: fps = 60). LARECOMP_G1_READERS="<addr>[,<addr>...]" (research): G[1] is
 // 16.67 ms only while those functions run, to find which readers a speed comes from.
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -411,4 +412,41 @@ __attribute__((constructor)) static void probe_init(void) {
     if (colon) *colon = 0, g_probe_bytes = (uint32_t)strtoul(colon + 1, NULL, 16);
     if (g_probe_bytes > 0x400) g_probe_bytes = 0x400;
     rt_register_fnhook(strtoull(buf, NULL, 16), probe_hook);
+}
+
+// ---- Legends: Arceus 1.1.1 (main build id AEE8F150DDA1B5A8) at 60 fps, the way the community "60 FPS" cheat does it:
+// the game steps its world by a frame time constant (main+0x397E8D8, in ns: 33333334) and presents every other vsync.
+// With 16666667 there and presents paced at 60 (nvn/objects.c present_pace) the world runs at its own speed: a 10 s
+// walk from the save ends at the same spot at 30 and at 60 fps. The launcher's 60 fps option, or LARECOMP_PLA_60FPS=1
+// (0: off).
+#include "../platform.h"
+#define PLA_FRAME_TIME (0x7000000000ull + 0x397E8D8)
+static bool g_pla60, g_pla60_patched;
+bool pla60_enabled(void) { return g_pla60; }
+
+void pla60_configure(const char *exefs) {
+    static const uint8_t PLA_111[8] = {0xae, 0xe8, 0xf1, 0x50, 0xdd, 0xa1, 0xb5, 0xa8};
+    char p[1100];
+    snprintf(p, sizeof p, "%s/main", exefs);
+    uint8_t id[8] = {0};
+    FILE *f = fopen(p, "rb");
+    if (f) {
+        fseek(f, 0x40, SEEK_SET);
+        if (fread(id, 1, 8, f) != 8) memset(id, 0, 8);
+        fclose(f);
+    }
+    const char *e = getenv("LARECOMP_PLA_60FPS");
+    g_pla60 = !memcmp(id, PLA_111, 8) && (e ? atoi(e) != 0 : g_settings.fps == 60);
+    g_pla60_patched = false;
+    if (g_pla60) LOG("[fps60] Legends: Arceus at 60 fps\n");
+}
+
+// each present: the frame time constant, once the game is loaded (read-only data: the page made writable first)
+void pla60_present(void) {
+    if (!g_pla60 || g_pla60_patched) return;
+    volatile uint32_t *ft = (volatile uint32_t *)(uintptr_t)PLA_FRAME_TIME;
+    if (*ft != 33333334u) return;
+    plat_protect(PLA_FRAME_TIME & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);
+    *ft = 16666667u;
+    g_pla60_patched = true;
 }
