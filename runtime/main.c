@@ -178,6 +178,7 @@ int main(int argc, char **argv) {
 #endif
     const char *root = "extracted";  // (in the data root)
     bool skip_launcher = getenv("LARECOMP_NO_LAUNCHER") || getenv("LARECOMP_INPUT");  // tests boot straight in
+    bool force_launcher = getenv("LARECOMP_FORCE_LAUNCHER") != NULL;  // (tests of the start screen's own steps: the shader warm-up)
     static char arg_root[1024];
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--play")) skip_launcher = true;
@@ -189,10 +190,19 @@ int main(int argc, char **argv) {
         extern void plugins_load(void);
         plugins_load();  // (runtime/plugin.h: before the Vulkan backend, whose instance / device they may extend)
     }
-    for (bool title = !skip_launcher;;) {
+    for (bool title = !skip_launcher || force_launcher;;) {
         if (title) {  // start screen: resolution, fullscreen, anti-aliasing, translation, keys (runtime/ui/launcher_lg.mm)
             extern void launcher_lg_run(const char *root);
             launcher_lg_run(root);
+        } else if (getenv("LARECOMP_WARMUP") && atoi(getenv("LARECOMP_WARMUP")) == 1) {  // (no start screen: the warm-up, logged)
+            extern bool warmup_needed(const char *root);
+            extern void warmup_start(void);
+            extern int warmup_progress(int *done, int *total);
+            if (warmup_needed(root)) {
+                warmup_start();
+                int done, total;
+                while (warmup_progress(&done, &total) != 3) SDL_Delay(50);
+            }
         }
         {  // (runtime/fnhook.c: the runtime's hooks, in the address tables of the known builds)
             extern void rt_fnhook_set_build(int build);

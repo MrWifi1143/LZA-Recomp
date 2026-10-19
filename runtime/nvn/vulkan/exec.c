@@ -1591,6 +1591,16 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
             }
         }
     }
+    if (ENV("LARECOMP_LOG_PROGS"))  // (research: the shaders each new program uses, by content hash)
+    {
+        char ak[33], rk[9];
+        for (int i = 0; i < 32; i++) ak[i] = (char)('0' + vkey->attr_kind[i]);
+        for (int i = 0; i < 8; i++) rk[i] = (char)('0' + fkey->rt_kind[i]);
+        ak[32] = rk[8] = 0;
+        LOG("[prog] vs %016llx fs %016llx attr %s rt %s xfb %u img %llx/%llx stencil %x/%x\n", (unsigned long long)np->stages[0].content_hash,
+            (unsigned long long)np->stages[1].content_hash, ak, rk, vkey->xfb_count[0], (unsigned long long)*(uint64_t *)vkey->img_kind,
+            (unsigned long long)*(uint64_t *)fkey->img_kind, vkey->tex_stencil, fkey->tex_stencil);
+    }
     Prog *p = calloc(1, sizeof *p);
     prog_tab[slot].key = h;
     prog_tab[slot].prog = p;
@@ -1886,6 +1896,7 @@ static void pipe_exec_report(VkPipeline pipe, uint64_t vs, uint64_t fs) {
     }
 }
 
+static __thread bool tl_warm;  // (vk_warm_program: its pipelines stay out of the pipeline cache file)
 static void build_pipeline(void *arg) {
     Pipe *pp = arg;
     PipeKey *k = &pp->k;
@@ -1960,7 +1971,7 @@ static void build_pipeline(void *arg) {
     uint64_t tp = SDL_GetTicksNS();
     extern bool g_pipe_exec_stats;
     if (g_pipe_exec_stats) pi.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
-    VkResult r = vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &pp->pipe);
+    VkResult r = vkCreateGraphicsPipelines(g_vk.dev, tl_warm ? VK_NULL_HANDLE : g_vk.pcache, 1, &pi, NULL, &pp->pipe);
     atomic_fetch_add(&stat_pipe_ns, SDL_GetTicksNS() - tp);
     if (r == VK_SUCCESS && g_pipe_exec_stats) pipe_exec_report(pp->pipe, k->prog->code[0], k->prog->code[1]);
     if (r != VK_SUCCESS) {
@@ -1970,6 +1981,48 @@ static void build_pipeline(void *arg) {
     atomic_fetch_add(&stat_compiles, 1);
     if (r == VK_SUCCESS) atomic_fetch_add(&new_pipes, 1);
     atomic_store(&pp->state, r == VK_SUCCESS ? 1 : 2);
+}
+
+// Shader warm-up (warmup.c): a program from the game's files translated and compiled as get_program's would be with the
+// default key (its SPIR-V and translation land in their disk caches); pipeline: also built into a pipeline of a typical
+// state and released, for the driver's shader cache. That only partly helps the draws' own pipelines later (NVIDIA, fresh
+// shader cache, PLA walk test: pipeline creation 10.3 -> 6.0 s) for a long wait (8427 programs: 98 s on 23 threads
+// instead of 17), so the warm-up asks for it only with LARECOMP_WARMUP_PIPELINES=1. false: failed.
+bool vk_warm_program(const uint8_t *vs, size_t vmax, const uint8_t *fs, size_t fmax, bool pipeline) {
+    Prog *p = calloc(1, sizeof *p);
+    p->code[0] = (uint64_t)(uintptr_t)vs, p->cmax[0] = vmax;
+    p->code[1] = (uint64_t)(uintptr_t)fs, p->cmax[1] = fs ? fmax : 0;
+    p->vkey.glsl = p->fkey.glsl = 1;  // (flip_y / depth_minus_one 0: window origin and depth mode 1 in both Legends games)
+    translate_program(p);  // (and compile_program)
+    bool ok = atomic_load(&p->state) == 1;
+    if (ok && pipeline) {
+        Pipe pp = {0};
+        PipeKey *k = &pp.k;
+        k->prog = p;
+        uint32_t rts = p->code[1] ? p->fi->out_mask & 0xFF : 0;
+        while (rts >> k->ncolor) k->ncolor++;
+        for (uint32_t i = 0; i < k->ncolor; i++) k->color[i] = VK_FORMAT_R8G8B8A8_UNORM, k->write_mask[i] = 0xF;
+        k->depth = VK_FORMAT_D32_SFLOAT;
+        k->samples = VK_SAMPLE_COUNT_1_BIT;
+        k->attr_mask = p->vi->attr_mask;
+        for (int i = 0; i < 32; i++) k->attr_fmt[i] = VK_FORMAT_R32G32B32A32_SFLOAT;
+        k->stride[0] = 16, k->used_streams = 1;
+        k->topo_class = 2, k->poly_fill = 1;
+        tl_warm = true;
+        build_pipeline(&pp);
+        tl_warm = false;
+        ok = atomic_load(&pp.state) == 1;
+        if (pp.pipe) vkDestroyPipeline(g_vk.dev, pp.pipe, NULL);
+    }
+    if (p->vs) vkDestroyShaderModule(g_vk.dev, p->vs, NULL);
+    if (p->fs) vkDestroyShaderModule(g_vk.dev, p->fs, NULL);
+    if (p->layout) vkDestroyPipelineLayout(g_vk.dev, p->layout, NULL);
+    for (int i = 0; i < 2; i++) if (p->set_layout[i]) vkDestroyDescriptorSetLayout(g_vk.dev, p->set_layout[i], NULL);
+    if (p->vi) maxwell_free(p->vi);
+    if (p->fi && p->code[1]) maxwell_free(p->fi);
+    else if (p->fi) { free(p->fi->msl); free(p->fi); }
+    free(p);
+    return ok;
 }
 
 // ================================================================== feedback snapshots (renderer.m resolve_feedback)
