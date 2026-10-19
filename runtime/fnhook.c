@@ -5,7 +5,8 @@
 //
 // Investigation (docs/MODO-BATALHA.md): LARECOMP_HOOK_DUMP="<addr>:<arg>,<arg>...[;<addr>:...]" logs, the first
 // LARECOMP_HOOK_DUMP_MAX (default 4) times each function is entered, the registers x0..x7 and the memory the args
-// name: "x2:30" = 0x30 bytes at x2, "*x0:400" = 0x400 bytes at the pointer stored at x0. LARECOMP_HOOK_DUMP_FRAMES=
+// name: "x2:30" = 0x30 bytes at x2, "*x0:400" = 0x400 bytes at the pointer stored at x0, "*x0+638:40" = at the
+// pointer stored at x0 + 0x638, "@7254604700:10" = at a fixed address. LARECOMP_HOOK_DUMP_FRAMES=
 // <first>-<last> limits it to those presents (the count then starts there).
 #include <stdatomic.h>
 #include <stdio.h>
@@ -123,7 +124,7 @@ void rt_call_original(Cpu *c, uint64_t addr) {
 }
 
 // ---- LARECOMP_HOOK_DUMP
-typedef struct { uint64_t addr; int nargs; struct { int reg, deref; uint32_t len; } arg[8]; _Atomic int hits; } Dump;
+typedef struct { uint64_t addr; int nargs; struct { int reg, deref; uint64_t off; uint32_t len; } arg[8]; _Atomic int hits; } Dump;
 static Dump dumps[32];
 static int ndumps, dump_max = 4;
 
@@ -155,7 +156,7 @@ static int dump_hook(Cpu *c, uint64_t addr) {
             (unsigned long long)c->x[2], (unsigned long long)c->x[3], (unsigned long long)c->x[4], (unsigned long long)c->x[5],
             (unsigned long long)c->x[6], (unsigned long long)c->x[7]);
         for (int k = 0; k < d->nargs; k++) {
-            uint64_t p = c->x[d->arg[k].reg];
+            uint64_t p = (d->arg[k].reg < 32 ? c->x[d->arg[k].reg] : 0) + d->arg[k].off;
             char what[16];
             snprintf(what, sizeof what, "%sx%d", d->arg[k].deref ? "*" : "", d->arg[k].reg);
             if (d->arg[k].deref) p = guest_ptr(p) ? *(const uint64_t *)(uintptr_t)p : 0;
@@ -183,11 +184,14 @@ __attribute__((constructor)) static void hook_dump_init(void) {
         for (char *a = colon ? colon + 1 : NULL; a && *a && d->nargs < 8;) {
             int deref = *a == '*';
             if (deref) a++;
-            if (*a != 'x') break;
-            int reg = (int)strtol(a + 1, &a, 10);
+            if (*a != 'x' && *a != '@') break;
+            int reg = *a == '@' ? 32 : (int)strtol(a + 1, &a, 10);  // @addr: a fixed address (x32 = 0)
+            if (reg == 32) a++;
+            uint64_t off = reg == 32 ? strtoull(a, &a, 16) : *a == '+' ? strtoull(a + 1, &a, 16) : 0;  // x0+638: at x0 + 0x638
             uint32_t len = *a == ':' ? (uint32_t)strtoul(a + 1, &a, 16) : 0x40;
             d->arg[d->nargs].reg = reg;
             d->arg[d->nargs].deref = deref;
+            d->arg[d->nargs].off = off;
             d->arg[d->nargs].len = len;
             d->nargs++;
             while (*a == ',') a++;

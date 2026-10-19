@@ -149,6 +149,25 @@ static void relocate(Module *m) {
         if (d[0] == DT_JMPREL) jmprel = m->base + d[1];
         if (d[0] == DT_PLTRELSZ) pltsz = d[1];
     }
+    // DT_RELR (newer SDKs, Legends Z-A): packed relative relocations with the addend in place. An even entry is an
+    // address; an odd one a bitmap of the 63 words after it (bit k: word k - 1).
+    uint64_t relr = 0, relrsz = 0;
+    for (uint64_t *d = (uint64_t *)m->dynamic; d[0] != DT_NULL; d += 2) {
+        if (d[0] == 36) relr = m->base + d[1];
+        if (d[0] == 35) relrsz = d[1];
+    }
+    uint64_t *where = NULL;
+    for (uint64_t i = 0; relr && i < relrsz / 8; i++) {
+        uint64_t e = ((uint64_t *)relr)[i];
+        if (!(e & 1)) {
+            where = (uint64_t *)(m->base + e);
+            *where++ += m->base;
+        } else if (where) {
+            for (int k = 1; k < 64; k++)
+                if (e >> k & 1) where[k - 1] += m->base;
+            where += 63;
+        }
+    }
     int unresolved = 0;
     for (int pass = 0; pass < 2; pass++) {
         Elf64Rela *r = (Elf64Rela *)(pass ? jmprel : rela);
@@ -180,9 +199,14 @@ void loader_load(const char *exefs) {
     static const struct { const char *name; uint64_t base; } mods[] = {
         {"main", MAIN_BASE}, {"sdk", SDK_BASE}, {"subsdk0", SUBSDK0_BASE}, {"subsdk1", SUBSDK1_BASE}};
     for (unsigned i = 0; i < sizeof mods / sizeof mods[0]; i++) {
+        snprintf(path, sizeof path, "%s/%s", exefs, mods[i].name);
+        if (i >= 2) {  // the subsdk modules are optional (Legends: Z-A has main + sdk only)
+            FILE *f = fopen(path, "rb");
+            if (!f) continue;
+            fclose(f);
+        }
         Module *m = &g_modules[g_nmodules++];
         m->name = mods[i].name;
-        snprintf(path, sizeof path, "%s/%s", exefs, m->name);
         load_nso(m, path, mods[i].base);
     }
     for (int i = 0; i < g_nmodules; i++) relocate(&g_modules[i]);

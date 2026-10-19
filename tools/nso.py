@@ -75,6 +75,21 @@ class Nso:
                 for i in range(n):
                     r_off, r_info, r_add = struct.unpack_from('<QQq', self.image, b + i * 24)
                     self.relocs.append((r_off, r_info & 0xFFFFFFFF, r_info >> 32, r_add))
+        # DT_RELR (newer SDKs, Legends Z-A): packed relative relocations, the addend stored in place. An even entry is an
+        # address; an odd one a bitmap of the 63 words after the last address. Listed as R_AARCH64_RELATIVE with that addend.
+        if 36 in dyn and 35 in dyn:
+            where = 0
+            for i in range(dyn[35] // 8):
+                e = struct.unpack_from('<Q', self.image, dyn[36] + i * 8)[0]
+                if not e & 1:
+                    self.relocs.append((e, R_AARCH64_RELATIVE, 0, struct.unpack_from('<q', self.image, e)[0]))
+                    where = e + 8
+                else:
+                    for k in range(1, 64):
+                        if e >> k & 1:
+                            a = where + (k - 1) * 8
+                            self.relocs.append((a, R_AARCH64_RELATIVE, 0, struct.unpack_from('<q', self.image, a)[0]))
+                    where += 63 * 8
 
     def cstr(self, off):
         end = self.image.index(b'\0', off)

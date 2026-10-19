@@ -44,9 +44,13 @@ typedef struct {
 typedef struct {
     uint32_t setmask;  // which fields are overridden
     uint16_t base_level, num_levels, min_layer, num_layers;
-    uint32_t format, target, ds_mode;
+    uint32_t format;
+    uint16_t target;
+    uint8_t ds_mode, pad;
     uint8_t swizzle[4];
-} NvnTextureView;  // our layout of the guest NVNtextureView (0x28 bytes)
+} NvnTextureView;  // our layout of the guest NVNtextureView: 0x28 bytes in the SDK headers, but Legends Z-A keeps its
+                   // views in 0x18-byte allocations (the driver uses no more), so ours must fit in 0x18
+_Static_assert(sizeof(NvnTextureView) == 0x18, "NvnTextureView fits Z-A's 0x18-byte views");
 
 typedef struct {
     NvnTexture *tex;
