@@ -733,6 +733,61 @@ void backend_present(NvnTexture *t) {
             if (*p == ',') p++; else break;
         }
     }
+    {   // LARECOMP_WATCH_RANGE=<lo>,<hi>@<frame> (hex guest addresses): from that frame on, the functions accessing [lo, hi)
+        // ("[watch]" in the log, dispatch.c watch_arm: one page, re-protected every 100 us)
+        static long at = -1;
+        static uint64_t lo, hi;
+        if (at < 0) {
+            const char *e = getenv("LARECOMP_WATCH_RANGE");
+            at = 0;
+            if (e) sscanf(e, "%llx,%llx@%ld", (unsigned long long *)&lo, (unsigned long long *)&hi, &at);
+        }
+        if (at && (long)total_frames == at) {
+            extern uint64_t g_watch_lo, g_watch_hi;
+            extern void watch_arm(void);
+            g_watch_lo = lo, g_watch_hi = hi;
+            watch_arm();
+        }
+    }
+    {   // LARECOMP_HWWATCH=<addr>[,<addr>...]@<frame> (hex, up to 4): hardware write watchpoints, 8 bytes each (hle/hwwatch.c)
+        static long at = -1;
+        static uint64_t wa[4];
+        static int nw;
+        if (at < 0) {
+            const char *e = getenv("LARECOMP_HWWATCH");
+            at = 0;
+            for (const char *p = e; p && *p && nw < 4;) {
+                wa[nw++] = strtoull(p, (char **)&p, 16);
+                if (*p == ',') p++;
+                else { if (*p == '@') at = atol(p + 1); break; }
+            }
+        }
+        extern void hwwatch_arm(uint64_t addr, uint64_t len);
+        if (at && (long)total_frames == at)
+            for (int i = 0; i < nw; i++) hwwatch_arm(wa[i] & ~7ull, 8);
+        extern void hwwatch_src_arm(void);  // (LARECOMP_HWWATCH_SRC, from the same frame)
+        if (at && (long)total_frames == at) hwwatch_src_arm();
+    }
+    {   // LARECOMP_CAMSCAN=<cbuf>@<frame>: exec.c camscan
+        static long at = -1;
+        static uint64_t cb;
+        if (at < 0) {
+            const char *e = getenv("LARECOMP_CAMSCAN");
+            at = 0;
+            if (e) sscanf(e, "%llx@%ld", (unsigned long long *)&cb, &at);
+        }
+        extern void camscan(uint64_t cbuf);
+        if (at && (long)total_frames == at) camscan(cb);
+    }
+    {   // LARECOMP_FIND_VIEW_AT=<frame>[,<frame>...]: camera research, the constant buffers holding view-like matrices
+        extern uint64_t g_findview_frame;  // exec.c ("[findview]" in the log)
+        g_findview_frame = 0;
+        for (const char *p = getenv("LARECOMP_FIND_VIEW_AT"); p && *p;) {
+            long at = strtol(p, (char **)&p, 10);
+            if (at == (long)total_frames) { g_findview_frame = total_frames; break; }
+            if (*p == ',') p++; else break;
+        }
+    }
     if (g_debug_frame) LOG("===== debug frame %llu =====\n", (unsigned long long)total_frames);
     {   // LARECOMP_SHOT_AT=<frame>,<frame>,... (ascending): the game image at those frames -> build/frames/frame_N.png
         static const char *next;

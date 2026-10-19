@@ -346,7 +346,14 @@ bool rt_fault_watch(uint64_t fa, uint64_t pc) {
         for (int i = 0; i < nseen; i++) found |= !strcmp(seen[i], key);
         if (!found && nseen < 64) {
             snprintf(seen[nseen++], 48, "%s", key);
-            fprintf(stderr, "[watch] +%#llx by %s\n", fa - g_watch_lo, nm);
+            Cpu *gc = kernel_current_cpu();  // (and the guest's view: a memcpy's caller and source)
+            if (gc)
+                fprintf(stderr, "[watch] +%#llx by %s (guest lr %llx x0 %llx x1 %llx x2 %llx fp-lr %llx)\n", fa - g_watch_lo, nm,
+                        (unsigned long long)gc->x[30], (unsigned long long)gc->x[0], (unsigned long long)gc->x[1],
+                        (unsigned long long)gc->x[2],
+                        (unsigned long long)(gc->x[29] >= GUEST_LO && gc->x[29] < GUEST_HI ? ((uint64_t *)(uintptr_t)gc->x[29])[1] : 0));
+            else
+                fprintf(stderr, "[watch] +%#llx by %s\n", fa - g_watch_lo, nm);
         }
     }
     plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_RW);

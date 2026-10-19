@@ -23,6 +23,8 @@ typedef struct {
     // The Vulkan queue is not thread-safe: take this around any queue use from a plugin thread (xrEndFrame...)
     void (*queue_lock)(void);
     void (*queue_unlock)(void);
+    // The game's final image (hooks.frame) is stored bottom row first (the window draw flips it): 1, top row first: 0
+    int (*image_origin_lower_left)(void);
 } LarecompPluginApi;
 
 typedef struct {
@@ -39,6 +41,9 @@ typedef struct {
     // That frame's commands are on the queue (images written by them may be handed on now)
     void (*frame_submitted)(void);
     void (*shutdown)(void);
+    // A vertex / fragment stage's constant buffer (game memory at addr, size bytes) read for a draw now: what the frame
+    // being recorded draws with (the next hooks.frame shows it). Called for every bind - keep it cheap.
+    void (*cbuf_bound)(int stage, uint64_t addr, uint32_t size);
 } LarecompPluginHooks;
 
 typedef int (*LarecompPluginInitFn)(const LarecompPluginApi *api, LarecompPluginHooks *hooks);
@@ -53,5 +58,7 @@ void plugins_vk_ready(VkInstance instance, VkPhysicalDevice pd, VkDevice dev, ui
 void plugins_frame(VkCommandBuffer cb, VkImage image, VkFormat fmt, uint32_t w, uint32_t h);
 void plugins_frame_submitted(void);
 void plugins_shutdown(void);
+extern volatile int g_plugins_cbuf;  // some plugin wants cbuf_bound
+void plugins_cbuf_bound(int stage, uint64_t addr, uint32_t size);
 void vk_queue_lock(void);
 void vk_queue_unlock(void);

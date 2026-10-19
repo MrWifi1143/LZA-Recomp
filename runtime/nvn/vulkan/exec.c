@@ -14,6 +14,7 @@
 
 #include "../../kernel.h"
 #include "shaders.h"
+#include "../../plugin.h"
 #include "vk.h"
 #include "../renderer.h"
 #include "../../settings.h"
@@ -2108,6 +2109,88 @@ static VkDescriptorBufferInfo ubo_span(VkSpan s, uint64_t size) {
     return (VkDescriptorBufferInfo){s.buf, s.off, size > max ? max : size};
 }
 
+// LARECOMP_FIND_VIEW_AT (device.c): each distinct constant buffer range bound that frame, scanned for 3x4 row-major
+// rigid transforms (three orthonormal rows: a view or model matrix) - where the camera is, for the VR mod.
+uint64_t g_findview_frame;
+static void findview_scan(int stage, int k, uint64_t addr, uint64_t size) {
+    static uint64_t seen[512], seen_frame;
+    static int nseen;
+    if (seen_frame != g_findview_frame) { seen_frame = g_findview_frame; nseen = 0; }
+    for (int i = 0; i < nseen; i++) if (seen[i] == addr) return;
+    if (nseen < 512) seen[nseen++] = addr;
+    const float *f = (const float *)(uintptr_t)addr;
+    {   // and the raw contents of each, for offline analysis: build/findview/<frame>_s<stage>_k<k>_<addr>.bin
+        static int made;
+        if (!made) made = 1, mkdir("build/findview", 0755);
+        char path[128];
+        snprintf(path, sizeof path, "build/findview/%llu_s%d_k%d_%llx.bin", (unsigned long long)g_findview_frame, stage, k,
+                 (unsigned long long)addr);
+        FILE *fp = fopen(path, "wb");
+        if (fp) fwrite(f, 1, size, fp), fclose(fp);
+    }
+    int found = 0;
+    for (uint64_t o = 0; o + 48 <= size && found < 6; o += 16) {
+        const float *m = f + o / 4;
+        bool ok = true, ident = true;
+        for (int r = 0; r < 3 && ok; r++) {
+            float n = m[r * 4] * m[r * 4] + m[r * 4 + 1] * m[r * 4 + 1] + m[r * 4 + 2] * m[r * 4 + 2];
+            if (!(n > 0.998f && n < 1.002f)) ok = false;
+            for (int c = r + 1; c < 3 && ok; c++) {
+                float d = m[r * 4] * m[c * 4] + m[r * 4 + 1] * m[c * 4 + 1] + m[r * 4 + 2] * m[c * 4 + 2];
+                if (!(d > -0.002f && d < 0.002f)) ok = false;
+            }
+            for (int c = 0; c < 3; c++) if (m[r * 4 + c] != (r == c ? 1.0f : 0.0f)) ident = false;
+        }
+        if (!ok || ident) continue;
+        found++;
+        LOG("[findview] frame %llu stage %d cbuf %d addr %llx+%llx (size %llx): %.4f %.4f %.4f %.2f | %.4f %.4f %.4f %.2f | %.4f %.4f %.4f %.2f\n",
+            (unsigned long long)g_findview_frame, stage, k, (unsigned long long)addr, (unsigned long long)o, (unsigned long long)size,
+            m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]);
+    }
+}
+
+// LARECOMP_CAMSCAN=<cbuf addr>@<frame> (device.c): the camera's eye position from the view matrix at cbuf+0x40 (column-major,
+// PLA's per-view constants), then every place in the guest's writable memory holding those three floats - the camera
+// object, for the VR mod. Logged as "[camscan]" with the 0x40 bytes around each hit.
+void camscan(uint64_t cbuf) {
+    const float *v = (const float *)(uintptr_t)(cbuf + 0x40);
+    float eye[3];
+    for (int c = 0; c < 3; c++) eye[c] = -(v[c * 4 + 0] * v[12] + v[c * 4 + 1] * v[13] + v[c * 4 + 2] * v[14]);
+    LOG("[camscan] eye %.4f %.4f %.4f forward %.4f %.4f %.4f\n", eye[0], eye[1], eye[2], -v[2], -v[6], -v[10]);
+    FILE *m = fopen("/proc/self/maps", "r");
+    char line[512];
+    int hits = 0;
+    while (m && fgets(line, sizeof line, m) && hits < 200) {
+        unsigned long long lo, hi;
+        char perm[8];
+        if (sscanf(line, "%llx-%llx %7s", &lo, &hi, perm) != 3 || perm[0] != 'r' || perm[1] != 'w') continue;
+        if (lo < 0x7000000000ull || hi > 0x8000000000ull) continue;
+        for (uint64_t a = lo; a + 12 <= hi && hits < 200; a += 4) {
+            const float *f = (const float *)(uintptr_t)a;
+            float d0 = f[0] - eye[0];
+            if (!(d0 < 0.02f && d0 > -0.02f)) continue;  // (written so that NaN fails)
+            float d1 = f[1] - eye[1], d2 = f[2] - eye[2];
+            if (!(d1 < 0.02f && d1 > -0.02f && d2 < 0.02f && d2 > -0.02f)) continue;
+            hits++;
+            if (f[5] > 1.777f && f[5] < 1.778f && getenv("LARECOMP_CAMSCAN_WATCH")) {  // the camera record (quaternion,
+                extern void hwwatch_arm(uint64_t addr, uint64_t len);                  // eye, fov, aspect): who writes it
+                static bool armed;
+                if (!armed) {
+                    armed = true;
+                    hwwatch_arm(a - 0x10, 8), hwwatch_arm(a - 8, 8), hwwatch_arm(a, 8), hwwatch_arm(a + 0x10, 8);
+                }
+            }
+            const float *w = (const float *)(uintptr_t)((a - 0x20) & ~0xfull);
+            LOG("[camscan] hit %llx (region %llx-%llx)\n", (unsigned long long)a, lo, hi);
+            for (int r = 0; r < 6; r++)
+                LOG("[camscan]   %llx: %11.4f %11.4f %11.4f %11.4f\n", (unsigned long long)(uintptr_t)(w + r * 4), w[r * 4], w[r * 4 + 1],
+                    w[r * 4 + 2], w[r * 4 + 3]);
+        }
+    }
+    if (m) fclose(m);
+    LOG("[camscan] %d hit(s)\n", hits);
+}
+
 // Constant buffer k of a stage (renderer.m bind_cbufs), copied into transient memory.
 static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32_t gx, uint32_t gy, uint32_t gz) {
     static const uint8_t zeros[0x10000];
@@ -2181,6 +2264,8 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
     // snapshot: later CPU writes must not leak in. Shared by the draws of one submission binding the same range:
     // within a command list nothing writes guest memory (no inline UpdateUniformBuffer: that writes through below
     // and drops the shared copies).
+    if (g_findview_frame) findview_scan(stage, k, r.addr, size);
+    if (g_plugins_cbuf) plugins_cbuf_bound(stage, r.addr, (uint32_t)size);
     return ubo_span(guest_copy(r.addr, size), size);
 }
 
