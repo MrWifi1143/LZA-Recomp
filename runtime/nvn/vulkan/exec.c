@@ -863,6 +863,7 @@ static void vk_end_pass_at(int line);
 void vk_end_pass(void) { vk_end_pass_at(0); }
 #define vk_end_pass() vk_end_pass_at(__LINE__)
 static bool g_storage_written;  // a draw of this pass wrote storage images (SUST / SURED)
+static NvnTexture *pass_rt[9];  // the running pass's color targets and depth (frame dumps save these at its end)
 static void vk_end_pass_at(int line) {
     if (!in_pass) return;
     if (prof && line < 4096) prof_end_line[line]++;
@@ -887,7 +888,7 @@ static void vk_end_pass_at(int line) {
             renderer_save_texture_tex(st.rt.color[0]->backend, path);
         }
     }
-    if (g_debug_frame && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {
+    if (g_debug_frame && pass_rt[0] && pass_rt[0]->backend) {
         char path[256];
         static uint64_t debug_pass_frame = ~0ull;
         static int multi = -1;
@@ -895,11 +896,11 @@ static void vk_end_pass_at(int line) {
         if (multi && renderer_present_count() != debug_pass_frame) { debug_pass_frame = renderer_present_count(); debug_pass_no = 0; }
         if (multi) snprintf(path, sizeof path, "build/pass_%llu_%03d.png", (unsigned long long)debug_pass_frame, debug_pass_no++);
         else snprintf(path, sizeof path, "build/pass_%03d.png", debug_pass_no++);
-        renderer_save_texture_tex(st.rt.color[0]->backend, path);
-        for (int i = 1; i < st.rt.ncolor && !multi; i++)  // (the other color targets: build/pass_NNN_c<i>.png)
-            if (st.rt.color[i] && st.rt.color[i]->backend) {
+        renderer_save_texture_tex(pass_rt[0]->backend, path);
+        for (int i = 1; i < 8 && !multi; i++)  // (the other color targets: build/pass_NNN_c<i>.png)
+            if (pass_rt[i] && pass_rt[i]->backend) {
                 snprintf(path, sizeof path, "build/pass_%03d_c%d.png", debug_pass_no - 1, i);
-                renderer_save_texture_tex(st.rt.color[i]->backend, path);
+                renderer_save_texture_tex(pass_rt[i]->backend, path);
             }
     }
 }
@@ -940,6 +941,9 @@ static void begin_pass(void) {
                 t0 ? t0->format : 0, st.rt.depth ? "yes" : "no");
     }
     VkRenderingAttachmentInfo ca[8], da = {0}, sa = {0};
+    for (int i = 0; i < 8; i++) pass_rt[i] = i < st.rt.ncolor ? st.rt.color[i] : NULL;
+    for (int i = 0; i < 8 && !pass_rt[0]; i++) if (pass_rt[i]) { pass_rt[0] = pass_rt[i]; pass_rt[i] = NULL; }  // (slot 0 empty)
+    pass_rt[8] = st.rt.depth;
     uint32_t w = 0, minw = UINT32_MAX, minh = UINT32_MAX;  // w: first attachment seen
     uint32_t layers = 1;  // a 3D color target: all its slices (vk_view's 2D-array render view)
     pass_ncolor = (uint32_t)st.rt.ncolor;
@@ -1439,6 +1443,11 @@ static void translate_program(void *arg) {
         {
             snprintf(path, sizeof path, "%s/%llx_fs.glsl", getenv("LARECOMP_GLSL_OVERRIDE_DIR"), (unsigned long long)p->code[1]);
             f = fopen(path, "rb");
+            if (!f && p->code[1]) {  // or h<fs hash>_fs.glsl: the hash the draw logs print, stable between runs
+                extern uint64_t vk_fs_hash(uint64_t fs);
+                snprintf(path, sizeof path, "%s/h%016llx_fs.glsl", getenv("LARECOMP_GLSL_OVERRIDE_DIR"), (unsigned long long)vk_fs_hash(p->code[1]));
+                f = fopen(path, "rb");
+            }
             if (f) {
                 fseek(f, 0, SEEK_END);
                 long n = ftell(f);
@@ -1453,6 +1462,13 @@ static void translate_program(void *arg) {
     p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
     save_glsl(p->vi->msl, p->code[0], "vs");
     save_glsl(p->fi->msl, p->code[1], "fs");
+    if (getenv("LARECOMP_SAVE_MSL") && p->code[1]) {  // (and by the stable hash: build/glsl/h<hash>_fs.glsl, what overrides match)
+        extern uint64_t vk_fs_hash(uint64_t fs);
+        char path[96];
+        snprintf(path, sizeof path, "build/glsl/h%016llx_fs.glsl", (unsigned long long)vk_fs_hash(p->code[1]));
+        FILE *f = fopen(path, "w");
+        if (f) { fputs(p->fi->msl, f); fclose(f); }
+    }
     compile_program(p);  // (this worker: queued again it would wait behind the other translations)
 }
 
@@ -1505,6 +1521,7 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= vb[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->img_kind[i]; h *= 0x100000001B3ull; }
+    for (int i = 0; i < 4; i++) { h ^= (fkey->tex_stencil >> (8 * i)) & 0xFF; h *= 0x100000001B3ull; }
     if (!h) h = 1;
     uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
     for (int probe = 0; prog_tab[slot].key && prog_tab[slot].key != h; probe++) {
@@ -1727,6 +1744,21 @@ static void image_kinds(int stage, uint8_t kind[8]) {
     }
 }
 
+// The texture slots of a stage bound to a depth-stencil texture in stencil mode (ShaderKey.tex_stencil: usampler)
+static uint32_t stencil_slots(int stage) {
+    uint32_t m = 0;
+    for (int i = 0; i < 32; i++) {
+        uint64_t h = st.tex[stage][i];
+        uint32_t tic = h & 0xFFFFF;
+        if (!h || !st.tpool || tic >= (uint32_t)st.tpool->count) continue;
+        NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
+        if (!e->tex || !renderer_format_is_depth(e->tex->format)) continue;
+        uint32_t dsm = e->has_view && (e->view.setmask & 16) ? e->view.ds_mode : e->tex->ds_mode;
+        if (dsm == 1) m |= 1u << i;
+    }
+    return m;
+}
+
 // ================================================================== graphics pipelines
 // Everything a pipeline bakes in, captured by value so it can be built on a worker thread.
 #define ZERO_BINDING 16
@@ -1760,6 +1792,7 @@ static uint64_t hmix(uint64_t h, const void *p, size_t n) {
     for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
     return h;
 }
+uint64_t vk_fs_hash(uint64_t fs) { return hmix(1469598103934665603ull, (const void *)(uintptr_t)(fs + 0x30), 0x200); }
 
 static VkPrimitiveTopology topo_class_base(uint8_t c) {
     return c == 0 ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST : c == 1 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -1952,13 +1985,17 @@ static TexBackend *snapshot_image(NvnTexture *t, TexBackend *src) {
 }
 
 // (debug frames) a depth image's depth values as a greyscale PGM, stretched over its own min..max
-static void debug_save_depth(TexBackend *b, const char *path) {
-    if (!b || !b->image || !(b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) || b->format != VK_FORMAT_D32_SFLOAT_S8_UINT) return;
+static void debug_save_depth_layer(TexBackend *b, const char *path, uint32_t layer) {
+    if (!b || !b->image || !(b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) ||
+        (b->format != VK_FORMAT_D32_SFLOAT_S8_UINT && b->format != VK_FORMAT_D32_SFLOAT) || layer >= b->layers) {
+        if (b) LOG("[vk] depth dump %s skipped: fmt %d aspect %#x layers %u\n", path, b->format, b->aspect, b->layers);
+        return;
+    }
     uint64_t n = (uint64_t)b->width * b->height;
     VkSpan out = vk_readback(n * 4);
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
-    VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1},
+    VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, layer, 1},
                            .imageExtent = {b->width, b->height, 1}};
     vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
     renderer_flush();
@@ -1970,7 +2007,39 @@ static void debug_save_depth(TexBackend *b, const char *path) {
     fprintf(f, "P5 %u %u 255\n", b->width, b->height);
     for (uint64_t i = 0; i < n; i++) fputc(hi > lo ? (int)((d[i] - lo) / (hi - lo) * 255.0f) : 0, f);
     fclose(f);
+    char raw[300];
+    snprintf(raw, sizeof raw, "%s.f32", path);  // (the floats as they are)
+    if ((f = fopen(raw, "wb"))) { fwrite(d, 4, n, f); fclose(f); }
     LOG("[vk] saved %s (%ux%u depth %.6f..%.6f)\n", path, b->width, b->height, lo, hi);
+}
+static void debug_save_depth(TexBackend *b, const char *path) { debug_save_depth_layer(b, path, 0); }
+void vk_debug_save_r8_layers(TexBackend *b, const char *base) {  // (frame dumps: R8_UINT textures as sampled, raw .pgm)
+    if (!b || !b->image || b->format != VK_FORMAT_R8_UINT) return;
+    uint64_t n = (uint64_t)b->width * b->height;
+    for (uint32_t l = 0; l < b->layers && l < 8; l++) {
+        VkSpan out = vk_readback(n);
+        VkCommandBuffer cb = vk_cmd();
+        vk_full_barrier(cb);
+        VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, l, 1},
+                               .imageExtent = {b->width, b->height, 1}};
+        vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
+        renderer_flush();
+        char path[256];
+        snprintf(path, sizeof path, "%s_l%u.pgm", base, l);
+        FILE *f = fopen(path, "wb");
+        if (!f) continue;
+        fprintf(f, "P5 %u %u 255\n", b->width, b->height);
+        fwrite(out.ptr, 1, n, f);
+        fclose(f);
+        LOG("[vk] saved %s (R8UI)\n", path);
+    }
+}
+void vk_debug_save_depth_layers(TexBackend *b, const char *base) {  // (frame dumps: every layer of a pass's depth target)
+    char path[256];
+    for (uint32_t l = 0; b && l < b->layers && l < 8; l++) {
+        snprintf(path, sizeof path, "%s_l%u.pgm", base, l);
+        debug_save_depth_layer(b, path, l);
+    }
 }
 
 static void resolve_feedback(Prog *pr) {
@@ -2315,6 +2384,28 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
         }
     }
     if (h && st.spool && tsc < (uint32_t)st.spool->count) smp = vk_sampler(&((NvnSamplerDesc *)st.spool->entries)[tsc]);
+    static int dump_sampled = -1;  // LARECOMP_DUMP_SAMPLED=1 (with the frame dump): depth / R8UI / G-buffer textures as sampled
+    if (dump_sampled < 0) dump_sampled = getenv("LARECOMP_DUMP_SAMPLED") != NULL;  // (its readbacks split the frame's passes)
+    if (dump_sampled && g_debug_frame && h && st.tpool && tic < (uint32_t)st.tpool->count) {
+        NvnTexture *dt = ((NvnTexEntry *)st.tpool->entries)[tic].tex;
+        static uint32_t done[64]; static int ndone;
+        bool seen = false;
+        for (int k = 0; k < ndone; k++) seen |= done[k] == tic;
+        if (dt && dt->backend && (renderer_format_is_depth(dt->format) || dt->format == 0x3) && !seen && ndone < 64) {
+            extern void vk_debug_save_depth_layers(TexBackend *b, const char *base);
+            extern void vk_debug_save_r8_layers(TexBackend *b, const char *base);
+            char base[64];
+            done[ndone++] = tic;
+            snprintf(base, sizeof base, "build/sampled_tex%u", tic);
+            if (dt->format == 0x3) vk_debug_save_r8_layers(dt->backend, base);
+            else vk_debug_save_depth_layers(dt->backend, base);
+        } else if (dt && dt->backend && !seen && ndone < 64 && dt->width >= 900 && (dt->format == 0x25 || dt->format == 0x38 || dt->format == 0x3f)) {
+            char path[64];  // (the G-buffer as sampled)
+            done[ndone++] = tic;
+            snprintf(path, sizeof path, "build/sampled_tex%u_f%x.png", tic, dt->format);
+            renderer_save_texture_tex(dt->backend, path);
+        }
+    }
     if (g_debug_frame && h && st.spool && tsc < (uint32_t)st.spool->count) {
         const NvnSamplerDesc *sd = &((NvnSamplerDesc *)st.spool->entries)[tsc];
         LOG("[draw]   sampler %u (tex %u): min %u mag %u wrap %u/%u lod %.2f..%.2f bias %.2f aniso %.1f\n", tsc, tic, sd->min_filter,
@@ -2705,6 +2796,8 @@ static void draw_(CmdRec *r, bool indexed) {
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
     image_kinds(0, vkey.img_kind);
     image_kinds(1, fkey.img_kind);
+    vkey.tex_stencil = stencil_slots(0);
+    fkey.tex_stencil = stencil_slots(1);
     Prog *pr = get_program(st.program, &vkey, &fkey);
     if (pr) wait_built(&pr->state);
     if (!pr || atomic_load(&pr->state) != 1) {

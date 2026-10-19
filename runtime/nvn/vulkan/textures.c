@@ -80,7 +80,7 @@ static VkFmt fmt_of(uint32_t f) {
     case 0x48: return (VkFmt){VK_FORMAT_BC3_SRGB_BLOCK};
     case 0x49: return (VkFmt){VK_FORMAT_BC4_UNORM_BLOCK};
     case 0x4A: return (VkFmt){VK_FORMAT_BC4_SNORM_BLOCK};
-    case 0x4B: return (VkFmt){VK_FORMAT_BC5_UNORM_BLOCK};
+    case 0x4B: return (VkFmt){getenv("LARECOMP_BC5_SNORM_TEST") ? VK_FORMAT_BC5_SNORM_BLOCK : VK_FORMAT_BC5_UNORM_BLOCK};
     // 0x4C = signed RGTC2; LARECOMP_BC5_UNORM=1 decodes it unsigned (see metal.m / notes/PLAN.md)
     case 0x4C: return (VkFmt){getenv("LARECOMP_BC5_UNORM") ? VK_FORMAT_BC5_UNORM_BLOCK : VK_FORMAT_BC5_SNORM_BLOCK};
     case 0x4D: return (VkFmt){VK_FORMAT_BC7_UNORM_BLOCK};
@@ -760,6 +760,10 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
         return vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, fmt, lv0, 1, ly0, 1, IDENTITY, b->aspect);
     }
     VkImageAspectFlags aspect = b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : b->aspect;
+    // NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL (the view's, else the texture's): the stencil (Z-A's lighting reads its
+    // material bits from the scene's stencil; taken as depth, the bits of a float made stripes on every surface)
+    uint32_t dsm = v && (v->setmask & 16) ? v->ds_mode : t->ds_mode;
+    if (dsm == 1 && (b->aspect & VK_IMAGE_ASPECT_STENCIL_BIT)) aspect = VK_IMAGE_ASPECT_STENCIL_BIT;
     VkComponentMapping sw = IDENTITY;
     if (!(b->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) && b->samples == 1) {
         const uint8_t *s = v && (v->setmask & 8) ? v->swizzle : t->swizzle;

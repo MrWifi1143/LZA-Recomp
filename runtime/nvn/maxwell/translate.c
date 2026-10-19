@@ -489,6 +489,8 @@ static int tex_slot(Ctx *c, uint32_t index, int type, bool shadow, bool array) {
     c->tex_weak[s] = weak;
     ShaderTexture *t = &c->info->tex[s];
     t->handle_offset = index * 4;
+    int nslot = ((int)index * 4 - 0x20) / 8;
+    t->stencil = c->glsl && c->key && nslot >= 0 && nslot < 32 && (c->key->tex_stencil >> nslot & 1);
     t->type = (uint8_t)type;
     t->shadow = shadow;
     t->is_array = array;
@@ -509,8 +511,8 @@ static const char *tex_type_name(int t) {
 
 // Write texture results: component mask selects which of r,g,b,a go to consecutive registers.
 static void write_tex_result(Ctx *c, int slot, const char *call, uint32_t mask, int d0, int d1, bool texs, bool f16) {
-    sp(&c->body, "    { float4 t = %s;\n", call);
-    (void)slot;
+    // (a stencil view: integer results, the stencil value in .x - which the game takes as is, e.g. material bits)
+    sp(&c->body, "    { %s t = %s;\n", slot >= 0 && slot < c->info->ntex && c->info->tex[slot].stencil ? "uint4" : "float4", call);
     if (f16) {
         // TEXS/TLDS .F16: components (in mask order) packed as half pairs into d0 (lo, hi) and d1 (lo, hi)
         int comps[4], n = 0;
@@ -2052,6 +2054,11 @@ static const char *glsl_sampler_type(const ShaderTexture *t) {
         {"samplerCube", "samplerCubeShadow"}, {"sampler2DArray", "sampler2DArrayShadow"},
         {"samplerCubeArray", "samplerCubeArrayShadow"}, {"sampler1DArray", "sampler1DArrayShadow"}};
     int ty = t->type <= TEXTYPE_1D_ARRAY ? t->type : TEXTYPE_2D;
+    if (t->stencil) {
+        static const char *const unames[] = {"usampler1D", "usampler2D", "usampler3D", "usamplerCube", "usampler2DArray",
+                                             "usamplerCubeArray", "usampler1DArray"};
+        return unames[ty];
+    }
     return names[ty][t->shadow ? 1 : 0];
 }
 
@@ -2146,8 +2153,13 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
             if (c->out_attr_mask & (1u << i)) sp(&s, "  v%d = vec4(0, 0, 0, 1);\n", i);
         if (info->writes_point_size) sp(&s, "  gl_PointSize = 0.0f;\n");
     }
+    // LARECOMP_VK_PRECISE=1 (research): `precise` registers - no contraction. Maxwell rounds FMUL and FADD separately
+    // (FFMA, emitted as fma(), is the fused one); a compiler fusing a*b + c rounds once, an ulp apart. No game needed it
+    // so far (Z-A's stripes were its stencil read as depth), and it costs the compiler freedom.
+    static int noprec = -1;
+    if (noprec < 0) noprec = getenv("LARECOMP_VK_PRECISE") == NULL;
     for (int i = 0; i < 256; i++)
-        if (c->reg_used[i]) sp(&s, "  uint r%d = 0u;\n", i);
+        if (c->reg_used[i]) sp(&s, "  %suint r%d = 0u;\n", noprec ? "" : "precise ", i);
     for (int i = 0; i < 7; i++)
         if (c->pred_used[i]) sp(&s, "  bool p%d = false;\n", i);
     if (c->uses_cc) sp(&s, "  uint cc = 0u; bool ccz = false, ccs = false;\n");
