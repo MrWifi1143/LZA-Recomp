@@ -690,6 +690,10 @@ static void set_shaders(Cpu *c, int stride) {
         p->stages[stage].const_offset = *(const uint32_t *)(control + 0x700);
         p->stages[stage].const_size = *(const uint32_t *)(control + 0x6FC);
         p->stages[stage].content_hash = shader_content_hash(&p->stages[stage]);
+        if (stage <= 1) {  // (a container not seen yet: all its programs compiled ahead of their draws, runtime/nvn/vulkan/warmup.c)
+            extern void warmup_capture(uint64_t control);
+            warmup_capture((uint64_t)(uintptr_t)control);
+        }
         p->stage_mask |= 1u << stage;
         if (stage == 0) {
             // Transform feedback layout (GLSLC control section, worked out on PLA's skinning shader: 0x20.. 0x22 at
