@@ -49,12 +49,15 @@ typedef struct {
     uint8_t xfb_count[4];   // vertex: transform feedback capture (exec.c): components per buffer, 0 = none
     uint16_t xfb_stride[4]; //   and the buffers' strides in bytes
     uint8_t img_kind[8];    // images bound per NVN slot: 0 float, 1 signed int, 2 unsigned int (the GLSL image type)
+    uint32_t tex_stencil;   // NVN texture slots (bit i: handle at 0x20 + 8 * i) bound to a depth-stencil texture in
+                            // stencil mode: read as unsigned integers (usampler)
 } ShaderKey;
 
 typedef struct {
     uint32_t handle_offset;  // byte offset of the texture handle in the bound texture cbuf
     uint8_t type;            // TEXTYPE_*
     bool shadow, is_array, is_image, bindless;
+    bool stencil;            // a depth-stencil texture's stencil (key->tex_stencil): usampler, integer results
     uint32_t bindless_cbuf, bindless_offset;
 } ShaderTexture;
 
