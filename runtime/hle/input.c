@@ -521,7 +521,8 @@ static void fill_state(Cpu *c) {
         LOG("[input] watching controller object %llx\n", c->x[1] - 8);
     }
     bool menu = menu_input_captured();  // the overlay menu / name entry has the controls (typing there isn't for the game)
-    const uint64_t zr = 1ull << BTN_ZR;  // (the controller's ZR is its finger on the touch screen: pad_finger)
+    bool input_pad_finger_on(void);
+    const uint64_t zr = input_pad_finger_on() ? 1ull << BTN_ZR : 0;  // (with the finger on, the controller's ZR touches)
     uint64_t b = menu ? script_buttons & ~zr : key_buttons | ((pad_buttons | script_buttons) & ~zr) | mouse_buttons;
     {   // injected Plus: held for ~10 presented frames (the game polls several times per frame)
         extern uint64_t renderer_game_frame(void);
@@ -645,11 +646,18 @@ static bool touch_now(int32_t *x, int32_t *y) {
 }
 // The controller as a finger (a controller has no touch screen, and Play with Eevee pets with one): the right stick
 // moves it over the screen - the overlay draws it (runtime/ui/menu.mm) - and ZR held touches there. ZR then doesn't
-// reach the game (fill_state; there it only repeats A).
+// reach the game (fill_state; in Let's Go it only repeats A). Off by default: PLA uses ZR (throwing) and the right
+// stick (camera). LARECOMP_PAD_FINGER=1 turns it on.
+bool input_pad_finger_on(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_PAD_FINGER") && atoi(getenv("LARECOMP_PAD_FINGER")) != 0;
+    return on;
+}
 static double finger_x = 960, finger_y = 540;
 static _Atomic uint64_t finger_seen_ns;
 static _Atomic int finger_down;
 static bool pad_finger(int32_t *x, int32_t *y) {
+    if (!input_pad_finger_on()) return false;
     static uint64_t last;
     uint64_t now = SDL_GetTicksNS();
     double dt = last ? (now - last) / 1e9 : 0;
