@@ -2280,7 +2280,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     return info;
 }
 
-ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, const ShaderKey *key) {
+static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, int stage, const ShaderKey *key) {
     ShaderInfo *info = calloc(1, sizeof *info);
     info->stage = stage;
     Ctx *c = calloc(1, sizeof *c);
@@ -2520,6 +2520,81 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     info->out_mask = stage == STAGE_FRAGMENT ? c->omap_target : c->out_attr_mask;
     free(c->body.buf);
     free(c);
+    return info;
+}
+
+// ---- Translation disk cache: cache/xlat/<hash>.bin, the translated program (GLSL / MSL and what it reads) by its
+// code, header, key and stage, so a shader seen before costs a file read instead of a translation - with the SPIR-V
+// and pipeline caches after it, a known shader no longer holds its draws back for a frame (the pop-in on known
+// ground). A rebuilt translator starts a new cache (the build time is in the hash); off with LARECOMP_NO_XLAT_CACHE=1
+// and while a switch that changes the output is set.
+#include <sys/stat.h>
+static const char k_xlat_build[] = __DATE__ " " __TIME__;
+
+static uint64_t xfnv(const void *p, size_t n, uint64_t h) {
+    const uint8_t *b = p;
+    for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 0x100000001b3ull;
+    return h;
+}
+
+// the bytes translate_impl reads: up to the end of the code as it finds it
+static size_t program_len(const uint8_t *blob, size_t max_size, int stage) {
+    size_t off = stage == STAGE_COMPUTE ? (max_size > 0x100 && *(const uint32_t *)blob == 0x12345679u ? 0x100 : 0) : 0x80;
+    if (max_size <= off) return max_size;
+    size_t n = (max_size - off) / 8, end = 0;
+    if (n > 65536) n = 65536;
+    for (size_t i = 0; i < n; i++) {
+        uint64_t w = ((const uint64_t *)(blob + off))[i];
+        if (i % 4 == 0) continue;
+        if ((w & 0xfff0000000000000ull) == 0xe240000000000000ull && sbits(w, 20, 24) == -8 && end) break;
+        if (w == 0 && i > 4) break;
+        end = i + 1;
+    }
+    return off + end * 8;
+}
+
+ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, const ShaderKey *key) {
+    static int off = -1;
+    if (off < 0)
+        off = getenv("LARECOMP_NO_XLAT_CACHE") || getenv("LARECOMP_NO_DISCARD") || getenv("LARECOMP_VK_EXACT_H2F") ||
+              getenv("LARECOMP_VK_PRECISE") || getenv("LARECOMP_SAVE_MSL") || getenv("LARECOMP_DUMP_FAILED_SHADERS");
+    if (off || maxwell_dbg_code || !key) return translate_impl(blob, max_size, stage, key);
+    uint64_t h = xfnv(k_xlat_build, sizeof k_xlat_build, 0xcbf29ce484222325ull ^ (uint64_t)stage);
+    h = xfnv(key, sizeof *key, h);
+    h = xfnv(blob, program_len(blob, max_size, stage), h);
+    char path[64];
+    snprintf(path, sizeof path, "cache/xlat/%016llx.bin", (unsigned long long)h);
+    FILE *f = fopen(path, "rb");
+    if (f) {
+        uint32_t hdr[2] = {0}, len = 0;
+        ShaderInfo *info = malloc(sizeof *info);
+        bool ok = fread(hdr, 4, 2, f) == 2 && hdr[0] == 0x31544c58 && hdr[1] == sizeof *info && fread(info, sizeof *info, 1, f) == 1 &&
+                  fread(&len, 4, 1, f) == 1 && len < (16u << 20);
+        if (ok && (info->msl = malloc(len + 1)) && fread(info->msl, 1, len, f) == len) {
+            info->msl[len] = 0;
+            fclose(f);
+            return info;
+        }
+        if (ok) free(info->msl);
+        free(info);
+        fclose(f);
+    }
+    ShaderInfo *info = translate_impl(blob, max_size, stage, key);
+    if (info && info->msl) {
+        static int made;
+        if (!made) made = 1, mkdir("cache", 0755), mkdir("cache/xlat", 0755);
+        char tmp[96];
+        snprintf(tmp, sizeof tmp, "%s.%llx", path, (unsigned long long)(uintptr_t)info);
+        if ((f = fopen(tmp, "wb"))) {
+            uint32_t hdr[2] = {0x31544c58, sizeof *info}, len = (uint32_t)strlen(info->msl);
+            ShaderInfo copy = *info;
+            copy.msl = NULL;
+            bool ok = fwrite(hdr, 4, 2, f) == 2 && fwrite(&copy, sizeof copy, 1, f) == 1 && fwrite(&len, 4, 1, f) == 1 &&
+                      fwrite(info->msl, 1, len, f) == len;
+            fclose(f);
+            if (!ok || rename(tmp, path) != 0) remove(tmp);
+        }
+    }
     return info;
 }
 
