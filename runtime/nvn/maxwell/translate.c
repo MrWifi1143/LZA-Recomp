@@ -998,6 +998,43 @@ static void emit_surface(Ctx *c, uint64_t w, uint32_t pc, bool red, bool bindles
     c->info->gmem_stores = true;  // (the shader writes memory: keep it, as for STG)
 }
 
+// ATOM (result to d) / RED (no result): a 32-bit atomic on global memory at [Ra (+ Ra + 1 with .E) + imm20]. Sizes
+// U32 / S32 / F32 (add); ops add, min, max, inc, dec, and, or, xor, exch. GLSL atomics where they match, else a
+// compare-and-swap loop (signed min / max, the wrapping inc / dec, float add). 64-bit forms: not translated.
+static void emit_gatomic(Ctx *c, uint64_t w, bool red) {
+    if (!c->glsl) { fail(c, "global atomic (MSL)"); return; }
+    int a = (int)bits(w, 8, 8), d = red ? RZ : (int)bits(w, 0, 8), b = red ? (int)bits(w, 0, 8) : (int)bits(w, 20, 8);
+    int size = red ? (int)bits(w, 20, 3) : (int)bits(w, 49, 3), op = red ? (int)bits(w, 23, 3) : (int)bits(w, 52, 4);
+    bool wide = bits(w, 48, 1);
+    int64_t off = sbits(w, 28, 20);
+    if (size == 2 || size >= 4 || op > 8 || (size == 3 && op != 0)) { fail(c, "global atomic size %d op %d", size, op); return; }
+    c->info->uses_gmem = true;
+    c->uses_gmem_store = true;
+    c->info->gmem_stores = true;
+    char addr[256];
+    if (a == RZ) sprintf(addr, "ulong(%lld)", (long long)off);
+    else if (wide) sprintf(addr, "((ulong(%s) << 32 | ulong(%s)) + ulong(%lld))", R(a + 1), R(a), (long long)off);
+    else sprintf(addr, "(ulong(%s) + ulong(%lld))", R(a), (long long)off);
+    const char *v = R(b);
+    sp(&c->body, "    { ulong ga = %s - 0x%llxul; bool ok = ga < 0x%llxul; uint wi = uint(ga >> 2); uint av = %s, old = 0u;\n", addr,
+       (unsigned long long)maxwell_gmem_base, (unsigned long long)maxwell_gmem_size, v);
+    static const char *const direct[9] = {"atomicAdd", "atomicMin", "atomicMax", NULL, NULL, "atomicAnd", "atomicOr", "atomicXor",
+                                          "atomicExchange"};
+    const char *nv = NULL;  // the new value from `prev` (CAS loop)
+    if (size == 3) nv = "floatBitsToUint(uintBitsToFloat(prev) + uintBitsToFloat(av))";
+    else if (size == 1 && op == 1) nv = "uint(min(int(prev), int(av)))";
+    else if (size == 1 && op == 2) nv = "uint(max(int(prev), int(av)))";
+    else if (op == 3) nv = "(prev >= av ? 0u : prev + 1u)";
+    else if (op == 4) nv = "((prev == 0u || prev > av) ? av : prev - 1u)";
+    if (nv)
+        sp(&c->body, "      if (ok) { uint cur = gmem_.w[wi], prev; do { prev = cur; cur = atomicCompSwap(gmem_.w[wi], prev, %s); } "
+                     "while (cur != prev); old = prev; }\n", nv);
+    else
+        sp(&c->body, "      if (ok) old = %s(gmem_.w[wi], av);\n", direct[op]);
+    if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = old;\n", d); }
+    sp(&c->body, "    }\n");
+}
+
 static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     char t[2048], u[2048];
     int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8);
@@ -1681,6 +1718,10 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         else sprintf(t, "uint((v << s) >> 32)");
         if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = %s;\n", d, t); }
         sp(&c->body, "    }\n");
+    } else if (OPM(0xed00000000000000ull, 0xff00000000000000ull)) {  // ATOM (global)
+        emit_gatomic(c, w, false);
+    } else if (OPM(0xebf8000000000000ull, 0xfff8000000000000ull)) {  // RED (global)
+        emit_gatomic(c, w, true);
     } else if (OPM(0xeed0000000000000ull, 0xfff8000000000000ull) || OPM(0xeed8000000000000ull, 0xfff8000000000000ull)) {  // LDG / STG
         bool store = bits(w, 51, 1);
         bool wide = bits(w, 45, 1);
@@ -1739,6 +1780,17 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         }
         sp(&c->body, "    }\n");
     } else if (emit_half(c, w)) {
+    } else if (OPM(0x50d8000000000000ull, 0xfff8000000000000ull)) {  // VOTE (.ALL / .ANY / .EQ): predicate, ballot
+        if (!c->glsl) { fail(c, "vote (MSL)"); return; }
+        int d = (int)bits(w, 0, 8), sp_ = (int)bits(w, 39, 3), vp = (int)bits(w, 45, 3), mode = (int)bits(w, 48, 2);
+        bool spn = bits(w, 42, 1);
+        static const char *const fn[3] = {"subgroupAll", "subgroupAny", "subgroupAllEqual"};
+        if (mode > 2) { fail(c, "vote mode %d", mode); return; }
+        const char *src = P(sp_, spn);
+        sp(&c->body, "    { bool vsrc = %s;\n", src);
+        if (vp != PT) { c->pred_used[vp] = 1; sp(&c->body, "      p%d = %s(vsrc);\n", vp, fn[mode]); }
+        if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = subgroupBallot(vsrc).x;\n", d); }
+        sp(&c->body, "    }\n");
     } else if (OPM(0x50f8000000000000ull, 0xfff8000000000000ull)) {  // FSWZADD
         // per quad lane (laneid & 3), 2 bits of the swizzle pick: a+b, b-a, a-b, b
         uint32_t swz = (uint32_t)bits(w, 28, 8);
@@ -1983,6 +2035,8 @@ static const char glsl_prelude[] =
     "#extension GL_KHR_shader_subgroup_basic : require\n"
     "#extension GL_KHR_shader_subgroup_shuffle : require\n"
     "#extension GL_KHR_shader_subgroup_shuffle_relative : require\n"
+    "#extension GL_KHR_shader_subgroup_vote : require\n"
+    "#extension GL_KHR_shader_subgroup_ballot : require\n"
     "#extension GL_EXT_texture_shadow_lod : require\n"
     "#extension GL_ARB_shader_draw_parameters : require\n"
     "#extension GL_ARB_shader_viewport_layer_array : require\n"  // (gl_Layer from the vertex shader: 3D / layered targets)
