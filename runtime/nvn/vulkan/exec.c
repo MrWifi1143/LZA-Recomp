@@ -66,6 +66,8 @@ static Sub subs[SUBS];
 static int cur_sub;
 static uint64_t submit_seq;  // last submitted
 static pthread_mutex_t seq_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t seq_cond = PTHREAD_COND_INITIALIZER;  // (submit_seq advanced: renderer_wait_seq)
+static int g_submit_req;  // a thread waits for work not submitted yet: the render thread submits after its job
 static bool in_pass;
 
 uint64_t vk_completed_seq(void) {
@@ -253,6 +255,7 @@ void vk_gpuprof_report(void) {
 }
 
 static void ring_flush_gpu(void);
+static uint64_t submit_draws;  // g_draws_total at the last submission (backend_execute's batching)
 // Submit the pending work (if any). wait/signal: binary semaphores for presentation (may be null).
 void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra) {
     (void)extra;
@@ -294,7 +297,9 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     pthread_mutex_lock(&seq_lock);
     submit_seq++;
     cur_sub = (cur_sub + 1) % SUBS;
+    pthread_cond_broadcast(&seq_cond);
     pthread_mutex_unlock(&seq_lock);
+    submit_draws = g_draws_total;
     stat_flushes++;
     cum_submits++;
     ring_retire();
@@ -302,18 +307,15 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
 }
 
 void renderer_submit(void) { vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE); }
+void renderer_wait_seq(uint64_t seq);
+uint64_t renderer_fence_seq(void);
 
 void renderer_flush(void) {
     renderer_submit();
     vk_wait_seq(submit_seq);
 }
 
-void renderer_sync(void) {
-    pthread_mutex_lock(&seq_lock);
-    uint64_t s = submit_seq;
-    pthread_mutex_unlock(&seq_lock);
-    vk_wait_seq(s);
-}
+void renderer_sync(void) { renderer_wait_seq(renderer_fence_seq()); }  // (the pending submission too: batched lists)
 
 uint64_t renderer_fence_seq(void) {
     pthread_mutex_lock(&seq_lock);
@@ -326,12 +328,33 @@ uint64_t renderer_fence_seq(void) {
     return q;
 }
 
+// The render thread batches command lists into one submission (backend_execute): a fence of the one being filled is
+// waited for by asking it to submit (after its current job; before it sleeps it always does) and waiting for that.
 void renderer_wait_seq(uint64_t seq) {
     if (!seq) return;
     pthread_mutex_lock(&seq_lock);
+    if (seq > submit_seq && rt_active() && !rt_on_render_thread()) {
+        __atomic_store_n(&g_submit_req, 1, __ATOMIC_RELEASE);
+        extern void rt_wake(void);
+        pthread_mutex_unlock(&seq_lock);
+        rt_wake();
+        pthread_mutex_lock(&seq_lock);
+        while (seq > submit_seq && !g_rt_unwind) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_nsec += 5000000;
+            if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+            pthread_cond_timedwait(&seq_cond, &seq_lock, &ts);
+        }
+    }
     uint64_t s = submit_seq;
     pthread_mutex_unlock(&seq_lock);
-    vk_wait_seq(seq > s ? s : seq);  // not submitted yet (other thread): everything submitted so far
+    vk_wait_seq(seq > s ? s : seq);
+}
+
+// Render thread, between jobs: submit now if a thread waits for the pending work (renderer_wait_seq) or the queue is empty
+void renderer_submit_if_needed(bool idle) {
+    if (__atomic_exchange_n(&g_submit_req, 0, __ATOMIC_ACQ_REL) || idle) renderer_submit();
 }
 
 VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
@@ -4300,6 +4323,16 @@ static void exec_list(uint64_t handle, int depth) {
     }
 }
 
+// One submission per command list cost Legends: Arceus ~50 vkQueueSubmits a frame (each with its upload buffer,
+// barrier and timeline signal). With the render thread, lists queued back to back share one, up to ~2000 draws (the GPU
+// starts on the first part while the rest is recorded); the render thread submits when its queue runs empty and when a
+// thread waits for the work (renderer_wait_seq). LARECOMP_VK_BATCH=0: one per list.
+static bool batch_lists(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_VK_BATCH") ? atoi(getenv("LARECOMP_VK_BATCH")) != 0 : 1;
+    return on;
+}
+
 void backend_execute(uint64_t handle) {
     if (ENV("LARECOMP_EXP_NOEXEC")) return;  // (research: the game's chain without the backend's work; the picture stays blank)
     PROF_T0();
@@ -4310,7 +4343,7 @@ void backend_execute(uint64_t handle) {
     static int sync_submit = -1;
     if (sync_submit < 0) sync_submit = getenv("LARECOMP_SYNC_SUBMIT") ? 1 : 0;
     if (sync_submit) renderer_flush();
-    else renderer_submit();
+    else if (!batch_lists() || !rt_on_render_thread() || !rt_more_queued() || g_draws_total - submit_draws >= 2000) renderer_submit();
 }
 
 // ================================================================== frame interpolation (prototype)

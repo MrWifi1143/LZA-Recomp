@@ -403,6 +403,10 @@ static Frame cur_frame;
 // nothing to draw into (minimised window).
 bool vk_frame_begin(const float clear[4]) {
     cur_frame.ok = false;
+    // The frame's batched lists (exec.c backend_execute) go now: in the present's submission they would wait for the
+    // window image (its acquire semaphore), and the GPU can run them while the acquire blocks
+    extern void renderer_submit(void);
+    renderer_submit();
     int w, h;
     SDL_GetWindowSizeInPixels(window, &w, &h);
     if (!w || !h) return false;  // minimised

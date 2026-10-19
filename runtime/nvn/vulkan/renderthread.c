@@ -31,6 +31,7 @@ uint64_t renderer_present_count(void);             // device.c: presents shown
 void input_frame(uint64_t frame);                  // hle/input.c
 void fnprof_frame(uint64_t frame);                 // fnprof.c
 void reboot_test_frame(uint64_t frame);            // main.c
+void renderer_submit_if_needed(bool idle);         // exec.c
 
 enum { RJ_EXEC, RJ_PRESENT, RJ_CALL };
 typedef struct {
@@ -84,17 +85,38 @@ static void run(Job *j) {
     }
 }
 
+// More jobs queued after the one running (backend_execute: batch the next list into the same submission)
+bool rt_more_queued(void) { return __atomic_load_n(&qtail, __ATOMIC_RELAXED) - __atomic_load_n(&qhead, __ATOMIC_RELAXED) > 1; }
+
+// A thread waits for the pending submission (exec.c renderer_wait_seq): wake the render thread if it sleeps
+void rt_wake(void) {
+    pthread_mutex_lock(&lk);
+    pthread_cond_signal(&c_work);
+    pthread_mutex_unlock(&lk);
+}
+
 static void *render_main(void *arg) {
     (void)arg;
+    uint64_t idle_seq = 0;  // renderer_fence_seq when the queue last ran empty with everything submitted
     on_render_thread = true;
     crash_handler_install();
     pthread_mutex_lock(&lk);
     for (;;) {
-        while (qhead == qtail) pthread_cond_wait(&c_work, &lk);
+        while (qhead == qtail) {
+            if (renderer_fence_seq() > idle_seq) {  // (lists batched into the pending submission: backend_execute)
+                pthread_mutex_unlock(&lk);
+                renderer_submit_if_needed(true);
+                pthread_mutex_lock(&lk);
+                idle_seq = renderer_fence_seq();
+                continue;
+            }
+            pthread_cond_wait(&c_work, &lk);
+        }
         Job j = queue[qhead % QN];
         busy = true;
         pthread_mutex_unlock(&lk);
         if (!dropping || j.kind == RJ_CALL) run(&j);  // (a reboot drops queued lists and presents, never a caller's call)
+        renderer_submit_if_needed(false);
         uint64_t seq = renderer_fence_seq();
         pthread_mutex_lock(&lk);
         qhead++;
