@@ -1836,8 +1836,20 @@ static const char glsl_prelude[] =
     "uint bfe_u(uint v, uint ctl) { uint pos = ctl & 0xFFu, len = (ctl >> 8) & 0xFFu; if (len == 0u) return 0u; if (pos >= 32u) return 0u; return bitfieldExtract(v, int(pos), int(min(len, 32u - pos))); }\n"
     "uint bfe_s(uint v, uint ctl) { uint pos = ctl & 0xFFu, len = (ctl >> 8) & 0xFFu; if (len == 0u) return 0u; if (pos >= 32u) return (int(v) < 0) ? 0xFFFFFFFFu : 0u; return uint(bitfieldExtract(int(v), int(pos), int(min(len, 32u - pos)))); }\n"
     "uint bfi(uint ins, uint ctl, uint base) { uint pos = ctl & 0xFFu, len = (ctl >> 8) & 0xFFu; if (len == 0u || pos >= 32u) return base; return bitfieldInsert(base, ins, int(pos), int(min(len, 32u - pos))); }\n"
-    "float fswzadd(float a, float b, uint swz, uint lane) { uint m = (swz >> ((lane & 3u) * 2u)) & 3u; float ma = m == 1u ? -1.0f : (m == 3u ? 0.0f : 1.0f); float mb = m == 2u ? -1.0f : 1.0f; return a * ma + b * mb; }\n"
+    "float fswzadd(float a, float b, uint swz, uint lane) { uint m = (swz >> ((lane & 3u) * 2u)) & 3u; float ma = m == 1u ? -1.0f : (m == 3u ? 0.0f : 1.0f); float mb = m == 2u ? -1.0f : 1.0f; return a * ma + b * mb; }\n";
+// rsc: an integer texel coordinate of the guest's size into a texture rendered at another scale. Pre-raster and
+// compute stages take each guest texel's centre. Fragment shaders at an integer scale k (4K = 2) add the fragment's own
+// position inside its k x k block: a fetch at the fragment's position (soft particles fading on the depth buffer) is
+// then exact at every pixel instead of once per k x k block (square artifacts on particles at 4K, 2026-10-18).
+static const char glsl_rsc[] =
     "uvec2 rsc(uvec2 c, vec4 s) { return (s.x == 1.0f && s.y == 1.0f) ? c : uvec2(floor((vec2(c) + 0.5f) * s.xy)); }\n";
+static const char glsl_rsc_fragment[] =
+    "uvec2 rsc(uvec2 c, vec4 s) {\n"
+    "  if (s.x == 1.0f && s.y == 1.0f) return c;\n"
+    "  if (s.x >= 1.0f && s.y >= 1.0f && fract(s.x) == 0.0f && fract(s.y) == 0.0f)\n"
+    "    return uvec2(vec2(c) * s.xy + mod(floor(gl_FragCoord.xy), s.xy));\n"
+    "  return uvec2(floor((vec2(c) + 0.5f) * s.xy));\n"
+    "}\n";
 // The half <-> float helpers (glsl_finish: glsl_h2f_exact or glsl_h2f_native, then glsl_prelude_half).
 // Half -> float in vertex (and other pre-raster) shaders: by bits, not unpackHalf2x16. NVIDIA's driver recognises
 // unpacked halves and runs some of the fp32 math after them in native fp16, differently per shader, so a depth
@@ -1884,7 +1896,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (c->fail) { free(body.buf); free(c->body.buf); free(c); return info; }
     int set = stage == STAGE_FRAGMENT ? 1 : 0;
     Str s = {0};
-    sp(&s, "%s", glsl_prelude);
+    sp(&s, "%s%s", glsl_prelude, stage == STAGE_FRAGMENT ? glsl_rsc_fragment : glsl_rsc);
     static int exact = -1;
     if (exact < 0) exact = getenv("LARECOMP_VK_EXACT_H2F") && atoi(getenv("LARECOMP_VK_EXACT_H2F")) != 0;
     sp(&s, "%s%s", !exact && (stage == STAGE_FRAGMENT || stage == STAGE_COMPUTE) ? glsl_h2f_native : glsl_h2f_exact,
