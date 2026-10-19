@@ -1,6 +1,8 @@
 // NVN command buffers: commands are recorded into the guest-provided command memory as CmdRec
 // records, so the game's own memory management and out-of-memory callbacks work as designed.
 // A command handle is the guest address of a list's first record.
+#include <pthread.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -30,6 +32,7 @@ static CmdRec *raw_rec(uint64_t at, uint32_t op, uint32_t size) {
     return r;
 }
 
+static void free_spills_in(uint64_t mem, uint64_t size);
 NVN(nvnCommandBufferAddCommandMemory) {
     NvnCmdBuf *cb = cb_of(A(0));
     NvnPool *pool = HOST(NvnPool, A(1));
@@ -38,6 +41,7 @@ NVN(nvnCommandBufferAddCommandMemory) {
               (unsigned long long)A(0), cb ? "ok" : "null", (unsigned long long)A(1), pool ? "ok" : "null",
               (unsigned long long)*(uint64_t *)(uintptr_t)A(1));
     uint64_t mem = pool->storage + A(2), size = A(3);
+    free_spills_in(mem, size);
     if (cb->recording && cb->mem) {
         // chain the list being recorded into the new chunk
         CmdRec *j = raw_rec(cb->mem + cb->used, CMD_JUMP, sizeof(CmdRec));
@@ -65,10 +69,49 @@ STUB(nvnCommandBufferSetCommandMemoryCallbackEnabled)
 
 // Reserve a record. May call back into the guest for more memory, so callers snapshot their
 // arguments first.
+// Out-of-line records: Legends Z-A gives command memory in 0x400-byte chunks, smaller than some of our records (a
+// draw's state, copied data: 1.5-5 KB), where NVN's own commands would have been split across chunks. Such a record
+// goes to a host block, reached by a JUMP in the chunk, with a JUMP back after it. The block is freed when the game
+// hands the chunk's memory to a command buffer again (its old commands are done then).
+typedef struct Spill { uint64_t at; void *blk; struct Spill *next; } Spill;
+static Spill *g_spills;
+static pthread_mutex_t g_spill_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static CmdRec *spill(NvnCmdBuf *cb, uint32_t op, uint32_t size) {
+    uint64_t at = cb->mem + cb->used;
+    uint8_t *blk = malloc(size + sizeof(CmdRec));
+    raw_rec(at, CMD_JUMP, sizeof(CmdRec))->x[0] = (uint64_t)(uintptr_t)blk;
+    cb->used += sizeof(CmdRec);
+    raw_rec((uint64_t)(uintptr_t)(blk + size), CMD_JUMP, sizeof(CmdRec))->x[0] = cb->mem + cb->used;
+    Spill *sp = malloc(sizeof *sp);
+    sp->at = at, sp->blk = blk;
+    pthread_mutex_lock(&g_spill_lock);
+    sp->next = g_spills, g_spills = sp;
+    pthread_mutex_unlock(&g_spill_lock);
+    return raw_rec((uint64_t)(uintptr_t)blk, op, size);
+}
+
+static void free_spills_in(uint64_t mem, uint64_t size) {
+    pthread_mutex_lock(&g_spill_lock);
+    for (Spill **p = &g_spills; *p;) {
+        Spill *sp = *p;
+        if (sp->at >= mem && sp->at < mem + size) { *p = sp->next; free(sp->blk); free(sp); }
+        else p = &sp->next;
+    }
+    pthread_mutex_unlock(&g_spill_lock);
+}
+
+// Reserve a record. May call back into the guest for more memory, so callers snapshot their
+// arguments first.
 static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
     uint32_t size = (uint32_t)((sizeof(CmdRec) + extra + 7) & ~7u);
     for (int tries = 0; !cb->mem || cb->used + size + JUMP_RESERVE > cb->size; tries++) {
-        if (!cb->callback || tries == 2) FATAL("nvn: out of command memory (need %u)\n", size);
+        bool jump_fits = cb->mem && cb->used + sizeof(CmdRec) + JUMP_RESERVE <= cb->size;
+        if (jump_fits && size + JUMP_RESERVE > cb->size) return spill(cb, op, size);  // larger than a whole chunk
+        if (!cb->callback || tries == 2)
+            FATAL("nvn: out of command memory (need %u; chunk %llx size %llx used %llx, callback %llx)\n", size,
+                  (unsigned long long)cb->mem, (unsigned long long)cb->size, (unsigned long long)cb->used,
+                  (unsigned long long)cb->callback);
         uint64_t saved[8];
         memcpy(saved, c->x, sizeof saved);
         c->x[0] = cb->guest;

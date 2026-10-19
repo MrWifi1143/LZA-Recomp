@@ -341,7 +341,8 @@ void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t
 }
 
 uint32_t kernel_current_thread_handle(void) { return t_cur ? t_cur->handle : 0; }
-Cpu *kernel_current_cpu(void) { return t_cur ? &t_cur->cpu : NULL; }
+__thread Cpu *g_fiber_cpu;  // hle/fiber.c: the running fiber's Cpu (NULL: the thread's own)
+Cpu *kernel_current_cpu(void) { return g_fiber_cpu ? g_fiber_cpu : t_cur ? &t_cur->cpu : NULL; }
 KThread *kernel_current_thread(void) { return t_cur; }
 
 // ------------------------------------------------------------------ mutex / condvar (Horizon semantics)
