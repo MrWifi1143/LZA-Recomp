@@ -104,6 +104,8 @@ const char *game_version(const char *exefs) {
     return "1.0.0";  // (a build not listed here)
 }
 
+uint64_t game_title_id(void) { return program_id(ROOT "/exefs"); }  // (the extracted game's program id)
+
 const char *game_name(const char *exefs) {
     uint64_t id = program_id(exefs);
     return id == TITLE_EEVEE ? "Eevee" : id == TITLE_PIKACHU ? "Pikachu" : id == TITLE_PLA ? "Legends: Arceus" : id == TITLE_ZA ? "Legends: Z-A" : NULL;
