@@ -2539,6 +2539,7 @@ static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, int stag
 // and while a switch that changes the output is set.
 #include <sys/stat.h>
 static const char k_xlat_build[] = __DATE__ " " __TIME__;
+const char *maxwell_build_id(void) { return k_xlat_build; }  // (runtime/nvn/vulkan/warmup.c: its marker)
 
 static uint64_t xfnv(const void *p, size_t n, uint64_t h) {
     const uint8_t *b = p;

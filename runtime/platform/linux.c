@@ -127,6 +127,11 @@ static void require_cpu(void) {}
 void plat_init(void) {
     log_to_file_without_terminal();
     require_cpu();
+    // The drivers' shader disk caches hold what the shader warm-up builds (runtime/nvn/vulkan/warmup.c: thousands of
+    // programs): room for all of it, unless the user chose a size (read when the driver loads, so before any of SDL / Vulkan)
+    setenv("__GL_SHADER_DISK_CACHE_SIZE", "4294967296", 0);  // (NVIDIA)
+    setenv("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP", "1", 0);
+    setenv("MESA_SHADER_CACHE_MAX_SIZE", "4G", 0);           // (Mesa: RADV, ANV, NVK)
 }
 
 // (inside an AppImage: the binary in its mount, which stays mounted while this process lives - re-exec included)

@@ -32,6 +32,9 @@ void vk_frame_end(const char *shot_path);
 void *vk_frame_cmd(void);
 bool vk_imgui_backend_init(void);
 void vk_imgui_backend_shutdown(void);
+bool warmup_needed(const char *root);  // runtime/nvn/vulkan/warmup.c
+void warmup_start(void);
+int warmup_progress(int *done, int *total);
 }
 
 // ------------------------------------------------------------------ language
@@ -461,6 +464,43 @@ extern "C" void launcher_lg_run(const char *root) {
     g_settings.wild_battle = wildb;
     snprintf(g_settings.mod, sizeof g_settings.mod, "%s", mod ? mods[mod - 1] : "");
     settings_save();
+    if (warmup_needed(root)) {  // first start, or the first after an update: every shader of the game, once (warmup.c)
+        warmup_start();
+        float shown = 0;
+        for (int done = 0, total = 0, ph; (ph = warmup_progress(&done, &total)) != 3;) {
+            SDL_Event e;
+            while (SDL_PollEvent(&e)) {
+                ImGui_ImplSDL3_ProcessEvent(&e);
+                if (e.type == SDL_EVENT_QUIT) exit(0);
+            }
+            if (!vk_frame_begin(bg)) { SDL_Delay(16); continue; }
+            ImGui_ImplVulkan_NewFrame();
+            ImGui_ImplSDL3_NewFrame();
+            ImGui::NewFrame();
+            ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x / 2, io.DisplaySize.y / 2), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(760, 0));
+            ImGui::Begin(RT_APP_NAME "##warmup", NULL, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                                                         ImGuiWindowFlags_NoSavedSettings);
+            ImGui::TextWrapped("%s", T("Preparing the game's shaders. This happens on the first start and after an update, "
+                                       "so the game doesn't stutter or pop in later.",
+                                       "Preparando os shaders do jogo. Isso acontece na primeira vez e depois de uma atualização, "
+                                       "para o jogo não travar nem ter objetos surgindo depois."));
+            ImGui::Spacing();
+            char label[96];
+            float frac = 0;
+            if (ph == 1) snprintf(label, sizeof label, T("Looking through the game files... %d MB", "Procurando nos arquivos do jogo... %d MB"), done);
+            else {
+                frac = total ? (float)done / (float)total : 1.0f;
+                snprintf(label, sizeof label, "%d / %d", done, total);
+            }
+            shown += (frac - shown) * 0.25f;  // (eased: the counter moves in bursts)
+            ImGui::ProgressBar(ph == 1 ? -1.0f * (float)ImGui::GetTime() : shown, ImVec2(-FLT_MIN, 0), label);
+            ImGui::End();
+            ImGui::Render();
+            ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)vk_frame_cmd());
+            vk_frame_end(NULL);
+        }
+    }
     vk_imgui_backend_shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext(ctx);
