@@ -131,9 +131,17 @@ const char *loader_symbol_at(uint64_t addr, uint64_t *offset) {
 static uint64_t resolve(Module *m, uint32_t symidx) {
     Elf64Sym *s = sym(m, symidx);
     const char *name = symname(m, s);
-    // A host implementation wins over the guest SDK's, also for a module's references to its own symbols through
-    // the GOT (the SDK reaches nn::os::detail::DispatchFiberContext through its own PLT: hle/fiber.c)
+    // A host implementation wins over the guest SDK's for imports. For a module's references to its own symbols (its
+    // GOT) only where listed: the SDK reaches nn::os::detail::DispatchFiberContext through its own PLT (hle/fiber.c).
+    // Taking over every one would also re-route the SDK's internal heap calls and the movie library's own
+    // movie::Buffer calls through wrappers written for the game's calls.
+    static const char *const own_overrides[] = {"_ZN2nn2os6detail20DispatchFiberContextEPPNS1_22FiberContextForHorizonES4_"};
     HostFn impl = hle_lookup_impl(name);
+    if (impl && s->shndx) {
+        bool listed = false;
+        for (size_t i = 0; i < sizeof own_overrides / sizeof *own_overrides; i++) listed |= !strcmp(name, own_overrides[i]);
+        if (!listed) impl = NULL;
+    }
     if (impl) return hle_register(name, impl);
     if (s->shndx) return m->base + s->value;
     uint64_t a = loader_find_symbol(name);
