@@ -335,9 +335,10 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
             if (s->npools == 16) FATAL("descriptor pools exhausted\n");
             VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 32768}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
                                             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32768},
-                                            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_SAMPLER, 1024}};
+                                            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_SAMPLER, 1024},
+                                            {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096}};
             VkDescriptorPoolCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 8192,
-                                             .poolSizeCount = 5, .pPoolSizes = sizes};
+                                             .poolSizeCount = 6, .pPoolSizes = sizes};
             VK_CHECK(vkCreateDescriptorPool(g_vk.dev, &ci, NULL, &s->pools[s->npools++]));
         }
         VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -861,11 +862,20 @@ static int debug_pass_no;
 static void vk_end_pass_at(int line);
 void vk_end_pass(void) { vk_end_pass_at(0); }
 #define vk_end_pass() vk_end_pass_at(__LINE__)
+static bool g_storage_written;  // a draw of this pass wrote storage images (SUST / SURED)
 static void vk_end_pass_at(int line) {
     if (!in_pass) return;
     if (prof && line < 4096) prof_end_line[line]++;
     vkCmdEndRendering(vk_cmd());
     in_pass = false;
+    if (g_storage_written) {  // the next passes sample (or keep accumulating into) what the shaders stored
+        g_storage_written = false;
+        VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                              .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT};
+        vkCmdPipelineBarrier(vk_cmd(), VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                             VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    }
     static long pass_fmt = -2;  // LARECOMP_DEBUG_PASS_FMT=<nvn format>: every pass rendering to that format, all frames
     if (pass_fmt == -2) pass_fmt = getenv("LARECOMP_DEBUG_PASS_FMT") ? strtol(getenv("LARECOMP_DEBUG_PASS_FMT"), NULL, 0) : -1;
     if (pass_fmt >= 0 && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend && (long)st.rt.color[0]->format == pass_fmt && st.rt.color[0]->width < 1000) {
@@ -926,6 +936,7 @@ static void begin_pass(void) {
     }
     VkRenderingAttachmentInfo ca[8], da = {0}, sa = {0};
     uint32_t w = 0, minw = UINT32_MAX, minh = UINT32_MAX;  // w: first attachment seen
+    uint32_t layers = 1;  // a 3D color target: all its slices (vk_view's 2D-array render view)
     pass_ncolor = (uint32_t)st.rt.ncolor;
     pass_samples = 1;
     for (int i = 0; i < st.rt.ncolor; i++) {
@@ -950,6 +961,12 @@ static void begin_pass(void) {
                       ? vk_format(st.rt.cview[i].format) : b->format;
         uint32_t lv = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 1) ? st.rt.cview[i].base_level : 0;
         uint32_t ew = level_extent(b->width, lv), eh = level_extent(b->height, lv);
+        if (b->base_type == VK_IMAGE_VIEW_TYPE_3D) {
+            uint32_t z = level_extent(b->depth, lv);
+            if (st.rt.has_cview[i] && (st.rt.cview[i].setmask & 2) && st.rt.cview[i].num_layers && st.rt.cview[i].num_layers < z)
+                z = st.rt.cview[i].num_layers;
+            if (i == 0 || z < layers) layers = z;  // (the pass's layer count: within every attachment)
+        }
         if (!w) { renderer_texture_scale(t, &pass_sx, &pass_sy); w = ew; }
         if (ew < minw) minw = ew;
         if (eh < minh) minh = eh;
@@ -987,7 +1004,7 @@ static void begin_pass(void) {
     }
     if (!w) { pass_sx = pass_sy = 1; minw = minh = 16; }
     pass_w = minw; pass_h = minh;
-    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = 1,
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = layers,
                           .colorAttachmentCount = pass_ncolor, .pColorAttachments = ca,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
     vkCmdBeginRendering(cb, &ri);
@@ -1482,6 +1499,7 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     const uint8_t *vb = (const uint8_t *)vkey;
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= vb[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
+    for (int i = 0; i < 8; i++) { h ^= fkey->img_kind[i]; h *= 0x100000001B3ull; }
     if (!h) h = 1;
     uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
     for (int probe = 0; prog_tab[slot].key && prog_tab[slot].key != h; probe++) {
@@ -1691,6 +1709,16 @@ static int rt_kind(uint32_t f) {
     case 0x03: case 0x08: case 0x0B: case 0x0F: case 0x14: case 0x17: case 0x27: case 0x2C: case 0x2F: case 0x3E: return 2;
     case 0x04: case 0x09: case 0x0C: case 0x10: case 0x15: case 0x18: case 0x28: case 0x2D: case 0x30: return 1;
     default: return 0;
+    }
+}
+
+// The format class (rt_kind) of each image bound to a stage: the shader's image types follow it (ShaderKey.img_kind)
+static void image_kinds(int stage, uint8_t kind[8]) {
+    for (int i = 0; i < 8; i++) {
+        uint64_t h = st.img[stage][i];
+        uint32_t id = h & 0xFFFFF;
+        NvnTexture *t = h && st.tpool && id < (uint32_t)st.tpool->count ? ((NvnTexEntry *)st.tpool->entries)[id].tex : NULL;
+        kind[i] = t ? (uint8_t)rt_kind(t->format) : 0;
     }
 }
 
@@ -2405,6 +2433,31 @@ static void draw_texture(CmdRec *r) {
             e->tex->height, e->tex->format, src[0], src[1], src[2], src[3], rt->width, rt->height, dst[0], dst[1], dst[2], dst[3], blend);
 }
 
+// Image i of a stage's shader: the NVN image bound at its slot (a texture pool entry registered with RegisterImage), as a
+// storage view; a 1x1 dummy when nothing usable is bound (the format must suit the declaration: r32ui for atomics).
+static void image_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo *out) {
+    const ShaderImage *im = &si->img[i];
+    uint64_t h = stage < 6 && im->slot < 8 ? st.img[stage][im->slot] : 0;
+    uint32_t id = h & 0xFFFFF;
+    VkImageView view = VK_NULL_HANDLE;
+    if (h && st.tpool && id < (uint32_t)st.tpool->count) {
+        NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[id];
+        if (e->tex) {
+            view = vk_storage_view(e->tex, &e->view, e->has_view, im->dim);
+            TexBackend *b = e->tex->backend;
+            if (view && im->atomic && !(b && b->format == VK_FORMAT_R32_UINT)) view = VK_NULL_HANDLE;  // (r32ui declared)
+            if (view && !im->atomic && rt_kind(e->tex->format) != im->kind) view = VK_NULL_HANDLE;    // (another type)
+            static int nlog;
+            if (!view && nlog++ < 20)
+                LOG("[vk] image slot %d (stage %d): texture fmt %#x flags %#x not usable as a%s storage image\n", im->slot, stage,
+                    e->tex->format, e->tex->flags, im->atomic ? "n r32ui" : "");
+        }
+    }
+    if (!view) view = vk_dummy_storage_view(im->dim, im->atomic);
+    else g_storage_written = true;
+    *out = (VkDescriptorImageInfo){VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL};
+}
+
 // Writes the descriptor set of one stage. gx..gz: compute group counts (driver constants).
 // pre_ii: texture descriptors already resolved by the caller (draw: fragment textures, needed earlier for the
 // viewport decision), or NULL.
@@ -2433,6 +2486,9 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
                 tex_sc[sg][ti][0] = sc[0]; tex_sc[sg][ti][1] = sc[1];
                 tex_wh[sg][ti][0] = wh[0]; tex_wh[sg][ti][1] = wh[1];
             }
+            w[n].pImageInfo = &ii[n];
+        } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE && b->binding >= 64 && (int)b->binding - 64 < si->nimg) {
+            image_info(stage, si, (int)b->binding - 64, &ii[n]);
             w[n].pImageInfo = &ii[n];
         } else if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && b->binding < 17) {
             bi[n] = cbuf_info(stage, si, (int)b->binding, gx, gy, gz);
@@ -2637,6 +2693,8 @@ static void draw_(CmdRec *r, bool indexed) {
     vkey.depth_minus_one = nvn_depth_mode() == 0;
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
+    image_kinds(0, vkey.img_kind);
+    image_kinds(1, fkey.img_kind);
     Prog *pr = get_program(st.program, &vkey, &fkey);
     if (pr) wait_built(&pr->state);
     if (!pr || atomic_load(&pr->state) != 1) {

@@ -14,6 +14,9 @@
 //  - per-draw tint -> binding 19: `uniform Tint { vec4 ltint[2]; };` (fragment, when uses_tint).
 //  - texture slot i (ShaderInfo.tex[i]) -> binding 32 + i, a combined image sampler: sampler1D/2D/3D/Cube/
 //    1DArray/2DArray/CubeArray, or its *Shadow variant when tex[i].shadow.
+//  - image i (ShaderInfo.img[i]: SUST / SURED, NVN image slot img[i].slot) -> binding 64 + i, a storage image:
+//    `writeonly [i|u]image<dim>` (stores, needs shaderStorageImageWriteWithoutFormat; the type from key->img_kind) or
+//    `r32ui uimage<dim>` (atomics).
 //  - vertex inputs `layout(location=i) in vec4|ivec4|uvec4 a<i>;` (key->attr_kind); varyings: location i =
 //    generic attribute i, `vec4 v<i>` (fragment side flat / noperspective as in MSL); `invariant gl_Position`;
 //    gl_PointSize when writes_point_size. Fragment outputs `layout(location=rt) out vec4|ivec4|uvec4 c<rt>;`,
@@ -45,6 +48,7 @@ typedef struct {
     uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
     uint8_t xfb_count[4];   // vertex: transform feedback capture (exec.c): components per buffer, 0 = none
     uint16_t xfb_stride[4]; //   and the buffers' strides in bytes
+    uint8_t img_kind[8];    // images bound per NVN slot: 0 float, 1 signed int, 2 unsigned int (the GLSL image type)
 } ShaderKey;
 
 typedef struct {
@@ -53,6 +57,14 @@ typedef struct {
     bool shadow, is_array, is_image, bindless;
     uint32_t bindless_cbuf, bindless_offset;
 } ShaderTexture;
+
+enum { SUDIM_1D, SUDIM_1D_BUFFER, SUDIM_1D_ARRAY, SUDIM_2D, SUDIM_2D_ARRAY, SUDIM_3D };  // SUST / SURED .dim
+typedef struct {
+    uint8_t slot;  // NVN image binding (its handle at driver cbuf 2, 0x120 + 8 * slot)
+    uint8_t dim;   // SUDIM_*
+    bool atomic;   // r32ui, written with atomics (SURED); otherwise stores (SUST.P)
+    uint8_t kind;  // ShaderKey.img_kind of the slot when translated: image / iimage / uimage
+} ShaderImage;
 
 typedef struct {
     int stage;
@@ -72,6 +84,8 @@ typedef struct {
                             // target scale, [1 + i] = allocation scale of texture i
     uint32_t local_mem;     // bytes of local memory
     uint32_t num_insts;
+    int nimg;
+    ShaderImage img[8];
     char error[256];        // set when translation fails
 } ShaderInfo;
 
