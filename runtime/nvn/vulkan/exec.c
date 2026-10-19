@@ -4047,7 +4047,11 @@ static void exec_list(uint64_t handle, int depth) {
     if (depth == 0) st.obj = 0, st.obj_draw = 0;  // (a submitted list starts with no object; its called lists inherit)
     for (int guard = 0; guard < 10000000; guard++) {
         CmdRec *r = (CmdRec *)(uintptr_t)p;
+        // (the records were written by a game thread on another core: fetch ahead, each one was a cache miss here)
+        __builtin_prefetch((const void *)(uintptr_t)(p + 256));
+        __builtin_prefetch((const void *)(uintptr_t)(p + 512));
         void *x = r->extra;
+        if (x) __builtin_prefetch(x);
         if (r->op < CMD_COUNT) op_counts[r->op]++;
         if (ip_replaying && ip_skip_op(r->op)) { p += r->size; continue; }
         switch (r->op) {
