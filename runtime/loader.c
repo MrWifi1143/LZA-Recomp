@@ -131,9 +131,11 @@ const char *loader_symbol_at(uint64_t addr, uint64_t *offset) {
 static uint64_t resolve(Module *m, uint32_t symidx) {
     Elf64Sym *s = sym(m, symidx);
     const char *name = symname(m, s);
-    if (s->shndx) return m->base + s->value;
+    // A host implementation wins over the guest SDK's, also for a module's references to its own symbols through
+    // the GOT (the SDK reaches nn::os::detail::DispatchFiberContext through its own PLT: hle/fiber.c)
     HostFn impl = hle_lookup_impl(name);
-    if (impl) return hle_register(name, impl);  // host implementation wins over the guest SDK's
+    if (impl) return hle_register(name, impl);
+    if (s->shndx) return m->base + s->value;
     uint64_t a = loader_find_symbol(name);
     if (a) return a;
     if ((s->info >> 4) == 2) return 0;  // weak undefined
