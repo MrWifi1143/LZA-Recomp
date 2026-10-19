@@ -706,6 +706,55 @@ static void emit_tld4s(Ctx *c, uint64_t w) {
     sp(&c->body, "    }\n");
 }
 
+// TLD4 (full form): gather of one component - or a depth comparison (.DC) - from a 2D / 2D-array / cube (array)
+// texture. Ra: the array index first, then the coordinates; Rb: the packed offset (.AOFFI: 6-bit x, y), then the
+// reference. The masked components go to consecutive registers from d. (PTP's four offsets: not translated.)
+static void emit_tld4(Ctx *c, uint64_t w) {
+    if (!c->glsl) { fail(c, "tld4 (MSL)"); return; }
+    int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8), b = (int)bits(w, 20, 8), dim = (int)bits(w, 28, 3);
+    int mask = (int)bits(w, 31, 4), toff = (int)bits(w, 54, 2), comp = (int)bits(w, 56, 2);
+    bool dc = bits(w, 50, 1), array = dim & 1;
+    if (d == RZ || !mask) return;
+    if (toff == 2 || toff == 3) { fail(c, "tld4 ptp"); return; }
+    int type = dim == 2 ? TEXTYPE_2D : dim == 3 ? TEXTYPE_2D_ARRAY : dim == 6 ? TEXTYPE_CUBE : dim == 7 ? TEXTYPE_CUBE_ARRAY : -1;
+    if (type < 0) { fail(c, "tld4 dim %d", dim); return; }
+    int ncoord = type == TEXTYPE_CUBE || type == TEXTYPE_CUBE_ARRAY ? 3 : 2;
+    char ra[5][24], rb[2][24];
+    int na = 0, nb = 0;
+    for (int k = 0; k < 5; k++) {  // registers in order: Ra, Ra + 1, ... (RZ and past it: 0)
+        if (a == RZ || a + k >= RZ) strcpy(ra[k], "0u");
+        else { c->reg_used[a + k] = 1; sprintf(ra[k], "r%d", a + k); }
+    }
+    for (int k = 0; k < 2; k++) {
+        if (b == RZ || b + k >= RZ) strcpy(rb[k], "0u");
+        else { c->reg_used[b + k] = 1; sprintf(rb[k], "r%d", b + k); }
+    }
+    const char *layer = array ? ra[na++] : NULL;
+    char co[160];
+    int n = sprintf(co, "vec%d(", ncoord + (array ? 1 : 0));
+    for (int k = 0; k < ncoord; k++) n += sprintf(co + n, "%suintBitsToFloat(%s)", k ? ", " : "", ra[na++]);
+    if (layer) n += sprintf(co + n, ", float(int(%s))", layer);
+    sprintf(co + n, ")");
+    const char *off = toff == 1 ? rb[nb++] : NULL;
+    const char *ref = dc ? rb[nb++] : NULL;
+    int slot = tex_slot(c, (uint32_t)bits(w, 36, 13), type, dc, array);
+    char call[400], ofs[128] = "";
+    if (off && ncoord != 2) { fail(c, "tld4 offset on cube"); return; }
+    if (off) sprintf(ofs, "ivec2(bitfieldExtract(int(%s), 0, 6), bitfieldExtract(int(%s), 8, 6))", off, off);
+    if (dc && off) sprintf(call, "textureGatherOffset(t%d, %s, uintBitsToFloat(%s), %s)", slot, co, ref, ofs);
+    else if (dc) sprintf(call, "textureGather(t%d, %s, uintBitsToFloat(%s))", slot, co, ref);
+    else if (off) sprintf(call, "textureGatherOffset(t%d, %s, %s, %d)", slot, co, ofs, comp);
+    else sprintf(call, "textureGather(t%d, %s, %d)", slot, co, comp);
+    sp(&c->body, "    { vec4 g = %s;\n", call);
+    static const char *const cn[4] = {"g.x", "g.y", "g.z", "g.w"};
+    for (int k = 0, r = d; k < 4; k++) {
+        if (!(mask >> k & 1)) continue;
+        if (r < RZ) { c->reg_used[r] = 1; sp(&c->body, "      r%d = floatBitsToUint(%s);\n", r, cn[k]); }
+        r++;
+    }
+    sp(&c->body, "    }\n");
+}
+
 static void emit_texs(Ctx *c, uint64_t w, bool fetch) {
     int d0 = (int)bits(w, 0, 8), d1 = (int)bits(w, 28, 8), a = (int)bits(w, 8, 8), b = (int)bits(w, 20, 8);
     uint32_t index = (uint32_t)bits(w, 36, 13);
@@ -1040,6 +1089,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             set_reg(c, d + i, cb);
         }
         if (overlap) sp(&c->body, "    }\n");
+    } else if (OPM(0xc800000000000000ull, 0xfc00000000000000ull)) {  // TLD4
+        emit_tld4(c, w);
     } else if (OPM(0xdf00000000000000ull, 0xffc0000000000000ull)) {  // TLD4S
         emit_tld4s(c, w);
     } else if (OPM(0xeb20000000000000ull, 0xfff8000000000000ull)) {  // SUST.B (bindless)
