@@ -42,7 +42,15 @@ NVN(nvnDeviceInitialize) {
 }
 NVN(nvnDeviceFinalize) { (void)c; }
 NVN(nvnDeviceSetDebugLabel) { (void)c; }
-NVN(nvnDeviceGetInteger) { *(int32_t *)AP(2) = (int32_t)device_integer((uint32_t)A(1)); }
+NVN(nvnDeviceGetInteger) {
+    uint32_t which = (uint32_t)A(1), v = device_integer(which);
+    static uint64_t seen[4];
+    if (which < 256 && !(seen[which >> 6] >> (which & 63) & 1)) {
+        seen[which >> 6] |= 1ull << (which & 63);
+        if (getenv("LARECOMP_LOG_NVN_INTS") || which > 64) LOG("[nvn] DeviceGetInteger %u -> %u%s\n", which, v, which > 64 ? " (unknown)" : "");
+    }
+    *(int32_t *)AP(2) = (int32_t)v;
+}
 NVN(nvnDeviceGetCurrentTimestampInNanoseconds) {
     RET(plat_now_ns());
 }
@@ -455,9 +463,9 @@ NVN(nvnTextureCompare) { RET(A(0) == A(1)); }
 NVN(nvnTextureFlushTexels) { (void)c; }
 NVN(nvnTextureInvalidateTexels) { (void)c; }
 
-// Texture views (our layout of the 0x28-byte guest struct)
+// Texture views (our layout of the guest struct, nvn.h; only its first 0x18 bytes are ours to write)
 #define TV(T, off) G(T, A(0), off)
-NVN(nvnTextureViewSetDefaults) { memset(AP(0), 0, 0x28); }
+NVN(nvnTextureViewSetDefaults) { memset(AP(0), 0, sizeof(NvnTextureView)); }
 NVN(nvnTextureViewSetLevels) { TV(uint32_t, 0) |= 1; TV(uint16_t, 4) = (uint16_t)A(1); TV(uint16_t, 6) = (uint16_t)A(2); }
 NVN(nvnTextureViewSetLayers) { TV(uint32_t, 0) |= 2; TV(uint16_t, 8) = (uint16_t)A(1); TV(uint16_t, 10) = (uint16_t)A(2); }
 NVN(nvnTextureViewSetFormat) { TV(uint32_t, 0) |= 4; TV(uint32_t, 12) = (uint32_t)A(1); }
@@ -466,15 +474,15 @@ NVN(nvnTextureViewSetSwizzle) {
     v->setmask |= 8;
     v->swizzle[0] = (uint8_t)A(1); v->swizzle[1] = (uint8_t)A(2); v->swizzle[2] = (uint8_t)A(3); v->swizzle[3] = (uint8_t)A(4);
 }
-NVN(nvnTextureViewSetDepthStencilMode) { NvnTextureView *v = AP(0); v->setmask |= 16; v->ds_mode = (uint32_t)A(1); }
-NVN(nvnTextureViewSetTarget) { NvnTextureView *v = AP(0); v->setmask |= 32; v->target = (uint32_t)A(1); }
+NVN(nvnTextureViewSetDepthStencilMode) { NvnTextureView *v = AP(0); v->setmask |= 16; v->ds_mode = (uint8_t)A(1); }
+NVN(nvnTextureViewSetTarget) { NvnTextureView *v = AP(0); v->setmask |= 32; v->target = (uint16_t)A(1); }
 NVN(nvnTextureViewGetLevels) { *(int32_t *)AP(1) = TV(uint16_t, 4); *(int32_t *)AP(2) = TV(uint16_t, 6); RET(TV(uint32_t, 0) & 1); }
 NVN(nvnTextureViewGetLayers) { *(int32_t *)AP(1) = TV(uint16_t, 8); *(int32_t *)AP(2) = TV(uint16_t, 10); RET(!!(TV(uint32_t, 0) & 2)); }
 NVN(nvnTextureViewGetFormat) { *(uint32_t *)AP(1) = TV(uint32_t, 12); RET(!!(TV(uint32_t, 0) & 4)); }
 NVN(nvnTextureViewGetSwizzle) { NvnTextureView *v = AP(0); for (int i = 0; i < 4; i++) *(uint32_t *)AP(1 + i) = v->swizzle[i]; RET(!!(v->setmask & 8)); }
 NVN(nvnTextureViewGetDepthStencilMode) { NvnTextureView *v = AP(0); *(uint32_t *)AP(1) = v->ds_mode; RET(!!(v->setmask & 16)); }
 NVN(nvnTextureViewGetTarget) { NvnTextureView *v = AP(0); *(uint32_t *)AP(1) = v->target; RET(!!(v->setmask & 32)); }
-NVN(nvnTextureViewCompare) { RET(memcmp(AP(0), AP(1), 0x1C) == 0); }
+NVN(nvnTextureViewCompare) { RET(memcmp(AP(0), AP(1), sizeof(NvnTextureView)) == 0); }
 
 NVN(nvnTextureWriteTexels) {
     // (texture, view, region, data) -- linear data into block-linear storage
@@ -494,11 +502,27 @@ NVN(nvnTextureReadTexels) { LOG("[nvn] ReadTexels not implemented\n"); (void)c; 
 NVN(nvnTextureReadTexelsStrided) { (void)c; }
 
 // ================================================================== samplers
-// SamplerBuilder: device@0 then an NvnSamplerDesc at 8
-#define SD ((NvnSamplerDesc *)(AP(0) + 8))
+// SamplerBuilder (64 bytes in the guest's memory, often on its stack): device@0, then a packed copy of the state at 8.
+// The full NvnSamplerDesc (72 bytes) wrote past the builder's end and over the caller's saved frame pointer and
+// return address (Legends Z-A crashed right after creating its first sampler).
+typedef struct {
+    uint8_t min_filter, mag_filter, wrap[3], compare_mode, compare_func, reduction;
+    float lod_min, lod_max, lod_bias, max_aniso;
+    float border[4];
+} NvnSamplerBuild;
+_Static_assert(8 + sizeof(NvnSamplerBuild) <= 64, "NVNsamplerBuilder is 64 bytes");
+#define SD ((NvnSamplerBuild *)(AP(0) + 8))
+static void sampler_desc_from_build(NvnSamplerDesc *d, const NvnSamplerBuild *b) {
+    memset(d, 0, sizeof *d);
+    d->min_filter = b->min_filter; d->mag_filter = b->mag_filter;
+    for (int i = 0; i < 3; i++) d->wrap[i] = b->wrap[i];
+    d->compare_mode = b->compare_mode; d->compare_func = b->compare_func; d->reduction = b->reduction;
+    d->lod_min = b->lod_min; d->lod_max = b->lod_max; d->lod_bias = b->lod_bias; d->max_aniso = b->max_aniso;
+    memcpy(d->border, b->border, 16);
+}
 NVN(nvnSamplerBuilderSetDevice) { G(uint64_t, A(0), 0) = A(1); }
 NVN(nvnSamplerBuilderSetDefaults) {
-    NvnSamplerDesc *d = SD;
+    NvnSamplerBuild *d = SD;
     memset(d, 0, sizeof *d);
     d->min_filter = 0; d->mag_filter = 0;
     d->wrap[0] = d->wrap[1] = d->wrap[2] = 1;  // REPEAT
@@ -531,7 +555,7 @@ NVN(nvnSamplerBuilderGetLodSnap) { RETF(0); }
 
 NVN(nvnSamplerInitialize) {
     NvnSamplerDesc *d = malloc(sizeof *d);
-    *d = *(NvnSamplerDesc *)(AP(1) + 8);
+    sampler_desc_from_build(d, (const NvnSamplerBuild *)(AP(1) + 8));
     SET_HOST(A(0), d);
     RET(1);
 }
@@ -607,7 +631,7 @@ NVN(nvnSamplerPoolRegisterSampler) {
 NVN(nvnSamplerPoolRegisterSamplerBuilder) {
     NvnDescPool *d = HOST(NvnDescPool, A(0));
     int id = (int)A(1);
-    if (id >= 0 && id < d->count) ((NvnSamplerDesc *)d->entries)[id] = *(NvnSamplerDesc *)(AP(2) + 8);
+    if (id >= 0 && id < d->count) sampler_desc_from_build(&((NvnSamplerDesc *)d->entries)[id], (const NvnSamplerBuild *)(AP(2) + 8));
 }
 
 NvnDescPool *nvn_find_pool(NvnDescPool **reg, uint64_t guest_pool) {

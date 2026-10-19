@@ -197,6 +197,27 @@ int ipc_handle_request(Cpu *c, uint32_t handle) {
         default:
             LOG("[ipc] control cmd %u\n", req.cmd);
         }
+    } else if (req.type >= 16) {
+        // TIPC (12.0.0+; newer SDKs talk to sm: this way, Legends Z-A): the command is the message type - 16, the raw
+        // data follows the descriptors with no alignment and no SFCI header; the reply is the result word, then the data.
+        req.cmd = req.type - 16;
+        req.data = (uint8_t *)raw;
+        req.data_size = raw_words * 4;
+        sess->svc->handler(sess->svc, &req, &resp);
+        for (int i = 0; i < resp.nobjects; i++) resp.move_handles[resp.nmove++] = session_new(resp.objects[i]);
+        memset(msg, 0, 0x100);
+        int hh = resp.ncopy || resp.nmove;
+        msg[0] = req.type;
+        msg[1] = (1 + (resp.data_size + 3) / 4) | (hh ? 0x80000000u : 0);
+        uint32_t *q = msg + 2;
+        if (hh) {
+            *q++ = (resp.ncopy << 1) | (resp.nmove << 5);
+            for (int i = 0; i < resp.ncopy; i++) *q++ = resp.copy_handles[i];
+            for (int i = 0; i < resp.nmove; i++) *q++ = resp.move_handles[i];
+        }
+        q[0] = resp.result;
+        memcpy(q + 1, resp.data, resp.data_size);
+        return 0;
     } else {
         LOG("[ipc] message type %u\n", req.type);
     }

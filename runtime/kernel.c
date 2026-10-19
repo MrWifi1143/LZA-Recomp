@@ -1032,6 +1032,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         case 16: v = g_system_resource_size; break;  // SystemResourceSizeTotal
         case 17: v = 0; break;                       // SystemResourceSizeUsed
         case 18: v = g_program_id; break;
+        case 28: v = 0; break;  // AliasRegionExtraSize (18.0.0+, asked by newer SDKs: Legends Z-A)
         case 20:  // UserExceptionContextAddress: nn::os::SetDyingMessageRegion stores its region at +0x1c0
             if (!g_user_exception_ctx) g_user_exception_ctx = (uint64_t)(uintptr_t)hle_alloc(0x1000);
             v = g_user_exception_ctx;
@@ -1051,6 +1052,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         x[0] = R_OK;
         break;
     case 0x2D:  // UnmapPhysicalMemory(addr, size)
+        if (ENV("LARECOMP_LOG_UNMAP")) LOG("[kernel] UnmapPhysicalMemory %llx +%llx\n", (unsigned long long)x[0], (unsigned long long)x[1]);
         plat_decommit(x[0], x[1]);
         x[0] = R_OK;
         break;

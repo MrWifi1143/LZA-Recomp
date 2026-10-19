@@ -176,8 +176,8 @@ PY := $(firstword $(wildcard .venv/Scripts/python.exe) $(wildcard .venv/bin/pyth
 gen:
 	cd tools && $(abspath $(PY)) gen.py sdk ../extracted/exefs/sdk 0x7008000000 ../$(GEN)/sdk --hle ../runtime/hle/hle_symbols.txt $(GENSIMD) $(GENTRACE)
 	cd tools && $(abspath $(PY)) gen.py main ../extracted/exefs/main 0x7000000000 ../$(GEN)/main $(GENSIMD) $(GENTRACE)
-	cd tools && $(abspath $(PY)) gen.py subsdk0 ../extracted/exefs/subsdk0 0x700A000000 ../$(GEN)/subsdk0 $(GENSIMD) $(GENTRACE)
-	cd tools && $(abspath $(PY)) gen.py subsdk1 ../extracted/exefs/subsdk1 0x700C000000 ../$(GEN)/subsdk1 $(GENSIMD) $(GENTRACE)
+	if [ -f extracted/exefs/subsdk0 ]; then cd tools && $(abspath $(PY)) gen.py subsdk0 ../extracted/exefs/subsdk0 0x700A000000 ../$(GEN)/subsdk0 $(GENSIMD) $(GENTRACE); fi
+	if [ -f extracted/exefs/subsdk1 ]; then cd tools && $(abspath $(PY)) gen.py subsdk1 ../extracted/exefs/subsdk1 0x700C000000 ../$(GEN)/subsdk1 $(GENSIMD) $(GENTRACE); fi
 
 gen-objs: $(GEN_OBJ)
 
