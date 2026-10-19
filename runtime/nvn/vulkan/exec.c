@@ -2204,6 +2204,32 @@ void camscan(uint64_t cbuf) {
 }
 
 static int g_ubo_direct = -1;  // constant buffers bound in place (1) or copied per draw (0); cbuf_info
+// Ranges the game updates inline (UpdateUniformBuffer: written between draws of one list, which in place would all read
+// the last value): constant buffers over them are copied per draw, the rest stay in place. Legends Z-A has a few.
+#define NINLINE 256
+static struct { uint64_t lo, hi; } g_inline[NINLINE];
+static int g_ninline;
+static bool inline_target(uint64_t lo, uint64_t hi) {
+    for (int i = 0; i < g_ninline; i++) if (lo < g_inline[i].hi && g_inline[i].lo < hi) return true;
+    return false;
+}
+static void inline_note(uint64_t lo, uint64_t hi) {
+    for (int i = 0; i < g_ninline; i++)
+        if (lo <= g_inline[i].hi && g_inline[i].lo <= hi) {  // (overlapping or touching: one range)
+            if (lo < g_inline[i].lo) g_inline[i].lo = lo;
+            if (hi > g_inline[i].hi) g_inline[i].hi = hi;
+            return;
+        }
+    if (g_ninline < NINLINE) {
+        g_inline[g_ninline].lo = lo, g_inline[g_ninline].hi = hi, g_ninline++;
+        static int logged;
+        if (logged++ < 8) LOG("[vk] inline uniform updates at %llx..%llx: copied per draw (%d ranges)\n", (unsigned long long)lo,
+                              (unsigned long long)hi, g_ninline);
+    } else if (g_ubo_direct == 1) {
+        g_ubo_direct = 0;  // (too many to track: copies everywhere)
+        LOG("[vk] inline uniform updates in over %d ranges: constant buffers are copied per draw from now on\n", NINLINE);
+    }
+}
 // Constant buffer k of a stage (renderer.m bind_cbufs), bound in place or copied into transient memory.
 static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32_t gx, uint32_t gy, uint32_t gz) {
     static const uint8_t zeros[0x10000];
@@ -2257,10 +2283,9 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
     }
     // Bound in place in the imported guest heap, read when the GPU runs - as on the console (the game's NVN fences wait
     // for the GPU: nvnSyncWait, rt_wait_ticket), and no per-draw copy (Legends: Arceus copied 6 MB of constants a
-    // frame). An inline UpdateUniformBuffer (none in the Legends games) brings the copies back: g_ubo_direct.
-    // LARECOMP_VK_UBO_DIRECT=0: always copy.
+    // frame). Ranges the game updates inline are copied (g_inline). LARECOMP_VK_UBO_DIRECT=0: always copy.
     if (g_ubo_direct < 0) g_ubo_direct = getenv("LARECOMP_VK_UBO_DIRECT") ? atoi(getenv("LARECOMP_VK_UBO_DIRECT")) != 0 : 1;
-    if (g_ubo_direct == 1 && !ip_enabled()) {  // (frame interpolation records the copies)
+    if (g_ubo_direct == 1 && !ip_enabled() && !inline_target(r.addr, r.addr + size)) {  // (frame interpolation records the copies)
         extern bool vk_guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off);
         VkBuffer gb;
         VkDeviceSize goff;
@@ -4177,10 +4202,7 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_DRAW_TEXTURE: draw_texture(r); break;
         case CMD_DRAW_ELEMENTS: draw(r, true); break;
         case CMD_UPDATE_UNIFORM_BUFFER:
-            if (g_ubo_direct == 1) {  // (bound in place, earlier draws would read this value too: snapshots from now on)
-                g_ubo_direct = 0;
-                LOG("[vk] inline uniform buffer update: constant buffers are copied per draw from now on\n");
-            }
+            inline_note(r->x[0] + r->x[2], r->x[0] + r->x[2] + r->x[3]);  // (copied per draw from now on: g_inline)
             memcpy((void *)(uintptr_t)(r->x[0] + r->x[2]), x, r->x[3]);
             guest_copy_flush();  // (cbuf copies shared within the submission are stale now)
             break;
