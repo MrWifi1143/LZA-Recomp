@@ -1,4 +1,9 @@
-# LegendsARecomp
+# LegendsRecomp: Legends: Arceus (branch `LegendsA`)
+
+Static recompilations of the two Pokémon Legends games, one branch each:
+
+- **`LegendsA`** (this branch): Pokémon Legends: Arceus
+- **`LegendsZA`**: Pokémon Legends: Z-A (in progress)
 
 A native port of **Pokémon Legends: Arceus** (Nintendo Switch) by **static recompilation**: the game's ARM64 code is
 translated to C and compiled into a regular Linux (or Windows) program, with a runtime standing in for the Switch's
