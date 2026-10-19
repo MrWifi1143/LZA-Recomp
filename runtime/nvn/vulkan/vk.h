@@ -37,6 +37,7 @@ typedef struct {
     VkCommandPool pool;        // render thread only
     bool custom_border, divisor, host_import;
     bool xfb;  // VK_EXT_transform_feedback (NVN transform feedback: PLA skins its characters with it)
+    bool depth_clamp;  // depthClamp feature (NVN SetDepthClamp)
     PFN_vkCmdBindTransformFeedbackBuffersEXT bind_xfb;
     PFN_vkCmdBeginTransformFeedbackEXT begin_xfb;
     PFN_vkCmdEndTransformFeedbackEXT end_xfb;

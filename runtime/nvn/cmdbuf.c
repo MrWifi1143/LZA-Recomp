@@ -388,7 +388,9 @@ PLAIN(nvnCommandBufferSetPointSize, CMD_SET_POINT_SIZE)
 PLAIN(nvnCommandBufferSetSampleMask, CMD_SET_SAMPLE_MASK)
 PLAIN(nvnCommandBufferSetRenderEnable, CMD_SET_RENDER_ENABLE)
 STUB(nvnCommandBufferSetRenderEnableConditional)
-STUB(nvnCommandBufferSetDepthClamp)
+// depth clamp: fragments beyond the near / far planes keep the clamped depth instead of being clipped (shadow maps
+// draw casters behind the light's near plane this way)
+NVN(nvnCommandBufferSetDepthClamp) { Snap s_ = snap(c); record(c, CMD_SET_DEPTH_CLAMP, 0, &s_); }
 NVN(nvnCommandBufferSetRasterizerDiscard) { Snap s_ = snap(c); record(c, CMD_SET_RASTER_DISCARD, 0, &s_); }
 STUB(nvnCommandBufferSetConservativeRasterEnable)
 STUB(nvnCommandBufferSetConservativeRasterDilate)
