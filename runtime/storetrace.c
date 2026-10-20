@@ -1,5 +1,5 @@
 // Store tracing (research): LARECOMP_TRACE_STORES="<first>-<last>" with a game library built by `gen.py --trace-stores`
-// (make TRACE=1, docs/DEPURACAO.md). Every store the game makes reports (instruction address, address, old, new value)
+// (make TRACE=1, letsgo-recomp's docs/DEPURACAO.md). Every store the game makes reports (instruction address, address, old, new value)
 // here; during those presents each instruction is tallied: in how many presents it stored, how often by +1 / -1, how
 // often by the same step as its previous store. At the last present the instructions that store in nearly every
 // present with a steady step are listed: those are the game's frame counters and per-frame steps.

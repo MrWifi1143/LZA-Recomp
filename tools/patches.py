@@ -7,7 +7,7 @@ addresses belong to that game's executable. Let's Go patches (widescreen etc.) g
 PATCHES = {}
 
 
-# 60 fps: the frame counters the capture and battle scenes' timelines run on (found with the store tracer, docs/PESQUISA-60FPS.md).
+# 60 fps: the frame counters the capture and battle scenes' timelines run on (found with the store tracer, letsgo-recomp's docs/PESQUISA-60FPS.md).
 # Each steps once per update; at 60 fps they step on every other one (rt_scene_tick, runtime/hle/fps60.c) so those scenes
 # keep the game's 30 steps a second. Everywhere else rt_scene_tick() is 1 and the store is the game's own.
 def _scene_counter(addr_expr, reg):
@@ -32,7 +32,7 @@ PATCHES[0x70002d2a44] = _ring_counter
 
 
 # The addresses above are Let's Go Eevee 1.0.0's main (build id below). The same instructions in the other builds with
-# address tables (found with tools/addrmap.py; runtime/fnhook.c has the runtime's hooks): gen.py moves the patches
+# address tables (found with letsgo-recomp's tools/addrmap.py; runtime/fnhook.c has the runtime's hooks): gen.py moves the patches
 # there, and generates any other build (an update) without them.
 EEVEE_100_BUILD = '0a3f0d21e67dad80'
 BUILD_ADDRS = {

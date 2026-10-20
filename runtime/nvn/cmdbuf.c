@@ -135,7 +135,7 @@ static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
     return r;
 }
 
-// ---- the game object being drawn (frame interpolation, docs/PESQUISA-60FPS.md)
+// ---- the game object being drawn (frame interpolation, letsgo-recomp's docs/PESQUISA-60FPS.md)
 // The game draws each object from a few functions, called once per object (and pass) with the object in x0: hooked
 // while interpolation is on, they name the object around the command lists it calls and the draws it records, so the
 // in-between frame pairs each draw with the same object's draw in the previous frame (the game reorders objects every

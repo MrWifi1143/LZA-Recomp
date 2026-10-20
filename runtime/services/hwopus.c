@@ -29,7 +29,7 @@ static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t
 static bool opus_open(OpusDec *d) {
     const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_OPUS);
     // (the game aborts without it, right after the controller screen: say why instead - an FFmpeg built without
-    // swresample has no Opus decoder, tools/build_deps_windows.sh)
+    // swresample has no Opus decoder, letsgo-recomp's tools/build_deps_windows.sh)
     if (!codec) FATAL("the game's audio needs FFmpeg's Opus decoder, and the avcodec DLL next to the exe has none\n");
     d->ctx = avcodec_alloc_context3(codec);
     d->ctx->sample_rate = 48000;  // (FFmpeg decodes Opus at 48 kHz: other rates are decimated below)

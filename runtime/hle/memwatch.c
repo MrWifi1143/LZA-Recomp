@@ -1,4 +1,4 @@
-// Research aid (docs/DEPURACAO.md): who writes a word of the game's memory. The page holding it is made read-only; the first
+// Research aid (letsgo-recomp's docs/DEPURACAO.md): who writes a word of the game's memory. The page holding it is made read-only; the first
 // write to it raises an access violation, a vectored handler logs the writer's backtrace (the guest functions show as
 // f_<address>), makes the page writable, single-steps the store and protects the page again. Windows only.
 //  LARECOMP_WATCH=<addr>[,<addr>...]        watch these 32-bit words (hex guest addresses) from the start

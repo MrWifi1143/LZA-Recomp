@@ -428,7 +428,7 @@ static NvnTexture *texture_from_builder(uint64_t b) {
 // in the same NVNtexture object (a bigger version streamed in) without registering the slot again: on the console the
 // slot's descriptor still describes the texture's memory; here the slot kept the freed host object and, whenever malloc
 // gave that memory to another texture, showed that one (the world after a capture: fences, signs and ferns with other
-// textures until the area changed, docs/HISTORICO.md 60). Finalize clears those slots and initializing the same object
+// textures until the area changed, letsgo-recomp's docs/HISTORICO.md 60). Finalize clears those slots and initializing the same object
 // puts the new host object back. LARECOMP_POOL_FIX=0: as before, only counted (research).
 extern NvnDescPool *g_texture_pools[64];
 static uint64_t g_pool_dangling, g_pool_reattached, g_pool_mismatch;
@@ -689,7 +689,7 @@ NVN(nvnProgramSetSubroutineLinkage) { RET(1); }
 // translated programs by code address only: after a capture Let's Go loads shaders again at addresses that held other
 // shaders before ("[shader] ... now holds another shader" in the log), and the world drew with old translations (other
 // texture layouts: ferns with the sign's texture, black trees, flat-coloured plants until the area changed;
-// docs/HISTORICO.md 66).
+// letsgo-recomp's docs/HISTORICO.md 66).
 static uint64_t shader_content_hash(const NvnShaderStage *s) {
     uint64_t h = 0xcbf29ce484222325ull;
     uint32_t n = s->const_offset ? s->const_offset : 0x1000;

@@ -1,6 +1,6 @@
 // The render thread (LARECOMP_RENDER_THREAD): the game's calls into the backend (command lists, presents, texture
 // destruction) are queued in the order the game made them and run on one thread of ours, so the game thread goes on with
-// the next frame while the Vulkan commands of this one are recorded (docs/PESQUISA-GPU.md: without the backend's work the
+// the next frame while the Vulkan commands of this one are recorded (letsgo-recomp's docs/PESQUISA-GPU.md: without the backend's work the
 // game's chain runs at ~160 fps, with it at ~90).
 //
 // What the console's contract gives us: after nvnQueueSubmitCommands the game may not touch what the lists use until a

@@ -1,0 +1,2 @@
+#!/bin/sh
+exec llvm-windres -I"${LZA_WINBUILD:?}/zig-linux/lib/libc/include/any-windows-any" --target=x86_64-w64-mingw32 "$@"
