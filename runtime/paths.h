@@ -21,7 +21,7 @@ extern "C" {
 #endif
 
 #define RT_BUNDLE_ID "com.plarecomp"            // (data folder on macOS)
-#define RT_APP_NAME "PLA Recomp"              // window title, messages, the launcher
+#define RT_APP_NAME "PL:A Recomp"             // window title, messages, the launcher
 #define RT_APP_VERSION "0.0.1"                // the release (Makefile `dist` names the zip after it)
 
 void rt_paths_init(void);         // first thing in main(), after plat_init
