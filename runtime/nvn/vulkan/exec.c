@@ -1066,6 +1066,10 @@ static void begin_pass(void) {
     }
     if (!w) { pass_sx = pass_sy = 1; minw = minh = 16; }
     pass_w = minw; pass_h = minh;
+    if (g_debug_frame && st.rt.depth && st.rt.depth->backend)  // (research: which layer / level a depth pass targets)
+        LOG("[pass] depth %p %ux%u layers %u view set %#x layer %u+%u level %u | layers %u, colors %u\n", (void *)st.rt.depth,
+            st.rt.depth->width, st.rt.depth->height, ((TexBackend *)st.rt.depth->backend)->layers, st.rt.has_dview ? st.rt.dview.setmask : 0,
+            st.rt.dview.min_layer, st.rt.dview.num_layers, st.rt.dview.base_level, layers, pass_ncolor);
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = layers,
                           .colorAttachmentCount = pass_ncolor, .pColorAttachments = ca,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
@@ -2631,7 +2635,7 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
                 }
         }
     }
-    if (h && st.spool && tsc < (uint32_t)st.spool->count) smp = vk_sampler(&((NvnSamplerDesc *)st.spool->entries)[tsc]);
+    if (h && st.spool && tsc < (uint32_t)st.spool->count) smp = vk_sampler_for(&((NvnSamplerDesc *)st.spool->entries)[tsc], st_->shadow);
     static int dump_sampled = -1;  // LARECOMP_DUMP_SAMPLED=1 (with the frame dump): depth / R8UI / G-buffer textures as sampled
     if (dump_sampled < 0) dump_sampled = getenv("LARECOMP_DUMP_SAMPLED") != NULL;  // (its readbacks split the frame's passes)
     if (dump_sampled && g_debug_frame && h && st.tpool && tic < (uint32_t)st.tpool->count) {

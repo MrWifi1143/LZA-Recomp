@@ -633,6 +633,12 @@ static void dirty_check(NvnTexture *t, TexBackend *b) {
                 vk_tex_unscale(t);
                 pthread_mutex_lock(&dirty_lock);
             }
+            if (b->gpu_owned && (b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) {  // (research: a rendered depth texture taken back from memory)
+                static int n;
+                if (n++ < 20) LOG("[tex] depth texture %p %ux%u (%u layers, guest %llx-%llx) re-read from memory: write %llx-%llx\n", (void *)t,
+                                  t->width, t->height, b->layers, (unsigned long long)lo, (unsigned long long)hi,
+                                  (unsigned long long)g_dirty[i].lo, (unsigned long long)g_dirty[i].hi);
+            }
             b->gpu_owned = false;
             b->dynamic = true;
             b->checked_frame = ~0ull;
@@ -898,8 +904,17 @@ static VkCompareOp compare_op(uint32_t f) {
     }
 }
 
-VkSampler vk_sampler(NvnSamplerDesc *d) {
-    if (d->backend) return (VkSampler)d->backend;
+// A sampler with depth compare used by a texture instruction without .DC (Legends Z-A's G-buffer shaders read the
+// cascaded shadow map's raw depth and compare in code): Maxwell compares only for .DC instructions, Vulkan leaves the
+// result of a compare sampler on a non-shadow image type undefined (NVIDIA: 0/1 - no cast shadows). Those get the same
+// sampler without compare.
+static VkSampler sampler_create(NvnSamplerDesc *d, bool cmp);
+VkSampler vk_sampler(NvnSamplerDesc *d) { return d->backend ? (VkSampler)d->backend : sampler_create(d, true); }
+VkSampler vk_sampler_for(NvnSamplerDesc *d, bool shadow) {
+    if (shadow || !d->compare_mode || getenv("LARECOMP_KEEP_COMPARE")) return vk_sampler(d);
+    return d->backend_nocmp ? (VkSampler)d->backend_nocmp : sampler_create(d, false);
+}
+static VkSampler sampler_create(NvnSamplerDesc *d, bool cmp) {
     VkSamplerCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     si.magFilter = d->mag_filter == 1 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
     uint32_t mf = d->min_filter;
@@ -939,7 +954,7 @@ VkSampler vk_sampler(NvnSamplerDesc *d) {
     static int stest = -1;
     if (stest < 0) stest = getenv("LARECOMP_SAMPLER_TEST") != NULL;
     if (stest && mf > 1) { si.minLod = 0; si.maxLod = VK_LOD_CLAMP_NONE; si.anisotropyEnable = VK_TRUE; si.maxAnisotropy = 16; }
-    if (d->compare_mode) {
+    if (d->compare_mode && cmp) {
         si.compareEnable = VK_TRUE;
         si.compareOp = getenv("LARECOMP_NO_SHADOW") ? VK_COMPARE_OP_ALWAYS : compare_op(d->compare_func);
     }
@@ -957,7 +972,8 @@ VkSampler vk_sampler(NvnSamplerDesc *d) {
     }
     VkSampler s;
     VK_CHECK(vkCreateSampler(g_vk.dev, &si, NULL, &s));
-    d->backend = (void *)s;
+    if (cmp) d->backend = (void *)s;
+    else d->backend_nocmp = (void *)s;
     return s;
 }
 
