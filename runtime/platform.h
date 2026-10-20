@@ -32,6 +32,20 @@ int plat_protect(uint64_t addr, uint64_t size, int prot);  // 0 on success
 // ---- time
 uint64_t plat_now_ns(void);                // monotonic
 int plat_cpu_count(void);                  // logical CPUs this process may run on (its affinity mask)
+// x86-64-v3's AVX2 + FMA + BMI2, usable (the OS saves the AVX state): what the lifted code is compiled for. CPUID itself, not
+// __builtin_cpu_supports: zig's compiler runtime for Windows has no __cpu_model.
+#if defined(__x86_64__)
+#include <cpuid.h>
+static inline bool plat_cpu_x86_v3(void) {
+    unsigned a, b, c, d, lo, hi;
+    if (!__get_cpuid(1, &a, &b, &c, &d) || !(c & (1u << 12)) || !(c & (1u << 27)) || !(c & (1u << 28))) return false;  // FMA, OSXSAVE, AVX
+    __asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+    if ((lo & 6) != 6) return false;  // (XMM + YMM state enabled by the OS)
+    return __get_cpuid_count(7, 0, &a, &b, &c, &d) && (b & (1u << 5)) && (b & (1u << 8));  // AVX2, BMI2
+}
+#else
+static inline bool plat_cpu_x86_v3(void) { return false; }
+#endif
 void plat_sleep_until_ns(uint64_t t);      // precise wait for plat_now_ns() >= t
 void plat_thread_realtime(uint64_t period_ns);  // periodic timing thread (vsync): don't coalesce its timers
 

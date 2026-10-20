@@ -123,6 +123,7 @@ void vk_views_forget(TexBackend *b);  // drop (deferred) the cached views of an 
 uint64_t vk_frame_counter(void);
 bool vcache_get(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off);  // vertex stream in VRAM (vcache.c)
 void vcache_reset(void);
+void vcache_invalidate(uint64_t addr, uint64_t len);  // the GPU may write there from now on: no copies of it
 extern uint64_t g_vcache_hits, g_vcache_uploads;
 
 // ---- shaders / pipelines (shaders.c)

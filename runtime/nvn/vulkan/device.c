@@ -790,6 +790,7 @@ void backend_present(NvnTexture *t) {
         extern void hwwatch_src_arm(void);  // (LARECOMP_HWWATCH_SRC, from the same frame)
         if (at && (long)total_frames == at) hwwatch_src_arm();
     }
+    { extern void fdiff_present(uint64_t frame); fdiff_present(total_frames); }  // (LARECOMP_FDIFF research: hle/fdiff.c)
     {   // LARECOMP_CAMSCAN=<cbuf>@<frame>: exec.c camscan
         static long at = -1;
         static uint64_t cb;

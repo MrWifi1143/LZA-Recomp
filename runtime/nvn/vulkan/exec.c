@@ -412,7 +412,7 @@ __attribute__((target("avx2"))) static uint32_t scan_max32_avx2(const uint32_t *
 }
 static uint32_t scan_max_index(const void *src, uint32_t isz, uint32_t n, uint32_t restart) {
     static int avx2 = -1;
-    if (avx2 < 0) avx2 = __builtin_cpu_supports("avx2");
+    if (avx2 < 0) avx2 = plat_cpu_x86_v3();
     uint32_t m = 0;
     if (isz == 2) {
         if (avx2) return scan_max16_avx2(src, n, (uint16_t)restart);
@@ -2485,6 +2485,7 @@ static void gpuw_note(uint64_t a, uint64_t n) {
         ngpuw++;
     }
     if (ENV("LARECOMP_LOG_GPUWRITES")) LOG("[gpuw] the GPU may write %llx-%llx (%d ranges)\n", (unsigned long long)a, (unsigned long long)e, ngpuw);
+    vcache_invalidate(a, e - a);  // (a copy made before this dispatch was seen would stay stale: the CPU never writes there)
 }
 // A shader that stores to global memory with no storage buffer bound writes through pointers we cannot see: from then on every
 // vertex / index range is read in place, as before the VRAM ring (slower, never stale).
@@ -2989,7 +2990,7 @@ static struct {
 } dc;
 #define DC_SET(field, val, call) do { int64_t v_ = (int64_t)(val); if (dc.field != v_) { dc.field = v_; call; } } while (0)
 static void dc_begin(VkCommandBuffer cb) {
-    if (dc.cb == cb && dc.epoch == g_dyn_epoch) return;
+    if (dc.cb == cb && dc.epoch == g_dyn_epoch && !ENV("LARECOMP_NO_DC")) return;  // (LARECOMP_NO_DC: research, no cache)
     memset(&dc, 0xff, sizeof dc);  // (all unknown: -1, NaN)
     dc.cb = cb, dc.epoch = g_dyn_epoch, dc.pipe = VK_NULL_HANDLE;
 }
@@ -3248,6 +3249,16 @@ static void draw_(CmdRec *r, bool indexed) {
     // ---- rasterizer
     uint8_t cull = st.poly[0];
     VkCullModeFlags cm = cull == 1 ? VK_CULL_MODE_FRONT_BIT : cull == 2 ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
+    if (ENV("LARECOMP_VK_NO_CULL")) cm = VK_CULL_MODE_NONE;  // (research: geometry missing from one side - culled?)
+    if (ENV("LARECOMP_EXP_NOCULL_BITS")) {  // (research: frame start + k culls nothing for the draws whose index in the frame has bit k)
+        static uint64_t fr = ~0ull, base;
+        extern uint64_t renderer_game_frame(void);
+        uint64_t f = vk_frame_counter(), start = strtoull(ENV("LARECOMP_EXP_NOCULL_BITS"), NULL, 10);
+        if (f != fr) fr = f, base = g_draws_total;
+        uint64_t idx = g_draws_total - base;
+        if (f >= start && f < start + 12 && ((idx >> (f - start)) & 1)) cm = VK_CULL_MODE_NONE;
+        if (f == start + 12 && idx == 0) LOG("[exp] nocull bits done\n");
+    }
     DC_SET(cull, cm, vkCmdSetCullMode(cb, cm));
     bool ccw = st.poly[1] == 1;
     static int flipw = -1;  // LARECOMP_VK_FLIP_WINDING: invert the front-face mapping (A/B against Metal)
@@ -3524,6 +3535,46 @@ static void draw_(CmdRec *r, bool indexed) {
 }
 
 static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
+    if (ENV("LARECOMP_LOG_DET")) {  // (research: the determinant of the instance matrix rows in vertex cbuf 10, per draw)
+        float d[2] = {0, 0};
+        uint64_t ad[2] = {0, 0};
+        for (int k = 0; k < 2; k++) {
+            Range u = st.ubuf[0][k ? 7 : 2];
+            if (!u.addr || u.size < 48) continue;
+            const float *m = (const float *)(uintptr_t)u.addr;
+            ad[k] = u.addr;
+            d[k] = m[0] * (m[5] * m[10] - m[6] * m[9]) - m[1] * (m[4] * m[10] - m[6] * m[8]) + m[2] * (m[4] * m[9] - m[5] * m[8]);
+        }
+        // winding against the stored normals (a0 = float3 position, a1 = snorm8 normal, same stream): CCW triangles whose
+        // normal agrees, of the first 64
+        int agree = -1, tot = 0;
+        if (indexed && st.nattrib > 1 && (st.attrib[0] & 0xFF) == 0x22 && (st.attrib[1] & 0xFF) == 0x29 &&
+            ((st.attrib[0] >> 8) & 0x1F) == ((st.attrib[1] >> 8) & 0x1F)) {
+            int sidx = (st.attrib[0] >> 8) & 0x1F;
+            uint32_t stride = st.stream[sidx][0], o0 = st.attrib[0] >> 13, o1 = st.attrib[1] >> 13;
+            const uint8_t *vb = (const uint8_t *)(uintptr_t)st.vbuf[sidx].addr;
+            const void *ib = (const void *)(uintptr_t)r->x[3];
+            uint32_t isz = (uint32_t)r->x[1] == 1 ? 2 : 4;
+            int32_t bv = (int32_t)r->x[4];
+            agree = 0;
+            for (uint32_t t = 0; vb && ib && t + 2 < r->x[2] && tot < 64; t += 3, tot++) {
+                float P[3][3], N[3] = {0, 0, 0};
+                for (int k = 0; k < 3; k++) {
+                    uint32_t id = (isz == 2 ? ((const uint16_t *)ib)[t + k] : ((const uint32_t *)ib)[t + k]) + bv;
+                    memcpy(P[k], vb + (uint64_t)id * stride + o0, 12);
+                    const int8_t *n = (const int8_t *)(vb + (uint64_t)id * stride + o1);
+                    for (int j = 0; j < 3; j++) N[j] += n[j];
+                }
+                float e1[3], e2[3], g[3];
+                for (int j = 0; j < 3; j++) e1[j] = P[1][j] - P[0][j], e2[j] = P[2][j] - P[0][j];
+                g[0] = e1[1] * e2[2] - e1[2] * e2[1], g[1] = e1[2] * e2[0] - e1[0] * e2[2], g[2] = e1[0] * e2[1] - e1[1] * e2[0];
+                agree += g[0] * N[0] + g[1] * N[1] + g[2] * N[2] > 0;
+            }
+        }
+        LOG("[det] draw %llu vs %llx count %llu agree %d/%d cb5 %llx det5 %.4f cb10 %llx det10 %.4f poly %02x%02x\n", (unsigned long long)g_draws_total,
+            (unsigned long long)st.program->stages[0].code_addr, (unsigned long long)r->x[2], agree, tot, (unsigned long long)ad[0], d[0],
+            (unsigned long long)ad[1], d[1], st.poly[0], st.poly[1]);
+    }
     LOG("[draw] %s inst %llu mode %llu count %llu prog vs=%llx fs=%llx | vs cb %#x fs cb %#x | rt %d", indexed ? "e" : "a",
         (unsigned long long)(indexed ? r->x[6] : r->x[4]), (unsigned long long)r->x[0], (unsigned long long)r->x[2],
         (unsigned long long)st.program->stages[0].code_addr, (unsigned long long)st.program->stages[1].code_addr,
