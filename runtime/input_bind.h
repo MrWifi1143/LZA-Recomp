@@ -20,19 +20,26 @@ enum {
     BIND_PAD_COUNT,                                      // controller: the 16 buttons (its sticks stay the sticks)
     BIND_LS_UP = BIND_PAD_COUNT, BIND_LS_DOWN, BIND_LS_LEFT, BIND_LS_RIGHT,
     BIND_RS_UP, BIND_RS_DOWN, BIND_RS_LEFT, BIND_RS_RIGHT,
-    BIND_KEY_COUNT                                       // keyboard: buttons + both sticks
+    BIND_WALK,                                           // keyboard: held, the left stick walks (half tilt)
+    BIND_KEY_COUNT                                       // keyboard: buttons + both sticks + walk
+};
+// Keyboard bindings are SDL scancodes, or a mouse button / the wheel: these values after the scancodes
+// (BIND_MOUSE_BASE + SDL_BUTTON_LEFT...)
+enum {
+    BIND_MOUSE_BASE = 512 /* SDL_SCANCODE_COUNT */, BIND_MOUSE_LEFT, BIND_MOUSE_MIDDLE, BIND_MOUSE_RIGHT, BIND_MOUSE_X1,
+    BIND_MOUSE_X2, BIND_WHEEL_UP, BIND_WHEEL_DOWN, BIND_KEYCODE_COUNT
 };
 enum { BIND_DEV_PAD, BIND_DEV_KEY };
 // Controller binding values: an SDL_GamepadButton, or the analog triggers as buttons
 enum { PADB_LTRIGGER = 26 /* SDL_GAMEPAD_BUTTON_COUNT */, PADB_RTRIGGER, PADB_HOST_COUNT };
 
 extern int16_t g_bind_pad[BIND_PAD_COUNT];  // PADB value per Switch button
-extern int16_t g_bind_key[BIND_KEY_COUNT];  // SDL_Scancode per input (0 = none)
-extern const int16_t g_bind_key2[BIND_PAD_COUNT];  // fixed second keys (Enter = A, Backspace = B)
+extern int16_t g_bind_key[BIND_KEY_COUNT];  // SDL_Scancode (or BIND_MOUSE_*) per input (0 = none)
+extern const int16_t g_bind_key2[BIND_PAD_COUNT];  // fixed second keys (Enter = A, Backspace = B, 1 / 3 = ZL / ZR)
 
 const char *bind_input_name(int slot);         // "A", "D-pad Up", "Left stick Up"
 const char *bind_pad_label(int host, int fam); // controller button in the pad family's own words (fam: input_pad_family)
-const char *bind_key_label(int scancode);
+const char *bind_key_label(int scancode);       // a key's name, or "Mouse left", "Wheel up"...
 int bind_label_family(void);                   // the connected controller's family (also on the start screen)
 void bind_reset(int dev);
 bool bind_is_default(int dev);

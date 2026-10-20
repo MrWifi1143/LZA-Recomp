@@ -57,14 +57,15 @@ static const struct { int slot; const char *en, *pt; } k_actions[] = {
     {BIND_LS_DOWN, "Left stick down", "Analógico esquerdo baixo"},   {BIND_B, "B (or Backspace)", "B (ou Backspace)"},
     {BIND_LS_LEFT, "Left stick left", "Analógico esquerdo esq."},    {BIND_X, "X", "X"},
     {BIND_LS_RIGHT, "Left stick right", "Analógico esquerdo dir."},  {BIND_Y, "Y", "Y"},
-    {BIND_RS_UP, "Camera up", "Câmera cima"},                        {BIND_L, "L", "L"},
+    {BIND_RS_UP, "Camera up (or the mouse)", "Câmera cima (ou o mouse)"}, {BIND_L, "L", "L"},
     {BIND_RS_DOWN, "Camera down", "Câmera baixo"},                   {BIND_R, "R", "R"},
-    {BIND_RS_LEFT, "Camera left", "Câmera esquerda"},                {BIND_ZL, "ZL", "ZL"},
-    {BIND_RS_RIGHT, "Camera right", "Câmera direita"},               {BIND_ZR, "ZR", "ZR"},
+    {BIND_RS_LEFT, "Camera left", "Câmera esquerda"},                {BIND_ZL, "ZL (or 1)", "ZL (ou 1)"},
+    {BIND_RS_RIGHT, "Camera right", "Câmera direita"},               {BIND_ZR, "ZR (or 3)", "ZR (ou 3)"},
     {BIND_UP, "D-pad up", "Direcional cima"},                        {BIND_PLUS, "+", "+"},
     {BIND_DOWN, "D-pad down", "Direcional baixo"},                   {BIND_MINUS, "-", "-"},
     {BIND_LEFT, "D-pad left", "Direcional esquerda"},                {BIND_LSTICK, "Left stick press", "Clique analógico esq."},
     {BIND_RIGHT, "D-pad right", "Direcional direita"},               {BIND_RSTICK, "Right stick press", "Clique analógico dir."},
+    {BIND_WALK, "Walk (hold)", "Andar (segurar)"},
 };
 
 static const char *key_name(int sc) {
@@ -94,7 +95,7 @@ static void keys_section(void) {
             ImGui::TableNextColumn();
             bool waiting = cap_dev == BIND_DEV_KEY && cap_slot == slot;
             char lbl[96];
-            if (waiting) snprintf(lbl, sizeof lbl, "%s %d##k%d", T("Press a key...", "Aperte a tecla..."), (ms_left + 999) / 1000, slot);
+            if (waiting) snprintf(lbl, sizeof lbl, "%s %d##k%d", T("Press a key or mouse button...", "Aperte uma tecla ou botão do mouse..."), (ms_left + 999) / 1000, slot);
             else snprintf(lbl, sizeof lbl, "%s##k%d", key_name(g_bind_key[slot]), slot);
             int pushed = 0;
             if (waiting) { ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.42f, 0.12f, 1)); pushed++; }
@@ -109,10 +110,12 @@ static void keys_section(void) {
     }
     ImGui::PopStyleVar(2);
     if (cap_dev == BIND_DEV_KEY)
-        ImGui::TextDisabled("%s", T("Press the new key. Esc cancels; a key already in use swaps over.",
-                                    "Aperte a nova tecla. Esc cancela; uma tecla já usada troca de lugar."));
+        ImGui::TextDisabled("%s", T("Press the new key, mouse button or wheel. Esc cancels; one already in use swaps over.",
+                                    "Aperte a nova tecla, botão ou roda do mouse. Esc cancela; uma já usada troca de lugar."));
     if (!bind_is_default(BIND_DEV_KEY) && ImGui::Button(T("Restore default keys", "Restaurar teclas padrão"))) bind_reset(BIND_DEV_KEY);
     ImGui::PushItemWidth(420);
+    ImGui::Checkbox(T("Mouse camera (click the game to take the mouse, Esc lets it go)",
+                      "Câmera no mouse (clique no jogo para prender o mouse, Esc solta)"), &g_settings.mouse_camera);
     ImGui::SliderFloat(T("Mouse sensitivity", "Sensibilidade do mouse"), &g_settings.mouse_sens, 0.02f, 0.30f, "%.2f");
     ImGui::PopItemWidth();
 }
@@ -361,7 +364,7 @@ extern "C" void launcher_lg_run(const char *root) {
     for (int i = 0; i < 5; i++) if (res_lines[i] == g_settings.res_height) res = i;
     bool full = g_settings.fullscreen, smaa = g_settings.antialias == AA_SMAA, wildb = g_settings.wild_battle, showfps = g_settings.show_fps;
     int fps_i = g_settings.fps == 144 ? 3 : g_settings.fps == 120 ? 2 : g_settings.fps == 60 ? 1 : 0;
-    int prompts_i = g_settings.button_prompts & 3;
+    int prompts_i = g_settings.button_prompts >= 0 && g_settings.button_prompts <= 4 ? g_settings.button_prompts : 0;
     // Translation: the folders under mods/ (runtime/mods.h); 0 = none (the game's own English)
     static char mods[MODS_MAX][128];
     int nmods = mods_list(mods, MODS_MAX), mod = 0;
@@ -419,9 +422,9 @@ extern "C" void launcher_lg_run(const char *root) {
         ImGui::Combo(T("Frame rate (experimental above 30)", "Taxa de quadros (experimental acima de 30)"), &fps_i, fps_names, 4);
         ImGui::Checkbox(T("Show FPS counter", "Mostrar contador de FPS"), &showfps);
         // (runtime/nvn/glyphs.c: the game's button icons redrawn for the controller in use)
-        const char *const prompt_names[] = {T("Auto (the connected controller)", "Automático (o controle conectado)"), "Nintendo Switch", "Xbox",
-                                            "PlayStation"};
-        ImGui::Combo(T("Button prompts", "Ícones dos botões"), &prompts_i, prompt_names, 4);
+        const char *const prompt_names[] = {T("Auto (what you play with)", "Automático (o que você usa)"), "Nintendo Switch", "Xbox",
+                                            "PlayStation", T("Keyboard and mouse", "Teclado e mouse")};
+        ImGui::Combo(T("Button prompts", "Ícones dos botões"), &prompts_i, prompt_names, 5);
         const char *none = T("None", "Nenhum");
         if (ImGui::BeginCombo(T("Mod", "Mod"), mod ? mods[mod - 1] : none)) {
             if (ImGui::Selectable(none, mod == 0)) mod = 0;

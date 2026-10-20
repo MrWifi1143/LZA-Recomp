@@ -69,8 +69,11 @@ Tested on Linux with an RTX 4090; the Windows build is tested under Wine.
 - NPCs animate every frame (the game's own animation level of detail is bypassed).
 - Start screen: resolution, fullscreen, anti-aliasing, frame rate, FPS counter, button prompts, mods, controller test
   and remapping, keyboard remapping.
-- Button prompts for the controller in use: Xbox letters or PlayStation shapes instead of the Switch's (Auto follows
-  the connected controller, even when it changes while playing; remapped buttons show their new button).
+- Button prompts for what you play with: the bound keys and mouse buttons, Xbox letters or PlayStation shapes instead
+  of the Switch's (Auto follows the last used keyboard / mouse or controller, even when it changes while playing;
+  remapped buttons show their new button).
+- Keyboard and mouse: WASD (Left Ctrl walks), mouse camera (click to take the mouse, Esc lets it go), mouse buttons
+  and wheel bindable like keys. The game's menus work with the keyboard; clicking them with the mouse isn't possible.
 
 Known issues:
 

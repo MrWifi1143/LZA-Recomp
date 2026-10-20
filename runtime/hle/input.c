@@ -1,12 +1,12 @@
 // Controller input: SDL keyboard/gamepad -> nn::hid Npad state.
 //
-// Both go through the player's bindings (runtime/hle/bindings.c, defaults there: keyboard WASD left stick, arrows
-// d-pad, Space (or Enter) = A, Q (or Backspace) = B, Tab = X, R = Y, Z / C = L / R, 1 / 3 = ZL / ZR, = / - = Plus /
-// Minus, numpad 8/4/5/6 right stick; controller by position, Switch A = east).
-// Mouse: while the game aims a Poke Ball (it started the motion sensor) the window holds it (relative mode): moving it
-// turns the virtual gyro, left click = A (throw). Otherwise it is free and is a finger on the touch screen (left
-// button held; Play with Eevee pets this way in handheld mode). Right click = B either way. The menu (Esc) or leaving
-// the window lets it go.
+// Both go through the player's bindings (runtime/hle/bindings.c, defaults there: keyboard WASD left stick (Left Ctrl
+// held: walk), arrows d-pad, Space (or Enter) = A, Q (or Backspace) = B, Tab = X, R = Y, Z / C = L / R, mouse right /
+// left (or 1 / 3) = ZL / ZR, = / - = Plus / Minus, numpad 8/4/5/6 right stick; controller by position, Switch A = east).
+// Mouse: a click in the game window takes it (relative mode; the mouse camera setting): moving it turns the camera
+// (the right stick, by its speed), or the virtual gyro while the game aims with the motion sensor; its buttons and
+// wheel are keyboard bindings. The menu (Esc) or leaving the window lets it go. With the mouse camera off it is free
+// and is a finger on the touch screen (left button held), held only while the game aims.
 #include <SDL3/SDL.h>
 #include <ctype.h>
 #include <math.h>
@@ -27,19 +27,30 @@ enum {
 
 _Static_assert(BTN_DOWN == BIND_DOWN && BTN_ZL == BIND_ZL, "bindings follow the button bits");
 
-static _Atomic uint64_t key_buttons, pad_buttons, mouse_buttons;
+static _Atomic uint64_t key_buttons, pad_buttons;
 static _Atomic int32_t key_lx, key_ly, key_rx, key_ry, pad_lx, pad_ly, pad_rx, pad_ry;
-static uint8_t keys_down[SDL_SCANCODE_COUNT];
+static uint8_t keys_down[BIND_KEYCODE_COUNT];  // (keys, then the mouse buttons: BIND_MOUSE_*)
 static SDL_Gamepad *pad;
 static _Atomic int64_t sampling;
 
 // Host keys / buttons held by a test script (LARECOMP_HOST_INPUT, input_frame): they go through the bindings
-static uint8_t test_keys[SDL_SCANCODE_COUNT];
+static uint8_t test_keys[BIND_KEYCODE_COUNT];
 static _Atomic uint32_t test_pad;
 static _Atomic int32_t test_lx, test_ly;  // (a resting stick's drift: "lstick" in LARECOMP_HOST_INPUT)
 static bool host_test;  // (then a real controller is left out: the player's own pad must not spoil the test)
 
-static int held_key(int sc) { return sc > 0 && sc < SDL_SCANCODE_COUNT && (keys_down[sc] || test_keys[sc]); }
+// The wheel has no "held": a notch holds its binding for WHEEL_MS
+#define WHEEL_MS 90
+static _Atomic uint64_t wheel_until[2];  // (SDL_GetTicks: up, down)
+static int held_key(int sc) {
+    if (sc == BIND_WHEEL_UP || sc == BIND_WHEEL_DOWN) return SDL_GetTicks() < wheel_until[sc - BIND_WHEEL_UP];
+    return sc > 0 && sc < BIND_KEYCODE_COUNT && (keys_down[sc] || test_keys[sc]);
+}
+
+// Keyboard and mouse or controller: the one used last (the button prompts' Auto, runtime/nvn/glyphs.c). Without a
+// controller it is always the keyboard.
+static _Atomic int last_kbm = 1;
+int input_last_was_kbm(void) { return last_kbm || !pad; }
 
 // Through the bindings (runtime/hle/bindings.c: g_bind_key, and the fixed second keys), read on every key event, so
 // a rebind applies at once.
@@ -48,8 +59,12 @@ static void recompute_keyboard(void) {
     for (int i = 0; i < BIND_PAD_COUNT; i++)
         if (held_key(g_bind_key[i]) || held_key(g_bind_key2[i])) b |= 1ull << i;
     key_buttons = b;
-    key_lx = (held_key(g_bind_key[BIND_LS_RIGHT]) - held_key(g_bind_key[BIND_LS_LEFT])) * 32767;
-    key_ly = (held_key(g_bind_key[BIND_LS_UP]) - held_key(g_bind_key[BIND_LS_DOWN])) * 32767;
+    // diagonals at the same speed (not sqrt 2 faster); Walk (held) at half tilt
+    int dx = held_key(g_bind_key[BIND_LS_RIGHT]) - held_key(g_bind_key[BIND_LS_LEFT]);
+    int dy = held_key(g_bind_key[BIND_LS_UP]) - held_key(g_bind_key[BIND_LS_DOWN]);
+    int32_t m = dx && dy ? 23170 : 32767;
+    if (held_key(g_bind_key[BIND_WALK])) m /= 2;
+    key_lx = dx * m, key_ly = dy * m;
     key_rx = (held_key(g_bind_key[BIND_RS_RIGHT]) - held_key(g_bind_key[BIND_RS_LEFT])) * 32767;
     key_ry = (held_key(g_bind_key[BIND_RS_UP]) - held_key(g_bind_key[BIND_RS_DOWN])) * 32767;
 }
@@ -98,16 +113,40 @@ static void recompute_pad(void) {
     pad_lx = lx, pad_ly = ly, pad_rx = rx, pad_ry = ry;
 }
 
-// The mouse: held by the game window (relative mode) or free
+// The mouse: held by the game window (relative mode) or free. Held, it turns the camera (the right stick, by its
+// speed: mouse_stick) or, while the game aims with the motion sensor, the virtual gyro; its buttons and wheel are
+// keyboard bindings (BIND_MOUSE_*). With the mouse camera on (setting), a click in the window takes the mouse;
+// losing focus or opening the menu (Esc) lets it go.
 static SDL_Window *mouse_win;
 static _Atomic int gyro_aiming;  // the game has the motion sensor started (aiming): the mouse turns the gyro
 static _Atomic int64_t mouse_acc_x, mouse_acc_y;  // motion not yet applied to the virtual gyro, in 1/1000 pixel
+static _Atomic int64_t cam_acc_x, cam_acc_y;      // motion not yet read as the camera stick, in 1/1000 pixel
 static _Atomic int touch_down;
 static void mouse_release(void) {
     if (mouse_win) SDL_SetWindowRelativeMouseMode(mouse_win, false);
     mouse_win = NULL;
-    mouse_buttons = 0;
+    for (int b = BIND_MOUSE_LEFT; b <= BIND_MOUSE_X2; b++) keys_down[b] = 0;
+    cam_acc_x = cam_acc_y = 0;
     touch_down = 0;
+    recompute_keyboard();
+}
+
+// The camera stick from the held mouse: its speed since the last read (smoothed over ~35 ms: the game reads the
+// controller several times a frame), full tilt at 600 px/s at the default sensitivity 0.10.
+static void mouse_stick(int32_t *rx, int32_t *ry) {
+    static uint64_t last;
+    static double vx, vy;
+    uint64_t now = SDL_GetTicksNS();
+    double dt = last ? (double)(now - last) / 1e9 : 0;
+    last = now;
+    double ax = (double)atomic_exchange(&cam_acc_x, 0) / 1000, ay = (double)atomic_exchange(&cam_acc_y, 0) / 1000;
+    if (dt <= 0 || dt > 0.25 || !mouse_win) { vx = vy = 0; return; }
+    double a = dt / 0.035 > 1 ? 1 : dt / 0.035;
+    vx += (ax / dt - vx) * a, vy += (ay / dt - vy) * a;
+    double k = g_settings.mouse_sens / 60.0 * 32767;
+    double sx = vx * k, sy = -vy * k;  // (the mouse moved up: the stick up)
+    *rx += (int32_t)(sx > 32767 ? 32767 : sx < -32767 ? -32767 : sx);
+    *ry += (int32_t)(sy > 32767 ? 32767 : sy < -32767 ? -32767 : sy);
 }
 
 // Touch screen: the free mouse over the game image. The game is told it is docked (runtime/services/am.c: a 1920 x
@@ -148,6 +187,9 @@ static bool test_event(const SDL_Event *e) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: return e->key.which == TEST_DEVICE;
     case SDL_EVENT_TEXT_INPUT: return e->text.windowID == TEST_DEVICE;
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP: return e->gbutton.which == TEST_DEVICE;
+    case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP: return e->button.which == TEST_DEVICE;
+    case SDL_EVENT_MOUSE_MOTION: return e->motion.which == TEST_DEVICE;
+    case SDL_EVENT_MOUSE_WHEEL: return e->wheel.which == TEST_DEVICE;
     default: return false;
     }
 }
@@ -231,35 +273,44 @@ void input_handle_event(const SDL_Event *e) {
             if (e->key.scancode == SDL_SCANCODE_F6) { g_heal_vtx = 1; LOG("[heal] F6: vertex data in place\n"); }
         }
         if (e->key.scancode < SDL_SCANCODE_COUNT) keys_down[e->key.scancode] = e->type == SDL_EVENT_KEY_DOWN;
+        if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat) last_kbm = 1;
         recompute_keyboard();
         break;
-    case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP: case SDL_EVENT_MOUSE_MOTION: {
-        bool motion = e->type == SDL_EVENT_MOUSE_MOTION;
-        SDL_Window *w = SDL_GetWindowFromID(motion ? e->motion.windowID : e->button.windowID);
-        // aiming: the window holds the mouse (the gyro); else it is free (the touch screen)
-        if (gyro_aiming && !mouse_win && w) {
+    case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP: case SDL_EVENT_MOUSE_MOTION: case SDL_EVENT_MOUSE_WHEEL: {
+        bool motion = e->type == SDL_EVENT_MOUSE_MOTION, wheel = e->type == SDL_EVENT_MOUSE_WHEEL;
+        SDL_Window *w = SDL_GetWindowFromID(motion ? e->motion.windowID : wheel ? e->wheel.windowID : e->button.windowID);
+        bool cam = g_settings.mouse_camera, down = e->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+        // aiming takes the mouse (the gyro); with the mouse camera a click does too (and is only that: no press)
+        if (!mouse_win && w && (gyro_aiming || (cam && down))) {
             mouse_win = w;
             SDL_SetWindowRelativeMouseMode(w, true);
             touch_down = 0;
-        } else if (!gyro_aiming && mouse_win) {
+            last_kbm = 1;
+            if (down && !gyro_aiming) break;
+        } else if (mouse_win && !gyro_aiming && !cam) {
             mouse_release();
         }
         if (motion) {
             if (mouse_win) {
-                mouse_acc_x += (int64_t)(e->motion.xrel * 1000);
-                mouse_acc_y += (int64_t)(e->motion.yrel * 1000);
+                if (gyro_aiming) mouse_acc_x += (int64_t)(e->motion.xrel * 1000), mouse_acc_y += (int64_t)(e->motion.yrel * 1000);
+                else cam_acc_x += (int64_t)(e->motion.xrel * 1000), cam_acc_y += (int64_t)(e->motion.yrel * 1000);
+                if (e->motion.xrel || e->motion.yrel) last_kbm = 1;
             } else {
                 touch_at(w, e->motion.x, e->motion.y);
             }
             break;
         }
-        bool down = e->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
-        if (e->button.button == SDL_BUTTON_RIGHT) {
-            mouse_buttons = down ? mouse_buttons | 1ull << BTN_B : mouse_buttons & ~(1ull << BTN_B);
-        } else if (e->button.button == SDL_BUTTON_LEFT) {
-            if (mouse_win) mouse_buttons = down ? mouse_buttons | 1ull << BTN_A : mouse_buttons & ~(1ull << BTN_A);
-            else { touch_at(w, e->button.x, e->button.y); touch_down = down; }
+        if (wheel) {
+            if (e->wheel.y) wheel_until[e->wheel.y > 0 ? 0 : 1] = SDL_GetTicks() + WHEEL_MS, last_kbm = 1;
+            recompute_keyboard();
+            break;
         }
+        // buttons: keyboard bindings while the window holds the mouse; free, the left one is a finger on the touch screen
+        uint8_t b = e->button.button;
+        if (!mouse_win && b == SDL_BUTTON_LEFT) { touch_at(w, e->button.x, e->button.y); touch_down = down; break; }
+        if (b >= 1 && b <= 5) keys_down[BIND_MOUSE_BASE + b] = down;
+        if (down) last_kbm = 1;
+        recompute_keyboard();
         break;
     }
     case SDL_EVENT_WINDOW_FOCUS_LOST:
@@ -273,6 +324,8 @@ void input_handle_event(const SDL_Event *e) {
         recompute_pad();
         break;
     case SDL_EVENT_GAMEPAD_AXIS_MOTION: case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
+        if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && abs(e->gaxis.value) > 20000))
+            last_kbm = 0;
         recompute_pad();
         break;
     }
@@ -294,6 +347,8 @@ static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
 //   entry first like a player's typing; "{Escape}" (any SDL key name) presses that key. No ',' or ':' in <text>.
 // "frame:sdlpad:<button>:frames" / "frame:sdlkey:<key>:frames" hold a controller button / key as real events (down
 //   at frame, up `frames` later): they reach menus and the on-screen keyboard first, as a player's would.
+// "frame:sdlmouse:left|middle|right|x1|x2|wheelup|wheeldown:frames" presses a mouse button (the wheel: one notch),
+// "frame:sdlmove:<dx>/<dy>:frames" moves the mouse by that much every frame, as real events in the game window.
 // "frame:shot:<name>" saves the window (game + menus) to build/<name>.png.
 // LARECOMP_BIND_TEST="frame:pad|key:<input>:<host>,..." starts a rebind capture of <input> (bind_* name: a, zl,
 //   ls_up...) at that frame (the Controls tab shows it waiting) and presses <host> 90 frames later ("esc" cancels,
@@ -311,6 +366,35 @@ static void test_push(uint64_t frame, unsigned long start, unsigned long len, co
     memset(&e, 0, sizeof e);
     if (!strcmp(dev, "sdlkey")) {
         if (frame == start || frame == start + len) push_key(SDL_GetScancodeFromName(arg), SDL_KMOD_NONE, frame == start);
+        return;
+    }
+    if (!strcmp(dev, "sdlmouse") || !strcmp(dev, "sdlmove")) {
+        int nw = 0;
+        SDL_Window **ws = SDL_GetWindows(&nw);
+        SDL_WindowID wid = ws && nw > 0 ? SDL_GetWindowID(ws[0]) : 0;
+        SDL_free(ws);
+        if (!strcmp(dev, "sdlmove")) {
+            float dx = 0, dy = 0;
+            if (frame < start || frame >= start + len || sscanf(arg, "%f/%f", &dx, &dy) != 2) return;
+            e.type = SDL_EVENT_MOUSE_MOTION, e.motion.which = TEST_DEVICE, e.motion.windowID = wid;
+            e.motion.xrel = dx, e.motion.yrel = dy;
+            SDL_PushEvent(&e);
+            return;
+        }
+        static const char *const names[] = {"left", "middle", "right", "x1", "x2"};
+        if (!strcmp(arg, "wheelup") || !strcmp(arg, "wheeldown")) {
+            if (frame != start) return;
+            e.type = SDL_EVENT_MOUSE_WHEEL, e.wheel.which = TEST_DEVICE, e.wheel.windowID = wid;
+            e.wheel.y = !strcmp(arg, "wheelup") ? 1 : -1;
+            SDL_PushEvent(&e);
+            return;
+        }
+        for (int i = 0; i < 5; i++) {
+            if (strcmp(arg, names[i]) || (frame != start && frame != start + len)) continue;
+            e.type = frame == start ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP;
+            e.button.which = TEST_DEVICE, e.button.windowID = wid, e.button.button = (Uint8)(i + 1), e.button.down = frame == start;
+            SDL_PushEvent(&e);
+        }
         return;
     }
     if (!strcmp(dev, "sdlpad")) {
@@ -360,9 +444,10 @@ static void host_test_frame(uint64_t frame) {
         char *save = NULL;
         for (char *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
             unsigned long start = 0, len = 10;
-            char dev[8] = "", name[400] = "";
-            if (sscanf(tok, "%lu:%7[a-z]:%399[^:]:%lu", &start, dev, name, &len) < 3) continue;
-            if (!strcmp(dev, "type") || !strcmp(dev, "sdlpad") || !strcmp(dev, "sdlkey") || !strcmp(dev, "shot")) {
+            char dev[12] = "", name[400] = "";
+            if (sscanf(tok, "%lu:%11[a-z]:%399[^:]:%lu", &start, dev, name, &len) < 3) continue;
+            if (!strcmp(dev, "type") || !strcmp(dev, "sdlpad") || !strcmp(dev, "sdlkey") || !strcmp(dev, "shot") ||
+                !strcmp(dev, "sdlmouse") || !strcmp(dev, "sdlmove")) {
                 test_push(frame, start, len, dev, name);
                 continue;
             }
@@ -604,7 +689,7 @@ scripted:;
 extern bool menu_input_captured(void);  // runtime/ui/menu.mm: overlay menu or name entry up (it has the keys / pad)
 
 // Buttons held right now (keyboard, gamepad, test script), independent of whether the game polls (movies).
-uint64_t input_buttons_now(void) { return (menu_input_captured() ? 0 : key_buttons | pad_buttons | mouse_buttons) | script_buttons; }
+uint64_t input_buttons_now(void) { return (menu_input_captured() ? 0 : key_buttons | pad_buttons) | script_buttons; }
 
 static int32_t clamp_axis(int32_t v) { return v > 32767 ? 32767 : v < -32767 ? -32767 : v; }
 
@@ -676,7 +761,8 @@ static void fill_state(Cpu *c) {
     bool menu = menu_input_captured();  // the overlay menu / name entry has the controls (typing there isn't for the game)
     bool input_pad_finger_on(void);
     const uint64_t zr = input_pad_finger_on() ? 1ull << BTN_ZR : 0;  // (with the finger on, the controller's ZR touches)
-    uint64_t b = menu ? script_buttons & ~zr : key_buttons | ((pad_buttons | script_buttons) & ~zr) | mouse_buttons;
+    if (wheel_until[0] || wheel_until[1]) recompute_keyboard();  // (a wheel notch's binding lets go by time)
+    uint64_t b = menu ? script_buttons & ~zr : key_buttons | ((pad_buttons | script_buttons) & ~zr);
     {   // injected Plus: held for ~10 presented frames (the game polls several times per frame)
         extern uint64_t renderer_game_frame(void);
         static uint64_t until;
@@ -684,7 +770,9 @@ static void fill_state(Cpu *c) {
         if (renderer_game_frame() < until) b |= 1ull << BTN_PLUS;
     }
     int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly) + script_ly);
-    int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry) + script_ry);
+    int32_t mrx = 0, mry = 0;
+    mouse_stick(&mrx, &mry);
+    int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx + mrx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry + mry) + script_ry);
     // d-pad / arrow keys walk (setting) while the stick is at rest. "At rest" has a dead zone: a controller's stick
     // never reads exactly 0 (a DualSense rests at a few hundred), which used to turn the d-pad off altogether.
     if (!menu && g_settings.dpad_move && (int64_t)lx * lx + (int64_t)ly * ly < 8000ll * 8000) {

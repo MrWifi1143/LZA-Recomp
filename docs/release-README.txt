@@ -40,17 +40,22 @@ How to play
 Start screen options
 --------------------
 Resolution, fullscreen, anti-aliasing (SMAA), frame rate (30 is the game's own; 60, 120 and 144 are experimental),
-"Show FPS counter" (the game's frames per second and frame time, top right), "Button prompts" (Auto: the
-connected controller's buttons, Xbox letters or PlayStation shapes, switching when you change controller; or always
-Nintendo Switch, Xbox or PlayStation), mods, controller test and remapping,
+"Show FPS counter" (the game's frames per second and frame time, top right), "Button prompts" (Auto: what you
+play with - the keys and mouse buttons you bound, or the controller's Xbox letters / PlayStation shapes, switching as
+you change; or always one of them), mouse camera and sensitivity (Keyboard section), mods, controller test and remapping,
 keyboard remapping.
 
 Controls
 --------
-Keyboard (all keys can be changed on the start screen): WASD = left stick, numpad 8/4/5/6 = right stick,
-Space or Enter = A, Q or Backspace = B, Tab = X, R = Y, Z / C = L / R, 1 / 3 = ZL / ZR, = and - = Plus / Minus,
-arrows = D-pad, F = left stick click.
+Keyboard and mouse (every key and mouse button can be changed on the start screen, under Keyboard):
+  WASD move (hold Left Ctrl to walk), the mouse turns the camera: click in the game window to take the mouse, Esc
+  lets it go. Space or Enter = A, Q or Backspace = B, Tab = X, R = Y, Z / C = L / R, right / left mouse button
+  (or 1 / 3) = ZL / ZR, = and - = Plus / Minus, arrows = D-pad, F = left stick click, numpad 8/4/5/6 = camera.
+  The game's menus work with the same keys (WASD or arrows to move, Space to choose, Q to go back); they can't be
+  clicked with the mouse.
 Controllers: any controller SDL recognizes (Xbox, PlayStation, Switch Pro...).
+The button prompts show what you play with: the keys you bound, Xbox or PlayStation buttons (start screen "Button
+prompts", Auto by default).
 Esc or F1: the menu. F11 or Alt+Enter: fullscreen.
 
 Everything stays in this folder: settings (larecomp.ini), saves (save\), the game files (extracted\), caches
