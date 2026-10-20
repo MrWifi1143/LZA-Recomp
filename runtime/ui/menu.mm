@@ -25,6 +25,7 @@ void input_reset(void);
 bool input_finger_cursor(float *x, float *y, bool *down);  // runtime/hle/input.c
 void input_rec_text(const char *text);                   // (LARECOMP_REC / LARECOMP_REPLAY: the names typed)
 bool input_replay_text(char *out, int cap);
+uint64_t renderer_game_frame(void);  // runtime/nvn: presents the game has made (the fps counter)
 }
 
 // ------------------------------------------------------------------ language
@@ -458,7 +459,18 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         ImGui::SetNextWindowBgAlpha(0.5f);
         ImGui::Begin("##fps", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                         ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
-        ImGui::Text("%.0f fps", io.Framerate);
+        // The game's own frames (renderer_game_frame), not the window's refresh: twice a second, frames per second and
+        // the average frame time
+        static uint64_t t0, f0;
+        static float fps_shown;
+        uint64_t now = SDL_GetTicksNS(), f = renderer_game_frame();
+        if (!t0 || f < f0) t0 = now, f0 = f;
+        else if (now - t0 >= 500000000ull) {
+            fps_shown = (float)((double)(f - f0) * 1e9 / (double)(now - t0));
+            t0 = now, f0 = f;
+        }
+        if (fps_shown > 0) ImGui::Text("%.0f fps  %.1f ms", fps_shown, 1000.0f / fps_shown);
+        else ImGui::Text("-- fps");
         ImGui::End();
     }
     if (finger) {  // the controller's finger on the touch screen (right stick moves it, ZR touches)

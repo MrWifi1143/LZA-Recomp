@@ -359,7 +359,7 @@ extern "C" void launcher_lg_run(const char *root) {
     static const int res_lines[] = {0, 720, 1080, 1440, 2160};
     int res = 0;
     for (int i = 0; i < 5; i++) if (res_lines[i] == g_settings.res_height) res = i;
-    bool full = g_settings.fullscreen, smaa = g_settings.antialias == AA_SMAA, wildb = g_settings.wild_battle;
+    bool full = g_settings.fullscreen, smaa = g_settings.antialias == AA_SMAA, wildb = g_settings.wild_battle, showfps = g_settings.show_fps;
     int fps_i = g_settings.fps == 144 ? 3 : g_settings.fps == 120 ? 2 : g_settings.fps == 60 ? 1 : 0;
     // Translation: the folders under mods/ (runtime/mods.h); 0 = none (the game's own English)
     static char mods[MODS_MAX][128];
@@ -416,6 +416,7 @@ extern "C" void launcher_lg_run(const char *root) {
         ImGui::Checkbox(T("Anti-aliasing (SMAA)", "Suavizar serrilhado (SMAA)"), &smaa);
         static const char *const fps_names[] = {"30 fps", "60 fps", "120 fps", "144 fps"};  // (above 30: experimental)
         ImGui::Combo(T("Frame rate (experimental above 30)", "Taxa de quadros (experimental acima de 30)"), &fps_i, fps_names, 4);
+        ImGui::Checkbox(T("Show FPS counter", "Mostrar contador de FPS"), &showfps);
         const char *none = T("None", "Nenhum");
         if (ImGui::BeginCombo(T("Mod", "Mod"), mod ? mods[mod - 1] : none)) {
             if (ImGui::Selectable(none, mod == 0)) mod = 0;
@@ -462,6 +463,7 @@ extern "C" void launcher_lg_run(const char *root) {
     g_settings.antialias = smaa ? AA_SMAA : AA_OFF;
     g_settings.fps = fps_i == 3 ? 144 : fps_i == 2 ? 120 : fps_i == 1 ? 60 : 30;
     g_settings.wild_battle = wildb;
+    g_settings.show_fps = showfps;
     snprintf(g_settings.mod, sizeof g_settings.mod, "%s", mod ? mods[mod - 1] : "");
     settings_save();
     if (warmup_needed(root)) {  // first start, or the first after an update: every shader of the game, once (warmup.c)
