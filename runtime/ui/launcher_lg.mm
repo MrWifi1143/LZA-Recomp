@@ -1,4 +1,4 @@
-// PLA Recomp start screen (from Let's Go Recomp's): the game files (picked once, set up and recompiled here:
+// PL:A / PL:Z-A Recomp start screen (from Let's Go Recomp's): the game files (picked once, set up and recompiled here:
 // runtime/gamesetup.c), the resolution, fullscreen, anti-aliasing, a mod (mods/: runtime/mods.c), the controller (what is
 // connected, a live test of every button and stick, remapping) and the keyboard, Play. In English, or in Portuguese when the system's language is (LARECOMP_LANG=en|pt
 // chooses). The choices go to larecomp.ini (settings.c; bind_key_* from runtime/hle/bindings.c).
