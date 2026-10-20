@@ -67,8 +67,10 @@ Tested on Linux with an RTX 4090; the Windows build is tested under Wine.
 - Graphics: GPU-culled and instanced props (station facade, iron work, trees, hedges, lamp posts), cast shadows,
   render scale up to 4K, SMAA.
 - NPCs animate every frame (the game's own animation level of detail is bypassed).
-- Start screen: resolution, fullscreen, anti-aliasing, frame rate, FPS counter, mods, controller test and remapping,
-  keyboard remapping.
+- Start screen: resolution, fullscreen, anti-aliasing, frame rate, FPS counter, button prompts, mods, controller test
+  and remapping, keyboard remapping.
+- Button prompts for the controller in use: Xbox letters or PlayStation shapes instead of the Switch's (Auto follows
+  the connected controller, even when it changes while playing; remapped buttons show their new button).
 
 Known issues:
 

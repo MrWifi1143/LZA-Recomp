@@ -656,6 +656,7 @@ void backend_present(NvnTexture *t) {
         // The game's first two presents are a blue full-screen 2D quad drawn while it loads (then black, then the
         // controller screen): a flash on every start. Keep the window black for them. LARECOMP_HIDE_FIRST_FRAMES=<n>
         // (0: show everything).
+        { extern void bntxscan_present(uint64_t frame); bntxscan_present(total_frames); }  // (research: hle/bntxscan.c)
         static long hide = -1;
         if (hide < 0) hide = getenv("LARECOMP_HIDE_FIRST_FRAMES") ? atol(getenv("LARECOMP_HIDE_FIRST_FRAMES")) : 2;
         if ((long)total_frames >= hide) vk_present_draw(cb, b, (float)vx, (float)vy, (float)vw, (float)vh, pv);

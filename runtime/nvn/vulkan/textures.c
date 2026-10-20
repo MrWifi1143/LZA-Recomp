@@ -10,6 +10,7 @@
 
 #include "vk.h"
 #include "../astc.h"
+#include "../glyphs.h"
 #include "../renderer.h"
 
 // ================================================================== formats
@@ -445,6 +446,8 @@ static uint64_t hash_full(const uint8_t *p, uint64_t n) {
     return h ^ (h >> 31);
 }
 
+uint64_t vk_tex_content_hash(const uint8_t *p, uint64_t n) { return hash_full(p, n); }  // (research: hle/bntxscan.c)
+
 // The quick check of a texture the CPU may have changed: 128 chunks of 32 bytes spread over it (each costs one cache
 // miss: 4096 single bytes made this a sixth of the render thread; the full hash every 120 frames is the backstop)
 static uint64_t fnv_sample(const uint8_t *p, uint64_t n) {
@@ -483,6 +486,7 @@ uint64_t prof_tex_checks, prof_tex_samples, prof_tex_full, prof_tex_full_bytes, 
 static void upload_texture(NvnTexture *t, TexBackend *b) {
     if (!t->addr || t->target == 10) return;
     uint64_t frame = vk_frame_counter();
+    if (b->glyph && b->glyph_gen != glyphs_generation()) b->uploaded = false;  // (another controller's prompts)
     if (b->uploaded && b->checked_frame == frame) return;
     if (b->uploaded && !b->dynamic && ((frame + ((uintptr_t)b >> 6)) & 7)) return;
     const FormatInfo *fi = t->layout.fmt;
@@ -556,6 +560,36 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 snprintf(path, sizeof path, "build/tex/%llx_%ux%u_f%x_row%u.bin", (unsigned long long)t->addr, l.w, l.h, t->format, row);
                 FILE *f = fopen(path, "wb");
                 if (f) { fwrite(lin, 1, (size_t)row * l.hb, f); fclose(f); }
+            }
+            // LARECOMP_DUMP_TEX_ALL=<max size>: level 0 of every texture up to that width and height, once per content
+            // -> build/tex/all/<hash>_<w>x<h>_f<format>_row<bytes>.bin (deswizzled blocks; <hash> as runtime/nvn/glyphs.c keys them)
+            static int dump_all = -1;
+            if (dump_all < 0) dump_all = getenv("LARECOMP_DUMP_TEX_ALL") ? atoi(getenv("LARECOMP_DUMP_TEX_ALL")) : 0;
+            if (dump_all && lv == 0 && layer == 0 && l.w <= (uint32_t)dump_all && l.h <= (uint32_t)dump_all && l.d == 1) {
+                static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+                static uint64_t seen[65536];
+                static int nseen;
+                uint64_t hsh = hash_full(lin, (uint64_t)row * l.hb) | 1;
+                pthread_mutex_lock(&mu);
+                uint32_t k = (uint32_t)hsh & 65535;
+                while (seen[k] && seen[k] != hsh) k = (k + 1) & 65535;
+                bool fresh = !seen[k] && nseen < 60000;
+                if (fresh) seen[k] = hsh, nseen++;
+                pthread_mutex_unlock(&mu);
+                if (fresh) {
+                    char path[200];
+                    mkdir("build/tex", 0755);
+                    mkdir("build/tex/all", 0755);
+                    snprintf(path, sizeof path, "build/tex/all/%016llx_%ux%u_f%x_row%u.bin", (unsigned long long)hsh, l.w, l.h,
+                             t->format, row);
+                    FILE *f = fopen(path, "wb");
+                    if (f) { fwrite(lin, 1, (size_t)row * l.hb, f); fclose(f); }
+                }
+            }
+            // a button icon: its symbol for the controller in use (BC4 / BC5: lin is the upload buffer itself)
+            if (lv == 0 && layer == 0 && l.d == 1 && l.w <= 128 && l.h <= 128 && (t->format == 0x49 || t->format == 0x4B)) {
+                int g = glyphs_patch(hash_full(lin, (uint64_t)row * l.hb) | 1, t->format, l.w, l.h, lin);
+                if (g) b->glyph = true, b->glyph_gen = glyphs_generation();
             }
             if (expand) {  // RGB8 / RGBA4 / RGB5A1 -> RGBA8
                 uint8_t *o = s.ptr;
