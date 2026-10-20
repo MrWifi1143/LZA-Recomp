@@ -140,6 +140,11 @@ static const char *cbuf_ref(Ctx *c, int idx, int64_t off, const char *dyn, char 
     if (off + 16 > (int64_t)c->info->cbuf_size[idx]) c->info->cbuf_size[idx] = (uint32_t)((off + 16 + 255) & ~255);
     if (dyn) c->info->cbuf_dynamic |= 1u << idx;
     if (!dyn && idx < 18 && off >= 0 && (uint32_t)(off >> 4) + 1 > c->cbuf_need[idx]) c->cbuf_need[idx] = (uint32_t)(off >> 4) + 1;
+    // c0[0x644] in a vertex shader: NVN's base instance (the shader adds it to the instance id, which excludes it).
+    // Vulkan has it as gl_BaseInstance - the only source for indirect draws, whose base instance the GPU writes (Z-A's
+    // instanced props: every instance drew at the first one's place). (c0[0x640], the base vertex, stays 0:
+    // gl_VertexIndex already includes it.)
+    if (!dyn && idx == 0 && off == 0x644 && c->stage == STAGE_VERTEX && c->glsl) { sprintf(buf, "uint(gl_BaseInstanceARB)"); return buf; }
     if (dyn) sprintf(buf, "cbr(cb%d, (%s) + %lldu)", idx, dyn, (long long)off);
     else sprintf(buf, "cb%d[%lld][%lld]", idx, (long long)(off >> 4), (long long)((off >> 2) & 3));
     return buf;
