@@ -30,6 +30,24 @@ LZ&A Recomp has one branch per game:
 Requirements: Windows 10/11 64-bit, a CPU with AVX2 (Intel 2013+ / AMD Zen+), a GPU with Vulkan 1.3 and a current
 driver, ~25 GB free disk space during setup.
 
+## Playing on Linux
+
+One line in a terminal (Arch / Manjaro / EndeavourOS, Debian 13+ / Ubuntu 25.04+ and their derivatives, Fedora): it
+downloads this branch, installs what it needs (asks for your password only if something is missing), builds the
+program and starts it.
+
+```sh
+git clone -b LegendsA https://github.com/MrWifi1143/LZA-Recomp.git PLA-Recomp && cd PLA-Recomp && ./tools/linux/install.sh && ./play.sh
+```
+
+On the start screen click **Select game folder...** and pick the folder with your extracted `exefs` and `romfs`
+(below); the game code is built for your PC once. Later, start it again with `./play.sh` in that folder. To update:
+`git pull && ./tools/linux/install.sh`.
+
+The repository is private for now: you need access to it (`gh auth login`, or a GitHub token as the password).
+
+Requirements: x86-64 with AVX2, a GPU with a Vulkan 1.3 driver (Mesa or NVIDIA), ~25 GB free during setup.
+
 ## Getting `exefs` and `romfs`
 
 The recomp reads the game's **extracted** files: an `exefs` folder (`main`, `sdk`, `subsdk0`, `subsdk1`, `main.npdm`) and
@@ -79,13 +97,20 @@ Known issues:
 - On a fresh install, shaders and pipelines compile the first time they are seen (short stutters).
 - Only the beginning of the game has been tested; expect missing effects and bugs further on.
 
-## Building from source (Linux)
+## Building from source (Linux, by hand)
 
-Requirements: x86-64 with AVX2, a Vulkan 1.3 GPU, clang + lld, SDL 3, FFmpeg, shaderc, Python 3.
+What the script does, step by step. Requirements: clang + lld, SDL 3, FFmpeg, shaderc, the Vulkan loader, Python 3.
 
 ```sh
-python3 -m venv tools/venv && tools/venv/bin/pip install lz4 capstone unicorn
-# your own game files: extracted/exefs (main, sdk, subsdk0, subsdk1, main.npdm) and extracted/romfs
+python3 -m venv .venv && .venv/bin/pip install lz4 capstone unicorn
+make -j$(nproc) all SHADERC=-lshaderc_shared  # build/lasrecomp (Debian / Ubuntu: SHADERC=-lshaderc)
+mkdir -p extracted && ./play.sh               # the start screen sets up your game files and builds the game code
+```
+
+For development, with the game code built by the Makefile instead: your own game files in extracted/exefs
+(main, sdk, subsdk0, subsdk1, main.npdm) and extracted/romfs, then
+
+```sh
 make gen                                      # translate the game code into generated/
 make -j$(nproc) all SHADERC=-lshaderc_shared  # build/lasrecomp + build/lasgame.so
 cc -O2 -Iruntime tools/romfs/mkromfs.c runtime/romfs_build.c -o build/mkromfs
