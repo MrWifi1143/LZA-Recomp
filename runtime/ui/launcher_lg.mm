@@ -361,6 +361,7 @@ extern "C" void launcher_lg_run(const char *root) {
     for (int i = 0; i < 5; i++) if (res_lines[i] == g_settings.res_height) res = i;
     bool full = g_settings.fullscreen, smaa = g_settings.antialias == AA_SMAA, wildb = g_settings.wild_battle, showfps = g_settings.show_fps;
     int fps_i = g_settings.fps == 144 ? 3 : g_settings.fps == 120 ? 2 : g_settings.fps == 60 ? 1 : 0;
+    int prompts_i = g_settings.button_prompts & 3;
     // Translation: the folders under mods/ (runtime/mods.h); 0 = none (the game's own English)
     static char mods[MODS_MAX][128];
     int nmods = mods_list(mods, MODS_MAX), mod = 0;
@@ -417,6 +418,10 @@ extern "C" void launcher_lg_run(const char *root) {
         static const char *const fps_names[] = {"30 fps", "60 fps", "120 fps", "144 fps"};  // (above 30: experimental)
         ImGui::Combo(T("Frame rate (experimental above 30)", "Taxa de quadros (experimental acima de 30)"), &fps_i, fps_names, 4);
         ImGui::Checkbox(T("Show FPS counter", "Mostrar contador de FPS"), &showfps);
+        // (runtime/nvn/glyphs.c: the game's button icons redrawn for the controller in use)
+        const char *const prompt_names[] = {T("Auto (the connected controller)", "Automático (o controle conectado)"), "Nintendo Switch", "Xbox",
+                                            "PlayStation"};
+        ImGui::Combo(T("Button prompts", "Ícones dos botões"), &prompts_i, prompt_names, 4);
         const char *none = T("None", "Nenhum");
         if (ImGui::BeginCombo(T("Mod", "Mod"), mod ? mods[mod - 1] : none)) {
             if (ImGui::Selectable(none, mod == 0)) mod = 0;
@@ -464,6 +469,7 @@ extern "C" void launcher_lg_run(const char *root) {
     g_settings.fps = fps_i == 3 ? 144 : fps_i == 2 ? 120 : fps_i == 1 ? 60 : 30;
     g_settings.wild_battle = wildb;
     g_settings.show_fps = showfps;
+    g_settings.button_prompts = prompts_i;
     snprintf(g_settings.mod, sizeof g_settings.mod, "%s", mod ? mods[mod - 1] : "");
     settings_save();
     if (warmup_needed(root)) {  // first start, or the first after an update: every shader of the game, once (warmup.c)

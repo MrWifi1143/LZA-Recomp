@@ -66,8 +66,10 @@ Village. Tested on Linux with an RTX 4090; the Windows build is tested under Win
 - Frame rates: 30 (the game's own), 60, 120 or 144 fps with the game at the right speed (144 holds in Jubilife
   Village on an RTX 4090).
 - Graphics: transform-feedback character skinning, cast shadows, render scale up to 4K, SMAA.
-- Start screen: resolution, fullscreen, anti-aliasing, frame rate, FPS counter, mods, controller test and remapping,
-  keyboard remapping.
+- Start screen: resolution, fullscreen, anti-aliasing, frame rate, FPS counter, button prompts, mods, controller test
+  and remapping, keyboard remapping.
+- Button prompts for the controller in use: Xbox letters or PlayStation shapes instead of the Switch's (Auto follows
+  the connected controller, even when it changes while playing; remapped buttons show their new button).
 
 Known issues:
 

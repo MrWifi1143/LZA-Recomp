@@ -88,6 +88,8 @@ typedef struct TexBackend {
     uint32_t width, height, depth, layers, levels, samples;
     VkImageAspectFlags aspect;
     bool gpu_owned, uploaded, dynamic;
+    bool glyph;          // a button icon (runtime/nvn/glyphs.c): uploaded again when glyphs_generation() moves on
+    uint32_t glyph_gen;
     uint64_t data_hash, sample_hash, checked_frame, full_frame;
     bool scalable, presented;
     uint64_t touched_frame, frame_cleared;

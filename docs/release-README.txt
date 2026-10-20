@@ -40,7 +40,9 @@ How to play
 Start screen options
 --------------------
 Resolution, fullscreen, anti-aliasing (SMAA), frame rate (30 is the game's own; 60, 120 and 144 are experimental),
-"Show FPS counter" (the game's frames per second and frame time, top right), mods, controller test and remapping,
+"Show FPS counter" (the game's frames per second and frame time, top right), "Button prompts" (Auto: the
+connected controller's buttons, Xbox letters or PlayStation shapes, switching when you change controller; or always
+Nintendo Switch, Xbox or PlayStation), mods, controller test and remapping,
 keyboard remapping.
 
 Controls
