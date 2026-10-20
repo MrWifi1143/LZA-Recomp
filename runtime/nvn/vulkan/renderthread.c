@@ -17,8 +17,12 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <sys/syscall.h>
 #include <unistd.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 
@@ -84,11 +88,18 @@ static struct { uint64_t us; uint32_t tid; char ev; uint64_t arg; } g_tr[TRN];
 static _Atomic uint32_t g_trn;
 static volatile int g_tr_on;
 static uint64_t g_tr_t0;
+static uint32_t trace_tid(void) {
+#ifdef _WIN32
+    return (uint32_t)GetCurrentThreadId();
+#else
+    return (uint32_t)syscall(SYS_gettid);
+#endif
+}
 void rt_trace(char ev, uint64_t arg) {
     if (!g_tr_on) return;
     uint32_t i = atomic_fetch_add(&g_trn, 1);
     if (i >= TRN) return;
-    g_tr[i].us = (plat_now_ns() - g_tr_t0) / 1000, g_tr[i].tid = (uint32_t)syscall(SYS_gettid), g_tr[i].ev = ev, g_tr[i].arg = arg;
+    g_tr[i].us = (plat_now_ns() - g_tr_t0) / 1000, g_tr[i].tid = trace_tid(), g_tr[i].ev = ev, g_tr[i].arg = arg;
 }
 void rt_trace_start(void) { g_tr_t0 = plat_now_ns(); g_trn = 0; g_tr_on = 1; }
 void rt_trace_stop(void) {
