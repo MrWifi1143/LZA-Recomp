@@ -108,7 +108,7 @@ typedef struct {
     char inc[1100], entry[1100], hle[1100];  // headers the game code includes, tools/gamelib_entry.c, HLE names
 #ifdef _WIN32
     char implib[1100];  // the .exe's import library (the runtime functions the game code calls)
-    char zig_rt[1100];  // the release's zig: its runtime built ahead of time (zig/rt, tools/zig_slim.sh), "" = none
+    char zig_rt[1100];  // the release's zig: its runtime built ahead of time (zig/rt, letsgo-recomp's tools/zig_slim.sh), "" = none
 #endif
 } Tools;
 
@@ -314,6 +314,10 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         snprintf(g->out, sizeof g->out, "%s" SEP "%s", work, g->name);
         char nso[1100];
         snprintf(nso, sizeof nso, "%s" SEP "exefs" SEP "%s", game_dir, g->name);
+        if (i > 0 && !file_exists(nso)) {  // (a module the game doesn't have - Legends: Z-A has no subsdk: nothing to build)
+            g->exit = 0;
+            continue;
+        }
         Args a = {0};
         add(&a, t.gen);
         if (t.gen_script[0]) add(&a, t.gen_script);
@@ -367,7 +371,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
                 snprintf(src, sizeof src, "%s" SEP "%s.c", g->out, stem);
                 add_unit(&units, src, work, stem);
             }
-            if (g->exit == 0 && !tables[i]) {
+            if (g->exit == 0 && !tables[i] && g->p) {
                 char src[1100], stem[64];
                 snprintf(stem, sizeof stem, "%s_table", g->name);
                 snprintf(src, sizeof src, "%s" SEP "%s.c", g->out, stem);
