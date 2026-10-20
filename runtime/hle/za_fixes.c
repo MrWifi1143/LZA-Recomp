@@ -58,12 +58,6 @@ static int param_lookup(Cpu *c, uint64_t addr) {
 // while a conversation puts everyone nearby on every frame. Here it is always set: every NPC's pose follows its animation
 // each frame. (2026-10-20: forcing that flag only re-applied the same pose - the gate below is the real fix.)
 // LARECOMP_ZA_NPC_LOD=1 keeps the game's choice.
-// Missing station wall (Lumiose Station platform: posters float in front of the hall): the wall's mesh faces the hall
-// - its winding agrees with its own normals, like every other mesh - and its command list (recorded once, at load) binds
-// back-face culling, so seen from the platform it is culled; nothing else in the frame draws that side. Every shader of
-// the game's static meshes reads gl_FrontFacing (back faces are shaded right), and with culling off nothing else in the
-// station or in Lumiose changes, at the same frame rate. Culling stays off for this game; LARECOMP_ZA_CULL=1 keeps it.
-// (Why the console shows the wall is still open: the polygon state, matrices, viewport and vertex data are all ordinary.)
 
 #define ZA_POSE_APPLY 0x7001dcdf40ull  // (x0 = animation item; [x0 + 0x48] -> its component, + 0x1f4: evaluate this frame)
 volatile int g_za_npc_full = 0;  // (research: LARECOMP_LIVE <dir>/npcfull "0" / "1" switches it while the game runs)
