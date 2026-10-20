@@ -44,6 +44,23 @@ static int param_lookup(Cpu *c, uint64_t addr) {
     return 1;
 }
 
+// Choppy NPCs: an NPC's animation advances every frame, but its pose is only applied to the skeleton when a per-frame LOD
+// decision allows it: a callback each animation component holds (component + 0x180, called from 0x7001e73abc) answers
+// whether to evaluate this frame, kept at component + 0x1f4, and 0x7001dcdf40 (animation item -> [+0x48] component)
+// applies the pose only then. NPCs standing or walking around get it once every 60 frames - 2 s at 30 fps, 0.4 s at 144 -
+// while a conversation puts everyone nearby on every frame. Here it is always set: every NPC's pose follows its animation
+// each frame (about 2% of the frame rate in Lumiose). LARECOMP_ZA_NPC_LOD=1 keeps the game's choice.
+#define ZA_POSE_APPLY 0x7001dcdf40ull  // (x0 = animation item; [x0 + 0x48] -> its component, + 0x1f4: evaluate this frame)
+volatile int g_za_npc_full = 1;  // (research: LARECOMP_LIVE <dir>/npcfull "0" / "1" switches it while the game runs)
+static int pose_apply(Cpu *c, uint64_t addr) {
+    if (!g_za_npc_full) return 0;
+    uint64_t item = c->x[0];
+    uint64_t comp = item ? *(uint64_t *)(uintptr_t)(item + 0x48) : 0;
+    if (comp >= 0x7000000000ull && comp < 0x8000000000ull) *(uint8_t *)(uintptr_t)(comp + 0x1f4) = 1;
+    (void)addr;
+    return 0;
+}
+
 void za_fixes_configure(const char *exefs) {
     static const uint8_t ZA_MAIN[8] = {0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a};
     static bool done;
@@ -58,6 +75,11 @@ void za_fixes_configure(const char *exefs) {
     }
     if (done || memcmp(id, ZA_MAIN, 8)) return;
     done = true;
+    const char *lod = getenv("LARECOMP_ZA_NPC_LOD");
+    if (!(lod && atoi(lod))) {
+        rt_register_fnhook_at(ZA_POSE_APPLY, pose_apply);
+        LOG("[za] NPC animation at the full frame rate (LARECOMP_ZA_NPC_LOD=1 keeps the game's animation LOD)\n");
+    }
     const char *e = getenv("LARECOMP_ZA_FOOT_IK");
     if (e && atoi(e)) return;
     static const char *names[8] = {"BipedIKWeight", "BipedIKOffsetWeight", "BipedIKControl0Weight", "BipedIKControl1Weight",

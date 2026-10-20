@@ -844,6 +844,70 @@ void backend_present(NvnTexture *t) {
                 next_at = (long)total_frames;
                 remove(path);
             }
+            snprintf(path, sizeof path, "%s/pscan", dir);  // (research: hle/pscan.c)
+            if (access(path, F_OK) == 0) {
+                FILE *f = fopen(path, "r");
+                long per = 60;
+                if (f) { if (fscanf(f, "%ld", &per) != 1) per = 60; fclose(f); }
+                remove(path);
+                extern void pscan_start(long period);
+                pscan_start(per);
+            }
+            snprintf(path, sizeof path, "%s/watch", dir);  // (research: hardware watchpoints, hle/hwwatch.c)
+            if (access(path, F_OK) == 0) {
+                FILE *f = fopen(path, "r");
+                char line[512] = "";
+                if (f) { if (!fgets(line, sizeof line, f)) line[0] = 0; fclose(f); }
+                remove(path);
+                extern void hwwatch_arm(uint64_t addr, uint64_t len);
+                extern void hwwatch_reset(void);
+                hwwatch_reset();
+                for (char *p = line; *p;) {
+                    uint64_t a = strtoull(p, &p, 16);
+                    if (a) hwwatch_arm(a & ~7ull, 8);
+                    if (*p != ',') break;
+                    p++;
+                }
+            }
+            snprintf(path, sizeof path, "%s/bt", dir);  // (research: call chains, hle/pscan.c)
+            if (access(path, F_OK) == 0) {
+                FILE *f = fopen(path, "r");
+                unsigned long long fn = 0, x0 = 0;
+                int n = 12;
+                if (f) { if (fscanf(f, "%llx %d %llx", &fn, &n, &x0) < 1) fn = 0; fclose(f); }
+                remove(path);
+                extern void bt_start(uint64_t fn, int n, uint64_t x0);
+                if (fn) bt_start(fn, n, x0);
+            }
+            snprintf(path, sizeof path, "%s/peek", dir);  // (research: "<addr> <len>" -> <dir>/peek.out, hex, 16 bytes a line)
+            if (access(path, F_OK) == 0) {
+                FILE *f = fopen(path, "r");
+                unsigned long long a = 0, n = 64;
+                if (f) { if (fscanf(f, "%llx %llx", &a, &n) < 1) a = 0; fclose(f); }
+                remove(path);
+                char out[1100];
+                snprintf(out, sizeof out, "%s/peek.out", dir);
+                FILE *o = fopen(out, "w");
+                if (o && a >= 0x7000000000ull && a + n < 0x8000000000ull && n <= 0x10000) {
+                    for (unsigned long long i = 0; i < n; i += 16) {
+                        fprintf(o, "%llx:", a + i);
+                        for (int k = 0; k < 16; k += 8) fprintf(o, " %016llx", (unsigned long long)*(const uint64_t *)(uintptr_t)(a + i + k));
+                        fprintf(o, "\n");
+                    }
+                }
+                if (o) fclose(o);
+            }
+            snprintf(path, sizeof path, "%s/npcfull", dir);  // (research: hle/za_fixes.c, the NPC animation fix on / off)
+            if (access(path, F_OK) == 0) {
+                FILE *f = fopen(path, "r");
+                int v = 1;
+                if (f) { if (fscanf(f, "%d", &v) != 1) v = 1; fclose(f); }
+                remove(path);
+                extern volatile int g_za_npc_full;
+                g_za_npc_full = v;
+                LOG("[za] NPC animation fix %s\n", v ? "on" : "off");
+            }
+            { extern void pscan_present(uint64_t frame); pscan_present(total_frames); }
             if (left && (long)total_frames >= next_at) {
                 snprintf(path, sizeof path, "%s/live_%06llu.png", dir, (unsigned long long)total_frames);
                 renderer_save_texture_tex(b, path);

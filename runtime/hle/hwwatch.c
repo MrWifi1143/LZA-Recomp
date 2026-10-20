@@ -71,6 +71,13 @@ static int bp_open(pid_t tid, uint64_t addr, uint64_t len) {
     return fd;
 }
 
+static int g_fds[4][256], g_nfd[4];
+void hwwatch_reset(void) {  // (the watchpoints armed so far closed: room for 4 new ones)
+    for (int w = 0; w < g_nw; w++)
+        for (int i = 0; i < g_nfd[w]; i++) close(g_fds[w][i]);
+    memset(g_nfd, 0, sizeof g_nfd);
+    g_nw = 0;
+}
 void hwwatch_arm(uint64_t addr, uint64_t len) {
     if (g_nw >= 4) return;
     static int installed;
@@ -88,7 +95,8 @@ void hwwatch_arm(uint64_t addr, uint64_t len) {
     struct dirent *e;
     while (d && (e = readdir(d))) {
         if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
-        if (bp_open((pid_t)atoi(e->d_name), addr, len) >= 0) n++;
+        int fd = bp_open((pid_t)atoi(e->d_name), addr, len);
+        if (fd >= 0) { n++; if (g_nfd[g_nw - 1] < 256) g_fds[g_nw - 1][g_nfd[g_nw - 1]++] = fd; }
         else fail++;
     }
     if (d) closedir(d);
@@ -119,5 +127,6 @@ void hwwatch_src_arm(void) {
 #else
 #include <stdint.h>
 void hwwatch_arm(uint64_t addr, uint64_t len) { (void)addr, (void)len; }
+void hwwatch_reset(void) {}
 void hwwatch_src_arm(void) {}
 #endif
