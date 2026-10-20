@@ -231,17 +231,21 @@ bool input_user_blocked(const SDL_Event *e) {
     }
 }
 
-// Controller family for the button prompts (runtime/nvn/texpatch.c): 0 Nintendo / other / none, 1 Xbox, 2 PlayStation.
-// LARECOMP_PAD_TYPE=xbox|playstation|nintendo pretends one is attached (tests).
+// Controller family for the button prompts (runtime/nvn/glyphs.c): 0 Nintendo / none, 1 Xbox, 2 PlayStation.
+// By what the controller's bottom face button says (SDL's label for it): A = an Xbox layout (Xbox pads, the Steam
+// Controller / Deck, 8BitDo and other XInput-style pads), Cross = PlayStation, B = Nintendo. A pad SDL has no label
+// for is laid out as SDL's own standard gamepad, the Xbox one. LARECOMP_PAD_TYPE=xbox|playstation|nintendo pretends
+// one is attached (tests).
 static _Atomic int pad_family;
+int input_family_of_label(int south_label) {
+    return south_label == SDL_GAMEPAD_BUTTON_LABEL_CROSS ? 2 : south_label == SDL_GAMEPAD_BUTTON_LABEL_B ? 0 : 1;
+}
 static void note_family(void) {
-    int f = 0;
-    if (pad) switch (SDL_GetGamepadType(pad)) {
-        case SDL_GAMEPAD_TYPE_XBOX360: case SDL_GAMEPAD_TYPE_XBOXONE: f = 1; break;
-        case SDL_GAMEPAD_TYPE_PS3: case SDL_GAMEPAD_TYPE_PS4: case SDL_GAMEPAD_TYPE_PS5: f = 2; break;
-        default: break;
-    }
-    if (f != pad_family) LOG("[input] button prompts: %s controller\n", f == 1 ? "Xbox" : f == 2 ? "PlayStation" : "Nintendo / other");
+    int f = pad ? input_family_of_label(SDL_GetGamepadButtonLabel(pad, SDL_GAMEPAD_BUTTON_SOUTH)) : 0;
+    static SDL_Gamepad *seen;
+    if (pad && pad != seen) last_kbm = 0;  // (a controller connected: the prompts are its own until a key is pressed)
+    seen = pad;
+    if (f != pad_family) LOG("[input] button prompts: %s controller\n", f == 1 ? "Xbox layout" : f == 2 ? "PlayStation" : "Nintendo");
     pad_family = f;
 }
 int input_pad_family(void) {

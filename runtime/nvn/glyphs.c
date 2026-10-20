@@ -32,7 +32,7 @@
 #include "../../third_party/imgui/imstb_truetype.h"
 #pragma clang diagnostic pop
 
-int input_pad_family(void);  // runtime/hle/input.c: 0 Nintendo / other / none, 1 Xbox, 2 PlayStation
+int input_pad_family(void);  // runtime/hle/input.c: 0 Nintendo / none, 1 Xbox layout, 2 PlayStation
 int input_last_was_kbm(void);  // runtime/hle/input.c: the keyboard / mouse used last (or no controller)
 #define FAMILY_KEYBOARD 3
 
