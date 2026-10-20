@@ -39,6 +39,7 @@ typedef struct {
     float lod_min, lod_max, lod_bias, max_aniso;
     float border[4];
     void *backend;
+    void *backend_nocmp;  // (a depth-compare sampler as used by a shader that reads raw depth: renderer)
 } NvnSamplerDesc;
 
 typedef struct {
