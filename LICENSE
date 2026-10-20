@@ -1,8 +1,8 @@
 MIT License
 
-Copyright (c) 2026 raulzito12345rrs
+Copyright (c) 2026 raulzito12345rrs (Let's Go Recomp)
 Portions copyright (c) 2026 Peiikai (LAS Recomp, see LICENSE-LASRecomp)
-Portions copyright (c) 2026 MrWifi1143 (Legends: Arceus port)
+Portions copyright (c) 2026 MrWifi1143 (LZ&A Recomp: the Legends: Arceus and Legends: Z-A ports)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -23,5 +23,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 This license covers the source code in this repository only. It grants nothing
-for Pokémon: Let's Go, Eevee!, which belongs to Nintendo / The Pokémon Company /
-Game Freak and must be supplied by each user from their own copy.
+for Pokémon Legends: Arceus, Pokémon Legends: Z-A or any other game, which belong
+to Nintendo / The Pokémon Company / Game Freak and must be supplied by each user
+from their own copy. The third-party components in third_party/ and those bundled
+with the Windows release keep their own licenses (see THIRD-PARTY-NOTICES.md).

@@ -1,0 +1,2 @@
+#!/bin/sh
+exec "${LZA_WINBUILD:?}/zig-linux/zig" c++ -target x86_64-windows-gnu -Wno-error=date-time "$@"

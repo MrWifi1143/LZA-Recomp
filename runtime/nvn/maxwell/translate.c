@@ -1202,7 +1202,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         const char *dyn = a == RZ ? NULL : reg(c, a, rb);
         // LDC.64 R4, c[i][R4 + x]: the address register is one of the destinations. Read it once before the
         // writes - with r4 written first, the second word came from c[i][<loaded value> + x + 4] (skinned models: the
-        // second bone's w translation read as 0, vertices thrown at the camera - docs/HISTORICO.md).
+        // second bone's w translation read as 0, vertices thrown at the camera - letsgo-recomp's docs/HISTORICO.md).
         bool overlap = dyn && n > 1 && a >= d && a < d + n;
         if (overlap) { sp(&c->body, "    { uint ldc_addr = %s;\n", dyn); dyn = "ldc_addr"; }
         for (int i = 0; i < n; i++) {

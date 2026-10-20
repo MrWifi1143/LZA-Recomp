@@ -527,7 +527,7 @@ void vk_frame_end(const char *shot_path) {
 }
 
 // LARECOMP_SHOT_RAW=<file>: the numbered series (".../frame_NNNNN.png") goes to one raw file instead, no PNG encoding:
-// per frame a record of u32 frame number + 480x270 RGB (box-filtered), read by tools/bateria_scan.py. Several times faster
+// per frame a record of u32 frame number + 480x270 RGB (box-filtered), read by letsgo-recomp's tools/bateria_scan.py. Several times faster
 // than PNGs (and ffmpeg) for a 900-frame route.
 #define RAW_W 480
 #define RAW_H 270

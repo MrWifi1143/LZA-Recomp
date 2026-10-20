@@ -600,7 +600,7 @@ def main():
     ap.add_argument('--chunk-bytes', type=int, default=1500000)  # and about this much C (even compile times)
     ap.add_argument('--big-fn', type=int, default=100000)  # bytes of C from which a function gets its own file
     ap.add_argument('--limit', type=int, default=0)
-    ap.add_argument('--trace-stores', action='store_true')  # research build (docs/DEPURACAO.md, LARECOMP_TRACE_STORES)
+    ap.add_argument('--trace-stores', action='store_true')  # research build (letsgo-recomp's docs/DEPURACAO.md, LARECOMP_TRACE_STORES)
     ap.add_argument('--simd', choices=('asm', 'c'),
                     default='asm' if platform.machine().lower() in ('arm64', 'aarch64') else 'c')
     args = ap.parse_args()

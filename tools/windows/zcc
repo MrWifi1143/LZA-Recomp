@@ -1,0 +1,5 @@
+#!/bin/bash
+# zig cc for Windows, with clang's -march=<cpu> as zig's -mcpu=<cpu> (as runtime/gamebuild.c passes it)
+a=()
+for x in "$@"; do case $x in -march=*) c=${x#-march=}; a+=("-mcpu=${c//-/_}") ;; *) a+=("$x") ;; esac; done
+exec "${LZA_WINBUILD:?}/zig-linux/zig" cc -target x86_64-windows-gnu -Wno-error=date-time "${a[@]}"

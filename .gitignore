@@ -1,4 +1,4 @@
-# Arquivos do jogo e chaves: NUNCA versionar
+# Game files and keys: NEVER commit
 *.xci
 *.nsp
 *.nca
@@ -11,25 +11,26 @@ extracted-*/
 generated/
 generated-*/
 
-# Build
+# Build (the built game library is recompiled game code: never commit or share it)
 build/
 
-# Repositórios de referência (clonados localmente)
+# Local reference clones and tool environments
 reference/
 tools/bin/
+tools/venv/
 .venv/
 logs/
 
-# Gerados pelo runtime ao rodar (saves, caches de shader, configurações locais)
+# Made by the runtime while running (saves, shader caches, local settings)
 cache/
 save/
 larecomp.ini
 *.log
 mods/
 
-# Logs que o driver da NVIDIA cria na pasta de trabalho
+# Logs the NVIDIA driver writes to the working folder
 NVIDIA Corporation/
-# Fontes do sistema do Switch, tiradas do seu console (fonts/README.md)
+# The Switch's system fonts, from your own console (fonts/README.md)
 fonts/*.bfttf
 fonts/*.ttf
 

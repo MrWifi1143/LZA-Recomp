@@ -441,7 +441,7 @@ void input_frame(uint64_t frame) {
     static char buf[16384];  // (long scripted sessions: the perf walk is ~4 KB)
     snprintf(buf, sizeof buf, "%s", spec);
     // LARECOMP_INPUT_LOOP=<start>:<period>: from frame <start> on, the script's entries in [start, start + period) repeat
-    // every period frames (long unattended sessions: tools/capture_loop.py walks through the grass and captures for hours)
+    // every period frames (long unattended sessions: letsgo-recomp's tools/capture_loop.py walks through the grass and captures for hours)
     static long loop_start = -1, loop_period;
     if (loop_start < 0) { loop_start = 0; const char *e = getenv("LARECOMP_INPUT_LOOP"); if (e) sscanf(e, "%ld:%ld", &loop_start, &loop_period); }
     uint64_t real_frame = frame;

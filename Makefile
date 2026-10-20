@@ -1,11 +1,9 @@
-# Let's Go Recomp build (from LAS Recomp's).
-# Windows (the supported platform): MSYS2 UCRT64 shell or Git Bash with MSYS2 on PATH, clang + Vulkan renderer
-# (docs/COMPILAR-WINDOWS.md). The Linux branch is LAS Recomp's, kept but untested here.
+# LZ&A Recomp build (from Let's Go Recomp's / LAS Recomp's). Linux (clang + Vulkan) is the development platform; the
+# Windows release is cross-built from Linux with zig (tools/windows/README.md).
 #   make gen           translate your own game files (extracted/exefs) into generated/
-#   make -j20          build/lasrecomp.exe (runtime) and build/lasgame.dll (the game code)
-#   make jogo          a copy to play while build/ is rebuilt (build/jogo/)
-#   make dist          the release zip (build/dist/LetsGoRecomp-<version>-windows.zip): needs make deps-windows,
-#                      make gen-helper and tools/fetch_zig.sh first
+#   make -j20 all      build/lasrecomp (runtime) and build/lasgame.so (the game code)
+#   make dist          the Windows release zip (LZA_WINBUILD=<folder>, tools/windows/README.md): the exe cross-built,
+#                      then $(LZA_WINBUILD)/dist/LZA-Recomp-<tag>-windows.zip
 UNAME := $(shell uname -s)
 comma := ,
 ifneq ($(filter MINGW% MSYS% CYGWIN% Windows_NT,$(UNAME) $(OS)),)
@@ -32,7 +30,7 @@ endif
 # B: build dir. DEPS: a prefix with SDL3 / FFmpeg to use instead of the system's (MSYS2's).
 B         ?= build
 DEPS      ?=
-# EXE_NAME: the exe's name (the release's: LetsGoRecomp); the game code library imports from the exe by it
+# EXE_NAME: the exe's name (the release's: WIN_EXE); the game code library imports from the exe by it
 EXE_NAME  ?= lasrecomp
 CC       := clang $(CROSS)
 CXX      := clang++ $(CROSS)
@@ -95,7 +93,7 @@ GAMELIB_LDFLAGS := -shared -fuse-ld=lld $(B)/lasrecomp.dll.a
 GAMELIB_SHARED := -shared  # (+ the import library: runtime/gamebuild.c)
 endif
 
-# Research build (docs/DEPURACAO.md, LARECOMP_TRACE_STORES): make TRACE=1 B=build/trace GEN=generated-trace gen / -j20 all.
+# Research build (LARECOMP_TRACE_STORES): make TRACE=1 B=build/trace GEN=generated-trace gen / -j20 all.
 # Every store of the game reports its instruction to runtime/storetrace.c.
 ifdef TRACE
 GENFLAGS += -DSTORE_TRACE
@@ -190,54 +188,14 @@ $(B)/rt/platform/windows_rc.o: runtime/platform/windows.rc docs/icon/icon.ico ru
 	@mkdir -p $(dir $@)
 	$(WINDRES) -I docs/icon -I runtime/platform -O coff $< -o $@
 
-# Windows release: build/dist/LetsGoRecomp-<version>-windows.zip, top folder "LetsGoRecomp/": LetsGoRecomp.exe, the
-# DLLs it loads (runs without MSYS2) and what its start screen builds the game code with on the player's machine
-# (runtime/gamebuild.c): the frozen generator (make gen-helper), zig (tools/fetch_zig.sh slimmed by tools/zig_slim.sh:
-# its runtime built ahead of time), gamelib-src/ and the exe's import library. No game code, no game files. The exe is
-# a release build in $(WIN_B): linked against the LGPL FFmpeg from `make deps-windows` (MSYS2's is a GPLv3 build) and
-# without a console window (RELEASE=1: the log goes to lasrecomp.log next to the exe). vulkan-1.dll is left out: every
-# Vulkan driver installs the loader in System32. Saves, settings, game files and mods go next to the exe at run time.
-VERSION  := $(shell sed -n 's/^\#define RT_APP_VERSION "\(.*\)".*/\1/p' runtime/paths.h)
-DIST     := build/dist/LetsGoRecomp
-WIN_B    := build/win-release
-deps-windows:
-	tools/build_deps_windows.sh
-dist:
-	@[ -f build/deps-win/lib/libavcodec.dll.a ] || { echo "make deps-windows first (LGPL FFmpeg)"; exit 1; }
-	@[ -d build/helper/lasgen ] || { echo "make gen-helper first (the game code generator)"; exit 1; }
-	@[ -x build/zig/zig.exe ] || { echo "tools/fetch_zig.sh first (the compiler)"; exit 1; }
-	$(MAKE) B=$(WIN_B) DEPS=$(CURDIR)/build/deps-win RELEASE=1 EXE_NAME=LetsGoRecomp $(WIN_B)/LetsGoRecomp.exe
-	! nm $(WIN_B)/LetsGoRecomp.exe | grep ' f_70' >/dev/null  # (no game code inside)
-	rm -rf build/dist && mkdir -p "$(DIST)/gamelib-src"
-	cp $(WIN_B)/LetsGoRecomp.exe $(WIN_B)/lasrecomp.dll.a "$(DIST)/"
-	tools/zig_slim.sh $(strip $(filter-out -Iruntime,$(GENFLAGS)))  # (zig with its runtime built ahead of time)
-	cp -R build/helper/lasgen "$(DIST)/"
-	cp -R build/zig-slim "$(DIST)/zig"
-	cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
-	    "$(DIST)/gamelib-src/"
-	cp docs/icon/icon_1024.png "$(DIST)/icon.png"  # (window icon)
-	cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$(DIST)/"  # (in-game menu font, OFL)
-	cp third_party/fonts/Baloo2/OFL.txt "$(DIST)/Baloo2-OFL.txt"
-	cp LICENSE "$(DIST)/LICENSE.txt"
-	cp LICENSE-LASRecomp "$(DIST)/LICENSE-LASRecomp.txt"
-	cp docs/release-README.txt "$(DIST)/README.txt"
-	PATH="$(CURDIR)/build/deps-win/bin:$$PATH" ldd $(WIN_B)/LetsGoRecomp.exe | awk '(/ucrt64/ || /deps-win/) && !/vulkan-1/ {print $$3}' | sort -u | \
-	    xargs -I{} cp -u {} "$(DIST)/"
-	! ls "$(DIST)" | grep -iE 'x264|x265|xvid|postproc'  # (no GPL codec libraries in the release)
-	cd build/dist && zip -qr "LetsGoRecomp-$(VERSION)-windows.zip" LetsGoRecomp
-	@echo "build/dist/LetsGoRecomp-$(VERSION)-windows.zip"
+# Windows release, cross-built from Linux (tools/windows/README.md): build/win/$(WIN_EXE).exe and its import library,
+# then $(LZA_WINBUILD)/dist/LZA-Recomp-$(WIN_TAG)-windows.zip with what the start screen builds the game code with on
+# the player's PC (runtime/gamebuild.c). No game code, no game files.
+WIN_EXE  ?= ZARecomp
+WIN_TAG  ?= ZA
+win-exe:
+	tools/windows/build_exe.sh $(WIN_EXE)
+dist: win-exe
+	tools/windows/make_zip.sh $(WIN_TAG) $(WIN_EXE)
 
-# The game code generator as a standalone helper, so players need no Python (tools/lasgen.spec): build/helper/lasgen/,
-# shipped as lasgen/ next to the exe. The start screen's setup runs it on the player's own game files.
-gen-helper:
-	USERPROFILE="$$(cygpath -w ~ 2>/dev/null || echo $$HOME)" \
-	$(PY) -m PyInstaller --noconfirm --clean --log-level WARN --distpath build/helper --workpath build/pyinstaller \
-	    tools/lasgen.spec
-	$(PY) tools/pe_no_cfg.py build/helper/lasgen/lasgen.exe
-	@du -sh build/helper/lasgen
-
-# A copy to play while build/ is rebuilt (the exe in use is locked on Windows): build/jogo/ (tools/publicar_jogo.sh)
-jogo:
-	tools/publicar_jogo.sh
-
-.PHONY: all gen gen-objs runtime-objs dist deps-windows gen-helper jogo
+.PHONY: all gen gen-objs runtime-objs win-exe dist

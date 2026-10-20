@@ -1,4 +1,4 @@
-// Research aid (docs/MODO-BATALHA.md): LARECOMP_SCAN="<hex bytes>[@<frame>]" scans the guest's mapped memory once the game
+// Research aid (letsgo-recomp's docs/MODO-BATALHA.md): LARECOMP_SCAN="<hex bytes>[@<frame>]" scans the guest's mapped memory once the game
 // has presented <frame> frames (default 1300: in the field) for those bytes and logs every hit with its region and the
 // 0x40 bytes that follow; LARECOMP_SCAN_BACK=<n> also logs n records of 0x40 bytes before the hit (a table's first
 // records) and searches memory for 8-byte pointers to hit - n*0x40 (whoever holds the table). Windows only (VirtualQuery).

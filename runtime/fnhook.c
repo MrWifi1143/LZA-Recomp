@@ -3,7 +3,7 @@
 // hook sets x0 etc. as the function would). rt_call_original runs the game's own function from inside a hook
 // (wrapping). Cost when no hook is registered: one predictable branch per call.
 //
-// Investigation (docs/MODO-BATALHA.md): LARECOMP_HOOK_DUMP="<addr>:<arg>,<arg>...[;<addr>:...]" logs, the first
+// Investigation (letsgo-recomp's docs/MODO-BATALHA.md): LARECOMP_HOOK_DUMP="<addr>:<arg>,<arg>...[;<addr>:...]" logs, the first
 // LARECOMP_HOOK_DUMP_MAX (default 4) times each function is entered, the registers x0..x7 and the memory the args
 // name: "x2:30" = 0x30 bytes at x2, "*x0:400" = 0x400 bytes at the pointer stored at x0, "*x0+638:40" = at the
 // pointer stored at x0 + 0x638, "@7254604700:10" = at a fixed address. LARECOMP_HOOK_DUMP_FRAMES=
@@ -25,7 +25,7 @@ static struct { uint64_t addr; FnHook fn; } hooks[NHOOK];
 static __thread uint64_t bypass;  // rt_call_original: the next entry of this function is the original running
 
 // The runtime's hooks are written with addresses of Let's Go Eevee 1.0.0's main (the build the research was done on,
-// docs/). The same functions in the other known builds, found by tools/addrmap.py (the code matches instruction by
+// docs/). The same functions in the other known builds, found by letsgo-recomp's tools/addrmap.py (the code matches instruction by
 // instruction, struct offsets included): each registration is kept as written and the hook table is rebuilt for the
 // running build (rt_fnhook_set_build, before each boot; an unknown build gets none). Hooks at addresses the user gave
 // (LARECOMP_HOOK_DUMP) are taken as they are.

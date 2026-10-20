@@ -1,7 +1,7 @@
-// Wild battles (experimental, docs/MODO-BATALHA.md): touching a wild Pokémon starts a battle (the game's "static
+// Wild battles (experimental, letsgo-recomp's docs/MODO-BATALHA.md): touching a wild Pokémon starts a battle (the game's "static
 // encounter" process: Snorlax, the legendary birds, Mewtwo) instead of the Pokémon GO-style capture.
 //
-// How the game does a static battle (docs/MODO-BATALHA.md, stage 3c): a script command builds a process of class A
+// How the game does a static battle (letsgo-recomp's docs/MODO-BATALHA.md, stage 3c): a script command builds a process of class A
 // (factory f_700017f0a0, constructor f_7000289ac0, object of 0xA8 bytes) whose [+0x98] holds the battle's 64-bit hash;
 // its state machine loads bin/script_event_data/event_encount.bin (0x40-byte records), looks the hash up
 // (f_70002bad00(table, &key) -> parsed record of 0x59 bytes), fills the battle configuration from the record
@@ -61,7 +61,7 @@ static bool g_active;  // a static battle process of ours is alive: the touch th
 #define CFG_SIZE 0x2b8
 #define CONFIG_FROM_RECORD 0x70002f60c0ull  // (x0 = configuration, x1 = record)
 static uint8_t g_cfg[CFG_SIZE] __attribute__((aligned(16)));
-static bool g_cfg_valid, g_usecfg;  // (off: copying the builder's configuration crashed; see docs/MODO-BATALHA.md)
+static bool g_cfg_valid, g_usecfg;  // (off: copying the builder's configuration crashed; see letsgo-recomp's docs/MODO-BATALHA.md)
 static uint8_t g_rec[0x60] __attribute__((aligned(16)));  // (the synthetic record, below)
 
 #define CONFIG_BUILD 0x70002f65d0ull         // (x0 = configuration object, x1 = allocator, x2 = struct, x8 = out): fills it
@@ -72,7 +72,7 @@ static uint8_t g_rec[0x60] __attribute__((aligned(16)));  // (the synthetic reco
 // Log what the game reads from it (species f_70002185d0, form f_70002186a0, and the raw fields the builder copies), to
 // compare with what the capture screen shows (species name, level).
 #define WILD_BUILDER 0x70003058f0ull
-// What the builder reads from the touched Pokémon's object P (docs/MODO-BATALHA.md): species f_70002185d0(P), form
+// What the builder reads from the touched Pokémon's object P (letsgo-recomp's docs/MODO-BATALHA.md): species f_70002185d0(P), form
 // f_70002186a0(P), level = byte P+0xf0c, IVs = six bytes P+0xf18, +0xf1c, ... +0xf2c, gender = word P+0x40c (0 male, 1 female,
 // else none: the builder turns it into 1 / 2 / 0, the record's fixed-gender codes).
 static bool g_wild_valid;
@@ -308,7 +308,7 @@ static void log_record(const char *what, const uint8_t *r) {
         *(const uint32_t *)(r + 0x3c), *(const uint32_t *)(r + 0x40));
 }
 
-// Level-up moves from the game's own table: bin/archive/waza_oboe.gfpak (a GFLXPACK, docs/MODO-BATALHA.md) holds one file per
+// Level-up moves from the game's own table: bin/archive/waza_oboe.gfpak (a GFLXPACK, letsgo-recomp's docs/MODO-BATALHA.md) holds one file per
 // species (the file's index is the species number): (move u16, level u16) pairs in level order, ended by 0xFFFFFFFF. A wild
 // Pokémon knows the last four it learns up to its level. Read from the romfs image, the pack parsed once (header: u32 files at
 // +0x10, i64 file-table offset at +0x18; 0x18-byte entries: type u8 at +2 (2 = LZ4 block), u32 sizes at +4 / +8, u32 offset at +0x10).
@@ -420,7 +420,7 @@ static int state_hook(Cpu *c, uint64_t addr) {
 }
 
 // Before each boot (runtime/main.c): the launcher's "Wild battles (experimental)" (larecomp.ini wild_battle = 1) turns the
-// mode on when LARECOMP_WILDBATTLE doesn't say otherwise. The research variables (docs/DEPURACAO.md) tune it.
+// mode on when LARECOMP_WILDBATTLE doesn't say otherwise. The research variables (letsgo-recomp's docs/DEPURACAO.md) tune it.
 void wildbattle_configure(void) {
     static bool hooked;
     extern void settings_load(void);
