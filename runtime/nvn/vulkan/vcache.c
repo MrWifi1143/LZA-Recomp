@@ -186,6 +186,20 @@ bool vcache_get(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off) {
     return true;
 }
 
+// [addr, addr + len) turned out to be written by the GPU (exec.c gpuw_note: a compute dispatch's storage buffer, transform
+// feedback): copies made of it before are dropped - the CPU never writes there, so they would never be refreshed (Z-A,
+// entering Lumiose from the station: vertices drawn from a stale copy of compute-written data, exploding). The draws
+// read such ranges in place from then on (exec.c gpuw_overlaps).
+void vcache_invalidate(uint64_t addr, uint64_t len) {
+    int n = 0;
+    for (int b = 0; b < NBUCKET; b++)
+        for (VEnt *e = g_tab[b]; e; e = e->next)
+            if (e->buf && e->addr < addr + len && addr < e->addr + e->len) drop_buf(e), n++;
+    static int nlog;
+    if (n && nlog++ < 8) LOG("[vk] %d VRAM vertex / index copies dropped: the GPU writes %llx-%llx\n", n, (unsigned long long)addr,
+                            (unsigned long long)(addr + len));
+}
+
 // In-place reboot (device.c backend_reset; GPU idle): no copies, no read-only pages
 void vcache_reset(void) {
     for (int b = 0; b < NBUCKET; b++) {

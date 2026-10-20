@@ -2485,6 +2485,7 @@ static void gpuw_note(uint64_t a, uint64_t n) {
         ngpuw++;
     }
     if (ENV("LARECOMP_LOG_GPUWRITES")) LOG("[gpuw] the GPU may write %llx-%llx (%d ranges)\n", (unsigned long long)a, (unsigned long long)e, ngpuw);
+    vcache_invalidate(a, e - a);  // (a copy made before this dispatch was seen would stay stale: the CPU never writes there)
 }
 // A shader that stores to global memory with no storage buffer bound writes through pointers we cannot see: from then on every
 // vertex / index range is read in place, as before the VRAM ring (slower, never stale).
