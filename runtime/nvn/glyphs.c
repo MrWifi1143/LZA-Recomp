@@ -1,11 +1,12 @@
-// Button prompts for the controller in use (start screen "Button prompts": Auto, Nintendo Switch, Xbox, PlayStation).
+// Button prompts for the controller in use (start screen "Button prompts": Auto, Nintendo Switch, Xbox, PlayStation,
+// Keyboard and mouse; Auto follows what was used last - the keyboard and mouse when no controller is connected).
 // The games draw each controller button from its own small texture: a BC5 one whose green channel is the button's
 // shape and whose red channel is the symbol cut out of it (dark on white), or a BC4 mask of the symbol alone (bright
 // on dark, laid over a separate round base). The renderer hands every small texture's level 0 here as it uploads it
 // (runtime/nvn/vulkan/textures.c); a known button icon (by the hash of its content, the table below: the names come
 // from LARECOMP_BNTX_SCAN, runtime/hle/bntxscan.c) gets its symbol redrawn for the physical button that drives that
-// Switch input now (runtime/hle/bindings.c, remaps included): Xbox letters / PlayStation shapes, or the Switch label of
-// another button after a remap. The button's shape stays the game's. Nothing of another console's artwork is used:
+// Switch input now (runtime/hle/bindings.c, remaps included): Xbox letters / PlayStation shapes, the Switch label of
+// another button after a remap, or the bound key's name / a mouse with that button. The button's shape stays the game's. Nothing of another console's artwork is used:
 // the letters come from the bundled Baloo 2 font, the shapes are drawn here.
 #include "glyphs.h"
 
@@ -16,6 +17,8 @@
 #include <string.h>
 
 #include <SDL3/SDL_gamepad.h>
+#include <SDL3/SDL_keyboard.h>
+#include <SDL3/SDL_scancode.h>
 
 #include "../hle.h"
 #include "../input_bind.h"
@@ -30,6 +33,8 @@
 #pragma clang diagnostic pop
 
 int input_pad_family(void);  // runtime/hle/input.c: 0 Nintendo / other / none, 1 Xbox, 2 PlayStation
+int input_last_was_kbm(void);  // runtime/hle/input.c: the keyboard / mouse used last (or no controller)
+#define FAMILY_KEYBOARD 3
 
 // ---- the icons: content hash (as textures.c computes it, | 1) -> the Switch input it shows
 typedef struct { uint64_t hash; int8_t slot; } Icon;
@@ -51,8 +56,45 @@ static const Icon k_icons[] = {
 };
 
 // ---- what a physical button is called on each controller family
-enum { SYM_TEXT, SYM_CROSS, SYM_CIRCLE, SYM_SQUARE, SYM_TRIANGLE, SYM_VIEW, SYM_MENU, SYM_CREATE, SYM_OPTIONS, SYM_PLUS, SYM_MINUS };
+enum { SYM_TEXT, SYM_CROSS, SYM_CIRCLE, SYM_SQUARE, SYM_TRIANGLE, SYM_VIEW, SYM_MENU, SYM_CREATE, SYM_OPTIONS, SYM_PLUS, SYM_MINUS,
+       SYM_MOUSE_L, SYM_MOUSE_M, SYM_MOUSE_R, SYM_MOUSE_X1, SYM_MOUSE_X2, SYM_WHEEL_UP, SYM_WHEEL_DOWN,
+       SYM_ARROW_UP, SYM_ARROW_DOWN, SYM_ARROW_LEFT, SYM_ARROW_RIGHT, SYM_EQUALS };
 typedef struct { int sym; const char *text; } Label;
+
+// a key (or mouse button) as a short label: "Q", "TAB", "SPC", "N0" (keypad), an arrow, a mouse
+static bool key_label(int sc, Label *o) {
+    static char buf[8][8];
+    static int next;
+    *o = (Label){SYM_TEXT, NULL};
+    if (sc >= BIND_MOUSE_LEFT && sc <= BIND_WHEEL_DOWN) { o->sym = SYM_MOUSE_L + (sc - BIND_MOUSE_LEFT); return true; }
+    switch (sc) {
+    case 0: return false;
+    case SDL_SCANCODE_UP: o->sym = SYM_ARROW_UP; return true;
+    case SDL_SCANCODE_DOWN: o->sym = SYM_ARROW_DOWN; return true;
+    case SDL_SCANCODE_LEFT: o->sym = SYM_ARROW_LEFT; return true;
+    case SDL_SCANCODE_RIGHT: o->sym = SYM_ARROW_RIGHT; return true;
+    case SDL_SCANCODE_SPACE: o->text = "SPC"; return true;
+    case SDL_SCANCODE_RETURN: case SDL_SCANCODE_KP_ENTER: o->text = "ENT"; return true;
+    case SDL_SCANCODE_BACKSPACE: o->text = "BS"; return true;
+    case SDL_SCANCODE_ESCAPE: o->text = "ESC"; return true;
+    case SDL_SCANCODE_LSHIFT: case SDL_SCANCODE_RSHIFT: o->text = "SHF"; return true;
+    case SDL_SCANCODE_LCTRL: case SDL_SCANCODE_RCTRL: o->text = "CTL"; return true;
+    case SDL_SCANCODE_LALT: case SDL_SCANCODE_RALT: o->text = "ALT"; return true;
+    case SDL_SCANCODE_CAPSLOCK: o->text = "CAP"; return true;
+    case SDL_SCANCODE_MINUS: case SDL_SCANCODE_KP_MINUS: o->sym = SYM_MINUS; return true;
+    case SDL_SCANCODE_EQUALS: o->sym = SYM_EQUALS; return true;
+    case SDL_SCANCODE_KP_PLUS: o->sym = SYM_PLUS; return true;
+    default: break;
+    }
+    const char *n = SDL_GetScancodeName((SDL_Scancode)sc);
+    if (!n || !*n) return false;
+    char *b = buf[next++ & 7];
+    if (!strncmp(n, "Keypad ", 7) && n[7]) snprintf(b, 8, "N%.2s", n + 7);
+    else snprintf(b, 8, "%.3s", n);
+    for (char *c = b; *c; c++) if (*c >= 'a' && *c <= 'z') *c = (char)(*c - 32);
+    o->text = b;
+    return true;
+}
 
 static bool label_of(int family, int host, Label *o) {
     *o = (Label){SYM_TEXT, NULL};
@@ -86,15 +128,22 @@ static int effective_family(void) {
     if (m == PROMPTS_SWITCH) return 0;
     if (m == PROMPTS_XBOX) return 1;
     if (m == PROMPTS_PLAYSTATION) return 2;
-    return input_pad_family();
+    if (m == PROMPTS_KEYBOARD) return FAMILY_KEYBOARD;
+    return input_last_was_kbm() ? FAMILY_KEYBOARD : input_pad_family();
+}
+// what drives Switch input `slot` in that family: a controller button, or a key / mouse button (its first binding)
+static bool wanted_label(int fam, int slot, Label *o) {
+    if (fam != FAMILY_KEYBOARD) return label_of(fam, bind_prompt_host(slot), o);
+    return key_label(g_bind_key[slot] ? g_bind_key[slot] : g_bind_key2[slot], o);
 }
 
 // ---- the generation: changes whenever an icon would be drawn differently (the setting, the controller, a remap)
 static _Atomic uint32_t g_gen = 1;
 static uint64_t g_sig;
 uint32_t glyphs_generation(void) {
-    uint64_t s = (uint64_t)effective_family() + 7;
-    for (int i = 0; i < BIND_PAD_COUNT; i++) s = s * 131 + (uint64_t)(bind_prompt_host(i) + 3);
+    int fam = effective_family();
+    uint64_t s = (uint64_t)fam + 7;
+    for (int i = 0; i < BIND_PAD_COUNT; i++) s = s * 131 + (uint64_t)((fam == FAMILY_KEYBOARD ? g_bind_key[i] : bind_prompt_host(i)) + 3);
     if (s != g_sig) {
         if (g_sig) g_gen++;
         g_sig = s;
@@ -177,6 +226,38 @@ static void ring(Canvas *cv, float cx, float cy, float r, float half) {
 }
 static void poly(Canvas *cv, const float *p, int n, float half) {  // a closed outline
     for (int i = 0; i < n; i++) stroke(cv, p[2 * i], p[2 * i + 1], p[2 * ((i + 1) % n)], p[2 * ((i + 1) % n) + 1], half);
+}
+
+static void fill_if(Canvas *cv, float x0, float y0, float x1, float y1, bool (*in)(float, float, const float *), const float *a) {
+    for (int y = (int)fmaxf(0, y0); y < (int)fminf(cv->h, y1 + 1); y++)
+        for (int x = (int)fmaxf(0, x0); x < (int)fminf(cv->w, x1 + 1); x++)
+            if (in(x + 0.5f, y + 0.5f, a)) cv->c[(size_t)y * cv->w + x] = 1;
+}
+// the mouse: an upright oval (a[0..3] = centre, radii), its top split into two buttons at a[4] (a y)
+static bool in_oval(float x, float y, const float *a) {
+    float dx = (x - a[0]) / a[2], dy = (y - a[1]) / a[3];
+    return dx * dx + dy * dy <= 1;
+}
+static bool in_button(float x, float y, const float *a) {  // a[5]: -1 left, 1 right, 0 the wheel's slot
+    if (!in_oval(x, y, a) || y > a[4]) return false;
+    return a[5] < 0 ? x < a[0] - a[6] : a[5] > 0 ? x > a[0] + a[6] : fabsf(x - a[0]) < a[6] * 1.6f && y > a[1] - a[3] * 0.62f;
+}
+static void mouse(Canvas *cv, float cx, float cy, float h, int which) {  // which: -1 left, 1 right, 0 wheel, 2 side
+    float ry = h * 0.5f, rx = ry * 0.7f, hw = h * 0.07f, split = cy - ry * 0.05f;
+    float a[7] = {cx, cy, rx, ry, split, (float)which, hw * 0.9f};
+    float pts[64];
+    for (int i = 0; i < 32; i++) pts[2 * i] = cx + rx * cosf(i * 0.19635f), pts[2 * i + 1] = cy + ry * sinf(i * 0.19635f);
+    poly(cv, pts, 32, hw);
+    stroke(cv, cx - rx, split, cx + rx, split, hw);
+    stroke(cv, cx, cy - ry, cx, split, hw);
+    if (which != 2) fill_if(cv, cx - rx, cy - ry, cx + rx, split, in_button, a);
+    else stroke(cv, cx - rx, cy + ry * 0.15f, cx - rx, cy + ry * 0.45f, hw * 2);  // (a side button)
+}
+static void arrow(Canvas *cv, float cx, float cy, float s, float dx, float dy, float hw) {
+    float px = -dy, py = dx;  // (across the arrow)
+    stroke(cv, cx - dx * s * 0.42f, cy - dy * s * 0.42f, cx + dx * s * 0.42f, cy + dy * s * 0.42f, hw);
+    stroke(cv, cx + dx * s * 0.42f, cy + dy * s * 0.42f, cx + (dx * 0.05f + px * 0.38f) * s, cy + (dy * 0.05f + py * 0.38f) * s, hw);
+    stroke(cv, cx + dx * s * 0.42f, cy + dy * s * 0.42f, cx + (dx * 0.05f - px * 0.38f) * s, cy + (dy * 0.05f - py * 0.38f) * s, hw);
 }
 
 static stbtt_fontinfo g_font;
@@ -275,6 +356,22 @@ static void draw_label(Canvas *cv, Label l, float cx, float cy, float ch, float 
         break;
     case SYM_PLUS: stroke(cv, cx - ch * 0.42f, cy, cx + ch * 0.42f, cy, hw * 1.4f), stroke(cv, cx, cy - ch * 0.42f, cx, cy + ch * 0.42f, hw * 1.4f); break;
     case SYM_MINUS: stroke(cv, cx - ch * 0.42f, cy, cx + ch * 0.42f, cy, hw * 1.4f); break;
+    case SYM_MOUSE_L: case SYM_MOUSE_R: case SYM_MOUSE_M: case SYM_MOUSE_X1: case SYM_MOUSE_X2:
+        mouse(cv, cx, cy, bs * 0.7f, l.sym == SYM_MOUSE_L ? -1 : l.sym == SYM_MOUSE_R ? 1 : l.sym == SYM_MOUSE_M ? 0 : 2);
+        break;
+    case SYM_EQUALS:
+        for (int i = -1; i <= 1; i += 2) stroke(cv, cx - ch * 0.4f, cy + i * ch * 0.2f, cx + ch * 0.4f, cy + i * ch * 0.2f, hw * 1.2f);
+        break;
+    case SYM_WHEEL_UP: case SYM_WHEEL_DOWN: {
+        float h = bs * 0.66f;
+        mouse(cv, cx - h * 0.12f, cy, h * 0.9f, 0);
+        arrow(cv, cx + h * 0.42f, cy, h * 0.5f, 0, l.sym == SYM_WHEEL_UP ? -1 : 1, hw * 0.8f);
+        break;
+    }
+    case SYM_ARROW_UP: arrow(cv, cx, cy, s, 0, -1, hw); break;
+    case SYM_ARROW_DOWN: arrow(cv, cx, cy, s, 0, 1, hw); break;
+    case SYM_ARROW_LEFT: arrow(cv, cx, cy, s, -1, 0, hw); break;
+    case SYM_ARROW_RIGHT: arrow(cv, cx, cy, s, 1, 0, hw); break;
     }
 }
 
@@ -288,9 +385,9 @@ int glyphs_patch(uint64_t hash, uint32_t format, uint32_t w, uint32_t h, uint8_t
     if (!ic) return 0;
     bool bc5 = format == 0x4B, bc4 = format == 0x49;
     if (!bc5 && !bc4) return 1;
-    int fam = effective_family(), host = bind_prompt_host(ic->slot);
+    int fam = effective_family();
     Label want, orig = switch_label(ic->slot);
-    if (!label_of(fam, host, &want)) return 1;
+    if (!wanted_label(fam, ic->slot, &want)) return 1;
     if (want.sym == orig.sym && (want.sym != SYM_TEXT || !strcmp(want.text, orig.text))) return 1;  // (the game's own)
     if (want.sym == SYM_TEXT && !font_ready()) return 1;
     int wb = (int)(w + 3) / 4, hb = (int)(h + 3) / 4, pw = wb * 4, ph = hb * 4, bpb = bc5 ? 16 : 8;

@@ -8,7 +8,7 @@ enum { UPSCALE_BILINEAR = 0, UPSCALE_FSR1 = 2 /* AMD FSR 1 */ };
 #define UPSCALE_SHARP UPSCALE_FSR1  // the non-bilinear upscaler (the default)
 enum { AA_OFF = 0, AA_SMAA = 1 };
 enum { VREAD_AUTO = 0, VREAD_COPY = 1, VREAD_DIRECT = 2 };
-enum { PROMPTS_AUTO, PROMPTS_SWITCH, PROMPTS_XBOX, PROMPTS_PLAYSTATION };  // (auto: the connected controller's)
+enum { PROMPTS_AUTO, PROMPTS_SWITCH, PROMPTS_XBOX, PROMPTS_PLAYSTATION, PROMPTS_KEYBOARD };  // (auto: what was used last)
 
 typedef struct {
     bool fullscreen;
@@ -18,7 +18,8 @@ typedef struct {
     int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
     float volume;        // master volume, 1 = 100%
-    float mouse_sens;    // mouse aim (the virtual gyro, runtime/hle/input.c): degrees per pixel
+    float mouse_sens;    // mouse aim (the virtual gyro, runtime/hle/input.c): degrees per pixel; the mouse camera's speed
+    bool mouse_camera;   // a click in the game window takes the mouse: it turns the camera (runtime/hle/input.c)
     float stick_deadzone;  // a controller's sticks: the share of their travel read as rest (runtime/hle/input.c)
     bool reverb;         // room reverb effect
     bool movie_audio;

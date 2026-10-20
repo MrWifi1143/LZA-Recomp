@@ -21,6 +21,7 @@ Settings g_settings = {
     .fps = 30,
     .volume = 1.0f,
     .mouse_sens = 0.1f,
+    .mouse_camera = true,
     .stick_deadzone = 0.15f,
     .reverb = true,
     .movie_audio = true,
@@ -52,6 +53,7 @@ static void parse_line(const char *line) {
     else if (!strcmp(key, "reverb")) g_settings.reverb = atoi(val) != 0;
     else if (!strcmp(key, "movie_audio")) g_settings.movie_audio = atoi(val) != 0;
     else if (!strcmp(key, "show_fps")) g_settings.show_fps = atoi(val) != 0;
+    else if (!strcmp(key, "mouse_camera")) g_settings.mouse_camera = atoi(val) != 0;
     else if (!strcmp(key, "resolution")) {
         int n = atoi(val);
         g_settings.res_mode = !strcmp(val, "dynamic") ? RES_DYNAMIC : (!strcmp(val, "75%") || !strcmp(val, "67%")) ? RES_Q75 :
@@ -67,7 +69,8 @@ static void parse_line(const char *line) {
     else if (!strcmp(key, "wild_battle")) g_settings.wild_battle = atoi(val) != 0;
     else if (!strcmp(key, "button_prompts"))
         g_settings.button_prompts = !strcmp(val, "switch") ? PROMPTS_SWITCH : !strcmp(val, "xbox") ? PROMPTS_XBOX :
-                                    !strcmp(val, "playstation") ? PROMPTS_PLAYSTATION : PROMPTS_AUTO;
+                                    !strcmp(val, "playstation") ? PROMPTS_PLAYSTATION : !strcmp(val, "keyboard") ? PROMPTS_KEYBOARD :
+                                    PROMPTS_AUTO;
     else bind_settings_load(key, val);  // bind_pad_* / bind_key_*: runtime/hle/bindings.c
 }
 
@@ -115,6 +118,7 @@ void settings_save(void) {
     fprintf(f, "reverb = %d\n", g_settings.reverb);
     fprintf(f, "movie_audio = %d\n", g_settings.movie_audio);
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
+    fprintf(f, "mouse_camera = %d\n", g_settings.mouse_camera);
     fprintf(f, "upscaler = %s\n", g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");
     if (g_settings.res_mode == RES_DYNAMIC) fprintf(f, "resolution = dynamic\n");
     else if (g_settings.res_mode == RES_Q75) fprintf(f, "resolution = 75%%\n");
@@ -126,8 +130,8 @@ void settings_save(void) {
     fprintf(f, "vertex_read = %s\n", g_settings.vertex_read == VREAD_DIRECT ? "direct" : g_settings.vertex_read == VREAD_COPY ? "copy" : "auto");
     fprintf(f, "dpad_move = %d\n", g_settings.dpad_move);
     fprintf(f, "wild_battle = %d\n", g_settings.wild_battle);
-    static const char *const prompts[] = {"auto", "switch", "xbox", "playstation"};
-    fprintf(f, "button_prompts = %s\n", prompts[g_settings.button_prompts & 3]);
+    static const char *const prompts[] = {"auto", "switch", "xbox", "playstation", "keyboard"};
+    fprintf(f, "button_prompts = %s\n", prompts[g_settings.button_prompts >= 0 && g_settings.button_prompts <= 4 ? g_settings.button_prompts : 0]);
     fprintf(f, "game_lang = %s\n", g_settings.game_lang);
     bind_settings_save(f);
     fclose(f);
