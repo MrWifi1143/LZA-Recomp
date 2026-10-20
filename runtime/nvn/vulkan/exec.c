@@ -4468,6 +4468,13 @@ static void exec_list(uint64_t handle, int depth) {
             }
             break;
         case CMD_DISPATCH: dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]); break;
+        case CMD_DRAW_ARRAYS_INDIRECT: case CMD_DRAW_ELEMENTS_INDIRECT: case CMD_DISPATCH_INDIRECT: {
+            // (not implemented: neither Legends game issues them in the scenes tested - say so the first time one does)
+            static int warned;
+            if (!warned++) LOG("[vk] indirect %s recorded but not executed (op %u): not implemented\n",
+                               r->op == CMD_DISPATCH_INDIRECT ? "dispatch" : "draw", (unsigned)r->op);
+            break;
+        }
         case CMD_DRAW_ARRAYS: draw(r, false); break;
         case CMD_DRAW_TEXTURE: draw_texture(r); break;
         case CMD_DRAW_ELEMENTS: draw(r, true); break;
