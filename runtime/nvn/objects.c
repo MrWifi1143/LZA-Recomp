@@ -1,4 +1,5 @@
 // NVN objects, builders, and state objects (everything except command recording).
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -124,7 +125,8 @@ NVN(nvnQueueSubmitCommands) {
     for (int i = 0; i < n; i++) rt_submit(handles[i]);
 }
 NVN(nvnQueueFlush) { (void)c; }
-NVN(nvnQueueFinish) { (void)c; rt_drain(); renderer_sync(); }
+static uint64_t g_wait_finish_ns;
+NVN(nvnQueueFinish) { (void)c; uint64_t t0_ = plat_now_ns(); rt_drain(); renderer_sync(); g_wait_finish_ns += plat_now_ns() - t0_; }
 
 static NvnSync *sync_of(uint64_t guest) {
     NvnSync *s = HOST(NvnSync, guest);
@@ -147,7 +149,44 @@ NVN(nvnSyncInitialize) { SET_HOST(A(0), calloc(1, sizeof(NvnSync))); RET(1); }
 NVN(nvnSyncFinalize) { free(HOST(NvnSync, A(0))); SET_HOST(A(0), 0); }
 NVN(nvnSyncSetDebugLabel) { (void)c; }
 void renderer_flush(void);
+// (research: LARECOMP_LOG_WAITS=1 - where the game threads wait for the GPU / render thread, ms per presented frame)
+static struct { uint64_t lr, ns, n; } g_wait[16];
+static uint64_t g_wait_pace_ns, g_wait_frames;
+uint64_t g_wait_pace_add;
+static pthread_mutex_t g_wait_mu = PTHREAD_MUTEX_INITIALIZER;
+static void wait_note(uint64_t lr, uint64_t ns) {
+    pthread_mutex_lock(&g_wait_mu);
+    int i = 0;
+    while (i < 16 && g_wait[i].lr && g_wait[i].lr != lr) i++;
+    if (i < 16) g_wait[i].lr = lr, g_wait[i].ns += ns, g_wait[i].n++;
+    pthread_mutex_unlock(&g_wait_mu);
+}
+static void wait_report(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_LOG_WAITS") != NULL;
+    if (!on || ++g_wait_frames < 288) return;
+    pthread_mutex_lock(&g_wait_mu);
+    char line[1024];
+    extern _Atomic uint64_t g_core_wait_ns, g_core_waits;  // (runtime/kernel.c: threads waiting for an emulated core)
+    uint64_t cw = g_core_wait_ns, cn = g_core_waits;
+    g_core_wait_ns = 0, g_core_waits = 0;
+    extern _Atomic uint64_t g_wake_lat_ns, g_wake_n;
+    uint64_t wl = g_wake_lat_ns, wn = g_wake_n;
+    g_wake_lat_ns = 0, g_wake_n = 0;
+    LOG("[waits] wakeups %.1f/frame, OS latency %.1f us each\n", (double)wn / g_wait_frames, wn ? wl / 1e3 / wn : 0.0);
+    int len = snprintf(line, sizeof line, "[waits] ms/frame: finish %.2f pace %.2f core %.2f (x%.1f) syncwait", g_wait_finish_ns / 1e6 / g_wait_frames,
+                       g_wait_pace_ns / 1e6 / g_wait_frames, cw / 1e6 / g_wait_frames, (double)cn / g_wait_frames);
+    for (int i = 0; i < 16 && g_wait[i].lr && len < 900; i++)
+        len += snprintf(line + len, sizeof line - (size_t)len, " %llx:%.2f(x%.1f)", (unsigned long long)g_wait[i].lr, g_wait[i].ns / 1e6 / g_wait_frames, (double)g_wait[i].n / g_wait_frames);
+    memset(g_wait, 0, sizeof g_wait);
+    g_wait_finish_ns = g_wait_pace_ns = g_wait_frames = 0;
+    pthread_mutex_unlock(&g_wait_mu);
+    LOG("%s\n", line);
+}
+void rt_trace(char ev, uint64_t arg);
 NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
+    uint64_t t0_ = plat_now_ns();
+    rt_trace('W', c->x[30]);
     static int flush = -1;
     static uint64_t n;
     if (flush < 0) flush = getenv("LARECOMP_SYNC_FLUSH") ? 1 : 0;
@@ -161,6 +200,8 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
         if (s->ticket) rt_wait_ticket(s->ticket);  // only the work up to this fence
         else { if (s->seq) rt_drain(); renderer_wait_seq(s->seq); }  // (a fence inside a list is set once the list has run)
     }
+    wait_note(c->x[30], plat_now_ns() - t0_);
+    rt_trace('w', 0);
     RET(0);
 }
 NVN(nvnSyncCreateGLSync) { RET(0); }
@@ -797,6 +838,8 @@ static void present_pace(int interval) {
         kernel_block_begin();  // (the emulated core is free while the game thread waits: runtime/kernel.c)
         plat_sleep_until_ns(next);
         kernel_block_end();
+        extern uint64_t g_wait_pace_add;
+        g_wait_pace_add += plat_now_ns() - now;
     }
     next += period;
 }
@@ -820,6 +863,8 @@ NVN(nvnQueuePresentTexture) {
         }
     }
     g_last_interval = w->interval;
+    g_wait_pace_ns += g_wait_pace_add, g_wait_pace_add = 0;
+    wait_report();
     { extern void fps60_present(void); fps60_present(); }
     present_pace(w->interval);
     if (i >= 0 && i < w->num) rt_present(HOST(NvnTexture, w->textures[i]));

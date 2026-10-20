@@ -28,12 +28,17 @@ static timer_t g_timers[512];
 static int g_ntimers;
 static long g_from = -1, g_to = -1;
 static uint64_t g_t0;
+static uint64_t g_present_us[8192];
+static int g_npresent;
 
 static void on_prof(int sig, siginfo_t *si, void *ctx) {
     (void)sig, (void)si;
     uint32_t i = atomic_fetch_add_explicit(&g_n, 1, memory_order_relaxed);
     if (i >= CAP) return;
     g_buf[i].tid = (uint32_t)syscall(SYS_gettid);
+    struct timespec ts;  // (pad: microseconds since the start, for timelines - build/sample/presents.txt has the presents)
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    g_buf[i].pad = (uint32_t)(((uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec - g_t0) / 1000);
     g_buf[i].pc = (uint64_t)((ucontext_t *)ctx)->uc_mcontext.gregs[REG_RIP];
 }
 
@@ -102,11 +107,21 @@ static void stop(void) {
     if (d) closedir(d);
     if (f) fclose(f);
     copy_file("/proc/self/maps", "build/sample/maps.txt");
+    if ((f = fopen("build/sample/presents.txt", "w"))) {
+        for (int i = 0; i < g_npresent; i++) fprintf(f, "%llu\n", (unsigned long long)g_present_us[i]);
+        fclose(f);
+    }
+    g_npresent = 0;
     if ((f = fopen("build/sample/frames.txt", "w"))) fprintf(f, "%ld %llu\n", g_to - g_from, (unsigned long long)wall), fclose(f);
     LOG("[sample] %u samples over %ld frames (%.1f s): build/sample/, tools/sample_report.py\n", n, g_to - g_from, wall / 1e9);
 }
 
+void sampler_live(long frames, uint64_t now) {  // (LARECOMP_LIVE <dir>/sample "<frames>": from the next frame on)
+    if (g_to && (long)now < g_to) return;
+    g_from = (long)now + 1, g_to = g_from + (frames > 0 ? frames : 600);
+}
 void sampler_frame(uint64_t frame) {
+    if (g_from >= 0 && g_to && (long)frame > g_from && (long)frame <= g_to && g_npresent < 8192) g_present_us[g_npresent++] = (now_ns() - g_t0) / 1000;
     if (g_from < 0) {
         const char *e = getenv("LARECOMP_SAMPLE");
         g_from = g_to = 0;
@@ -119,4 +134,5 @@ void sampler_frame(uint64_t frame) {
 #else
 #include <stdint.h>
 void sampler_frame(uint64_t frame) { (void)frame; }
+void sampler_live(long frames, uint64_t now) { (void)frames, (void)now; }
 #endif

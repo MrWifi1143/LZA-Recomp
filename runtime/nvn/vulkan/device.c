@@ -14,6 +14,7 @@
 #include "../../settings.h"
 #include "../../ui/menu.h"
 #include "vk.h"
+void rt_trace(char ev, uint64_t arg);  // (renderthread.c: research timeline)
 #include "../../plugin.h"
 #include "../output_scale.h"
 #include "../renderer.h"
@@ -433,7 +434,9 @@ bool vk_frame_begin(const float clear[4]) {
     slot = (slot + 1) % FRAMES;
     if (!acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
     vk_wait_seq(slot_seq[slot]);
+    rt_trace('A', 0);
     VkResult r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
+    rt_trace('a', 0);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
         recreate_swapchain();
         r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
@@ -511,7 +514,9 @@ void vk_frame_end(const char *shot_path) {
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &done_sem[img],
                            .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
     vk_queue_lock();
+    rt_trace('Q', 0);
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
+    rt_trace('q', 0);
     vk_queue_unlock();
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) recreate_swapchain();
     cur_frame.ok = false;
@@ -910,6 +915,30 @@ void backend_present(NvnTexture *t) {
                 extern uint64_t vk_frame_counter(void);
                 g_exp_nocull_start = vk_frame_counter() + 2;
                 LOG("[exp] nocull bits from frame %llu (vk frame)\n", (unsigned long long)g_exp_nocull_start);
+            }
+            snprintf(path, sizeof path, "%s/trace", dir);  // (research: renderthread.c rt_trace, ~300 presents)
+            {
+                static long trace_end = -1;
+                if (access(path, F_OK) == 0) {
+                    remove(path);
+                    extern void rt_trace_start(void);
+                    rt_trace_start();
+                    trace_end = (long)total_frames + 300;
+                }
+                if (trace_end >= 0 && (long)total_frames >= trace_end) {
+                    trace_end = -1;
+                    extern void rt_trace_stop(void);
+                    rt_trace_stop();
+                }
+            }
+            snprintf(path, sizeof path, "%s/sample", dir);  // (profiling: hle/sampler.c for "<frames>" presents)
+            if (access(path, F_OK) == 0) {
+                FILE *f = fopen(path, "r");
+                long n = 600;
+                if (f) { if (fscanf(f, "%ld", &n) != 1) n = 600; fclose(f); }
+                remove(path);
+                extern void sampler_live(long frames, uint64_t now);
+                sampler_live(n, total_frames);
             }
             snprintf(path, sizeof path, "%s/nocull", dir);  // (research: exec.c, no culling at all on / off)
             if (access(path, F_OK) == 0) {

@@ -1,4 +1,5 @@
 // A small Horizon kernel: handles, threads, synchronization, memory, and the SVC dispatcher.
+#include <stdatomic.h>
 #include <SDL3/SDL.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,7 +69,12 @@ static void handle_close(uint32_t h) {
 // Threads blocked in WaitSynchronization; object signals wake only these (caller holds g_klock).
 static KThread *g_syncwaiters;
 
-static void wake(KThread *t) { pthread_cond_signal(&t->cond); }
+static uint64_t g_wake_at[64];  // (research, LARECOMP_LOG_WAITS: when each thread was woken, by id & 63)
+_Atomic uint64_t g_wake_lat_ns, g_wake_n;
+static void wake(KThread *t) {
+    if (!g_wake_at[t->id & 63]) g_wake_at[t->id & 63] = plat_now_ns();
+    pthread_cond_signal(&t->cond);
+}
 
 void kernel_signal(KObject *o) {
     // caller holds g_klock
@@ -120,8 +126,24 @@ static bool cores_on(void) {
     return on;
 }
 
+_Atomic uint64_t g_core_wait_ns, g_core_waits;  // (research: LARECOMP_LOG_WAITS, nvn/objects.c)
+static struct { uint64_t w, o; int wp, op, core, wmask; uint64_t n; } g_pairs[32];
+static void core_pair_note(KThread *t, KThread *o, int core) {  // (g_core_lock held)
+    if (!o) return;
+    int i = 0;
+    while (i < 32 && g_pairs[i].n && !(g_pairs[i].w == t->id && g_pairs[i].o == o->id)) i++;
+    if (i == 32) return;
+    g_pairs[i].w = t->id, g_pairs[i].o = o->id, g_pairs[i].wp = t->prio, g_pairs[i].op = o->prio, g_pairs[i].core = core;
+    g_pairs[i].wmask = (int)(t->core_mask & 0xF), g_pairs[i].n++;
+    static uint64_t total;
+    if (++total % 20000 == 0)
+        for (int k = 0; k < 32 && g_pairs[k].n; k++)
+            LOG("[waits] core %d: thread %llx (prio %d, mask %x) waited for %llx (prio %d) x%llu\n", g_pairs[k].core, (unsigned long long)g_pairs[k].w,
+                g_pairs[k].wp, g_pairs[k].wmask, (unsigned long long)g_pairs[k].o, g_pairs[k].op, (unsigned long long)g_pairs[k].n);
+}
 static void core_acquire(KThread *t) {
     if (!t || t->run_core >= 0 || !cores_on()) return;
+    uint64_t w0_ = 0;
     uint32_t mask = t->core_mask & 0xF;
     if (!mask) mask = 1u << t->core;
     pthread_mutex_lock(&g_core_lock);
@@ -135,9 +157,31 @@ static void core_acquire(KThread *t) {
             g_core_owner[pick] = t;
             t->run_core = pick;
             t->core_shared = false;
+            if (w0_) g_core_wait_ns += plat_now_ns() - w0_, g_core_waits++;
             break;
         }
+        {   // LARECOMP_CORE_PREEMPT=1 (experiment): a thread of higher priority than the owner of its core runs at once,
+            // beside it (Horizon would preempt the owner; it can't be paused here)
+            static int pre = -1;
+            if (pre < 0) pre = ENV("LARECOMP_CORE_PREEMPT") != NULL;
+            int c0 = (mask >> t->core & 1) ? t->core : __builtin_ctz(mask);
+            KThread *o = g_core_owner[c0];
+            if (pre && o && t->prio < o->prio) {
+                t->run_core = c0;
+                t->core_shared = true;
+                if (w0_) g_core_wait_ns += plat_now_ns() - w0_, g_core_waits++;
+                break;
+            }
+        }
         uint64_t now = plat_now_ns();
+        if (!w0_) {
+            w0_ = now;
+            if (ENV("LARECOMP_LOG_WAITS")) {  // (who waits for whom: one sample per wait, the owner of the core it prefers)
+                int c0 = (mask >> t->core & 1) ? t->core : __builtin_ctz(mask);
+                KThread *o = g_core_owner[c0];
+                core_pair_note(t, o, c0);
+            }
+        }
         if (!start) start = now;
         if (now - start >= CORE_STEAL_NS) {
             pick = (mask >> t->core & 1) ? t->core : __builtin_ctz(mask);
@@ -181,11 +225,15 @@ static pthread_cond_t g_nothread_cond = PTHREAD_COND_INITIALIZER;
 static bool kwait(int64_t timeout_ns, const struct timespec *ts) {
     pthread_cond_t *cv = t_cur ? &t_cur->cond : &g_nothread_cond;
     core_release(t_cur);  // (taken again at rt_svc's end, holding no lock)
-    if (timeout_ns < 0) {
-        pthread_cond_wait(cv, &g_klock);
-        return true;
+    if (t_cur) g_wake_at[t_cur->id & 63] = 0;
+    bool r;
+    if (timeout_ns < 0) pthread_cond_wait(cv, &g_klock), r = true;
+    else r = pthread_cond_timedwait(cv, &g_klock, ts) == 0;
+    if (t_cur && g_wake_at[t_cur->id & 63]) {
+        g_wake_lat_ns += plat_now_ns() - g_wake_at[t_cur->id & 63], g_wake_n++;
+        g_wake_at[t_cur->id & 63] = 0;
     }
-    return pthread_cond_timedwait(cv, &g_klock, ts) == 0;
+    return r;
 }
 
 // ------------------------------------------------------------------ memory map

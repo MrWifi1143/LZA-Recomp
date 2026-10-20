@@ -15,6 +15,10 @@
 //    own (renderer_present_count) count the ones it has shown.
 #include <SDL3/SDL.h>
 #include <pthread.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -73,6 +77,29 @@ uint64_t renderer_game_frame(void) {
     return rt_active() ? __atomic_load_n(&game_frames, __ATOMIC_RELAXED) : renderer_present_count();
 }
 
+// Research: LARECOMP_LIVE <dir>/trace - timestamped events of the next ~2 s (game submits and presents, the render
+// thread's jobs, the game's fence waits) -> build/trace.txt: "<us> <thread> <event> <arg>"
+#define TRN (1 << 18)
+static struct { uint64_t us; uint32_t tid; char ev; uint64_t arg; } g_tr[TRN];
+static _Atomic uint32_t g_trn;
+static volatile int g_tr_on;
+static uint64_t g_tr_t0;
+void rt_trace(char ev, uint64_t arg) {
+    if (!g_tr_on) return;
+    uint32_t i = atomic_fetch_add(&g_trn, 1);
+    if (i >= TRN) return;
+    g_tr[i].us = (plat_now_ns() - g_tr_t0) / 1000, g_tr[i].tid = (uint32_t)syscall(SYS_gettid), g_tr[i].ev = ev, g_tr[i].arg = arg;
+}
+void rt_trace_start(void) { g_tr_t0 = plat_now_ns(); g_trn = 0; g_tr_on = 1; }
+void rt_trace_stop(void) {
+    g_tr_on = 0;
+    FILE *f = fopen("build/trace.txt", "w");
+    uint32_t n = g_trn < TRN ? g_trn : TRN;
+    for (uint32_t i = 0; f && i < n; i++) fprintf(f, "%llu %u %c %llx\n", (unsigned long long)g_tr[i].us, g_tr[i].tid, g_tr[i].ev, (unsigned long long)g_tr[i].arg);
+    if (f) fclose(f);
+    LOG("[trace] %u events: build/trace.txt\n", n);
+}
+
 static void run(Job *j) {
     switch (j->kind) {
     case RJ_EXEC:
@@ -110,13 +137,17 @@ static void *render_main(void *arg) {
                 idle_seq = renderer_fence_seq();
                 continue;
             }
+            rt_trace('i', 0);
             pthread_cond_wait(&c_work, &lk);
         }
         Job j = queue[qhead % QN];
         busy = true;
         pthread_mutex_unlock(&lk);
+        rt_trace(j.kind == RJ_EXEC ? 'X' : j.kind == RJ_PRESENT ? 'R' : 'C', j.handle);
         if (!dropping || j.kind == RJ_CALL) run(&j);  // (a reboot drops queued lists and presents, never a caller's call)
+        rt_trace('e', 0);
         renderer_submit_if_needed(false);
+        rt_trace('s', 0);
         uint64_t seq = renderer_fence_seq();
         pthread_mutex_lock(&lk);
         qhead++;
@@ -173,6 +204,7 @@ static uint64_t push(Job j) {
 
 void rt_submit(uint64_t handle) {
     if (!rt_active()) { backend_execute(handle); return; }
+    rt_trace('S', handle);
     Job j = {.kind = RJ_EXEC, .handle = handle, .dirty = backend_dirty_seq()};
     push(j);
 }
@@ -182,11 +214,13 @@ void rt_submit(uint64_t handle) {
 void rt_present(NvnTexture *t) {
     if (!t) return;
     if (!rt_active()) { backend_present(t); return; }
+    rt_trace('P', 0);
     pthread_mutex_lock(&lk);
     while (pres_enq - pres_fin >= MAX_PRESENTS)
         if (!wait_done()) { lk_unlock(); return; }
     pres_enq++;
     lk_unlock();
+    rt_trace('p', 0);
     Job j = {.kind = RJ_PRESENT, .tex = t};
     push(j);
     uint64_t n = __atomic_add_fetch(&game_frames, 1, __ATOMIC_RELAXED);
