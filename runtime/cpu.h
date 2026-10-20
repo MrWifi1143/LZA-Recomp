@@ -40,6 +40,15 @@ void rt_udf(Cpu *c, uint64_t pc) __attribute__((noreturn));
 uint64_t rt_ticks(void);
 // guest setjmp: the host __builtin_setjmp buffer for the call returning to `ret` at this sp (runtime/dispatch.c)
 void **rt_setjmp_point(Cpu *c, uint64_t ret);
+#ifdef _WIN32
+// Windows: LLVM's __builtin_setjmp / __builtin_longjmp break the frame on x86-64 Windows (locals of the function that
+// took the point come back clobbered; the Lua protected call of Legends: Arceus looped forever at boot). A plain
+// register save / restore of our own instead (runtime/dispatch.c; buffers of 30 pointers).
+int rt_sj_set(void **buf) __attribute__((returns_twice));
+void rt_sj_long(void **buf, int v) __attribute__((noreturn));
+#define __builtin_setjmp(b) rt_sj_set(b)
+#define __builtin_longjmp(b, v) rt_sj_long(b, v)
+#endif
 
 #if defined(__aarch64__)
 static inline uint64_t rt_get_fpcr(void) { uint64_t v; __asm__ volatile("mrs %0, fpcr" : "=r"(v)); return v; }

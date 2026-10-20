@@ -163,7 +163,33 @@ GuestFn dispatch_lookup(uint64_t addr) {
 // branches to that return address, which is no function: dispatch_slow finds the point and longjmps the host back into
 // the generated function that made it. Per thread; a point whose sp is below the caller's belongs to a frame that has
 // returned and is reused first.
+#ifdef _WIN32
+typedef struct { uint64_t ret, sp; void *buf[30]; } JmpPoint;  // (rt_sj_set below: registers, xmm6-15, sp, return address)
+// Win64 setjmp / longjmp without unwinding: the callee-saved registers (rbx rbp rdi rsi r12-r15, xmm6-xmm15), the stack
+// pointer and the return address (cpu.h: LLVM's __builtin_setjmp is broken on this target).
+__attribute__((naked, returns_twice)) int rt_sj_set(void **buf) {
+    __asm__ volatile(
+        "movq %rbx, 0(%rcx)\n\t" "movq %rbp, 8(%rcx)\n\t" "movq %rdi, 16(%rcx)\n\t" "movq %rsi, 24(%rcx)\n\t"
+        "movq %r12, 32(%rcx)\n\t" "movq %r13, 40(%rcx)\n\t" "movq %r14, 48(%rcx)\n\t" "movq %r15, 56(%rcx)\n\t"
+        "leaq 8(%rsp), %rdx\n\t" "movq %rdx, 64(%rcx)\n\t" "movq (%rsp), %rdx\n\t" "movq %rdx, 72(%rcx)\n\t"
+        "movdqu %xmm6, 80(%rcx)\n\t" "movdqu %xmm7, 96(%rcx)\n\t" "movdqu %xmm8, 112(%rcx)\n\t" "movdqu %xmm9, 128(%rcx)\n\t"
+        "movdqu %xmm10, 144(%rcx)\n\t" "movdqu %xmm11, 160(%rcx)\n\t" "movdqu %xmm12, 176(%rcx)\n\t"
+        "movdqu %xmm13, 192(%rcx)\n\t" "movdqu %xmm14, 208(%rcx)\n\t" "movdqu %xmm15, 224(%rcx)\n\t"
+        "xorl %eax, %eax\n\t" "ret\n\t");
+}
+__attribute__((naked, noreturn)) void rt_sj_long(void **buf, int v) {
+    __asm__ volatile(
+        "movl %edx, %eax\n\t" "testl %eax, %eax\n\t" "jnz 1f\n\t" "movl $1, %eax\n\t" "1:\n\t"
+        "movq 0(%rcx), %rbx\n\t" "movq 8(%rcx), %rbp\n\t" "movq 16(%rcx), %rdi\n\t" "movq 24(%rcx), %rsi\n\t"
+        "movq 32(%rcx), %r12\n\t" "movq 40(%rcx), %r13\n\t" "movq 48(%rcx), %r14\n\t" "movq 56(%rcx), %r15\n\t"
+        "movdqu 80(%rcx), %xmm6\n\t" "movdqu 96(%rcx), %xmm7\n\t" "movdqu 112(%rcx), %xmm8\n\t" "movdqu 128(%rcx), %xmm9\n\t"
+        "movdqu 144(%rcx), %xmm10\n\t" "movdqu 160(%rcx), %xmm11\n\t" "movdqu 176(%rcx), %xmm12\n\t"
+        "movdqu 192(%rcx), %xmm13\n\t" "movdqu 208(%rcx), %xmm14\n\t" "movdqu 224(%rcx), %xmm15\n\t"
+        "movq 64(%rcx), %rsp\n\t" "jmpq *72(%rcx)\n\t");
+}
+#else
 typedef struct { uint64_t ret, sp; void *buf[5]; } JmpPoint;
+#endif
 #define NJMP 256
 static __thread JmpPoint jmp_points[NJMP];
 static __thread unsigned jmp_next;
