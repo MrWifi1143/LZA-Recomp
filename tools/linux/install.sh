@@ -64,8 +64,12 @@ for d in /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu; do
     [ -e "$d/libshaderc.so" ] && break
     [ -e "$d/libshaderc_shared.so" ] && { shaderc=-lshaderc_shared; break; }
 done
-say "Building the runtime ($(nproc) jobs)"
-make -j"$(nproc)" all SHADERC=$shaderc
+say "Building the runtime ($(nproc) jobs, a few minutes; log: build/install.log)"
+mkdir -p build
+if ! make -j"$(nproc)" all SHADERC=$shaderc > build/install.log 2>&1; then
+    grep -E "error|Error" build/install.log | head -20
+    die "the build failed (build/install.log has the whole output)"
+fi
 mkdir -p extracted  # (the start screen keeps your game files, saves and settings in this folder)
 
 name=$(sed -n 's/^#define RT_APP_NAME "\(.*\)".*/\1/p' runtime/paths.h)

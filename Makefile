@@ -111,7 +111,7 @@ RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
 RTFLAGS  := -O2 -g -fno-strict-aliasing -fdenormal-fp-math=dynamic -Wall -Wno-unused-function -Iruntime -Iruntime/nvn -Ithird_party $(DEPINC) $(OSFLAGS)
 CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn -Ithird_party $(DEPINC)
 
-all: $(EXE) $(if $(GEN_SRC),$(GAMELIB))
+all: $(EXE) $(if $(strip $(GEN_SRC)),$(GAMELIB))  # (strip: an empty wildcard list is spaces, which $(if) took as true)
 
 $(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h runtime/simd.h runtime/simd_fp.h
 	@mkdir -p $(dir $@)
