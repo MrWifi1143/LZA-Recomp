@@ -827,6 +827,30 @@ void backend_present(NvnTexture *t) {
             if (*next == ',') next++;
         }
     }
+    {   // LARECOMP_LIVE=<dir> (testing, hle/input.c): <dir>/shot appears ("<n> <every>", default 1 1) -> the next n game
+        // images <every> presents apart as <dir>/live_<frame>.png; the request file is removed once taken
+        static const char *dir = (const char *)1;
+        static long left, every = 1, next_at;
+        if (dir == (const char *)1) dir = getenv("LARECOMP_LIVE");
+        if (dir) {
+            char path[1100];
+            snprintf(path, sizeof path, "%s/shot", dir);
+            if (!left && access(path, F_OK) == 0) {
+                FILE *f = fopen(path, "r");
+                left = 1, every = 1;
+                if (f) { if (fscanf(f, "%ld %ld", &left, &every) < 1) left = 1; fclose(f); }
+                if (left < 1) left = 1;
+                if (every < 1) every = 1;
+                next_at = (long)total_frames;
+                remove(path);
+            }
+            if (left && (long)total_frames >= next_at) {
+                snprintf(path, sizeof path, "%s/live_%06llu.png", dir, (unsigned long long)total_frames);
+                renderer_save_texture_tex(b, path);
+                left--, next_at = (long)total_frames + every;
+            }
+        }
+    }
     {   // LARECOMP_SHOT_REL=<n>,<n>,...: the game image n presents after a capture began (fps60.c marks it)
         extern long fps60_scene_start(void);
         static const char *rel = (const char *)1;

@@ -420,15 +420,38 @@ __attribute__((constructor)) static void probe_init(void) {
 // and presents paced at 60 (nvn/objects.c present_pace) the world runs at its own speed - a 10 s walk from the save
 // ends at the same spot at 30 and at 60 fps. The launcher's 60 fps option, or LARECOMP_PLA_60FPS=1 (0: off).
 #include "../platform.h"
-static const struct { uint8_t id[8]; uint64_t entry; const char *name; } k_legends60[] = {
-    {{0xae, 0xe8, 0xf1, 0x50, 0xdd, 0xa1, 0xb5, 0xa8}, 0x7000000000ull + 0x397E8D8, "Legends: Arceus 1.1.1"},
-    {{0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a}, 0x7000000000ull + 0x3393E28, "Legends Z-A"},
+// The menus, text boxes and loading screens are nn::ui2d layouts, whose animations advance a fixed step per update
+// (Animator::UpdateFrame(progress): frame += speed * progress) - 4.8 times too fast at 144 fps. Both UpdateFrame
+// implementations (Animator, shared by GroupAnimator / GroupArrayAnimator, and AnimatorEx: their vtable slot 3) get
+// progress scaled by frame time / 33.33 ms. LARECOMP_UI_SCALE=0: off.
+static const struct { uint8_t id[8]; uint64_t entry; const char *name; uint64_t ui2d[2]; } k_legends60[] = {
+    {{0xae, 0xe8, 0xf1, 0x50, 0xdd, 0xa1, 0xb5, 0xa8}, 0x7000000000ull + 0x397E8D8, "Legends: Arceus 1.1.1",
+     {0x70001395a4ull, 0x700013a7d4ull}},
+    {{0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a}, 0x7000000000ull + 0x3393E28, "Legends Z-A",
+     {0x7002638d2cull, 0x700263a0fcull}},
 };
 static uint64_t g_pla60_entry;  // the interval-2 frame time of the running build (0: off)
 static bool g_pla60_patched;
 static uint64_t g_pla60_ns = 16666667;  // the frame time: 60 fps, or LARECOMP_LEGENDS_FPS=<n> (experimental: 90, 120, 144...)
 bool pla60_enabled(void) { return g_pla60_entry != 0; }
 uint64_t pla60_period_ns(void) { return g_pla60_ns; }
+
+void rt_register_fnhook_at(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
+static float g_ui_scale = 1.0f;
+static int ui2d_update_frame(Cpu *c, uint64_t addr) {  // (s0 = progress; the original runs with it scaled)
+    (void)addr;
+    if (!g_pla60_entry) return 0;
+    float v;
+    uint32_t w = (uint32_t)c->v[0];
+    memcpy(&v, &w, 4);
+    static float seen[4];
+    static int nseen;
+    if (nseen < 4 && v != seen[0] && v != seen[1] && v != seen[2]) seen[nseen++] = v, LOG("[fps60] ui2d progress %g -> %g\n", v, v * g_ui_scale);
+    v *= g_ui_scale;
+    memcpy(&w, &v, 4);
+    c->v[0] = w;
+    return 0;
+}
 
 void pla60_configure(const char *exefs) {
     char p[1100];
@@ -450,6 +473,13 @@ void pla60_configure(const char *exefs) {
         if (!memcmp(id, k_legends60[i].id, 8)) {
             g_pla60_entry = k_legends60[i].entry;
             LOG("[fps60] %s at %.0f fps\n", k_legends60[i].name, 1e9 / (double)g_pla60_ns);
+            g_ui_scale = (float)((double)g_pla60_ns / 33333334.0);
+            static bool hooked;
+            const char *u = getenv("LARECOMP_UI_SCALE");
+            if (!hooked && !(u && atoi(u) == 0)) {
+                hooked = true;
+                for (int j = 0; j < 2; j++) rt_register_fnhook_at(k_legends60[i].ui2d[j], ui2d_update_frame);
+            }
         }
 }
 

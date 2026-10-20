@@ -73,7 +73,7 @@ static void recompute_pad(void) {
     static int user_off = -1;
     if (user_off < 0) {
         const char *v = getenv("LARECOMP_NO_USER_INPUT");
-        user_off = v ? atoi(v) != 0 : getenv("LARECOMP_INPUT") != NULL;
+        user_off = v ? atoi(v) != 0 : getenv("LARECOMP_INPUT") != NULL || getenv("LARECOMP_REPLAY") != NULL;
     }
     if (pad && !host_test && !user_off) {
         for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++)
@@ -170,7 +170,7 @@ bool input_user_blocked(const SDL_Event *e) {
     static int on = -1;
     if (on < 0) {
         const char *v = getenv("LARECOMP_NO_USER_INPUT");
-        on = v ? atoi(v) != 0 : (getenv("LARECOMP_INPUT") || getenv("LARECOMP_DOORJUMP_TEST") || getenv("LARECOMP_PLACE") ||
+        on = v ? atoi(v) != 0 : (getenv("LARECOMP_INPUT") || getenv("LARECOMP_REPLAY") || getenv("LARECOMP_DOORJUMP_TEST") || getenv("LARECOMP_PLACE") ||
                                  getenv("LARECOMP_HOST_INPUT") || getenv("LARECOMP_BIND_TEST"));
         if (on) LOG("[input] scripted run: keyboard, mouse and controllers ignored\n");
     }
@@ -281,6 +281,8 @@ void input_handle_event(const SDL_Event *e) {
 // Scripted input for testing: LARECOMP_INPUT="frame:BUTTON:frames,..." (BUTTON = A,B,X,Y,L,R,ZL,ZR,PLUS,
 // MINUS,LEFT,UP,RIGHT,DOWN, or STICK_UP/DOWN/LEFT/RIGHT, RSTICK_UP/DOWN/LEFT/RIGHT, STICK_<degrees>: full tilt at
 // that angle, 0 = right, 90 = up).
+static char g_replay_text[8][96];
+static int g_nreplay_text, g_replay_text_next;
 static _Atomic uint64_t script_buttons;
 static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
 
@@ -432,6 +434,113 @@ void input_frame(uint64_t frame) {
     extern void watch_arm(void);
     watch_arm();
     host_test_frame(frame);
+    {   // LARECOMP_LIVE=<dir> (testing): steered while it runs - lines appended to <dir>/cmd, "<frames> <keys>" with keys
+        // LARECOMP_INPUT's names joined by '+' (A, STICK_UP, STICK_45 = left stick at 45 degrees, RSTICK_LEFT...; "-": none),
+        // run one after another; <dir>/state says the frame and what's left (screenshots: <dir>/shot, nvn/vulkan/device.c)
+        static const char *dir = (const char *)1;
+        if (dir == (const char *)1) dir = getenv("LARECOMP_LIVE");
+        if (dir) {
+            static long off;
+            static struct { long len; char keys[120]; } q[256];
+            static int qh, qt;
+            static uint64_t until;
+            static bool active;
+            char path[1100], line[160];
+            snprintf(path, sizeof path, "%s/cmd", dir);
+            FILE *f = fopen(path, "r");
+            if (f) {
+                fseek(f, off, SEEK_SET);
+                while (fgets(line, sizeof line, f) && strchr(line, '\n')) {
+                    off = ftell(f);
+                    long len;
+                    char keys[120];
+                    if (sscanf(line, "%ld %119s", &len, keys) == 2 && (qt + 1) % 256 != qh) q[qt].len = len, snprintf(q[qt].keys, 120, "%s", keys), qt = (qt + 1) % 256;
+                }
+                fclose(f);
+            }
+            if (active && frame >= until) active = false, qh = (qh + 1) % 256;
+            if (!active && qh != qt) active = true, until = frame + (uint64_t)q[qh].len;
+            uint64_t b = 0;
+            int32_t lx = 0, ly = 0, rx = 0, ry = 0;
+            static const char *const nm[] = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS",
+                                             "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
+            if (active) {
+                char k[120];
+                snprintf(k, sizeof k, "%s", q[qh].keys);
+                for (char *t = strtok(k, "+"); t; t = strtok(NULL, "+")) {
+                    if (!strcmp(t, "STICK_UP")) ly = 32767;
+                    else if (!strcmp(t, "STICK_DOWN")) ly = -32767;
+                    else if (!strcmp(t, "STICK_LEFT")) lx = -32767;
+                    else if (!strcmp(t, "STICK_RIGHT")) lx = 32767;
+                    else if (!strcmp(t, "RSTICK_UP")) ry = 32767;
+                    else if (!strcmp(t, "RSTICK_DOWN")) ry = -32767;
+                    else if (!strcmp(t, "RSTICK_LEFT")) rx = -32767;
+                    else if (!strcmp(t, "RSTICK_RIGHT")) rx = 32767;
+                    else if (!strncmp(t, "STICK_", 6) && isdigit((unsigned char)t[6])) {
+                        double r = atoi(t + 6) * 3.14159265358979 / 180;
+                        lx = (int32_t)lround(cos(r) * 32767), ly = (int32_t)lround(sin(r) * 32767);
+                    } else if (!strncmp(t, "WALK_", 5) && isdigit((unsigned char)t[5])) {  // (half tilt: walk, not run)
+                        double r = atoi(t + 5) * 3.14159265358979 / 180;
+                        lx = (int32_t)lround(cos(r) * 14000), ly = (int32_t)lround(sin(r) * 14000);
+                    }
+                    for (int i = 0; i < 16; i++) if (!strcmp(t, nm[i])) b |= 1ull << i;
+                }
+            }
+            static uint64_t last_state;
+            if (frame - last_state >= 30) {
+                last_state = frame;
+                snprintf(path, sizeof path, "%s/state", dir);
+                FILE *o = fopen(path, "w");
+                if (o) { fprintf(o, "frame %llu queued %d%s%s\n", (unsigned long long)frame, (qt - qh + 256) % 256, active ? " now " : "", active ? q[qh].keys : ""); fclose(o); }
+            }
+            script_buttons = b, script_lx = lx, script_ly = ly, script_rx = rx, script_ry = ry;
+            return;
+        }
+    }
+    {   // LARECOMP_REPLAY=<file>: a LARECOMP_REC recording, by game frame
+        static struct RecLine { uint64_t f, b; int32_t a[4]; } *rl;
+        static size_t nrl, pos;
+        static int init;
+        if (!init) {
+            init = 1;
+            FILE *f = getenv("LARECOMP_REPLAY") ? fopen(getenv("LARECOMP_REPLAY"), "r") : NULL;
+            size_t cap = 0;
+            unsigned long long fr, bb;
+            int a0, a1, a2, a3;
+            char line[256];
+            while (f && fgets(line, sizeof line, f)) {
+                char text[96];
+                if (line[0] == 'K' && sscanf(line, "K %llu %95[^\n]", &fr, text) == 2) {
+                    if (g_nreplay_text < 8) snprintf(g_replay_text[g_nreplay_text++], sizeof g_replay_text[0], "%s", text);
+                    continue;
+                }
+                if (sscanf(line, "%llu %llx %d %d %d %d", &fr, &bb, &a0, &a1, &a2, &a3) != 6) continue;
+                if (nrl == cap) cap = cap ? cap * 2 : 4096, rl = realloc(rl, cap * sizeof *rl);
+                rl[nrl++] = (struct RecLine){fr, bb, {a0, a1, a2, a3}};
+            }
+            if (f) { fclose(f); LOG("[input] replaying %zu controller changes from %s\n", nrl, getenv("LARECOMP_REPLAY")); }
+        }
+        // LARECOMP_REPLAY_AT=<frame>:<recorded frame>: LARECOMP_INPUT drives the game until <frame>, the recording from
+        // <recorded frame> on after it (a scripted way into the game, then the player's session from where they could move)
+        static long at = -2, from;
+        if (at == -2) { at = -1; if (getenv("LARECOMP_REPLAY_AT")) sscanf(getenv("LARECOMP_REPLAY_AT"), "%ld:%ld", &at, &from); }
+        uint64_t rf = frame;
+        if (nrl && at >= 0) {
+            if ((long)frame < at) goto scripted;
+            rf = frame - (uint64_t)at + (uint64_t)from;
+            static bool said;
+            if (!said) { said = true; LOG("[input] replay takes over at frame %llu (recorded frame %ld)\n", (unsigned long long)frame, from); }
+        }
+        if (nrl) {
+            while (pos + 1 < nrl && rl[pos + 1].f <= rf) pos++;
+            bool on = rl[pos].f <= rf;
+            script_buttons = on ? rl[pos].b : 0;
+            script_lx = on ? rl[pos].a[0] : 0, script_ly = on ? rl[pos].a[1] : 0;
+            script_rx = on ? rl[pos].a[2] : 0, script_ry = on ? rl[pos].a[3] : 0;
+            return;
+        }
+    }
+scripted:;
     const char *spec = getenv("LARECOMP_INPUT");
     if (!spec) return;
     static const char *const names[] = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS",
@@ -499,6 +608,50 @@ uint64_t input_buttons_now(void) { return (menu_input_captured() ? 0 : key_butto
 
 static int32_t clamp_axis(int32_t v) { return v > 32767 ? 32767 : v < -32767 ? -32767 : v; }
 
+// LARECOMP_REC=<file>: what the game reads from the controller (buttons, both sticks), a line "<game frame> <buttons hex>
+// <lx> <ly> <rx> <ry>" each time it changes - a player's session, for LARECOMP_REPLAY=<file> to drive the game the same
+// way from the same save (copied to <file>.save/ when the recording starts).
+static FILE *g_rec;
+static void input_rec_sample(uint64_t b, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
+    static int init;
+    if (!init) {
+        init = 1;
+        const char *path = getenv("LARECOMP_REC");
+        if (path && *path) {
+            g_rec = fopen(path, "w");
+            if (g_rec) {
+                char cmd[2200];
+                snprintf(cmd, sizeof cmd, "rm -rf '%s.save' && cp -a save '%s.save'", path, path);
+                if (system(cmd)) {}
+                LOG("[input] recording the controller to %s (save copied to %s.save)\n", path, path);
+            }
+        }
+    }
+    if (!g_rec) return;
+    static uint64_t lb = ~0ull;
+    static int32_t l[4];
+    b &= ~0xFF0000ull;  // (the stick directions as buttons: derived from the sticks again on replay)
+    if (b == lb && lx == l[0] && ly == l[1] && rx == l[2] && ry == l[3]) return;
+    lb = b, l[0] = lx, l[1] = ly, l[2] = rx, l[3] = ry;
+    extern uint64_t renderer_game_frame(void);
+    fprintf(g_rec, "%llu %llx %d %d %d %d\n", (unsigned long long)renderer_game_frame(), (unsigned long long)b, lx, ly, rx, ry);
+    fflush(g_rec);
+}
+
+// The name typed into the game's keyboard dialog (runtime/ui/menu.mm): a line "K <game frame> <text>" in the recording,
+// and the next one of the replay's answers the dialog at once (no game frames pass while it is open: the game waits)
+void input_rec_text(const char *text) {
+    if (!g_rec) return;
+    extern uint64_t renderer_game_frame(void);
+    fprintf(g_rec, "K %llu %s\n", (unsigned long long)renderer_game_frame(), text);
+    fflush(g_rec);
+}
+bool input_replay_text(char *out, int cap) {
+    if (g_replay_text_next >= g_nreplay_text) return false;
+    snprintf(out, (size_t)cap, "%s", g_replay_text[g_replay_text_next++]);
+    return true;
+}
+
 // NpadFullKeyState / NpadHandheldState / NpadJoy*State share this layout (0x28 bytes):
 // {int64 sampling, u64 buttons, AnalogStick L {x,y}, AnalogStick R {x,y}, u32 attributes}
 static uint32_t npad_id_used(uint32_t *style);  // (below: which controller the player has)
@@ -551,6 +704,7 @@ static void fill_state(Cpu *c) {
     if (rx > 16000) b |= 1ull << 22;
     if (ry < -16000) b |= 1ull << 23;
     *(uint64_t *)(s + 8) = b;
+    input_rec_sample(b, lx, ly, rx, ry);
     static uint64_t last_b;
     if (b != last_b && getenv("LARECOMP_INPUT")) LOG("[input] id %#x buttons %#llx (sampling %lld, lr %llx)\n", id, (unsigned long long)b, (long long)sampling, c->x[30]);
     last_b = b;
