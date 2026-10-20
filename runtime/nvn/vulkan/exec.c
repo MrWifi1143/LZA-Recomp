@@ -16,6 +16,7 @@
 #include "shaders.h"
 #include "../../plugin.h"
 #include "vk.h"
+#include "../../platform.h"
 #include "../renderer.h"
 #include "../../settings.h"
 
@@ -2405,19 +2406,25 @@ static VkDeviceMemory gmem_mem;
 static uint64_t gmem_size;
 
 static bool gmem_import(uint64_t size) {
+#ifdef _WIN32
+    plat_commit(HEAP_BASE, size);  // (Windows commits guest memory on first touch: the driver can only pin committed pages)
+#endif
     PFN_vkGetMemoryHostPointerPropertiesEXT props =
         (PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(g_vk.dev, "vkGetMemoryHostPointerPropertiesEXT");
     VkMemoryHostPointerPropertiesEXT mp = {.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
-    if (!props || props(g_vk.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, (void *)(uintptr_t)HEAP_BASE, &mp) != VK_SUCCESS ||
-        !mp.memoryTypeBits)
+    VkResult pr = props ? props(g_vk.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, (void *)(uintptr_t)HEAP_BASE, &mp) : VK_ERROR_EXTENSION_NOT_PRESENT;
+    if (pr != VK_SUCCESS || !mp.memoryTypeBits) {
+        LOG("[vk] guest heap import: host pointer properties %d, memory types %#x\n", (int)pr, mp.memoryTypeBits);
         return false;
+    }
     VkImportMemoryHostPointerInfoEXT imp = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
                                             .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
                                             .pHostPointer = (void *)(uintptr_t)HEAP_BASE};
     VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &imp, .allocationSize = size,
                                .memoryTypeIndex = (uint32_t)__builtin_ctz(mp.memoryTypeBits)};
     VkDeviceMemory mem;
-    if (vkAllocateMemory(g_vk.dev, &ai, NULL, &mem) != VK_SUCCESS) return false;
+    VkResult ar = vkAllocateMemory(g_vk.dev, &ai, NULL, &mem);
+    if (ar != VK_SUCCESS) { LOG("[vk] guest heap import: vkAllocateMemory %d (%llu MB)\n", (int)ar, (unsigned long long)(size >> 20)); return false; }
     VkExternalMemoryBufferCreateInfo eb = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
                                            .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = size,

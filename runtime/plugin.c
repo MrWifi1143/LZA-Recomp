@@ -21,7 +21,7 @@ static const char *dl_error(void) { static char b[32]; snprintf(b, sizeof b, "er
 #define PLUGIN_EXT ".so"
 static void *dl_open(const char *p) { return dlopen(p, RTLD_NOW | RTLD_LOCAL); }
 static void *dl_sym(void *h, const char *n) { return dlsym(h, n); }
-static void dl_close(void *h) { dl_close(h); }
+static void dl_close(void *h) { dlclose(h); }
 static const char *dl_error(void) { return dlerror(); }
 #endif
 
