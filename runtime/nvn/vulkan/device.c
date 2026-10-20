@@ -979,8 +979,8 @@ void backend_present(NvnTexture *t) {
                 int v = 1;
                 if (f) { if (fscanf(f, "%d", &v) != 1) v = 1; fclose(f); }
                 remove(path);
-                extern volatile int g_za_npc_full;
-                g_za_npc_full = v;
+                extern volatile int g_za_gate_on;
+                g_za_gate_on = v;
                 LOG("[za] NPC animation fix %s\n", v ? "on" : "off");
             }
             { extern void pscan_present(uint64_t frame); pscan_present(total_frames); }

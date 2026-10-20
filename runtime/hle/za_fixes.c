@@ -49,7 +49,15 @@ static int param_lookup(Cpu *c, uint64_t addr) {
 // whether to evaluate this frame, kept at component + 0x1f4, and 0x7001dcdf40 (animation item -> [+0x48] component)
 // applies the pose only then. NPCs standing or walking around get it once every 60 frames - 2 s at 30 fps, 0.4 s at 144 -
 // while a conversation puts everyone nearby on every frame. Here it is always set: every NPC's pose follows its animation
-// each frame (about 2% of the frame rate in Lumiose). LARECOMP_ZA_NPC_LOD=1 keeps the game's choice.
+// each frame. (2026-10-20: forcing that flag only re-applied the same pose - the gate below is the real fix.)
+// LARECOMP_ZA_NPC_LOD=1 keeps the game's choice.
+// Choppy NPCs: an NPC's animation advances every frame, but its pose is only applied to the skeleton when a per-frame LOD
+// decision allows it: a callback each animation component holds (component + 0x180, called from 0x7001e73abc) answers
+// whether to evaluate this frame, kept at component + 0x1f4, and 0x7001dcdf40 (animation item -> [+0x48] component)
+// applies the pose only then. NPCs standing or walking around get it once every 60 frames - 2 s at 30 fps, 0.4 s at 144 -
+// while a conversation puts everyone nearby on every frame. Here it is always set: every NPC's pose follows its animation
+// each frame. (2026-10-20: forcing that flag only re-applied the same pose - the gate below is the real fix.)
+// LARECOMP_ZA_NPC_LOD=1 keeps the game's choice.
 // Missing station wall (Lumiose Station platform: posters float in front of the hall): the wall's mesh faces the hall
 // - its winding agrees with its own normals, like every other mesh - and its command list (recorded once, at load) binds
 // back-face culling, so seen from the platform it is culled; nothing else in the frame draws that side. Every shader of
@@ -58,14 +66,58 @@ static int param_lookup(Cpu *c, uint64_t addr) {
 // (Why the console shows the wall is still open: the polygon state, matrices, viewport and vertex data are all ordinary.)
 
 #define ZA_POSE_APPLY 0x7001dcdf40ull  // (x0 = animation item; [x0 + 0x48] -> its component, + 0x1f4: evaluate this frame)
-volatile int g_za_npc_full = 1;  // (research: LARECOMP_LIVE <dir>/npcfull "0" / "1" switches it while the game runs)
+volatile int g_za_npc_full = 0;  // (research: LARECOMP_LIVE <dir>/npcfull "0" / "1" switches it while the game runs)
 static int pose_apply(Cpu *c, uint64_t addr) {
-    if (!g_za_npc_full) return 0;
     uint64_t item = c->x[0];
     uint64_t comp = item ? *(uint64_t *)(uintptr_t)(item + 0x48) : 0;
+    if (getenv("LARECOMP_ZA_NPC_STATS") && comp >= 0x7000000000ull && comp < 0x8000000000ull) {  // (research: the LOD callback)
+        static uint64_t seen[24];
+        static int n;
+        uint64_t fn = *(uint64_t *)(uintptr_t)(comp + 0x180);
+        int i = 0;
+        while (i < n && seen[i] != fn) i++;
+        if (i == n && n < 24) {
+            seen[n++] = fn;
+            const uint64_t *q = (const uint64_t *)(uintptr_t)(comp + 0x160);
+            LOG("[za] anim component %llx: +0x160.. %llx %llx %llx %llx %llx %llx %llx %llx flag %d\n", (unsigned long long)comp,
+                (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2], (unsigned long long)q[3], (unsigned long long)q[4],
+                (unsigned long long)q[5], (unsigned long long)q[6], (unsigned long long)q[7], *(uint8_t *)(uintptr_t)(comp + 0x1f4));
+        }
+    }
+    if (!g_za_npc_full) return 0;
     if (comp >= 0x7000000000ull && comp < 0x8000000000ull) *(uint8_t *)(uintptr_t)(comp + 0x1f4) = 1;
     (void)addr;
     return 0;
+}
+
+// The real gate (2026-10-20): the component's callback (component + 0x180, called from 0x7001e73abc with x0 = state,
+// x1 = &dt, x2 = &skip, x3 = &threshold, x4 = &accumulated time, x5 = &&counter) adds dt to the accumulated time and
+// evaluates only once the counter has reached the threshold - then with all the time since the last evaluation.
+// Forcing the "apply" flag alone (pose_apply) re-applied the old pose. These hooks make the threshold always met:
+// 0x7001e75b20 / 0x7001e75b78 (w1 skip, w2 threshold, x3 accumulated, x4 counter) and 0x70029019f8 (handled here:
+// the accumulated time + dt, as the other two compute it).
+#define ZA_ANIM_GATE_A 0x7001e75b20ull
+#define ZA_ANIM_GATE_A2 0x7001e75b78ull
+#define ZA_ANIM_GATE_B 0x70029019f8ull
+volatile int g_za_gate_on = 1;  // (research: LARECOMP_LIVE <dir>/npcfull "0" / "1")
+static int anim_gate_a(Cpu *c, uint64_t addr) {
+    if (!g_za_gate_on) return 0;
+    if (!(c->x[1] & 1)) c->x[2] = 0x80000000u;  // (w2: INT32_MIN, the counter is always >= it)
+    (void)addr;
+    return 0;
+}
+static int anim_gate_b(Cpu *c, uint64_t addr) {
+    if (!g_za_gate_on) return 0;
+    float *acc = *(float **)(uintptr_t)c->x[4];
+    float dt = *(const float *)(uintptr_t)c->x[1];
+    float t = *acc + dt;
+    *acc = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    uint32_t bits;
+    memcpy(&bits, &t, 4);
+    c->x[0] = (uint64_t)bits | 0x100000000ull;
+    (void)addr;
+    return 1;
 }
 
 void za_fixes_configure(const char *exefs) {
@@ -82,16 +134,13 @@ void za_fixes_configure(const char *exefs) {
     }
     if (done || memcmp(id, ZA_MAIN, 8)) return;
     done = true;
-    const char *cull = getenv("LARECOMP_ZA_CULL");
-    if (!(cull && atoi(cull))) {
-        extern volatile int g_live_nocull;  // (nvn/vulkan/exec.c)
-        g_live_nocull = 1;
-        LOG("[za] face culling off (missing station wall; LARECOMP_ZA_CULL=1 keeps it)\n");
-    }
     const char *lod = getenv("LARECOMP_ZA_NPC_LOD");
     if (!(lod && atoi(lod))) {
-        rt_register_fnhook_at(ZA_POSE_APPLY, pose_apply);
-        LOG("[za] NPC animation at the full frame rate (LARECOMP_ZA_NPC_LOD=1 keeps the game's animation LOD)\n");
+        rt_register_fnhook_at(ZA_ANIM_GATE_A, anim_gate_a);
+        rt_register_fnhook_at(ZA_ANIM_GATE_A2, anim_gate_a);
+        rt_register_fnhook_at(ZA_ANIM_GATE_B, anim_gate_b);
+        if (getenv("LARECOMP_ZA_NPC_STATS")) rt_register_fnhook_at(ZA_POSE_APPLY, pose_apply);  // (research)
+        LOG("[za] NPC animation evaluated every frame (LARECOMP_ZA_NPC_LOD=1 keeps the game's animation LOD)\n");
     }
     const char *e = getenv("LARECOMP_ZA_FOOT_IK");
     if (e && atoi(e)) return;
