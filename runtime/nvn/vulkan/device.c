@@ -897,6 +897,53 @@ void backend_present(NvnTexture *t) {
                 }
                 if (o) fclose(o);
             }
+            snprintf(path, sizeof path, "%s/debugframe", dir);  // (research: the next frame's draws logged, LARECOMP_DEBUG_FRAME)
+            if (access(path, F_OK) == 0) {
+                remove(path);
+                extern volatile int g_debug_frame_request;
+                g_debug_frame_request = 1;
+            }
+            snprintf(path, sizeof path, "%s/nocullbits", dir);  // (research: exec.c LARECOMP_EXP_NOCULL_BITS from the frame after next)
+            if (access(path, F_OK) == 0) {
+                remove(path);
+                extern volatile uint64_t g_exp_nocull_start;
+                extern uint64_t vk_frame_counter(void);
+                g_exp_nocull_start = vk_frame_counter() + 2;
+                LOG("[exp] nocull bits from frame %llu (vk frame)\n", (unsigned long long)g_exp_nocull_start);
+            }
+            snprintf(path, sizeof path, "%s/nocull", dir);  // (research: exec.c, no culling at all on / off)
+            if (access(path, F_OK) == 0) {
+                FILE *f = fopen(path, "r");
+                int v = 1;
+                if (f) { if (fscanf(f, "%d", &v) != 1) v = 1; fclose(f); }
+                remove(path);
+                extern volatile int g_live_nocull;
+                g_live_nocull = v;
+                LOG("[exp] culling %s\n", v ? "off" : "on");
+            }
+            snprintf(path, sizeof path, "%s/nocullone", dir);  // (research: exec.c; "0 0" ends it)
+            if (access(path, F_OK) == 0) {
+                FILE *f = fopen(path, "r");
+                long lo = 0, hi = 0;
+                if (f) { if (fscanf(f, "%ld %ld", &lo, &hi) < 1) lo = 0; fclose(f); }
+                remove(path);
+                if (hi < lo) hi = lo;
+                extern volatile long g_nocull_lo, g_nocull_hi;
+                g_nocull_lo = lo, g_nocull_hi = hi;
+                LOG("[exp] no culling for draws %ld-%ld\n", lo, hi);
+            }
+            snprintf(path, sizeof path, "%s/drawprobe", dir);  // (research: exec.c [probe])
+            if (access(path, F_OK) == 0) {
+                FILE *f = fopen(path, "r");
+                long lo = 0, hi = 0;
+                if (f) { if (fscanf(f, "%ld %ld", &lo, &hi) < 1) lo = 0; fclose(f); }
+                remove(path);
+                if (hi < lo) hi = lo;
+                extern volatile long g_probe_lo, g_probe_hi;
+                extern volatile uint64_t g_probe_frame;
+                extern uint64_t vk_frame_counter(void);
+                g_probe_lo = lo, g_probe_hi = hi, g_probe_frame = vk_frame_counter() + 2;
+            }
             snprintf(path, sizeof path, "%s/npcfull", dir);  // (research: hle/za_fixes.c, the NPC animation fix on / off)
             if (access(path, F_OK) == 0) {
                 FILE *f = fopen(path, "r");

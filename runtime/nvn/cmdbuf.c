@@ -247,7 +247,14 @@ NVN(nvnCommandBufferBindChannelMaskState) { record_copy(c, CMD_BIND_CHANNEL_MASK
 NVN(nvnCommandBufferBindColorState) { record_copy(c, CMD_BIND_COLOR, 1, 4); }
 NVN(nvnCommandBufferBindDepthStencilState) { record_copy(c, CMD_BIND_DEPTH_STENCIL, 1, 8); }
 NVN(nvnCommandBufferBindMultisampleState) { record_copy(c, CMD_BIND_MULTISAMPLE, 1, 0x18); }
-NVN(nvnCommandBufferBindPolygonState) { record_copy(c, CMD_BIND_POLYGON, 1, 4); }
+static bool chains_on(void);
+NVN(nvnCommandBufferBindPolygonState) {
+    if (chains_on()) {  // (LARECOMP_DRAW_CHAINS: the polygon states between the draws)
+        const uint8_t *p = (const uint8_t *)(uintptr_t)c->x[1];
+        LOG("[chain] polygon state %llx = %02x %02x %02x %02x (lr %llx)\n", (unsigned long long)c->x[1], p[0], p[1], p[2], p[3], (unsigned long long)c->x[30]);
+    }
+    record_copy(c, CMD_BIND_POLYGON, 1, 4);
+}
 NVN(nvnCommandBufferBindVertexAttribState) { record_copy(c, CMD_BIND_VERTEX_ATTRIB, 2, (uint32_t)A(1) * 4); }
 NVN(nvnCommandBufferBindVertexStreamState) { record_copy(c, CMD_BIND_VERTEX_STREAM, 2, (uint32_t)A(1) * 8); }
 

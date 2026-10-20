@@ -48,6 +48,14 @@ static _Atomic int new_pipes;  // pipelines created since the pipeline cache was
 static uint64_t op_counts[CMD_COUNT];
 static uint64_t stat_vtx_copied, stat_vtx_direct;  // vertex / index ranges of the draws: copied to VRAM / read in place
 bool g_debug_frame;
+volatile uint64_t g_exp_nocull_start;
+volatile long g_probe_lo, g_probe_hi;
+volatile long g_nocull_lo, g_nocull_hi;
+volatile int g_live_nocull;
+bool vk_gpu_may_write(uint64_t a);
+static uint64_t g_poly_src_list, g_poly_src_rec, g_cur_list[9];
+static int g_poly_src_depth, g_cur_depth;
+volatile uint64_t g_probe_frame;
 uint32_t g_dyn_epoch = 1;  // (draw_'s dynamic state cache, dc: bumped by whatever else sets graphics state)
 static char stats_text[1024];
 void vk_collect_dead(void);
@@ -2487,6 +2495,7 @@ static void gpuw_note(uint64_t a, uint64_t n) {
     if (ENV("LARECOMP_LOG_GPUWRITES")) LOG("[gpuw] the GPU may write %llx-%llx (%d ranges)\n", (unsigned long long)a, (unsigned long long)e, ngpuw);
     vcache_invalidate(a, e - a);  // (a copy made before this dispatch was seen would stay stale: the CPU never writes there)
 }
+bool vk_gpu_may_write(uint64_t a);
 bool vk_gpu_may_write(uint64_t a) {  // (research, hle/pscan.c; render thread)
     for (int i = 0; i < ngpuw; i++) if (a >= gpuw[i].a && a < gpuw[i].e) return true;
     return false;
@@ -3253,15 +3262,27 @@ static void draw_(CmdRec *r, bool indexed) {
     // ---- rasterizer
     uint8_t cull = st.poly[0];
     VkCullModeFlags cm = cull == 1 ? VK_CULL_MODE_FRONT_BIT : cull == 2 ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
-    if (ENV("LARECOMP_VK_NO_CULL")) cm = VK_CULL_MODE_NONE;  // (research: geometry missing from one side - culled?)
-    if (ENV("LARECOMP_EXP_NOCULL_BITS")) {  // (research: frame start + k culls nothing for the draws whose index in the frame has bit k)
+    extern volatile int g_live_nocull;  // (research: LARECOMP_LIVE <dir>/nocull "1" / "0"; hle/za_fixes.c sets it for Legends Z-A)
+    if (ENV("LARECOMP_VK_NO_CULL") || g_live_nocull) cm = VK_CULL_MODE_NONE;  // (geometry missing from one side - culled?)
+    extern volatile uint64_t g_exp_nocull_start;  // (LARECOMP_LIVE <dir>/nocullbits starts it on the next frame)
+    if (ENV("LARECOMP_EXP_NOCULL_BITS") || g_exp_nocull_start) {  // (research: frame start + k culls nothing for the draws whose index in the frame has bit k)
         static uint64_t fr = ~0ull, base;
         extern uint64_t renderer_game_frame(void);
-        uint64_t f = vk_frame_counter(), start = strtoull(ENV("LARECOMP_EXP_NOCULL_BITS"), NULL, 10);
+        uint64_t f = vk_frame_counter(), start = g_exp_nocull_start ? g_exp_nocull_start : strtoull(ENV("LARECOMP_EXP_NOCULL_BITS"), NULL, 10);
         if (f != fr) fr = f, base = g_draws_total;
         uint64_t idx = g_draws_total - base;
+        if (f >= start && f < start + 12 && idx == 0) LOG("[exp] nocull bit %llu: vk frame %llu, present %llu\n", (unsigned long long)(f - start),
+                                                       (unsigned long long)f, (unsigned long long)renderer_present_count());
         if (f >= start && f < start + 12 && ((idx >> (f - start)) & 1)) cm = VK_CULL_MODE_NONE;
         if (f == start + 12 && idx == 0) LOG("[exp] nocull bits done\n");
+    }
+    {   // (research: LARECOMP_LIVE <dir>/nocullone "<first> <last>": those draw indices never culled, until removed again)
+        extern volatile long g_nocull_lo, g_nocull_hi;
+        static uint64_t nfr = ~0ull, nbase;
+        uint64_t f = vk_frame_counter();
+        if (f != nfr) nfr = f, nbase = g_draws_total;
+        long idx = (long)(g_draws_total - nbase);
+        if (g_nocull_hi > 0 && idx >= g_nocull_lo && idx <= g_nocull_hi) cm = VK_CULL_MODE_NONE;
     }
     DC_SET(cull, cm, vkCmdSetCullMode(cb, cm));
     bool ccw = st.poly[1] == 1;
@@ -3269,6 +3290,69 @@ static void draw_(CmdRec *r, bool indexed) {
     if (flipw < 0) flipw = getenv("LARECOMP_VK_FLIP_WINDING") != NULL;
     bool front_ccw = (ccw != vkey.flip_y) != (flipw != 0);
     DC_SET(front, front_ccw, vkCmdSetFrontFace(cb, front_ccw ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE));
+    {   // (research: LARECOMP_LIVE <dir>/drawprobe "<first> <last>": the draws with those indices in the next frame, in detail)
+        extern volatile long g_probe_lo, g_probe_hi;
+        extern volatile uint64_t g_probe_frame;
+        static uint64_t pfr = ~0ull, pbase;
+        uint64_t f = vk_frame_counter();
+        if (f != pfr) pfr = f, pbase = g_draws_total;
+        long idx = (long)(g_draws_total - pbase);
+        if (g_probe_frame == f && idx >= g_probe_lo && idx <= g_probe_hi) {
+            const float *m10 = st.ubuf[0][7].addr ? (const float *)(uintptr_t)st.ubuf[0][7].addr : NULL;
+            const float *m5 = st.ubuf[0][2].addr ? (const float *)(uintptr_t)st.ubuf[0][2].addr : NULL;
+            LOG("[probe] #%ld vs %llx fs %llx poly %02x%02x cull %d front_ccw %d flip_y %d vp %.0f %.0f %.0f %.0f inst %u\n", idx,
+                (unsigned long long)st.program->stages[0].code_addr, (unsigned long long)st.program->stages[1].code_addr, st.poly[0], st.poly[1],
+                (int)cm, front_ccw, (int)vkey.flip_y, st.viewport[0][0], st.viewport[0][1], st.viewport[0][2], st.viewport[0][3], (unsigned)st.ubuf[0][7].size);
+            if (indexed && (st.attrib[0] & 0xFF) == 0x22 && (st.attrib[1] & 0xFF) == 0x29) {  // winding vs the stored normals
+                int sidx = (st.attrib[0] >> 8) & 0x1F, agree = 0, tot = 0;
+                uint32_t stride = st.stream[sidx][0], o0 = st.attrib[0] >> 13, o1 = st.attrib[1] >> 13;
+                const uint8_t *vb = (const uint8_t *)(uintptr_t)st.vbuf[sidx].addr;
+                const void *ib = (const void *)(uintptr_t)r->x[3];
+                uint32_t isz = (uint32_t)r->x[1] == 1 ? 2 : 4;
+                for (uint32_t t = 0; vb && ib && t + 2 < r->x[2] && tot < 4096; t += 3, tot++) {
+                    float P[3][3], Nn[3] = {0, 0, 0};
+                    for (int q = 0; q < 3; q++) {
+                        uint32_t id = (isz == 2 ? ((const uint16_t *)ib)[t + q] : ((const uint32_t *)ib)[t + q]) + (int32_t)r->x[4];
+                        memcpy(P[q], vb + (uint64_t)id * stride + o0, 12);
+                        const uint16_t *n = (const uint16_t *)(vb + (uint64_t)id * stride + o1);  // (RGBA16F)
+                        for (int j = 0; j < 3; j++) {
+                            uint32_t h = n[j], e = (h >> 10) & 0x1F, m = h & 0x3FF;
+                            float v = e ? ldexpf((float)(m | 0x400), (int)e - 25) : ldexpf((float)m, -24);
+                            Nn[j] += (h & 0x8000) ? -v : v;
+                        }
+                    }
+                    float e1[3], e2[3], g[3];
+                    for (int j = 0; j < 3; j++) e1[j] = P[1][j] - P[0][j], e2[j] = P[2][j] - P[0][j];
+                    g[0] = e1[1] * e2[2] - e1[2] * e2[1], g[1] = e1[2] * e2[0] - e1[0] * e2[2], g[2] = e1[0] * e2[1] - e1[1] * e2[0];
+                    agree += g[0] * Nn[0] + g[1] * Nn[1] + g[2] * Nn[2] > 0;
+                }
+                const float *p0 = vb ? (const float *)(vb + o0) : NULL;
+                LOG("[probe]   winding agrees with normals %d/%d; vbuf %llx (gpu writes %d) ibuf %llx (gpu writes %d) v0 (%g %g %g)\n", agree, tot,
+                    (unsigned long long)st.vbuf[sidx].addr, (int)vk_gpu_may_write(st.vbuf[sidx].addr), (unsigned long long)r->x[3],
+                    (int)vk_gpu_may_write(r->x[3]), p0 ? p0[0] : 0, p0 ? p0[1] : 0, p0 ? p0[2] : 0);
+            }
+            LOG("[probe]   in list %llx (depth %d, top %llx); polygon state from list %llx rec %llx depth %d\n", (unsigned long long)g_cur_list[g_cur_depth < 9 ? g_cur_depth : 8],
+                g_cur_depth, (unsigned long long)g_cur_list[0], (unsigned long long)g_poly_src_list, (unsigned long long)g_poly_src_rec, g_poly_src_depth);
+            LOG("[probe]   mode %llu args %llx %llx %llx %llx %llx %llx native %d\n", (unsigned long long)r->x[0], (unsigned long long)r->x[1],
+                (unsigned long long)r->x[2], (unsigned long long)r->x[3], (unsigned long long)r->x[4], (unsigned long long)r->x[5],
+                (unsigned long long)r->x[6], (int)native);
+            {
+                char line[512];
+                int len = snprintf(line, sizeof line, "[probe]   attribs:");
+                for (int i = 0; i < st.nattrib && len < 440; i++)
+                    if ((pr->vi->attr_mask >> i) & 1)
+                        len += snprintf(line + len, sizeof line - (size_t)len, " a%d=f%#x/s%u/+%u", i, st.attrib[i] & 0xFF, (st.attrib[i] >> 8) & 0x1F, st.attrib[i] >> 13);
+                for (int k = 0; k < st.nstream && k < 6 && len < 480; k++)
+                    len += snprintf(line + len, sizeof line - (size_t)len, " | s%d stride %u div %u", k, st.stream[k][0], st.stream[k][1]);
+                LOG("%s\n", line);
+            }
+            if (m10) LOG("[probe]   cb10 %llx: %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g || %g %g %g %g | %g %g %g %g\n", (unsigned long long)st.ubuf[0][7].addr,
+                         m10[0], m10[1], m10[2], m10[3], m10[4], m10[5], m10[6], m10[7], m10[8], m10[9], m10[10], m10[11], m10[12], m10[13], m10[14], m10[15],
+                         m10[16], m10[17], m10[18], m10[19], m10[20], m10[21], m10[22], m10[23]);
+            if (m5) LOG("[probe]   cb5 %llx: %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g\n", (unsigned long long)st.ubuf[0][2].addr, m5[0], m5[1], m5[2], m5[3],
+                        m5[4], m5[5], m5[6], m5[7], m5[8], m5[9], m5[10], m5[11], m5[12], m5[13], m5[14], m5[15]);
+        }
+    }
     VkPrimitiveTopology vtopo = native ? topo : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     DC_SET(topo, vtopo, vkCmdSetPrimitiveTopology(cb, vtopo));
     bool restart = st.prim_restart && native && (mode == 3 || mode == 5);
@@ -4219,6 +4303,8 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
 
 // ================================================================== executor (renderer.m exec_list)
 static void exec_list(uint64_t handle, int depth) {
+    if (depth < 9) g_cur_list[depth] = handle;
+    g_cur_depth = depth;
     uint64_t p = handle;
     if (depth == 0) st.obj = 0, st.obj_draw = 0;  // (a submitted list starts with no object; its called lists inherit)
     for (int guard = 0; guard < 10000000; guard++) {
@@ -4247,6 +4333,7 @@ static void exec_list(uint64_t handle, int depth) {
                 st.obj = obj, st.obj_draw = obj_draw;
                 exec_list(h[i], depth + 1);
             }
+            g_cur_depth = depth;
             st.obj = obj, st.obj_draw = obj_draw;
             break;
         }
@@ -4256,7 +4343,7 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_BIND_COLOR: memcpy(st.color_state, x, 4); break;
         case CMD_BIND_DEPTH_STENCIL: memcpy(st.ds, x, 8); break;
         case CMD_BIND_MULTISAMPLE: memcpy(st.ms, x, 0x18); break;
-        case CMD_BIND_POLYGON: memcpy(st.poly, x, 4); break;
+        case CMD_BIND_POLYGON: memcpy(st.poly, x, 4); g_poly_src_list = handle, g_poly_src_rec = p, g_poly_src_depth = depth; break;
         case CMD_BIND_VERTEX_ATTRIB:
             st.nattrib = (int)r->x[0] > 16 ? 16 : (int)r->x[0];
             memcpy(st.attrib, x, st.nattrib * 4);

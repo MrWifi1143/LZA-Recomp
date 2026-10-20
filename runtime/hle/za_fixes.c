@@ -50,6 +50,13 @@ static int param_lookup(Cpu *c, uint64_t addr) {
 // applies the pose only then. NPCs standing or walking around get it once every 60 frames - 2 s at 30 fps, 0.4 s at 144 -
 // while a conversation puts everyone nearby on every frame. Here it is always set: every NPC's pose follows its animation
 // each frame (about 2% of the frame rate in Lumiose). LARECOMP_ZA_NPC_LOD=1 keeps the game's choice.
+// Missing station wall (Lumiose Station platform: posters float in front of the hall): the wall's mesh faces the hall
+// - its winding agrees with its own normals, like every other mesh - and its command list (recorded once, at load) binds
+// back-face culling, so seen from the platform it is culled; nothing else in the frame draws that side. Every shader of
+// the game's static meshes reads gl_FrontFacing (back faces are shaded right), and with culling off nothing else in the
+// station or in Lumiose changes, at the same frame rate. Culling stays off for this game; LARECOMP_ZA_CULL=1 keeps it.
+// (Why the console shows the wall is still open: the polygon state, matrices, viewport and vertex data are all ordinary.)
+
 #define ZA_POSE_APPLY 0x7001dcdf40ull  // (x0 = animation item; [x0 + 0x48] -> its component, + 0x1f4: evaluate this frame)
 volatile int g_za_npc_full = 1;  // (research: LARECOMP_LIVE <dir>/npcfull "0" / "1" switches it while the game runs)
 static int pose_apply(Cpu *c, uint64_t addr) {
@@ -75,6 +82,12 @@ void za_fixes_configure(const char *exefs) {
     }
     if (done || memcmp(id, ZA_MAIN, 8)) return;
     done = true;
+    const char *cull = getenv("LARECOMP_ZA_CULL");
+    if (!(cull && atoi(cull))) {
+        extern volatile int g_live_nocull;  // (nvn/vulkan/exec.c)
+        g_live_nocull = 1;
+        LOG("[za] face culling off (missing station wall; LARECOMP_ZA_CULL=1 keeps it)\n");
+    }
     const char *lod = getenv("LARECOMP_ZA_NPC_LOD");
     if (!(lod && atoi(lod))) {
         rt_register_fnhook_at(ZA_POSE_APPLY, pose_apply);
