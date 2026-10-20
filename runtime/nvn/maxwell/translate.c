@@ -691,19 +691,92 @@ static bool glsl_texs(Ctx *c, uint64_t w, bool fetch, int *slot_out, char *call,
 
 // TLD4S: a 2D gather of one component (bits 52-53) at (a, b), results to d0, d0 + 1 and d1, d1 + 1 (only d0's pair
 // when d1 is RZ). The depth-compare and offset forms take other operands: not translated.
+// .DC / .AOFFI (Ryujinx / yuzu TLD4S): the coordinates move to Ra, Ra + 1 and Rb holds the packed offset (6-bit x, y),
+// then the depth reference (.DC without .AOFFI: Rb is the reference).
 static void emit_tld4s(Ctx *c, uint64_t w) {
     if (!c->glsl) { fail(c, "tld4s (MSL)"); return; }
-    if (bits(w, 50, 1) || bits(w, 51, 1)) { fail(c, "tld4s dc/aoffi"); return; }
+    bool dc = bits(w, 50, 1), aoffi = bits(w, 51, 1);
     int d0 = (int)bits(w, 0, 8), d1 = (int)bits(w, 28, 8), a = (int)bits(w, 8, 8), b = (int)bits(w, 20, 8);
-    int slot = tex_slot(c, (uint32_t)bits(w, 36, 13), TEXTYPE_2D, false, false);
-    sp(&c->body, "    { vec4 g = textureGather(t%d, vec2(uintBitsToFloat(%s), uintBitsToFloat(%s)), %d);\n", slot, R(a), R(b),
-       (int)bits(w, 52, 2));
+    int slot = tex_slot(c, (uint32_t)bits(w, 36, 13), TEXTYPE_2D, dc, false);
+    char x[16], y[16], off[16] = "", ref[16] = "";
+    snprintf(x, sizeof x, "%s", R(a));
+    if (dc || aoffi) {
+        snprintf(y, sizeof y, "%s", a == RZ ? "0u" : R(a + 1));
+        if (aoffi) snprintf(off, sizeof off, "%s", R(b));
+        if (dc) snprintf(ref, sizeof ref, "%s", aoffi ? (b == RZ ? "0u" : R(b + 1)) : R(b));
+    } else snprintf(y, sizeof y, "%s", R(b));
+    char co[96], ofs[160];
+    snprintf(co, sizeof co, "vec2(uintBitsToFloat(%s), uintBitsToFloat(%s))", x, y);
+    snprintf(ofs, sizeof ofs, "ivec2(bitfieldExtract(int(%s), 0, 6), bitfieldExtract(int(%s), 8, 6))", off, off);
+    if (dc && aoffi) sp(&c->body, "    { vec4 g = textureGatherOffset(t%d, %s, uintBitsToFloat(%s), %s);\n", slot, co, ref, ofs);
+    else if (dc) sp(&c->body, "    { vec4 g = textureGather(t%d, %s, uintBitsToFloat(%s));\n", slot, co, ref);
+    else if (aoffi) sp(&c->body, "    { vec4 g = textureGatherOffset(t%d, %s, %s, %d);\n", slot, co, ofs, (int)bits(w, 52, 2));
+    else sp(&c->body, "    { vec4 g = textureGather(t%d, %s, %d);\n", slot, co, (int)bits(w, 52, 2));
     static const char *const comp[4] = {"g.x", "g.y", "g.z", "g.w"};
     for (int k = 0; k < 4; k++) {
         int base = k < 2 ? d0 : d1, r = base == RZ ? RZ : base + (k & 1);
         if (r == RZ || r >= RZ) continue;
         c->reg_used[r] = 1;
         sp(&c->body, "      r%d = floatBitsToUint(%s);\n", r, comp[k]);
+    }
+    sp(&c->body, "    }\n");
+}
+
+// TLD (full form, yuzu texture_fetch.cpp): texelFetch with a component mask. Ra: the coordinates (array: the layer in
+// Ra's low 16 bits first); Rb, in order: the level (.LL; .LZ: 0), the packed offset (.AOFFI: 4-bit signed x, y, z),
+// the sample (.MS). The masked components go to consecutive registers from d.
+static void emit_tld(Ctx *c, uint64_t w) {
+    if (!c->glsl) { fail(c, "tld (MSL)"); return; }
+    int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8), b = (int)bits(w, 20, 8), dim = (int)bits(w, 28, 3), mask = (int)bits(w, 31, 4);
+    bool aoffi = bits(w, 35, 1), ms = bits(w, 50, 1), ll = bits(w, 55, 1);
+    if (d == RZ || !mask) return;
+    char ra[4][16], rb[3][16];
+    for (int k = 0; k < 4; k++) {
+        if (a == RZ || a + k >= RZ) strcpy(ra[k], "0u");
+        else { c->reg_used[a + k] = 1; sprintf(ra[k], "r%d", a + k); }
+    }
+    for (int k = 0; k < 3; k++) {
+        if (b == RZ || b + k >= RZ) strcpy(rb[k], "0u");
+        else { c->reg_used[b + k] = 1; sprintf(rb[k], "r%d", b + k); }
+    }
+    int nb = 0;
+    const char *lod = ll ? rb[nb++] : "0u";
+    const char *off = aoffi ? rb[nb++] : NULL;
+    const char *smp = ms ? rb[nb++] : NULL;
+    char call[600], o[200] = "";
+    uint32_t index = (uint32_t)bits(w, 36, 13);
+    int slot;
+    switch (dim) {
+    case 0:  // 1D
+        slot = tex_slot(c, index, TEXTYPE_1D, false, false);
+        if (off) sprintf(o, " + bitfieldExtract(int(%s), 0, 4)", off);
+        sprintf(call, "texelFetch(t%d, int(%s)%s, int(%s))", slot, ra[0], o, lod);
+        break;
+    case 2:  // 2D (multisampled with .MS)
+        slot = tex_slot(c, index, ms ? TEXTYPE_2D_MS : TEXTYPE_2D, false, false);
+        if (off) sprintf(o, " + ivec2(bitfieldExtract(int(%s), 0, 4), bitfieldExtract(int(%s), 4, 4))", off, off);
+        if (ms) sprintf(call, "texelFetch(t%d, ivec2(%s)%s, int(%s))", slot, RSC2(c, slot, "uint2(%s, %s)", ra[0], ra[1]), o, smp);
+        else sprintf(call, "texelFetch(t%d, ivec2(%s)%s, int(%s))", slot, RSC2(c, slot, "uint2(%s, %s)", ra[0], ra[1]), o, lod);
+        break;
+    case 3:  // 2D array
+        slot = tex_slot(c, index, TEXTYPE_2D_ARRAY, false, true);
+        if (off) sprintf(o, " + ivec2(bitfieldExtract(int(%s), 0, 4), bitfieldExtract(int(%s), 4, 4))", off, off);
+        sprintf(call, "texelFetch(t%d, ivec3(ivec2(%s)%s, int(%s & 0xFFFFu)), int(%s))", slot, RSC2(c, slot, "uint2(%s, %s)", ra[1], ra[2]),
+                o, ra[0], lod);
+        break;
+    case 4:  // 3D
+        slot = tex_slot(c, index, TEXTYPE_3D, false, false);
+        if (off) sprintf(o, " + ivec3(bitfieldExtract(int(%s), 0, 4), bitfieldExtract(int(%s), 4, 4), bitfieldExtract(int(%s), 8, 4))", off, off, off);
+        sprintf(call, "texelFetch(t%d, ivec3(int(%s), int(%s), int(%s))%s, int(%s))", slot, ra[0], ra[1], ra[2], o, lod);
+        break;
+    default: fail(c, "tld dim %d", dim); return;
+    }
+    sp(&c->body, "    { vec4 g = vec4(%s);\n", call);
+    static const char *const cn[4] = {"g.x", "g.y", "g.z", "g.w"};
+    for (int k = 0, r = d; k < 4; k++) {
+        if (!(mask >> k & 1)) continue;
+        if (r < RZ) { c->reg_used[r] = 1; sp(&c->body, "      r%d = floatBitsToUint(%s);\n", r, cn[k]); }
+        r++;
     }
     sp(&c->body, "    }\n");
 }
@@ -1143,6 +1216,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         emit_tld4(c, w);
     } else if (OPM(0xdf00000000000000ull, 0xffc0000000000000ull)) {  // TLD4S
         emit_tld4s(c, w);
+    } else if (OPM(0xdc38000000000000ull, 0xfff8000000000000ull)) {  // TLD
+        emit_tld(c, w);
     } else if (OPM(0xeb20000000000000ull, 0xfff8000000000000ull)) {  // SUST.B (bindless)
         emit_surface(c, w, pc, false, true);
     } else if (OPM(0xeb28000000000000ull, 0xfff8000000000000ull)) {  // SUST
