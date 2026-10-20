@@ -1,5 +1,6 @@
 // Windows host layer (runtime/platform.h).
 #include <windows.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -316,6 +317,10 @@ void plat_crash_handler_install(void) {
 static ssize_t prw(int fd, void *buf, size_t n, off_t off, bool write) {
     HANDLE h = (HANDLE)_get_osfhandle(fd);
     if (h == INVALID_HANDLE_VALUE) return -1;
+    // Guest memory is committed when first touched (vectored_handler): ReadFile into pages not touched yet fails
+    // (ERROR_NOACCESS) instead of faulting, so the range is committed first (the game reading files into fresh buffers)
+    uint64_t b = (uint64_t)(uintptr_t)buf;
+    if (!write && n && b >= g_lo && b + n <= g_hi) plat_commit(b, n);
     size_t done = 0;
     while (done < n) {
         OVERLAPPED ov = {0};
@@ -326,7 +331,12 @@ static ssize_t prw(int fd, void *buf, size_t n, off_t off, bool write) {
         BOOL ok = write ? WriteFile(h, (const char *)buf + done, chunk, &got, &ov)
                         : ReadFile(h, (char *)buf + done, chunk, &got, &ov);
         if (!ok) {
-            if (GetLastError() == ERROR_HANDLE_EOF) break;
+            DWORD e = GetLastError();
+            if (e == ERROR_HANDLE_EOF) break;
+            static int nlog;
+            if (nlog++ < 16) fprintf(stderr, "[win] %s of %lu bytes at %llx into %p failed: error %lu\n", write ? "write" : "read",
+                                     (unsigned long)chunk, (unsigned long long)o, (char *)buf + done, (unsigned long)e);
+            errno = e == ERROR_NOACCESS ? EFAULT : EIO;
             return done ? (ssize_t)done : -1;
         }
         if (!got) break;

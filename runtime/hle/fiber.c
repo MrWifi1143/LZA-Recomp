@@ -13,9 +13,12 @@
 
 #include "../hle.h"
 
-#ifndef _WIN32
+#ifdef _WIN32
+#include <windows.h>  // (Win32 fibers: CreateFiberEx / SwitchToFiber stand for ucontext's makecontext / swapcontext)
+#else
 #include <sys/mman.h>
 #include <ucontext.h>
+#endif
 
 uint64_t loader_find_symbol(const char *name);
 void guest_call(Cpu *c, uint64_t addr);
@@ -26,8 +29,12 @@ extern __thread Cpu *g_fiber_cpu;  // kernel.c: kernel_current_cpu() while a fib
 #define FRAME_Q8 0x70
 
 typedef struct HFiber {
+#ifdef _WIN32
+    void *wf;             // its Win32 fiber
+#else
     ucontext_t uc;
-    void *stack;          // NULL: a thread's own context (its pthread stack)
+#endif
+    void *stack;          // NULL: a thread's own context (its pthread stack); Windows: non-NULL for ours
     Cpu *cpu;
     uint64_t key;         // context word while suspended
     struct HFiber *next;  // suspended list / free list
@@ -72,6 +79,10 @@ static void copy_thread_state(Cpu *to, const Cpu *from) {  // what belongs to th
     to->host_fpcr = from->host_fpcr;  // (the host FP state is the thread's too)
 }
 
+#ifdef _WIN32
+static void fiber_entry(void);
+static VOID CALLBACK fiber_entry_win(LPVOID arg) { (void)arg; fiber_entry(); }
+#endif
 static void fiber_entry(void) {
     publish_left();
     Cpu *c = t_running->cpu;
@@ -88,10 +99,15 @@ static HFiber *new_fiber(uint64_t frame, const Cpu *from) {
     pthread_mutex_unlock(&g_lock);
     if (!f) {
         f = calloc(1, sizeof *f);
+#ifdef _WIN32
+        f->stack = f;  // (the stack is the Win32 fiber's own)
+        f->cpu = _aligned_malloc(sizeof(Cpu), 16);
+#else
         f->stack = mmap(NULL, HOST_STACK, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
         if (f->stack == MAP_FAILED) FATAL("fiber: no host stack\n");
         mprotect(f->stack, 0x1000, PROT_NONE);  // guard
         f->cpu = aligned_alloc(16, sizeof(Cpu));
+#endif
     }
     Cpu *c = f->cpu;
     memset(c, 0, sizeof *c);
@@ -103,11 +119,17 @@ static HFiber *new_fiber(uint64_t frame, const Cpu *from) {
     c->pc = fr[FRAME_X30 / 8];
     c->x[30] = 0;
     c->sp = frame + 0xf0;
+#ifdef _WIN32
+    if (f->wf) DeleteFiber(f->wf);  // (a reused one: a Win32 fiber can't start over; its old one ended switched away)
+    f->wf = CreateFiberEx(64 << 10, HOST_STACK, FIBER_FLAG_FLOAT_SWITCH, fiber_entry_win, NULL);
+    if (!f->wf) FATAL("fiber: CreateFiberEx failed (%lu)\n", GetLastError());
+#else
     getcontext(&f->uc);
     f->uc.uc_stack.ss_sp = f->stack;
     f->uc.uc_stack.ss_size = HOST_STACK;
     f->uc.uc_link = NULL;
     makecontext(&f->uc, fiber_entry, 0);
+#endif
     return f;
 }
 
@@ -129,6 +151,10 @@ HLE_FUNC("_ZN2nn2os6detail20DispatchFiberContextEPPNS1_22FiberContextForHorizonE
     if (!me) {  // the thread's own context, switching for the first time
         me = calloc(1, sizeof *me);
         me->cpu = c;
+#ifdef _WIN32
+        me->wf = IsThreadAFiber() ? GetCurrentFiber() : ConvertThreadToFiberEx(NULL, FIBER_FLAG_FLOAT_SWITCH);
+        if (!me->wf) FATAL("fiber: ConvertThreadToFiberEx failed (%lu)\n", GetLastError());
+#endif
     }
     me->key = c->sp - 0xf0;  // the frame DispatchFiberContext would have pushed
     *(uint64_t *)(uintptr_t)(me->key + FRAME_X30) = 0;  // (never taken for a new fiber's frame, see below)
@@ -152,7 +178,11 @@ HLE_FUNC("_ZN2nn2os6detail20DispatchFiberContextEPPNS1_22FiberContextForHorizonE
     t_left_save = save;
     t_running = to;
     g_fiber_cpu = to->stack ? to->cpu : NULL;
+#ifdef _WIN32
+    SwitchToFiber(to->wf);
+#else
     swapcontext(&me->uc, &to->uc);
+#endif
     // Resumed (maybe on another thread): this context runs again with its own Cpu, as DispatchFiberContext returns.
     publish_left();
     t_running = me;
@@ -185,4 +215,3 @@ RT_ON_RESET(fiber_reset) {
     t_running = NULL;
     t_left = NULL;
 }
-#endif

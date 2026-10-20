@@ -871,6 +871,15 @@ static void svc_entry(Cpu *c, uint32_t imm, uint64_t pc) {
         return;
     }
     uint64_t in[4] = {c->x[0], c->x[1], c->x[2], c->x[3]};
+    if (imm == 0x18) {  // (WaitSynchronization: what it waits on, before it blocks)
+        const uint32_t *hs = (const uint32_t *)(uintptr_t)c->x[1];
+        LOG("[svc] 18 wait (lr %llx):", (unsigned long long)c->x[30]);
+        for (uint32_t i = 0; i < (uint32_t)c->x[2] && i < 8; i++) {
+            KObject *o = handle_get(hs[i]);
+            LOG(" %x(type %d sig %d)", hs[i], o ? (int)o->type : -1, o ? (int)o->signaled : -1);
+        }
+        LOG(" timeout %lld\n", (long long)c->x[3]);
+    }
     svc_impl(c, imm, pc);
     LOG("[svc] %02x(%llx, %llx, %llx, %llx) -> %llx %llx %llx  @%llx\n", imm, in[0], in[1], in[2], in[3], c->x[0],
         c->x[1], c->x[2], pc);
