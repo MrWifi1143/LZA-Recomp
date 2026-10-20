@@ -191,8 +191,8 @@ $(B)/rt/platform/windows_rc.o: runtime/platform/windows.rc docs/icon/icon.ico ru
 # Windows release, cross-built from Linux (tools/windows/README.md): build/win/$(WIN_EXE).exe and its import library,
 # then $(LZA_WINBUILD)/dist/LZA-Recomp-$(WIN_TAG)-windows.zip with what the start screen builds the game code with on
 # the player's PC (runtime/gamebuild.c). No game code, no game files.
-WIN_EXE  ?= ZARecomp
-WIN_TAG  ?= ZA
+WIN_EXE  ?= PLARecomp
+WIN_TAG  ?= PLA
 win-exe:
 	tools/windows/build_exe.sh $(WIN_EXE)
 dist: win-exe

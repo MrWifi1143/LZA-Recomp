@@ -1,10 +1,10 @@
-PL:Z-A Recomp (LZ&A Recomp) - Windows test build
-================================================
+PL:A Recomp (LZ&A Recomp) - Windows test build
+==============================================
 
-A native Windows port of Pokemon Legends: Z-A (Nintendo Switch) by static recompilation.
+A native Windows port of Pokemon Legends: Arceus (Nintendo Switch) by static recompilation.
 
-NO GAME FILES ARE INCLUDED. You need your own dump of Pokemon Legends: Z-A with the 0.6.0 update, extracted to
-an exefs folder (main, sdk, main.npdm) and a romfs folder. This program never asks for keys: they are only used by
+NO GAME FILES ARE INCLUDED. You need your own dump of Pokemon Legends: Arceus with the 1.1.1 update, extracted to
+an exefs folder (main, sdk, subsdk0, subsdk1, main.npdm) and a romfs folder. This program never asks for keys: they are only used by
 the tool you extract the game with.
 
 Requirements
@@ -16,9 +16,9 @@ Requirements
 
 Getting exefs and romfs
 -----------------------
-Dump the base game and the 0.6.0 update from your own Switch (.nsp / .xci), and prod.keys + title.keys
-(Lockpick_RCM). The extracted files must have the update applied; other versions won't work. Plain hactool can't
-apply Z-A's update: use hac2l or hactoolnet.
+Dump the base game and the 1.1.1 update from your own Switch (.nsp / .xci), and prod.keys + title.keys
+(Lockpick_RCM). The extracted files must have the update applied; other versions won't work. The update is a patch
+on top of the base game's RomFS: use hac2l or hactoolnet.
 1. Unpack both .nsp files (e.g. hactoolnet -t pfs0 base.nsp --outdir base). The program NCA is the biggest .nca.
 2. hac2l -k prod.keys --titlekeys=title.keys --basenca=base\<base program>.nca
          --exefsdir=game\exefs --romfsdir=game\romfs update\<update program>.nca
@@ -27,8 +27,8 @@ Packed files (.xci, .nsp, .nsz, .nca) are not accepted by the start screen: extr
 
 How to play
 -----------
-1. Unzip this folder anywhere you can write to (e.g. D:\Games\LZA-Recomp-ZA). Not inside Program Files.
-2. Open ZARecomp.exe. It is not code-signed: if Windows says "Windows protected your PC", click "More info" and then
+1. Unzip this folder anywhere you can write to (e.g. D:\Games\LZA-Recomp-PLA). Not inside Program Files.
+2. Open PLARecomp.exe. It is not code-signed: if Windows says "Windows protected your PC", click "More info" and then
    "Run anyway".
 3. Click "Select game folder..." and pick the folder that holds your extracted exefs and romfs (or any folder above
    it).
@@ -56,7 +56,7 @@ Everything stays in this folder: settings (larecomp.ini), saves (save\), the gam
 
 Troubleshooting
 ---------------
-- "That's not a supported game": pick the folder of your own extracted Pokemon Legends: Z-A.
+- "That's not a supported game": pick the folder of your own extracted Pokemon Legends: Arceus.
 - "Those are packed game files": extract them first (above).
 - The game code didn't build: check the free disk space; details are in lasrecomp.log. An antivirus may also have
   quarantined part of zig\ or python\: restore it or add this folder as an exception.
