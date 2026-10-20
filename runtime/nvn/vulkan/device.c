@@ -940,6 +940,23 @@ void backend_present(NvnTexture *t) {
                 extern void sampler_live(long frames, uint64_t now);
                 sampler_live(n, total_frames);
             }
+            snprintf(path, sizeof path, "%s/skipcs", dir);  // (research: exec.c dispatch_compute)
+            if (access(path, F_OK) == 0) {
+                FILE *f = fopen(path, "r");
+                char line[300] = "";
+                if (f) { if (!fgets(line, sizeof line, f)) line[0] = 0; fclose(f); }
+                remove(path);
+                extern volatile uint64_t g_skip_cs[8];
+                int k = 0;
+                for (char *p = line; *p && k < 8;) {
+                    uint64_t a = strtoull(p, &p, 16);
+                    if (a) g_skip_cs[k++] = a;
+                    if (*p != ',') break;
+                    p++;
+                }
+                while (k < 8) g_skip_cs[k++] = 0;
+                LOG("[exp] skipping compute: %s", line);
+            }
             snprintf(path, sizeof path, "%s/nocull", dir);  // (research: exec.c, no culling at all on / off)
             if (access(path, F_OK) == 0) {
                 FILE *f = fopen(path, "r");

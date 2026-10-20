@@ -53,6 +53,7 @@ volatile uint64_t g_exp_nocull_start;
 volatile long g_probe_lo, g_probe_hi;
 volatile long g_nocull_lo, g_nocull_hi;
 volatile int g_live_nocull;
+volatile uint64_t g_skip_cs[8];
 bool vk_gpu_may_write(uint64_t a);
 static uint64_t g_poly_src_list, g_poly_src_rec, g_cur_list[9];
 static int g_poly_src_depth, g_cur_depth;
@@ -2442,6 +2443,7 @@ static bool gmem_import(uint64_t size) {
                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                                       VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |  // (uniforms read in place: cbuf_info)
+                                      VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |  // (indirect draws: arguments the game's compute writes)
                                       (g_vk.xfb ? VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT : 0)};  // (CMD_XFB_*)
     VkBuffer buf;
     if (vkCreateBuffer(g_vk.dev, &bi, NULL, &buf) != VK_SUCCESS) { vkFreeMemory(g_vk.dev, mem, NULL); return false; }
@@ -2869,11 +2871,24 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
 }
 
 // ================================================================== compute
-typedef struct { Prog p; ShaderInfo *si; VkPipeline pipe; uint32_t local[3]; } CsProg;
+typedef struct { Prog p; ShaderInfo *si; VkPipeline pipe; uint32_t local[3]; uint64_t addr; } CsProg;
 
 static void build_compute(void *arg) {
     CsProg *cp = arg;
     size_t n = 0;
+    if (getenv("LARECOMP_GLSL_OVERRIDE_DIR")) {  // (research: <dir>/<code address>_cs.glsl replaces a compute program's GLSL)
+        char path[512];
+        snprintf(path, sizeof path, "%s/%llx_cs.glsl", getenv("LARECOMP_GLSL_OVERRIDE_DIR"), (unsigned long long)cp->addr);
+        FILE *f = fopen(path, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long fl = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            char *src = malloc((size_t)fl + 1);
+            if (src && fread(src, 1, (size_t)fl, f) == (size_t)fl) { src[fl] = 0; cp->si->msl = src; LOG("[exp] GLSL override: %s\n", path); }
+            fclose(f);
+        }
+    }
     uint32_t *spv = vk_glsl_to_spirv(cp->si->msl, STAGE_COMPUTE, "cs", &n);
     if (!spv) { atomic_store(&cp->p.state, 2); return; }
     cp->p.nbinds = vk_reflect(spv, n, cp->p.binds, MAX_BIND);
@@ -2905,6 +2920,7 @@ static CsProg *compute_program(NvnProgram *np) {
     int n = g_cs_n;
     for (int i = 0; i < n; i++) if (tab[i].addr == ss->code_addr && tab[i].content == ss->content_hash) return tab[i].cp;
     CsProg *cp = calloc(1, sizeof *cp);
+    cp->addr = ss->code_addr;
     if (n < CS_MAX) { tab[n].addr = ss->code_addr; tab[n].content = ss->content_hash; tab[n].cp = cp; g_cs_n = n + 1; }
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
@@ -2935,6 +2951,20 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     if (!st.program || !gx || !gy || !gz) return;
     CsProg *cp = compute_program(st.program);
     if (!cp || atomic_load(&cp->p.state) != 1) { stat_skipped++; return; }
+    {   // (research: LARECOMP_LIVE <dir>/skipcs "<addr>[,<addr>...]": those compute shaders not dispatched; "0" ends it)
+        extern volatile uint64_t g_skip_cs[8];
+        for (int k = 0; k < 8 && g_skip_cs[k]; k++)
+            if (g_skip_cs[k] == st.program->stages[5].code_addr) return;
+    }
+    if (g_debug_frame) {
+        char line[600];
+        int len = snprintf(line, sizeof line, "[dispatch] cs %llx groups %ux%ux%u local %ux%ux%u", (unsigned long long)st.program->stages[5].code_addr,
+                           gx, gy, gz, cp->local[0], cp->local[1], cp->local[2]);
+        for (int k = 0; k < 16 && len < 520; k++)
+            if (st.sbuf[5][k].addr) len += snprintf(line + len, sizeof line - (size_t)len, " s%d=%llx+%llx", k, (unsigned long long)st.sbuf[5][k].addr,
+                                                    (unsigned long long)st.sbuf[5][k].size);
+        LOG("%s\n", line);
+    }
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
@@ -3017,6 +3047,11 @@ static void dc_begin(VkCommandBuffer cb) {
     memset(&dc, 0xff, sizeof dc);  // (all unknown: -1, NaN)
     dc.cb = cb, dc.epoch = g_dyn_epoch, dc.pipe = VK_NULL_HANDLE;
 }
+// Indirect draws (nvnCommandBufferDraw{Elements,Arrays}Indirect): the arguments are in guest memory, written by the
+// game's GPU culling (Z-A's GpuInstancingCulling* passes: props, foliage, the station facade...) in the same submission,
+// so they are read by the GPU (vkCmdDraw*Indirect from the heap import) and the index / vertex data is bound in place
+// whole. NVN's argument layouts are Vulkan's (VkDrawIndexedIndirectCommand / VkDrawIndirectCommand).
+static uint64_t g_draw_indirect;  // (draw_: nonzero while an indirect draw runs - its argument address)
 static void draw_(CmdRec *r, bool indexed);
 static void draw(CmdRec *r, bool indexed) {
     PROF_T0();
@@ -3137,6 +3172,20 @@ static void draw_(CmdRec *r, bool indexed) {
                 NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
                 if (t && (int)t->width == tw && (int)t->height == th) { nd++; ni += (unsigned)(indexed ? r->x[6] : r->x[4]); break; }
             }
+        }
+    }
+    if (st.program->stage_mask & 0x1C) {  // (geometry / tessellation stages: not translated - which draws have them)
+        static uint64_t seen[64];
+        static int nseen;
+        uint64_t key = st.program->stages[0].code_addr ^ ((uint64_t)st.program->stage_mask << 56);
+        int i = 0;
+        while (i < nseen && seen[i] != key) i++;
+        if (i == nseen && nseen < 64) {
+            seen[nseen++] = key;
+            LOG("[shader] draw with stages %#x (vs %llx gs %llx tcs %llx tes %llx fs %llx): only vertex + fragment run\n", st.program->stage_mask,
+                (unsigned long long)st.program->stages[0].code_addr, (unsigned long long)st.program->stages[2].code_addr,
+                (unsigned long long)st.program->stages[3].code_addr, (unsigned long long)st.program->stages[4].code_addr,
+                (unsigned long long)st.program->stages[1].code_addr);
         }
     }
     if (g_debug_frame) debug_draw(pr, r, indexed);
@@ -3476,7 +3525,7 @@ static void draw_(CmdRec *r, bool indexed) {
     uint32_t scan_isz = 0, scan_restart = 0;
     if (!indexed) {
         first = (uint32_t)r->x[1]; base_inst = (uint32_t)r->x[3]; inst = (uint32_t)r->x[4] ? (uint32_t)r->x[4] : 1;
-        max_index = first + count;
+        max_index = g_draw_indirect ? 0x7FFFFFFF : first + count;
         if (!native) {
             uint32_t *e = expand_indices(mode, count, NULL, 0, first, &icount);
             ib = vk_transient_copy(e, (uint64_t)icount * 4 + 4, 4);
@@ -3490,7 +3539,20 @@ static void draw_(CmdRec *r, bool indexed) {
         inst = (uint32_t)r->x[6] ? (uint32_t)r->x[6] : 1;
         const void *src = (const void *)(uintptr_t)iaddr;
         uint32_t restart = st.prim_restart ? st.restart_index : 0xFFFFFFFFu;
-        if (native && itype != 0) {
+        if (g_draw_indirect) {  // (the count is the GPU's: the index data from its address to the end of its mapping, in place)
+            uint32_t isz = itype == 1 ? 2 : itype == 2 ? 4 : 1;
+            itype_vk = itype == 1 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
+            uint64_t in = 4ull << 20;
+            gmem_info();
+            if (iaddr >= HEAP_BASE && iaddr < HEAP_BASE + gmem_size && iaddr + in > HEAP_BASE + gmem_size) in = HEAP_BASE + gmem_size - iaddr;
+            if (itype == 0 || iaddr % isz || !guest_direct(iaddr, in, &ib.buf, &ib.off)) {
+                static int warned;
+                if (!warned++) LOG("[vk] indirect draw: index buffer %llx (type %u) not readable in place: skipped\n", (unsigned long long)iaddr, itype);
+                SKIP(7);
+                return;
+            }
+            max_index = 0x7FFFFFFF;
+        } else if (native && itype != 0) {
             uint32_t isz = itype == 1 ? 2 : 4;
             itype_vk = itype == 1 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
             icount = count;
@@ -3550,6 +3612,7 @@ static void draw_(CmdRec *r, bool indexed) {
             }
             uint64_t stride = k.stride[s], need;
             if (!stride) need = 256;
+            else if (g_draw_indirect) need = v.size ? v.size : 256;
             else if (k.divisor[s]) need = ((uint64_t)base_inst + inst + k.divisor[s] - 1) / k.divisor[s] * stride + 256;
             else need = (uint64_t)max_index * stride + 256;
             if (v.size && need > v.size) need = v.size;
@@ -3612,6 +3675,17 @@ static void draw_(CmdRec *r, bool indexed) {
         }
     }
     if (exp_hit && exp_mode == 1) { /* skipped */ }
+    else if (g_draw_indirect) {
+        VkDescriptorBufferInfo gm = gmem_info();
+        uint64_t off = g_draw_indirect - HEAP_BASE;
+        if (gm.buffer && g_draw_indirect >= HEAP_BASE && off + 20 <= gm.range) {
+            if (use_index) vkCmdDrawIndexedIndirect(cb, gm.buffer, off, 1, 20);
+            else vkCmdDrawIndirect(cb, gm.buffer, off, 1, 16);
+        } else {
+            static int warned;
+            if (!warned++) LOG("[vk] indirect draw: arguments at %llx outside the heap import: skipped\n", (unsigned long long)g_draw_indirect);
+        }
+    }
     else if (!use_index) vkCmdDraw(cb, count, inst_eff, first, base_inst);
     else vkCmdDrawIndexed(cb, icount, inst_eff, 0, base_vertex, base_inst);
     if (xfb_on) {
@@ -4475,11 +4549,28 @@ static void exec_list(uint64_t handle, int depth) {
             }
             break;
         case CMD_DISPATCH: dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]); break;
-        case CMD_DRAW_ARRAYS_INDIRECT: case CMD_DRAW_ELEMENTS_INDIRECT: case CMD_DISPATCH_INDIRECT: {
-            // (not implemented: neither Legends game issues them in the scenes tested - say so the first time one does)
+        case CMD_DRAW_ELEMENTS_INDIRECT: case CMD_DRAW_ARRAYS_INDIRECT: {
+            // (cmd, mode, index type, index buffer, indirect buffer) / (cmd, mode, indirect buffer): as a direct draw record
+            // whose counts come from the GPU (draw_ with g_draw_indirect)
+            static int logged;
+            if (!logged++) LOG("[vk] indirect draws executed (first: %s, arguments at %llx)\n", r->op == CMD_DRAW_ELEMENTS_INDIRECT ? "elements" : "arrays",
+                               (unsigned long long)(r->op == CMD_DRAW_ELEMENTS_INDIRECT ? r->x[3] : r->x[1]));
+            CmdRec d = *r;
+            bool idx = r->op == CMD_DRAW_ELEMENTS_INDIRECT;
+            memset(d.x, 0, sizeof d.x);
+            d.x[0] = r->x[0];
+            if (idx) d.x[1] = r->x[1], d.x[3] = r->x[2], d.x[6] = 1;
+            else d.x[4] = 1;
+            g_draw_indirect = idx ? r->x[3] : r->x[1];
+            if (g_debug_frame) LOG("[indirect] %s args %llx index %llx vs %llx\n", idx ? "elements" : "arrays", (unsigned long long)g_draw_indirect,
+                                   (unsigned long long)(idx ? r->x[2] : 0), (unsigned long long)(st.program ? st.program->stages[0].code_addr : 0));
+            draw(&d, idx);
+            g_draw_indirect = 0;
+            break;
+        }
+        case CMD_DISPATCH_INDIRECT: {
             static int warned;
-            if (!warned++) LOG("[vk] indirect %s recorded but not executed (op %u): not implemented\n",
-                               r->op == CMD_DISPATCH_INDIRECT ? "dispatch" : "draw", (unsigned)r->op);
+            if (!warned++) LOG("[vk] indirect dispatch recorded but not executed: not implemented\n");
             break;
         }
         case CMD_DRAW_ARRAYS: draw(r, false); break;

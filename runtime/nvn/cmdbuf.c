@@ -24,6 +24,7 @@ NVN(nvnCommandBufferInitialize) {
 NVN(nvnCommandBufferFinalize) { free(cb_of(A(0))); SET_HOST(A(0), 0); }
 STUB(nvnCommandBufferSetDebugLabel)
 
+static uint64_t g_q_used, g_q_free, g_added, g_add_bytes;  // (research: command memory traffic)
 static CmdRec *raw_rec(uint64_t at, uint32_t op, uint32_t size) {
     CmdRec *r = (CmdRec *)(uintptr_t)at;
     memset(r, 0, sizeof *r);
@@ -41,6 +42,7 @@ NVN(nvnCommandBufferAddCommandMemory) {
               (unsigned long long)A(0), cb ? "ok" : "null", (unsigned long long)A(1), pool ? "ok" : "null",
               (unsigned long long)*(uint64_t *)(uintptr_t)A(1));
     uint64_t mem = pool->storage + A(2), size = A(3);
+    g_added++, g_add_bytes += size;
     free_spills_in(mem, size);
     if (cb->recording && cb->mem) {
         // chain the list being recorded into the new chunk
@@ -53,8 +55,14 @@ NVN(nvnCommandBufferAddCommandMemory) {
 }
 STUB(nvnCommandBufferAddControlMemory)
 NVN(nvnCommandBufferGetCommandMemorySize) { RET(cb_of(A(0))->size); }
-NVN(nvnCommandBufferGetCommandMemoryUsed) { RET(cb_of(A(0))->used); }
+static void cmdmem_stats(void) {
+    static uint64_t n;
+    if ((++n & 0xFFFFF) == 0) LOG("[nvn] cmd memory: %llu chunks added (%llu MB), GetUsed x%llu, GetFree x%llu\n", (unsigned long long)g_added,
+                                   (unsigned long long)(g_add_bytes >> 20), (unsigned long long)g_q_used, (unsigned long long)g_q_free);
+}
+NVN(nvnCommandBufferGetCommandMemoryUsed) { g_q_used++; RET(cb_of(A(0))->used); }
 NVN(nvnCommandBufferGetCommandMemoryFree) {
+    g_q_free++;
     NvnCmdBuf *cb = cb_of(A(0));
     RET(cb->size > cb->used + JUMP_RESERVE ? cb->size - cb->used - JUMP_RESERVE : 0);
 }
@@ -104,6 +112,7 @@ static void free_spills_in(uint64_t mem, uint64_t size) {
 // Reserve a record. May call back into the guest for more memory, so callers snapshot their
 // arguments first.
 static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
+    cmdmem_stats();
     uint32_t size = (uint32_t)((sizeof(CmdRec) + extra + 7) & ~7u);
     for (int tries = 0; !cb->mem || cb->used + size + JUMP_RESERVE > cb->size; tries++) {
         bool jump_fits = cb->mem && cb->used + sizeof(CmdRec) + JUMP_RESERVE <= cb->size;
@@ -659,6 +668,7 @@ PLAIN(nvnCommandBufferReportCounter, CMD_REPORT_COUNTER)
 STUB(nvnCommandBufferReportValue)
 STUB(nvnCommandBufferResetCounter)
 NVN(nvnCommandBufferCallCommands) {
+    { static uint64_t n; n++; if ((n & (n - 1)) == 0) LOG("[nvn] CallCommands #%llu (lr %llx)\n", (unsigned long long)n, (unsigned long long)c->x[30]); }
     if (g_ntrace_list) {
         const uint64_t *h = (const uint64_t *)(uintptr_t)A(2);
         for (uint64_t i = 0; i < A(1); i++)
@@ -670,7 +680,12 @@ NVN(nvnCommandBufferCallCommands) {
             }
     }
     draw_chain(c, "call", A(1)); obj_mark(c, cb_of(A(0))); record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
-NVN(nvnCommandBufferCopyCommands) { obj_mark(c, cb_of(A(0))); record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
+NVN(nvnCommandBufferCopyCommands) {
+    static uint64_t n, handles;
+    n++, handles += A(1);
+    if ((n & (n - 1)) == 0) LOG("[nvn] CopyCommands #%llu (%llu handles so far, lr %llx)\n", (unsigned long long)n, (unsigned long long)handles, (unsigned long long)c->x[30]);
+    obj_mark(c, cb_of(A(0))); record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8);
+}
 STUB(nvnCommandBufferInsertDebugMarker)
 STUB(nvnCommandBufferInsertDebugMarkerDynamic)
 STUB(nvnCommandBufferInsertDebugMarkerStatic)

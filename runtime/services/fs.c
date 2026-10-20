@@ -359,6 +359,11 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
                 if (getenv("LARECOMP_LOG_FILES")) LOG("[fs] read %s\n", path);
             }
         }
+        {   // LARECOMP_LOG_READS=<file>: every RomFS read as "<offset hex> <size hex>" (research: which packs the game loads)
+            static FILE *rl = (FILE *)1;
+            if (rl == (FILE *)1) rl = getenv("LARECOMP_LOG_READS") ? fopen(getenv("LARECOMP_LOG_READS"), "w") : NULL;
+            if (rl) { fprintf(rl, "%llx %llx\n", (unsigned long long)off, (unsigned long long)size); fflush(rl); }
+        }
         static uint64_t reads, bytes;
         reads++;
         bytes += size;

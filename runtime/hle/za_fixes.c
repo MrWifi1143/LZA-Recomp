@@ -128,6 +128,8 @@ void za_fixes_configure(const char *exefs) {
     }
     if (done || memcmp(id, ZA_MAIN, 8)) return;
     done = true;
+    { extern void za_qstats_configure(void); za_qstats_configure(); }
+    { extern void za_passq_configure(void); za_passq_configure(); }
     const char *lod = getenv("LARECOMP_ZA_NPC_LOD");
     if (!(lod && atoi(lod))) {
         rt_register_fnhook_at(ZA_ANIM_GATE_A, anim_gate_a);
@@ -144,4 +146,48 @@ void za_fixes_configure(const char *exefs) {
     for (int i = 0; i < 8; i++) g_biped[i] = fnv1a(names[i]);
     rt_register_fnhook_at(ZA_PARAM_LOOKUP, param_lookup);
     LOG("[za] foot IK off (stretched legs workaround; LARECOMP_ZA_FOOT_IK=1 keeps it)\n");
+}
+
+// (research, LARECOMP_ZA_QSTATS=1: the render queue lookup 0x7001802c90 called from the queue walk 0x700180ee10 -
+// how often it finds no renderable for a queued id)
+static uint64_t g_q_calls, g_q_null;
+static int queue_lookup_hook(Cpu *c, uint64_t addr) {
+    uint64_t lr = c->x[30], out = c->x[8];
+    rt_call_original(c, addr);
+    if (lr == 0x700180ee74ull) {
+        g_q_calls++;
+        if (out >= 0x7000000000ull && !*(uint64_t *)(uintptr_t)out) g_q_null++;
+        if ((g_q_calls & 0x3FFFF) == 0) LOG("[za] render queue lookups %llu, not found %llu\n", (unsigned long long)g_q_calls, (unsigned long long)g_q_null);
+    }
+    return 1;
+}
+void za_qstats_configure(void);
+void za_qstats_configure(void) {
+    if (getenv("LARECOMP_ZA_QSTATS")) rt_register_fnhook_at(0x7001802c90ull, queue_lookup_hook);
+}
+
+// (research, LARECOMP_ZA_PASSQ=1: each render pass's queue walk 0x700180ee10 - the pass object and its queue length)
+static int passq_hook(Cpu *c, uint64_t addr) {
+    static uint64_t seen[64], last_frame;
+    static int nseen;
+    extern uint64_t renderer_game_frame(void);
+    uint64_t f = renderer_game_frame();
+    uint64_t p = c->x[0];
+    uint64_t b = *(uint64_t *)(uintptr_t)(p + 0x168), e = *(uint64_t *)(uintptr_t)(p + 0x170);
+    if (f % 600 == 0 && f != last_frame) { last_frame = f; nseen = 0; }
+    int i = 0;
+    while (i < nseen && seen[i] != p) i++;
+    if (i == nseen && nseen < 64) {
+        seen[nseen++] = p;
+        uint64_t nm = *(uint64_t *)(uintptr_t)(p + 0x40);
+        const char *name = nm >= 0x7000000000ull && nm < 0x8000000000ull ? (const char *)(uintptr_t)nm : "?";
+        LOG("[za] f%llu pass %llx %.40s queue %llu items (lr %llx)\n", (unsigned long long)f, (unsigned long long)p, name,
+            (unsigned long long)((e - b) / 16), (unsigned long long)c->x[30]);
+    }
+    (void)addr;
+    return 0;
+}
+void za_passq_configure(void);
+void za_passq_configure(void) {
+    if (getenv("LARECOMP_ZA_PASSQ")) rt_register_fnhook_at(0x700180ec2cull, passq_hook);
 }
