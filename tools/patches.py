@@ -107,7 +107,19 @@ def _sky_step_divisor(gen, a):
             'a.f = a.f * b.f; c->v[2] = rt_unscale30_f32(a.u); }' % _F32)
 
 
+# The cutscene (demo) player's clock: its frame counter (+0x7ec of the demo, in 60 Hz frames) gets 2 on every update
+# - the whole cutscene 4.8 times as fast at 144 fps. add w9, w9, #2 adds the frames the frame time is worth instead
+# (rt_pla_frames60: 2 at 30 fps, the fraction carried to the next update).
+def _demo_frames(i):
+    def patch(gen, a):
+        assert gen.words[(a - gen.base) // 4] == 0x11000929, hex(a)  # add w9, w9, #2
+        return ('{ extern uint32_t rt_pla_frames60(int); c->x[9] = (uint32_t)((uint32_t)c->x[9] + rt_pla_frames60(%d)); }' % i)
+    return patch
+
+
 PLA_PATCHES = {a: _step_site(i) for i, a in enumerate(PLA_STEP_SITES)}
+for _i, _a in enumerate((0x7001458424, 0x700145e234, 0x700145e580)):
+    PLA_PATCHES[_a] = _demo_frames(_i)
 PLA_PATCHES[0x70029c1934] = _sky_step_div      # fdiv s0, s0, s1
 PLA_PATCHES[0x70029c23cc] = _sky_step_divisor  # fmul s2, s2, s11
 PLA_PATCHES[0x7002b31864] = _printer_wait  # b.hs 0x7002b31e38 (still waiting: return)

@@ -446,7 +446,7 @@ void pla60_configure(const char *exefs) {
     if (n && atoi(n) > 30) on = true, g_pla60_ns = 1000000000ull / (uint64_t)atoi(n);
     g_pla60_entry = 0;
     g_pla60_patched = false;
-    { void dt_probe_init(void), watch_arg_init(void); dt_probe_init(); watch_arg_init(); }
+    { void dt_probe_init(void), watch_arg_init(void), gate_init(void); dt_probe_init(); watch_arg_init(); gate_init(); }
     for (size_t i = 0; on && i < sizeof k_legends60 / sizeof *k_legends60; i++)
         if (!memcmp(id, k_legends60[i].id, 8)) {
             g_pla60_entry = k_legends60[i].entry;
@@ -628,4 +628,32 @@ uint32_t rt_unscale30_f32(uint32_t bits) {
     f = (float)((double)f * 33333334.0 / (double)g_pla60_ns);
     memcpy(&bits, &f, 4);
     return bits;
+}
+
+// Research (LARECOMP_GATE="<fn hex>[,<fn hex>...]"): those functions run only on the updates where 30 fps time moved
+// on a frame (rt_pla_tick), skipped on the others - which update a speed that follows the frame rate comes from.
+static int gate_hook(Cpu *c, uint64_t addr) {
+    (void)c, (void)addr;
+    return !rt_pla_tick(0);  // 1: skipped (the function returns at once)
+}
+void gate_init(void) {
+    const char *e = getenv("LARECOMP_GATE");
+    for (char *s = (char *)e; s && *s;) {
+        uint64_t a = strtoull(s, &s, 16);
+        void rt_register_fnhook_at(uint64_t, int (*)(Cpu *, uint64_t));
+        if (a) rt_register_fnhook_at(a, gate_hook);
+        while (*s == ',') s++;
+        if (*s && !strchr("0123456789abcdefABCDEF", *s)) break;
+    }
+}
+
+// Legends: Arceus above 30 fps: the 60 Hz frames an update is worth (tools/patches.py: the cutscene clock steps 2 per
+// update, sized for 30 fps): 2 at 30 fps, at 144 fps 0.42 - whole frames, the fraction carried (per site).
+uint32_t rt_pla_frames60(int site) {
+    static double acc[8];
+    if (!g_pla60_patched || site < 0 || site >= 8) return 2;
+    acc[site] += 2.0 * (double)g_pla60_ns / 33333334.0;
+    uint32_t n = (uint32_t)acc[site];
+    acc[site] -= n;
+    return n;
 }
