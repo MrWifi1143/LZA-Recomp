@@ -36,21 +36,43 @@ static uint64_t fnv1a(const char *s) {
 
 static uint64_t g_biped[8];
 
+// (research, LARECOMP_ZA_PARAMS=1: every parameter read through the lookup - its hash, how often, its values - logged
+// every 600 frames as "[za] param"; names: FNV-1a 64 of the game's strings)
+static struct { uint64_t hash, n, changes; float last, lo, hi; } g_params[512];
+static int g_nparams;
+static void param_note(uint64_t hash, float v) {
+    int i = 0;
+    while (i < g_nparams && g_params[i].hash != hash) i++;
+    if (i == g_nparams) {
+        if (g_nparams == 512) return;
+        g_params[g_nparams++] = (typeof(g_params[0])){hash, 0, 0, v, v, v};
+    }
+    if (v != g_params[i].last) g_params[i].changes++;
+    g_params[i].n++, g_params[i].last = v;
+    if (v < g_params[i].lo) g_params[i].lo = v;
+    if (v > g_params[i].hi) g_params[i].hi = v;
+    extern uint64_t renderer_game_frame(void);
+    static uint64_t dumped;
+    uint64_t f = renderer_game_frame();
+    if (f / 600 != dumped / 600) {
+        dumped = f;
+        for (int k = 0; k < g_nparams; k++)
+            LOG("[za] param %016llx reads %llu changes %llu last %g range %g..%g\n", (unsigned long long)g_params[k].hash,
+                (unsigned long long)g_params[k].n, (unsigned long long)g_params[k].changes, g_params[k].last, g_params[k].lo, g_params[k].hi);
+    }
+}
+
 static int param_lookup(Cpu *c, uint64_t addr) {
+    static int stats = -1;
+    if (stats < 0) stats = getenv("LARECOMP_ZA_PARAMS") != NULL;
     uint64_t hash = *(const uint64_t *)(uintptr_t)c->x[1];
     rt_call_original(c, addr);
     for (int i = 0; i < 8; i++)
-        if (hash == g_biped[i]) { c->v[0] = 0; break; }  // (the weight, s0)
+        if (hash == g_biped[i] && g_biped[i]) { c->v[0] = 0; break; }  // (the weight, s0)
+    if (stats) { float v; memcpy(&v, &c->v[0], 4); param_note(hash, v); }
     return 1;
 }
 
-// Choppy NPCs: an NPC's animation advances every frame, but its pose is only applied to the skeleton when a per-frame LOD
-// decision allows it: a callback each animation component holds (component + 0x180, called from 0x7001e73abc) answers
-// whether to evaluate this frame, kept at component + 0x1f4, and 0x7001dcdf40 (animation item -> [+0x48] component)
-// applies the pose only then. NPCs standing or walking around get it once every 60 frames - 2 s at 30 fps, 0.4 s at 144 -
-// while a conversation puts everyone nearby on every frame. Here it is always set: every NPC's pose follows its animation
-// each frame. (2026-10-20: forcing that flag only re-applied the same pose - the gate below is the real fix.)
-// LARECOMP_ZA_NPC_LOD=1 keeps the game's choice.
 // Choppy NPCs: an NPC's animation advances every frame, but its pose is only applied to the skeleton when a per-frame LOD
 // decision allows it: a callback each animation component holds (component + 0x180, called from 0x7001e73abc) answers
 // whether to evaluate this frame, kept at component + 0x1f4, and 0x7001dcdf40 (animation item -> [+0x48] component)
@@ -139,7 +161,10 @@ void za_fixes_configure(const char *exefs) {
         LOG("[za] NPC animation evaluated every frame (LARECOMP_ZA_NPC_LOD=1 keeps the game's animation LOD)\n");
     }
     const char *e = getenv("LARECOMP_ZA_FOOT_IK");
-    if (e && atoi(e)) return;
+    if (e && atoi(e)) {
+        if (getenv("LARECOMP_ZA_PARAMS")) rt_register_fnhook_at(ZA_PARAM_LOOKUP, param_lookup);  // (g_biped empty: no change)
+        return;
+    }
     static const char *names[8] = {"BipedIKWeight", "BipedIKOffsetWeight", "BipedIKControl0Weight", "BipedIKControl1Weight",
                                    "BipedIKControl0FootWeight", "BipedIKControl1FootWeight", "BipedIKControl0ToeWeight",
                                    "BipedIKControl1ToeWeight"};

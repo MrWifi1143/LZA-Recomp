@@ -1,4 +1,5 @@
 // fsp-srv: RomFS as a raw storage image, save data and SD card backed by host directories.
+#include <SDL3/SDL_timer.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -359,10 +360,16 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
                 if (getenv("LARECOMP_LOG_FILES")) LOG("[fs] read %s\n", path);
             }
         }
-        {   // LARECOMP_LOG_READS=<file>: every RomFS read as "<offset hex> <size hex>" (research: which packs the game loads)
+        {   // LARECOMP_LOG_READS=<file>: every RomFS read as "<offset hex> <size hex> <presented frame> <ms>" (research: which
+            // packs the game loads, and when)
             static FILE *rl = (FILE *)1;
             if (rl == (FILE *)1) rl = getenv("LARECOMP_LOG_READS") ? fopen(getenv("LARECOMP_LOG_READS"), "w") : NULL;
-            if (rl) { fprintf(rl, "%llx %llx\n", (unsigned long long)off, (unsigned long long)size); fflush(rl); }
+            extern uint64_t renderer_present_count(void);
+            if (rl) {
+                fprintf(rl, "%llx %llx %llu %llu\n", (unsigned long long)off, (unsigned long long)size,
+                        (unsigned long long)renderer_present_count(), (unsigned long long)SDL_GetTicks());
+                fflush(rl);
+            }
         }
         static uint64_t reads, bytes;
         reads++;
