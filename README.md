@@ -82,7 +82,8 @@ Playable into the open world: boot, first-boot setup, character creation, the op
 Village. Tested on Linux with an RTX 4090; the Windows build is tested under Wine.
 
 - Frame rates: 30 (the game's own), 60, 120 or 144 fps with the game at the right speed (144 holds in Jubilife
-  Village on an RTX 4090).
+  Village on an RTX 4090). The systems the game steps a fixed amount per frame (cutscenes, dialogue text, camera
+  turning, sky and water, effects) are patched to its frame time (`tools/patches.py`); no interpolated frames.
 - Graphics: transform-feedback character skinning, cast shadows, render scale up to 4K, SMAA.
 - Start screen: resolution, fullscreen, anti-aliasing, frame rate, FPS counter, button prompts, mods, controller test
   and remapping, keyboard remapping.
