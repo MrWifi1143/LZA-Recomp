@@ -91,9 +91,10 @@ def _printer_wait(gen, a):
     return '{ extern int rt_pla_tick(int); if (COND_CS(c) || !rt_pla_tick(%d)) { goto L_7002b31e38; } }' % (a & 0xffff)
 
 
-# The sky's scroll phases (the environment object: x19 + 0x604..0x614, each stepped once per update and wrapped to
-# 0..1): steps sized for 30 fps, scaled to the frame time. fdiv s0, s0, s1 (+0x614's step) and fmul s2, s2, s11
-# (the divisor of the +0x604..+0x610 steps).
+# The environment's scroll phases (the environment object: x19 + 0x5dc, 0x604..0x614, 0x64c, 0x650 - the clouds, the
+# wind; each stepped once per update and wrapped to 0..1): steps sized for 30 fps, scaled to the frame time.
+# fdiv s0, s0, s1 (+0x614's and +0x5dc's steps), fmul s2, s2, s11 (the divisor of the +0x604..+0x610 steps) and
+# fmul s11, s1, s2 (the divisor of the +0x64c / +0x650 steps).
 _F32 = 'union { uint32_t u; float f; } a, b; '
 
 
@@ -137,7 +138,14 @@ PLA_PATCHES[0x7002b90040] = _vfx_frames_cvt
 PLA_PATCHES[0x7002b90048] = _vfx_frames_use
 for _i, _a in enumerate((0x7001458424, 0x700145e234, 0x700145e580)):
     PLA_PATCHES[_a] = _demo_frames(_i)
-PLA_PATCHES[0x70029c1934] = _sky_step_div      # fdiv s0, s0, s1
+def _wind_step_divisor(gen, a):  # fmul s11, s1, s2 (param * 30: the divisor of the +0x64c / +0x650 steps)
+    return ('{ extern uint32_t rt_unscale30_f32(uint32_t); %sa.u = (uint32_t)c->v[1]; b.u = (uint32_t)c->v[2]; '
+            'a.f = a.f * b.f; c->v[11] = rt_unscale30_f32(a.u); }' % _F32)
+
+
+PLA_PATCHES[0x70029c1934] = _sky_step_div      # fdiv s0, s0, s1 (+0x614)
+PLA_PATCHES[0x70029c1800] = _sky_step_div      # fdiv s0, s0, s1 (+0x5dc)
+PLA_PATCHES[0x70029c2994] = _wind_step_divisor  # fmul s11, s1, s2
 PLA_PATCHES[0x70029c23cc] = _sky_step_divisor  # fmul s2, s2, s11
 PLA_PATCHES[0x7002b31864] = _printer_wait  # b.hs 0x7002b31e38 (still waiting: return)
 for _a in (0x70019358d0, 0x7001935c6c, 0x700193d26c):  # bl f_700193c2c4 (the camera's input turn, three modes)
