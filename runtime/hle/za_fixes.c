@@ -20,6 +20,9 @@
 // fixed the same day: the legs still stretch with LARECOMP_ZA_FOOT_IK=1 after them.)
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
+#include <time.h>
+#include <stdatomic.h>
 
 #include "../hle.h"
 
@@ -152,6 +155,8 @@ void za_fixes_configure(const char *exefs) {
     done = true;
     { extern void za_qstats_configure(void); za_qstats_configure(); }
     { extern void za_passq_configure(void); za_passq_configure(); }
+    { extern void za_jobq_configure(void); za_jobq_configure(); }
+    { extern void za_jobs_configure(void); za_jobs_configure(); }
     const char *lod = getenv("LARECOMP_ZA_NPC_LOD");
     if (!(lod && atoi(lod))) {
         rt_register_fnhook_at(ZA_ANIM_GATE_A, anim_gate_a);
@@ -215,4 +220,57 @@ static int passq_hook(Cpu *c, uint64_t addr) {
 void za_passq_configure(void);
 void za_passq_configure(void) {
     if (getenv("LARECOMP_ZA_PASSQ")) rt_register_fnhook_at(0x700180ec2cull, passq_hook);
+}
+
+// (research, LARECOMP_ZA_JOBQ=1: would more job workers help? The job system (scheduler at 0x7001cf5680's x0: workers
+// at +0x18, 3 of them) - a sampler every 200 us: how many jobs run (the job runner 0x7001cf3900, wrapped) and how
+// many wait in the workers' queues (each worker: three work-stealing deques at +0x2e0 / +0x310 / +0x340).)
+static _Atomic uint64_t g_jobq_sched;
+static _Atomic int g_jobq_running;
+static int jobq_kick_hook(Cpu *c, uint64_t addr) { (void)addr; g_jobq_sched = c->x[0]; return 0; }
+static int jobq_run_hook(Cpu *c, uint64_t addr) {
+    g_jobq_running++;
+    rt_call_original(c, addr);
+    g_jobq_running--;
+    return 1;
+}
+static void *jobq_sampler(void *arg) {
+    (void)arg;
+    uint64_t n = 0, by_run[5] = {0}, wait_when_full = 0, full_with_wait = 0, pend_sum = 0;
+    for (;;) {
+        struct timespec ts = {0, 200000};
+        nanosleep(&ts, NULL);
+        uint64_t s = g_jobq_sched;
+        if (!s) continue;
+        int run = g_jobq_running;
+        if (run > 4) run = 4;
+        int64_t pend = 0;
+        for (int i = 0; i < 3; i++) {
+            uint64_t w = *(uint64_t *)(uintptr_t)(s + 0x18 + 8 * i);
+            if (w < 0x7000000000ull || w >= 0x8000000000ull) continue;
+            for (int q = 0; q < 3; q++) {  // (its three work-stealing deques, by priority: bottom - top)
+                int64_t d = *(int64_t *)(uintptr_t)(w + 0x300 + 0x30 * q) - *(int64_t *)(uintptr_t)(w + 0x308 + 0x30 * q);
+                if (d > 0 && d < 4096) pend += d;
+            }
+        }
+        n++, by_run[run]++;
+        if (run >= 3) { pend_sum += (uint64_t)pend; if (pend > 0) full_with_wait++; }
+        (void)wait_when_full;
+        if (n % 10000 == 0) {
+            LOG("[jobq] %llu samples: running 0/1/2/3+ jobs %.0f%% %.0f%% %.0f%% %.0f%% | all busy and jobs waiting %.0f%% of the time, %.1f waiting on average then\n",
+                (unsigned long long)n, 100.0 * by_run[0] / n, 100.0 * by_run[1] / n, 100.0 * by_run[2] / n, 100.0 * (by_run[3] + by_run[4]) / n,
+                100.0 * full_with_wait / n, by_run[3] + by_run[4] ? (double)pend_sum / (by_run[3] + by_run[4]) : 0.0);
+            n = 0, memset(by_run, 0, sizeof by_run), full_with_wait = pend_sum = 0;
+        }
+    }
+    return NULL;
+}
+void za_jobq_configure(void);
+void za_jobq_configure(void) {
+    if (!getenv("LARECOMP_ZA_JOBQ")) return;
+    rt_register_fnhook_at(0x7001cf5680ull, jobq_kick_hook);
+    rt_register_fnhook_at(0x7001cf3900ull, jobq_run_hook);
+    pthread_t th;
+    pthread_create(&th, NULL, jobq_sampler, NULL);
+    pthread_detach(th);
 }

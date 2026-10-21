@@ -306,6 +306,8 @@ void rt_fatal_trace(void) {
     plat_print_backtrace();
     Cpu *c = kernel_current_cpu();
     if (c) {
+        { extern int kernel_current_thread_info(uint64_t *id, int *core); uint64_t id = 0; int core = -1;
+          if (kernel_current_thread_info(&id, &core)) fprintf(stderr, "guest thread %llx on core %d\n", (unsigned long long)id, core); }
         fprintf(stderr, "guest: sp=%llx lr=%llx\n", c->sp, c->x[30]);
         for (int i = 0; i < 31; i += 4)
             fprintf(stderr, "  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx\n", i, c->x[i], i + 1,

@@ -5,7 +5,8 @@
 // frame unpinned, ~6.6 ms pinned; ~4 fps more. Each of them gets a physical core of its own - the fastest ones, by
 // their maximum clock - and every other thread (started after cpupin_init) the CPUs left over. Only with 8 or more
 // fast physical cores, so the rest keep enough room. LARECOMP_PIN=0: off; LARECOMP_PIN=<core 0 cpu>,<core 1>,<core 2>,
-// <core 3>[,<render thread>]: those CPUs (the others not restricted).
+// <core 3>[,<render thread>]: those CPUs (the others not restricted). Emulated cores 4+ (Z-A's extra job workers) go on
+// the fast cores after those.
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -15,9 +16,11 @@
 
 #include "hle.h"
 
-static int g_core_cpu[4] = {-1, -1, -1, -1}, g_render_cpu = -1;
-int cpupin_core(int c) { return c >= 0 && c < 4 ? g_core_cpu[c] : -1; }
+static int g_core_cpu[8] = {-1, -1, -1, -1, -1, -1, -1, -1}, g_render_cpu = -1;
+int cpupin_core(int c) { return c >= 0 && c < 8 ? g_core_cpu[c] : -1; }
 int cpupin_render(void) { return g_render_cpu; }
+static int g_fast;  // fast physical cores (cpupin_init)
+int cpupin_fast_cores(void) { return g_fast; }
 
 #if !defined(__linux__)
 void cpupin_init(void) {}
@@ -106,6 +109,7 @@ void cpupin_init(void) {
     qsort(pc, (size_t)n, sizeof *pc, by_speed);
     int fast = 0;
     while (fast < n && (pc[0].freq <= 0 || pc[fast].freq >= pc[0].freq * 95 / 100)) fast++;
+    g_fast = fast;
     if (fast < 8) {
         LOG("[cpu] %d fast physical cores (of %d): threads not pinned\n", fast, n);
         return;
@@ -116,6 +120,8 @@ void cpupin_init(void) {
             if (CPU_ISSET(k, &pc[i].sib)) CPU_CLR(k, &rest);
     for (int i = 0; i < 4; i++) g_core_cpu[i] = pc[i].first;
     g_render_cpu = pc[4].first;
+    for (int i = 4; i < 8 && i + 1 < fast; i++) g_core_cpu[i] = pc[i + 1].first;  // (cores 4+, when a game has them -
+    // hle/za_jobs.c's extra job workers - on the next fast cores; not kept free of other threads)
     sched_setaffinity(0, sizeof rest, &rest);  // (this thread and every thread it starts from now on)
     LOG("[cpu] cores on CPUs %d %d %d %d, render thread %d; other threads on the %d CPUs left\n", g_core_cpu[0], g_core_cpu[1],
         g_core_cpu[2], g_core_cpu[3], g_render_cpu, CPU_COUNT(&rest));

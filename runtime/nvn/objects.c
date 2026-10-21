@@ -175,11 +175,11 @@ static void wait_report(void) {
     g_wake_lat_ns = 0, g_wake_n = 0;
     LOG("[waits] wakeups %.1f/frame, OS latency %.1f us each\n", (double)wn / g_wait_frames, wn ? wl / 1e3 / wn : 0.0);
     {
-        extern uint64_t g_core_busy_ns[4], g_thread_busy_ns[256], g_thread_wait_ns[256];
+        extern uint64_t g_core_busy_ns[8], g_thread_busy_ns[256], g_thread_wait_ns[256];
         extern uint32_t g_thread_busy_mask[256];
         char cl[640];
         int cn_ = snprintf(cl, sizeof cl, "[waits] cores busy ms/frame:");
-        for (int k = 0; k < 4; k++) cn_ += snprintf(cl + cn_, sizeof cl - (size_t)cn_, " %.2f", g_core_busy_ns[k] / 1e6 / g_wait_frames), g_core_busy_ns[k] = 0;
+        for (int k = 0; k < 8; k++) if (k < 4 || g_core_busy_ns[k]) cn_ += snprintf(cl + cn_, sizeof cl - (size_t)cn_, " %.2f", g_core_busy_ns[k] / 1e6 / g_wait_frames), g_core_busy_ns[k] = 0;
         cn_ += snprintf(cl + cn_, sizeof cl - (size_t)cn_, " | threads:");
         for (int k = 0; k < 256; k++)
             if (g_thread_busy_ns[k] / g_wait_frames > 300000 && cn_ < 440)

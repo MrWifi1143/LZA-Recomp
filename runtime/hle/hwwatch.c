@@ -103,6 +103,14 @@ void hwwatch_arm(uint64_t addr, uint64_t len) {
     fprintf(stderr, "[hwwatch] %llx+%llu on %d thread(s) (%d failed)\n", (unsigned long long)addr, (unsigned long long)len, n, fail);
 }
 
+// The watchpoints armed so far, on the calling thread too (one started after they were armed: kernel.c thread_main)
+void hwwatch_arm_self(void) {
+    for (int w = 0; w < g_nw; w++) {
+        int fd = bp_open((pid_t)syscall(SYS_gettid), g_lo[w], g_len[w]);
+        if (fd >= 0 && g_nfd[w] < 256) g_fds[w][g_nfd[w]++] = fd;
+    }
+}
+
 // LARECOMP_HWWATCH_SRC=<memcpy>,<dst>,<off>: the first time the guest's memcpy (its address) copies to dst, watch what
 // it copies from (+off, 3 words of 8 bytes): data that a buffer on its way to dst got from (a per-frame ring is reused)
 static uint64_t src_memcpy, src_dst, src_off;
@@ -128,5 +136,6 @@ void hwwatch_src_arm(void) {
 #include <stdint.h>
 void hwwatch_arm(uint64_t addr, uint64_t len) { (void)addr, (void)len; }
 void hwwatch_reset(void) {}
+void hwwatch_arm_self(void) {}
 void hwwatch_src_arm(void) {}
 #endif

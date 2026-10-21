@@ -27,6 +27,7 @@ struct KThread {
     pthread_t host;
 #endif
     uint64_t entry, tlr, id;
+    uint64_t arg;        // (thread dump: the ThreadType* the SDK passes, for the thread's name)
     uint32_t handle;
     int prio, core;      // core: the ideal core (svcSetThreadCoreMask / CreateThread)
     uint32_t core_mask;  // the cores it may run on

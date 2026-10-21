@@ -111,7 +111,13 @@ static void deadline(struct timespec *ts, int64_t timeout_ns) {
 // call's dispatch, kernel_block_end). A thread that waited CORE_STEAL_NS for a core whose owner runs without any svc
 // takes it beside the owner (Horizon would preempt a lower-priority owner; a spin-wait must not hang).
 // LARECOMP_FREE_CORES=1: the old way (every thread free).
-#define NCORES 4
+#define NCORES 8  // (array sizes; g_ncores of them exist)
+// The emulated cores: 4, as on the Switch, unless kernel_set_cores asked for more before boot (hle/za_jobs.c: Z-A's
+// extra job workers run on cores 4+). The game is told what it has through GetInfo's core mask.
+static int g_ncores = 4;
+void kernel_set_cores(int n) { g_ncores = n < 4 ? 4 : n > NCORES ? NCORES : n; }
+int kernel_cores(void) { return g_ncores; }
+static uint32_t cores_mask(void) { return (1u << g_ncores) - 1; }
 #define CORE_STEAL_NS 20000000ull
 static pthread_mutex_t g_core_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_core_cond = PTHREAD_COND_INITIALIZER;
@@ -183,7 +189,7 @@ static void core_pair_note(KThread *t, KThread *o, int core) {  // (g_core_lock 
     while (i < 32 && g_pairs[i].n && !(g_pairs[i].w == t->id && g_pairs[i].o == o->id)) i++;
     if (i == 32) return;
     g_pairs[i].w = t->id, g_pairs[i].o = o->id, g_pairs[i].wp = t->prio, g_pairs[i].op = o->prio, g_pairs[i].core = core;
-    g_pairs[i].wmask = (int)(t->core_mask & 0xF), g_pairs[i].n++;
+    g_pairs[i].wmask = (int)(t->core_mask & cores_mask()), g_pairs[i].n++;
     static uint64_t total;
     if (++total % 20000 == 0)
         for (int k = 0; k < 32 && g_pairs[k].n; k++)
@@ -193,14 +199,14 @@ static void core_pair_note(KThread *t, KThread *o, int core) {  // (g_core_lock 
 static void core_acquire(KThread *t) {
     if (!t || t->run_core >= 0 || !cores_on()) return;
     uint64_t w0_ = 0;
-    uint32_t mask = t->core_mask & 0xF;
+    uint32_t mask = t->core_mask & cores_mask();
     if (!mask) mask = 1u << t->core;
     pthread_mutex_lock(&g_core_lock);
     uint64_t start = 0, seq = 0;
     for (;;) {
         int pick = -1;
         if ((mask >> t->core & 1) && !g_core_owner[t->core]) pick = t->core;
-        for (int i = 0; pick < 0 && i < NCORES; i++)
+        for (int i = 0; pick < 0 && i < g_ncores; i++)
             if ((mask >> i & 1) && !g_core_owner[i]) pick = i;
         if (pick >= 0) {
             g_core_owner[pick] = t;
@@ -398,6 +404,14 @@ static void *thread_main(void *arg) {
     t->cpu.host_fpcr = 1;  // (the host FP state this pthread started with is its creator's: simd.h syncs it)
     if (!setjmp(t->unwind)) {
         core_acquire(t);
+        {   // (research, LARECOMP_HWWATCH_BOOT=<addr>: a hardware watchpoint on that guest word from the first thread's start)
+            static int armed;
+            const char *w = getenv("LARECOMP_HWWATCH_BOOT");
+            extern void hwwatch_arm(uint64_t addr, uint64_t len), hwwatch_arm_self(void);
+            if (w && !armed++) {  // (<addr>[,<addr>...], 8 bytes each; every thread started later is watched too)
+                for (char *p = (char *)w; *p;) { uint64_t a = strtoull(p, &p, 16); if (a) hwwatch_arm(a, 8); while (*p == ',') p++; }
+            } else if (w) hwwatch_arm_self();
+        }
         guest_call(&t->cpu, t->entry);
     }
     core_release(t);
@@ -421,6 +435,7 @@ static KThread *thread_new(uint64_t entry, uint64_t arg, uint64_t stack_top, int
     t->run_core = -1;
     t->id = next_thread_id++;
     t->cpu.x[0] = arg;
+    t->arg = arg;
     t->cpu.sp = stack_top & ~15ull;
     t->cpu.excl_addr = ~0ull;
     t->tlr = tls_next;
@@ -464,6 +479,11 @@ void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t
 
 uint32_t kernel_current_thread_handle(void) { return t_cur ? t_cur->handle : 0; }
 __thread Cpu *g_fiber_cpu;  // hle/fiber.c: the running fiber's Cpu (NULL: the thread's own)
+int kernel_current_thread_info(uint64_t *id, int *core) {  // (dispatch.c's crash report)
+    if (!t_cur) return 0;
+    *id = t_cur->id, *core = t_cur->run_core >= 0 ? t_cur->run_core : t_cur->core;
+    return 1;
+}
 Cpu *kernel_current_cpu(void) { return g_fiber_cpu ? g_fiber_cpu : t_cur ? &t_cur->cpu : NULL; }
 KThread *kernel_current_thread(void) { return t_cur; }
 
@@ -872,6 +892,21 @@ static void *thread_dump_main(void *arg) {
                 (unsigned long long)t->cur_svc_args[0], (unsigned long long)t->cur_svc_args[1],
                 (unsigned long long)t->cur_svc_args[2], (unsigned long long)t->cur_svc_args[3],
                 (unsigned long long)(t->cur_svc < 0 ? t->cpu.pc : t->cur_svc_pc), (unsigned long long)t->cpu.x[30]);
+            {   // its name: the first string in (or pointed to from) the SDK's ThreadType it was started with
+                char nm[40] = "";
+                for (uint64_t o = 0; o < 0x1c0 && !nm[0] && t->arg >= GUEST_LO && t->arg + o + 8 < GUEST_HI; o += 8) {
+                    const char *cand[2] = {(const char *)(uintptr_t)(t->arg + o), NULL};
+                    uint64_t pv = *(uint64_t *)(uintptr_t)(t->arg + o);
+                    if (pv >= GUEST_LO && pv + 32 < GUEST_HI) cand[1] = (const char *)(uintptr_t)pv;
+                    for (int k = 0; k < 2 && !nm[0]; k++) {
+                        const char *q = cand[k];
+                        int n = 0;
+                        while (q && n < 39 && q[n] >= 0x20 && q[n] < 0x7f) n++;
+                        if (q && n >= 4 && !q[n]) memcpy(nm, q, (size_t)n), nm[n] = 0;
+                    }
+                }
+                LOG("[threads]     name \"%s\" mask %x core %d arg %llx tpidr %llx (id %llx)\n", nm, t->core_mask, t->core, (unsigned long long)t->arg, (unsigned long long)t->cpu.tpidr, (unsigned long long)((t->cpu.tpidr >> 13) & 0x7f));
+            }
             // guest call stack: the AArch64 frame record chain {fp, lr} from x29
             uint64_t fp = t->cpu.x[29];
             LOG("[threads]     stack:");
@@ -1046,15 +1081,32 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         if (!o) { x[0] = R_INVALID_HANDLE; break; }
         KThread *t = (KThread *)o;
         int ideal = (int32_t)x[1];
-        uint32_t mask = (uint32_t)x[2] & 0xF;
-        if (ideal >= 0 && ideal < 4) t->core = ideal;
+        uint32_t mask = (uint32_t)x[2] & cores_mask();
+        if (ideal >= 0 && ideal < g_ncores) t->core = ideal;
         else if (ideal == -2) t->core = 0;
         if (mask && !(mask >> t->core & 1)) t->core = __builtin_ctz(mask);
         t->core_mask = mask ? mask : 1u << t->core;
         x[0] = R_OK;
         break;
     }
-    case 0x10: x[0] = t_cur->run_core >= 0 ? t_cur->run_core : t_cur->core; break;  // GetCurrentProcessorNumber
+    case 0x10: {  // GetCurrentProcessorNumber
+        x[0] = t_cur->run_core >= 0 ? t_cur->run_core : t_cur->core;
+        { static int alias = -2; if (alias == -2) alias = ENV("LARECOMP_CORE_ALIAS") ? atoi(ENV("LARECOMP_CORE_ALIAS")) : -1;  // (research)
+          if (alias >= 0 && x[0] >= 4) x[0] = (uint64_t)alias; }
+        if (ENV("LARECOMP_LOG_CORENUM")) {  // (research: who asks - the caller and its caller, counted)
+            static struct { uint64_t a, b, n; } seen[64];
+            static int nseen;
+            uint64_t a = c->x[30], fp = c->x[29], b = fp >= GUEST_LO && fp < GUEST_HI ? ((uint64_t *)(uintptr_t)fp)[1] : 0;
+            int i = 0;
+            while (i < nseen && !(seen[i].a == a && seen[i].b == b)) i++;
+            if (i < 64) {
+                if (i == nseen) nseen++, seen[i].a = a, seen[i].b = b;
+                if (++seen[i].n == 1 || seen[i].n == 1000 || seen[i].n == 100000)
+                    LOG("[corenum] from %llx / %llx: %llu calls\n", (unsigned long long)a, (unsigned long long)b, (unsigned long long)seen[i].n);
+            }
+        }
+        break;
+    }
     case 0x11: case 0x12: case 0x17: {  // SignalEvent / ClearEvent / ResetSignal
         pthread_mutex_lock(&g_klock);
         KObject *o = handle_get((uint32_t)x[0]);
@@ -1155,7 +1207,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         uint64_t v = 0;
         uint32_t r = R_OK;
         switch (id0) {
-        case 0: v = 0xF; break;
+        case 0: v = cores_mask(); break;
         case 1: v = 0xFFFFFFFFFFFFFFFFull; break;
         case 2: v = ALIAS_BASE; break;
         case 3: v = ALIAS_SIZE; break;
