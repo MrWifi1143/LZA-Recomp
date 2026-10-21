@@ -117,7 +117,24 @@ def _demo_frames(i):
     return patch
 
 
+# The effect manager's frame rate for the effect system (f_7002b8fe..: s8 = speed * frames): the frame time in whole
+# 60 Hz frames - fcvtzs w8, d0 / scvtf s1, w8: 2 at 30 fps, 1 at 60, 0 at 120 and 144, where effects that fade in
+# or emit over frames (the opening's golden light, the title logo) never show. The frames with their fraction instead
+# (rt_pla_frames60_f: whole frames at 30 fps, as the game does). fcvtzs w8, d0 carries them as a float's bits in w8
+# (d0 is reused by the next instruction), scvtf s1, w8 takes them back.
+def _vfx_frames_cvt(gen, a):  # fcvtzs w8, d0: w8 = the frames as a float's bits (d0 is reused right after)
+    assert gen.words[(a - gen.base) // 4] == 0x1e780008, hex(a)
+    return '{ extern uint32_t rt_pla_frames60_f(uint64_t); c->x[8] = rt_pla_frames60_f((uint64_t)c->v[0]); }'
+
+
+def _vfx_frames_use(gen, a):  # scvtf s1, w8: s1 = those bits
+    assert gen.words[(a - gen.base) // 4] == 0x1e220101, hex(a)
+    return 'c->v[1] = (uint32_t)c->x[8];'
+
+
 PLA_PATCHES = {a: _step_site(i) for i, a in enumerate(PLA_STEP_SITES)}
+PLA_PATCHES[0x7002b90040] = _vfx_frames_cvt
+PLA_PATCHES[0x7002b90048] = _vfx_frames_use
 for _i, _a in enumerate((0x7001458424, 0x700145e234, 0x700145e580)):
     PLA_PATCHES[_a] = _demo_frames(_i)
 PLA_PATCHES[0x70029c1934] = _sky_step_div      # fdiv s0, s0, s1

@@ -446,7 +446,7 @@ void pla60_configure(const char *exefs) {
     if (n && atoi(n) > 30) on = true, g_pla60_ns = 1000000000ull / (uint64_t)atoi(n);
     g_pla60_entry = 0;
     g_pla60_patched = false;
-    { void dt_probe_init(void), watch_arg_init(void), gate_init(void); dt_probe_init(); watch_arg_init(); gate_init(); }
+    { void dt_probe_init(void), watch_arg_init(void), gate_init(void), args_probe_init(void); dt_probe_init(); watch_arg_init(); gate_init(); args_probe_init(); }
     for (size_t i = 0; on && i < sizeof k_legends60 / sizeof *k_legends60; i++)
         if (!memcmp(id, k_legends60[i].id, 8)) {
             g_pla60_entry = k_legends60[i].entry;
@@ -656,4 +656,39 @@ uint32_t rt_pla_frames60(int site) {
     uint32_t n = (uint32_t)acc[site];
     acc[site] -= n;
     return n;
+}
+
+// Research (LARECOMP_ARGS_PROBE="<fn hex>[,...]"): the first calls of those functions: x0..x3 and s0..s1 (a float
+// argument such as an effect system's frame rate).
+static int args_probe_hook(Cpu *c, uint64_t addr) {
+    static _Atomic int n;
+    if (atomic_fetch_add(&n, 1) > 200) return 0;
+    float s0, s1;
+    uint32_t b0 = (uint32_t)c->v[0], b1 = (uint32_t)c->v[1];
+    memcpy(&s0, &b0, 4), memcpy(&s1, &b1, 4);
+    LOG("[args] f_%llx present %llu: x0 %llx x1 %llx x2 %llx x3 %llx s0 %g s1 %g lr %llx\n", (unsigned long long)addr,
+        (unsigned long long)renderer_game_frame(), (unsigned long long)c->x[0], (unsigned long long)c->x[1],
+        (unsigned long long)c->x[2], (unsigned long long)c->x[3], (double)s0, (double)s1, (unsigned long long)c->x[30]);
+    return 0;
+}
+void args_probe_init(void) {
+    const char *e = getenv("LARECOMP_ARGS_PROBE");
+    for (char *s = (char *)e; s && *s;) {
+        uint64_t a = strtoull(s, &s, 16);
+        void rt_register_fnhook_at(uint64_t, int (*)(Cpu *, uint64_t));
+        if (a) rt_register_fnhook_at(a, args_probe_hook);
+        while (*s == ',') s++;
+        if (*s && !strchr("0123456789abcdefABCDEF", *s)) break;
+    }
+}
+
+// (the effect manager's 60 Hz frames, d = the frame time / 16.67 ms as a double's bits: the float's bits; whole frames
+// unless above 30 fps)
+uint32_t rt_pla_frames60_f(uint64_t dbits) {
+    double d;
+    memcpy(&d, &dbits, 8);
+    float f = g_pla60_patched ? (float)d : (float)(int32_t)d;
+    uint32_t b;
+    memcpy(&b, &f, 4);
+    return b;
 }
