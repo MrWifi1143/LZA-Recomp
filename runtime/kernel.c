@@ -117,7 +117,7 @@ static pthread_mutex_t g_core_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_core_cond = PTHREAD_COND_INITIALIZER;
 static KThread *g_core_owner[NCORES];
 // (research, LARECOMP_LOG_WAITS: how long each core and each thread held a core - g_core_lock)
-uint64_t g_core_busy_ns[NCORES], g_thread_busy_ns[256];
+uint64_t g_core_busy_ns[NCORES], g_thread_busy_ns[256], g_thread_wait_ns[256];
 static uint64_t g_core_t0[NCORES];
 uint32_t g_thread_busy_mask[256];
 static bool core_busy_log(void) {
@@ -207,7 +207,7 @@ static void core_acquire(KThread *t) {
             if (core_busy_log()) g_core_t0[pick] = plat_now_ns();
             t->run_core = pick;
             t->core_shared = false;
-            if (w0_) g_core_wait_ns += plat_now_ns() - w0_, g_core_waits++;
+            if (w0_) g_core_wait_ns += plat_now_ns() - w0_, g_core_waits++, g_thread_wait_ns[t->id & 255] += plat_now_ns() - w0_;
             break;
         }
         {   // LARECOMP_CORE_PREEMPT=1 (experiment): a thread of higher priority than the owner of its core runs at once,
@@ -219,7 +219,7 @@ static void core_acquire(KThread *t) {
             if (pre && o && t->prio < o->prio) {
                 t->run_core = c0;
                 t->core_shared = true;
-                if (w0_) g_core_wait_ns += plat_now_ns() - w0_, g_core_waits++;
+                if (w0_) g_core_wait_ns += plat_now_ns() - w0_, g_core_waits++, g_thread_wait_ns[t->id & 255] += plat_now_ns() - w0_;
                 break;
             }
         }
@@ -261,7 +261,7 @@ static void core_acquire(KThread *t) {
         if (w.granted >= 0) {
             t->run_core = w.granted;
             t->core_shared = false;
-            g_core_wait_ns += plat_now_ns() - w0_, g_core_waits++;
+            g_core_wait_ns += plat_now_ns() - w0_, g_core_waits++, g_thread_wait_ns[t->id & 255] += plat_now_ns() - w0_;
             break;
         }
     }
