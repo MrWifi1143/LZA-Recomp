@@ -666,7 +666,7 @@ PLAIN(nvnCommandBufferSignalEvent, CMD_SIGNAL_EVENT)
 PLAIN(nvnCommandBufferWaitEvent, CMD_WAIT_EVENT)
 PLAIN(nvnCommandBufferReportCounter, CMD_REPORT_COUNTER)
 STUB(nvnCommandBufferReportValue)
-STUB(nvnCommandBufferResetCounter)
+PLAIN(nvnCommandBufferResetCounter, CMD_RESET_COUNTER)
 NVN(nvnCommandBufferCallCommands) {
     { static uint64_t n; n++; if ((n & (n - 1)) == 0) LOG("[nvn] CallCommands #%llu (lr %llx)\n", (unsigned long long)n, (unsigned long long)c->x[30]); }
     if (g_ntrace_list) {

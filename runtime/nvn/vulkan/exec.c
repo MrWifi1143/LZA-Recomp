@@ -268,11 +268,13 @@ void vk_gpuprof_report(void) {
 }
 
 static void ring_flush_gpu(void);
+static void oq_flush(void);
 static uint64_t submit_draws;  // g_draws_total at the last submission (backend_execute's batching)
 // Submit the pending work (if any). wait/signal: binary semaphores for presentation (may be null).
 void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra) {
     (void)extra;
     vk_end_pass();
+    if (signal) oq_flush();  // (the frame's occlusion query results: once a frame, in its presenting submission)
     ring_flush_gpu();
     Sub *s = sub();
     if (!s->main_begun && !s->upload_begun && !wait && !signal) return;
@@ -747,7 +749,7 @@ static bool ip_skip_op(uint32_t op) {  // what the replay must not do again: it 
     switch (op) {
     case CMD_DISPATCH: case CMD_DISPATCH_INDIRECT: case CMD_COPY_BUFFER_TO_BUFFER: case CMD_COPY_TEXTURE_TO_BUFFER:
     case CMD_UPDATE_UNIFORM_BUFFER: case CMD_FENCE_SYNC: case CMD_WAIT_SYNC: case CMD_SIGNAL_EVENT: case CMD_WAIT_EVENT:
-    case CMD_REPORT_COUNTER: case CMD_CLEAR_BUFFER:
+    case CMD_REPORT_COUNTER: case CMD_RESET_COUNTER: case CMD_CLEAR_BUFFER:
     case CMD_COPY_BUFFER_TO_TEXTURE:  // (uploads: done when the frame ran; again, they overran scaled images)
         return true;
     default:
@@ -907,6 +909,79 @@ static float vp_sx = 1, vp_sy = 1, vp_ox = 0, vp_oy = 0;
 static float tex_sc[2][64][2];
 static uint32_t tex_wh[2][64][2];
 
+// ================================================================== occlusion queries
+// The game's SAMPLES_PASSED counters (Z-A: ~45 a frame, each object's proxy box drawn between ResetCounter and
+// ReportCounter) as Vulkan occlusion queries: the report's counter word gets the query's result, copied by the GPU in
+// the frame's last submission (the one presenting: its occlusion passes are long done, so the copies' waits cost
+// nothing - copied at every submission's end, right after the queries, they drained the GPU: ~20% fps). (Written from
+// the CPU once the GPU was done, frames later, results landed on memory the game had reused: vertex explosions.)
+// Until then, and wherever a query can't be made (no pass running, the pass ended before the report, no pool), the
+// counter reads "visible". (It read 0: every proxy hidden, so objects popped in late
+// - Lumiose's arrival cutscene.) LARECOMP_VK_SAMPLES=<n>: no queries, every report n (0: the old behaviour).
+#define OQ_SLOTS 4096
+#define OQ_VISIBLE 0x10000ull
+static VkQueryPool oq_pool;
+static int oq_mode = -1;  // 1: queries; 0: every report oq_fixed
+static uint64_t oq_fixed;
+static uint32_t oq_next;
+static int oq_active = -1;  // the query running in this pass (its slot)
+static bool oq_wanted;      // a reset came outside a pass: the query begins with the next one
+static uint64_t oq_seq[OQ_SLOTS];  // submission each slot was last used in
+static struct { uint32_t slot; uint64_t off; } oq_copy[OQ_SLOTS];  // reports waiting for their query's result
+static int oq_ncopy;
+static uint64_t oq_stats[3];  // queries copied, reports without a query, queries cut by a pass end
+
+static void oq_init(void) {
+    const char *e = getenv("LARECOMP_VK_SAMPLES");
+    oq_mode = 0, oq_fixed = e ? strtoull(e, NULL, 0) : OQ_VISIBLE;
+    if (e) { LOG("[vk] occlusion queries off: every report %llu\n", (unsigned long long)oq_fixed); return; }
+    VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_OCCLUSION,
+                                .queryCount = OQ_SLOTS};
+    if (!g_vk.oq_host_reset || vkCreateQueryPool(g_vk.dev, &qi, NULL, &oq_pool) != VK_SUCCESS) {
+        LOG("[vk] occlusion queries unavailable (host query reset %d): every report says visible\n", g_vk.oq_host_reset);
+        return;
+    }
+    vkResetQueryPool(g_vk.dev, oq_pool, 0, OQ_SLOTS);
+    oq_mode = 1;
+    LOG("[vk] occlusion queries on (%s sample counts)\n", g_vk.oq_precise ? "exact" : "non-zero");
+}
+static void oq_begin(void) {  // (in a pass)
+    uint32_t slot = oq_next % OQ_SLOTS;
+    if (oq_seq[slot] == vk_pending_seq() || oq_ncopy == OQ_SLOTS) return;  // (ring full: no query, "visible")
+    if (oq_seq[slot] && oq_seq[slot] > vk_completed_seq()) return;           // (its last copy still running: same)
+    for (int i = 0; i < oq_ncopy; i++) if (oq_copy[i].slot == slot) return;  // (not copied yet)
+    oq_next++;
+    if (oq_seq[slot]) vkResetQueryPool(g_vk.dev, oq_pool, slot, 1);
+    oq_seq[slot] = vk_pending_seq();
+    vkCmdBeginQuery(vk_cmd(), oq_pool, slot, g_vk.oq_precise ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
+    oq_active = (int)slot;
+}
+static void oq_pass_begun(void) {
+    if (oq_wanted && oq_mode == 1) oq_begin();
+    oq_wanted = false;
+}
+static void oq_pass_ending(void) {  // (before vkCmdEndRendering: a query can't outlive its pass)
+    if (oq_active < 0) return;
+    vkCmdEndQuery(vk_cmd(), oq_pool, (uint32_t)oq_active);
+    oq_active = -1;
+    oq_stats[2]++;
+}
+static VkBuffer gmem_buf;
+static void oq_flush(void) {  // (the presenting submission, outside any pass) the results into the reports' counter words
+    if (!oq_ncopy) return;
+    VkCommandBuffer cb = vk_cmd();
+    for (int i = 0; i < oq_ncopy; i++) {
+        vkCmdCopyQueryPoolResults(cb, oq_pool, oq_copy[i].slot, 1, gmem_buf, oq_copy[i].off, 8,
+                                  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+        oq_seq[oq_copy[i].slot] = vk_pending_seq();  // (reusable once this submission is done)
+    }
+    VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                          .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    oq_stats[0] += (uint64_t)oq_ncopy;
+    oq_ncopy = 0;
+}
+
 // ================================================================== render passes
 static VkFormat pass_color[8], pass_depth, pass_stencil;
 static uint32_t pass_ncolor, pass_samples = 1, pass_w, pass_h;
@@ -920,6 +995,7 @@ static NvnTexture *pass_rt[9];  // the running pass's color targets and depth (f
 static void vk_end_pass_at(int line) {
     if (!in_pass) return;
     if (prof && line < 4096) prof_end_line[line]++;
+    oq_pass_ending();
     vkCmdEndRendering(vk_cmd());
     in_pass = false;
     if (g_storage_written) {  // the next passes sample (or keep accumulating into) what the shaders stored
@@ -1075,6 +1151,7 @@ static void begin_pass(void) {
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
     vkCmdBeginRendering(cb, &ri);
     in_pass = true;
+    oq_pass_begun();
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
     stat_passes++;
 }
@@ -2417,7 +2494,6 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
 // (VK_EXT_external_memory_host), zero-copy like metal.m's g_guest_buffer, so compute results land in guest
 // memory. The import pins its pages, so it covers only the heap the game set up (SetHeapSize), made on first use.
 // LARECOMP_VK_NO_GMEM=1: no import, reads return zero.
-static VkBuffer gmem_buf;
 static VkDeviceMemory gmem_mem;
 static uint64_t gmem_size;
 
@@ -4593,6 +4669,14 @@ static void exec_list(uint64_t handle, int depth) {
             if (r->x[1]) nvn_sync_set_seq(r->x[1], renderer_fence_seq());
             break;
         }
+        case CMD_RESET_COUNTER:
+            if (r->x[0] != 1) break;  // (SAMPLES_PASSED only: an occlusion query starts here)
+            if (oq_mode < 0) oq_init();
+            if (oq_mode != 1) break;
+            if (oq_active >= 0) { vkCmdEndQuery(vk_cmd(), oq_pool, (uint32_t)oq_active); oq_active = -1; }  // (a reset again)
+            if (in_pass) oq_begin();
+            else oq_wanted = true;
+            break;
         case CMD_REPORT_COUNTER: {
             // The game times its GPU work with these (two per frame) and drops to 30 fps when that looks slow;
             // the value is our translation time, not GPU time. LARECOMP_VK_COUNTER=frozen: the same timestamp for
@@ -4609,11 +4693,32 @@ static void exec_list(uint64_t handle, int depth) {
             uint64_t v = frozen == 1 ? frame_ts : frozen == 2 ? frame_seen * 33333333ull + in_frame * 1000000ull : SDL_GetTicksNS();
             in_frame++;
             if (out) { out[0] = 0; out[1] = v; }
+            if (type == 1) {  // SAMPLES_PASSED: the occlusion query since the reset (above)
+                if (oq_mode < 0) oq_init();
+                if (out) out[0] = oq_mode == 1 ? OQ_VISIBLE : oq_fixed;  // (until the query's result is copied over it)
+                uint64_t a = r->x[1];
+                if (oq_active >= 0) {
+                    vkCmdEndQuery(vk_cmd(), oq_pool, (uint32_t)oq_active);
+                    if (in_pass && gmem_buf && a >= HEAP_BASE && a + 8 <= HEAP_BASE + gmem_size && oq_ncopy < OQ_SLOTS)
+                        oq_copy[oq_ncopy].slot = (uint32_t)oq_active, oq_copy[oq_ncopy++].off = a - HEAP_BASE;
+                    oq_active = -1;
+                } else if (oq_mode == 1) {
+                    oq_stats[1]++;
+                }
+                oq_wanted = false;
+                static uint64_t logged;
+                if (oq_mode == 1 && renderer_present_count() / 1200 != logged) {
+                    logged = renderer_present_count() / 1200;
+                    LOG("[vk] occlusion queries: %llu results copied, %llu reports without a query, %llu cut by a pass end\n",
+                        (unsigned long long)oq_stats[0], (unsigned long long)oq_stats[1], (unsigned long long)oq_stats[2]);
+                }
+            }
             static int clog = -1;  // LARECOMP_COUNTER_LOG=1: each counter, with the draws recorded since the previous one
             if (clog < 0) clog = getenv("LARECOMP_COUNTER_LOG") != NULL;
             static uint64_t last_draws;
-            if (clog) LOG("[counter] frame %llu #%llu value %llu draws %llu\n", (unsigned long long)frame_seen, (unsigned long long)in_frame,
-                          (unsigned long long)v, (unsigned long long)(g_draws_total - last_draws));
+            if (clog) LOG("[counter] frame %llu #%llu type %u at %llx value %llu draws %llu\n", (unsigned long long)frame_seen,
+                          (unsigned long long)in_frame, type, (unsigned long long)r->x[1], (unsigned long long)v,
+                          (unsigned long long)(g_draws_total - last_draws));
             last_draws = g_draws_total;
             break;
         }

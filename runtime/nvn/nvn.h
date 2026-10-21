@@ -136,6 +136,7 @@ enum {
     CMD_DISCARD_DEPTH_STENCIL, CMD_SET_COPY_STRIDES, CMD_DRAW_TEXTURE, CMD_RESOLVE_DEPTH,
     CMD_OBJECT,  // (ours) x[0]: the game object the following draws belong to, 0 = none (frame interpolation)
     CMD_XFB_BEGIN, CMD_XFB_END, CMD_XFB_BIND, CMD_SET_RASTER_DISCARD, CMD_SET_DEPTH_CLAMP,
+    CMD_RESET_COUNTER,  // x[0]: the counter type (SAMPLES_PASSED: an occlusion query starts, exec.c)
     CMD_COUNT
 };
 
