@@ -153,7 +153,7 @@ void renderer_set_scale(float sx, float sy) { g_rs_x = sx; g_rs_y = sy; }
 uint64_t renderer_present_count(void);
 
 static bool tex_scalable(const NvnTexture *t) {
-    if (getenv("LARECOMP_NO_SCALE")) return false;
+    if (ENV("LARECOMP_NO_SCALE")) return false;
     if (t->target != 1 || t->samples > 1 || !(t->flags & 8) || t->width < 32 || t->height < 16) return false;
     float a = (float)t->width / (float)t->height;
     return a > 1.74f && a < 1.81f;
@@ -496,12 +496,16 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     b->checked_frame = frame;
     prof_tex_checks++;
     if (t->flags & 0x10) b->dynamic = true;
-    if (full_hash_budget_frame != frame) { full_hash_budget_frame = frame; full_hash_budget = 4 << 20; }
+    if (full_hash_budget_frame != frame) { full_hash_budget_frame = frame; full_hash_budget = 1 << 20; }
     const uint8_t *mem = (const uint8_t *)(uintptr_t)t->addr;
     static int always_full = -1;
     if (always_full < 0) always_full = getenv("LARECOMP_TEX_FULLHASH") ? 1 : 0;
     bool full = b->dynamic || !b->uploaded || always_full;
-    if (!full && frame - b->full_frame >= 120 && full_hash_budget >= total) { full = true; full_hash_budget -= total; }
+    // (the backstop: 1 MB a frame, or one texture up to 4 MB - reading more evicted the game's data from the shared L3)
+    if (!full && frame - b->full_frame >= 120 && (full_hash_budget >= total || (full_hash_budget == 1 << 20 && total <= 4 << 20))) {
+        full = true;
+        full_hash_budget -= total < full_hash_budget ? total : full_hash_budget;
+    }
     if (!full) {
         prof_tex_samples++;
         uint64_t sh = fnv_sample(mem, total);
@@ -945,7 +949,7 @@ static VkCompareOp compare_op(uint32_t f) {
 static VkSampler sampler_create(NvnSamplerDesc *d, bool cmp);
 VkSampler vk_sampler(NvnSamplerDesc *d) { return d->backend ? (VkSampler)d->backend : sampler_create(d, true); }
 VkSampler vk_sampler_for(NvnSamplerDesc *d, bool shadow) {
-    if (shadow || !d->compare_mode || getenv("LARECOMP_KEEP_COMPARE")) return vk_sampler(d);
+    if (shadow || !d->compare_mode || ENV("LARECOMP_KEEP_COMPARE")) return vk_sampler(d);
     return d->backend_nocmp ? (VkSampler)d->backend_nocmp : sampler_create(d, false);
 }
 static VkSampler sampler_create(NvnSamplerDesc *d, bool cmp) {

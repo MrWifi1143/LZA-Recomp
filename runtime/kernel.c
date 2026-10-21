@@ -116,6 +116,55 @@ static void deadline(struct timespec *ts, int64_t timeout_ns) {
 static pthread_mutex_t g_core_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_core_cond = PTHREAD_COND_INITIALIZER;
 static KThread *g_core_owner[NCORES];
+// (research, LARECOMP_LOG_WAITS: how long each core and each thread held a core - g_core_lock)
+uint64_t g_core_busy_ns[NCORES], g_thread_busy_ns[256];
+static uint64_t g_core_t0[NCORES];
+uint32_t g_thread_busy_mask[256];
+static bool core_busy_log(void) {
+    static int on = -1;
+    if (on < 0) on = ENV("LARECOMP_LOG_WAITS") != NULL;
+    return on;
+}
+// Threads waiting for a core (g_core_lock): a core given up goes straight to the waiter Horizon would run on it - the
+// highest priority, then one pinned to it before one that may float (it has other cores), then the longest waiting -
+// instead of to whichever waiter the OS woke first (a pinned main-loop thread kept losing its core to job workers).
+// LARECOMP_CORE_FIFO=1: the old way (every waiter woken, the first to look takes it).
+typedef struct CoreWaiter { KThread *t; uint32_t mask; uint64_t seq; int granted; pthread_cond_t cv; struct CoreWaiter *next; } CoreWaiter;
+static CoreWaiter *g_core_waiters;
+static uint64_t g_core_seq;
+static bool core_handoff(void) {
+    static int on = -1;
+    if (on < 0) on = !ENV("LARECOMP_CORE_FIFO");
+    return on;
+}
+// A thread holding emulated core c runs on that core's own host CPU (cpupin.c), once it has one
+int cpupin_core(int c);
+void cpupin_self(int cpu);
+static void pin_to_core(KThread *t, int c) {
+    int cpu = cpupin_core(c);
+    if (cpu < 0 || t->core_shared || t->pinned_cpu == cpu + 1) return;
+    cpupin_self(cpu);
+    t->pinned_cpu = cpu + 1;
+}
+static bool waiter_before(const CoreWaiter *a, const CoreWaiter *b) {
+    if (a->t->prio != b->t->prio) return a->t->prio < b->t->prio;
+    int pa = __builtin_popcount(a->mask), pb = __builtin_popcount(b->mask);
+    if (pa != pb) return pa < pb;
+    return a->seq < b->seq;
+}
+// Core c is free: hand it to its best waiter, if any (g_core_lock held)
+static void core_grant(int c) {
+    CoreWaiter **best = NULL;
+    for (CoreWaiter **w = &g_core_waiters; *w; w = &(*w)->next)
+        if (((*w)->mask >> c & 1) && (!best || waiter_before(*w, *best))) best = w;
+    if (!best) return;
+    CoreWaiter *b = *best;
+    *best = b->next;
+    g_core_owner[c] = b->t;
+    if (core_busy_log()) g_core_t0[c] = plat_now_ns();
+    b->granted = c;
+    pthread_cond_signal(&b->cv);
+}
 
 static bool cores_on(void) {
     static int on = -1;
@@ -147,7 +196,7 @@ static void core_acquire(KThread *t) {
     uint32_t mask = t->core_mask & 0xF;
     if (!mask) mask = 1u << t->core;
     pthread_mutex_lock(&g_core_lock);
-    uint64_t start = 0;
+    uint64_t start = 0, seq = 0;
     for (;;) {
         int pick = -1;
         if ((mask >> t->core & 1) && !g_core_owner[t->core]) pick = t->core;
@@ -155,6 +204,7 @@ static void core_acquire(KThread *t) {
             if ((mask >> i & 1) && !g_core_owner[i]) pick = i;
         if (pick >= 0) {
             g_core_owner[pick] = t;
+            if (core_busy_log()) g_core_t0[pick] = plat_now_ns();
             t->run_core = pick;
             t->core_shared = false;
             if (w0_) g_core_wait_ns += plat_now_ns() - w0_, g_core_waits++;
@@ -198,19 +248,42 @@ static void core_acquire(KThread *t) {
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_nsec += 2000000;
         if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
-        pthread_cond_timedwait(&g_core_cond, &g_core_lock, &ts);
+        if (!core_handoff()) { pthread_cond_timedwait(&g_core_cond, &g_core_lock, &ts); continue; }
+        if (!seq) seq = ++g_core_seq;  // (its place in line, kept when it looks again)
+        CoreWaiter w = {.t = t, .mask = mask, .seq = seq, .granted = -1};
+        pthread_cond_init(&w.cv, NULL);
+        w.next = g_core_waiters, g_core_waiters = &w;
+        while (w.granted < 0 && pthread_cond_timedwait(&w.cv, &g_core_lock, &ts) == 0) {}
+        if (w.granted < 0)  // (timed out: leave the queue, look again - and take a core beside its owner after CORE_STEAL_NS)
+            for (CoreWaiter **p = &g_core_waiters; *p; p = &(*p)->next)
+                if (*p == &w) { *p = w.next; break; }
+        pthread_cond_destroy(&w.cv);
+        if (w.granted >= 0) {
+            t->run_core = w.granted;
+            t->core_shared = false;
+            g_core_wait_ns += plat_now_ns() - w0_, g_core_waits++;
+            break;
+        }
     }
     pthread_mutex_unlock(&g_core_lock);
+    if (t->run_core >= 0) pin_to_core(t, t->run_core);
 }
 
 // (may be called holding g_klock: g_core_lock is taken last and never waits here)
 static void core_release(KThread *t) {
     if (!t || t->run_core < 0) return;
     pthread_mutex_lock(&g_core_lock);
-    if (!t->core_shared && g_core_owner[t->run_core] == t) g_core_owner[t->run_core] = NULL;
+    if (!t->core_shared && g_core_owner[t->run_core] == t) {
+        if (core_busy_log()) {
+            uint64_t held = plat_now_ns() - g_core_t0[t->run_core];
+            g_core_busy_ns[t->run_core] += held, g_thread_busy_ns[t->id & 255] += held, g_thread_busy_mask[t->id & 255] = t->core_mask;
+        }
+        g_core_owner[t->run_core] = NULL;
+        if (core_handoff()) core_grant(t->run_core);
+    }
     t->run_core = -1;
     t->core_shared = false;
-    pthread_cond_broadcast(&g_core_cond);
+    if (!core_handoff()) pthread_cond_broadcast(&g_core_cond);
     pthread_mutex_unlock(&g_core_lock);
 }
 

@@ -174,6 +174,19 @@ static void wait_report(void) {
     uint64_t wl = g_wake_lat_ns, wn = g_wake_n;
     g_wake_lat_ns = 0, g_wake_n = 0;
     LOG("[waits] wakeups %.1f/frame, OS latency %.1f us each\n", (double)wn / g_wait_frames, wn ? wl / 1e3 / wn : 0.0);
+    {
+        extern uint64_t g_core_busy_ns[4], g_thread_busy_ns[256];
+        extern uint32_t g_thread_busy_mask[256];
+        char cl[512];
+        int cn_ = snprintf(cl, sizeof cl, "[waits] cores busy ms/frame:");
+        for (int k = 0; k < 4; k++) cn_ += snprintf(cl + cn_, sizeof cl - (size_t)cn_, " %.2f", g_core_busy_ns[k] / 1e6 / g_wait_frames), g_core_busy_ns[k] = 0;
+        cn_ += snprintf(cl + cn_, sizeof cl - (size_t)cn_, " | threads:");
+        for (int k = 0; k < 256; k++)
+            if (g_thread_busy_ns[k] / g_wait_frames > 300000 && cn_ < 480)
+                cn_ += snprintf(cl + cn_, sizeof cl - (size_t)cn_, " %x(m%x):%.2f", k, g_thread_busy_mask[k], g_thread_busy_ns[k] / 1e6 / g_wait_frames);
+        memset(g_thread_busy_ns, 0, sizeof g_thread_busy_ns);
+        LOG("%s\n", cl);
+    }
     int len = snprintf(line, sizeof line, "[waits] ms/frame: finish %.2f pace %.2f core %.2f (x%.1f) syncwait", g_wait_finish_ns / 1e6 / g_wait_frames,
                        g_wait_pace_ns / 1e6 / g_wait_frames, cw / 1e6 / g_wait_frames, (double)cn / g_wait_frames);
     for (int i = 0; i < 16 && g_wait[i].lr && len < 900; i++)

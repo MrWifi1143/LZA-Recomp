@@ -186,6 +186,7 @@ int main(int argc, char **argv) {
         else if (argv[i][0] != '-') root = arg_root;
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
+    { extern void cpupin_init(void); cpupin_init(); }  // (runtime/cpupin.c: before the threads it places start)
     {
         extern void plugins_load(void);
         plugins_load();  // (runtime/plugin.h: before the Vulkan backend, whose instance / device they may extend)

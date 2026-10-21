@@ -138,6 +138,7 @@ static void *render_main(void *arg) {
     uint64_t idle_seq = 0;  // renderer_fence_seq when the queue last ran empty with everything submitted
     on_render_thread = true;
     crash_handler_install();
+    { extern int cpupin_render(void); extern void cpupin_self(int cpu); cpupin_self(cpupin_render()); }  // (runtime/cpupin.c)
     pthread_mutex_lock(&lk);
     for (;;) {
         while (qhead == qtail) {

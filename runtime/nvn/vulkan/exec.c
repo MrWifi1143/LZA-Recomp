@@ -303,6 +303,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
         dl_note("submit %llu", (unsigned long long)submit_seq + 1);
         extern void vk_queue_lock(void), vk_queue_unlock(void);
         vk_queue_lock();
+        _mm_sfence();  // (copy_stream's stores, before the GPU reads them)
         VkResult sr = vkQueueSubmit2(g_vk.queue, 1, &si, VK_NULL_HANDLE);
         vk_queue_unlock();
         if (sr == VK_ERROR_DEVICE_LOST) vk_devlost_dump();
@@ -568,9 +569,30 @@ VkSpan vk_readback(uint64_t size) {
     return (VkSpan){buf, 0, ptr};
 }
 
+// Copies into the transient rings, with streaming stores: only the GPU reads them, and ~2 MB a frame written through
+// the cache pushed the game's own data out of the shared L3 (in Lumiose its threads ran ~20% slower with the backend
+// working than without: the same instructions, more cache misses). vk_submit_extra's sfence orders them before the GPU
+// reads them. LARECOMP_NO_STREAM_COPY=1: plain memcpy.
+static void copy_stream(void *dst, const void *src, uint64_t n) {
+    static int off = -1;
+    if (off < 0) off = getenv("LARECOMP_NO_STREAM_COPY") != NULL;
+    if (n < 256 || ((uintptr_t)dst & 15) || off) { memcpy(dst, src, n); return; }
+    uint8_t *d = dst;
+    const uint8_t *q = src;
+    uint64_t i = 0;
+    for (; i + 64 <= n; i += 64) {
+        __m128i a = _mm_loadu_si128((const __m128i *)(q + i)), b = _mm_loadu_si128((const __m128i *)(q + i + 16)),
+                c = _mm_loadu_si128((const __m128i *)(q + i + 32)), e = _mm_loadu_si128((const __m128i *)(q + i + 48));
+        _mm_stream_si128((__m128i *)(d + i), a), _mm_stream_si128((__m128i *)(d + i + 16), b);
+        _mm_stream_si128((__m128i *)(d + i + 32), c), _mm_stream_si128((__m128i *)(d + i + 48), e);
+    }
+    if (i < n) memcpy(d + i, q + i, n - i);
+    if (!rt_on_render_thread()) _mm_sfence();  // (another thread's copy: ordered here, before it hands the span over)
+}
+
 VkSpan vk_transient_copy(const void *data, uint64_t size, uint64_t align) {
     VkSpan s = vk_transient(size ? size : 16, align);
-    if (size) memcpy(s.ptr, data, size);
+    if (size) copy_stream(s.ptr, data, size);
     return s;
 }
 
@@ -594,7 +616,7 @@ static uint64_t gcopy_gen;  // bumped to drop every shared copy (guest memory wr
 static void guest_copy_flush(void) { gcopy_gen++; }
 static VkSpan transient_gpu_copy(const void *data, uint64_t size, uint64_t align) {
     VkSpan s = transient_gpu(size ? size : 16, align);
-    if (size) memcpy(s.ptr, data, size);
+    if (size) copy_stream(s.ptr, data, size);
     return s;
 }
 static VkSpan guest_copy_pool(uint64_t addr, uint64_t size, bool gpu) {  // (gpu: vertex / index data, in VRAM when that ring is on)
@@ -4708,12 +4730,20 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_SET_RASTER_DISCARD: st.raster_discard = r->x[0] != 0; break;
         case CMD_SET_DEPTH_CLAMP: st.depth_clamp = r->x[0] != 0; break;
         case CMD_OBJECT: st.obj = r->x[0]; st.obj_draw = 0; { static int d; if (getenv("LARECOMP_OBJDBG") && vk_frame_counter() == 1450 && d++ < 80) LOG("[objdbg] depth %d object %llx\n", depth,(unsigned long long)r->x[0]); } break;
-        case CMD_JUMP: p = r->x[0]; continue;
+        case CMD_JUMP: p = r->x[0]; __builtin_prefetch((const void *)(uintptr_t)(p + 64)); __builtin_prefetch((const void *)(uintptr_t)(p + 128)); continue;
         case CMD_CALL: {
             const uint64_t *h = x;
             uint64_t obj = st.obj;  // (a called list names objects of its own: they end with it)
             uint32_t obj_draw = st.obj_draw;
+            // (the called lists are small and each starts in memory not touched yet: fetch their first lines now - the
+            // look-ahead above only covers what follows the record being run)
+            for (uint64_t i = 0; i < r->x[0] && i < 16; i++) {
+                __builtin_prefetch((const void *)(uintptr_t)h[i]);
+                __builtin_prefetch((const void *)(uintptr_t)(h[i] + 64));
+                __builtin_prefetch((const void *)(uintptr_t)(h[i] + 128));
+            }
             for (uint64_t i = 0; i < r->x[0] && depth < 8; i++) {
+                if (i + 16 < r->x[0]) __builtin_prefetch((const void *)(uintptr_t)h[i + 16]);
                 st.obj = obj, st.obj_draw = obj_draw;
                 exec_list(h[i], depth + 1);
             }

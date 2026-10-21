@@ -176,7 +176,66 @@ class Module:
             r = self._jump_table_taken(br_pc, entry, end)
         if r is None:
             r = self._jump_table_masked(br_pc, entry, end)
+        if r is None:
+            r = self._jump_table_offsets(br_pc, entry, end)
         return r
+
+    def _jump_table_offsets(self, br_pc, entry, end):
+        """Form: adr xB, base ; ldrb/ldrh wI, [table...] ; add xT, xB, xI, lsl #2 ; ... ; br xT, straight-line. No
+        bounds check needed: the loaded width bounds the index, so base + 4 * (0..255) (or 0..65535, clipped to the
+        function) covers every value it can take. Z-A's f_7000048720 (its hottest function: two of these, unresolved
+        before, made it all-labels and unoptimized). Returns the targets; scan() checks that no branch lands inside the
+        sequence (another path could reach the br with another base)."""
+        def writes(w, r):  # (conservative: anything with Rd = r that isn't a store)
+            return (w & 31) == r and not ((w & 0x0A000000) == 0x08000000 and not bits(w, 22, 1))
+        rn = bits(self.word(br_pc), 5, 5)
+        a = br_pc - 4
+        add = None
+        while a >= entry and br_pc - a <= 4 * 24:
+            if self.lift(a).kind not in ('op', 'asm'):
+                return None
+            w = self.word(a)
+            if writes(w, rn):
+                if (w & 0xFF200000) == 0x8B000000 and bits(w, 22, 2) == 0 and bits(w, 10, 6) == 2:  # ADD x, x, x, LSL #2
+                    add = a
+                elif (w & 0xFFE00000) == 0x8B200000 and bits(w, 10, 3) == 2 and bits(w, 13, 3) in (0, 2, 3):  # UXTB/UXTW/UXTX #2
+                    add = a
+                break
+            a -= 4
+        if add is None:
+            return None
+        w = self.word(add)
+        base_r, idx_r = bits(w, 5, 5), bits(w, 16, 5)
+        if base_r == idx_r or base_r == 31 or idx_r == 31:
+            return None
+        base = width = None
+        start = add
+        a = add - 4
+        while a >= entry and add - a <= 4 * 24 and (base is None or width is None):
+            if self.lift(a).kind not in ('op', 'asm'):
+                return None
+            w = self.word(a)
+            if width is None and writes(w, idx_r):
+                if (w & 0xFFC00000) == 0x39400000 or (w & 0xFFE00C00) == 0x38600800:  # LDRB (imm / reg)
+                    width = 256
+                elif (w & 0xFFC00000) == 0x79400000 or (w & 0xFFE00C00) == 0x78600800:  # LDRH (imm / reg)
+                    width = 65536
+                else:
+                    return None
+                start = min(start, a)
+            if base is None and writes(w, base_r):
+                if (w & 0x9F000000) != 0x10000000:  # ADR
+                    return None
+                base = a + sext((bits(w, 5, 19) << 2) | bits(w, 29, 2), 21)
+                start = min(start, a)
+            a -= 4
+        if base is None or width is None:
+            return None
+        targets = [base + 4 * k for k in range(width) if entry <= base + 4 * k < end]
+        if not targets:
+            return None
+        self.offset_tables[br_pc] = start
+        return targets
 
     def _jump_table_masked(self, br_pc, entry, end):
         """Form: and wI, wX, #(2^k - 1) ... <table lookup with wI> ... br. No bounds check: the mask bounds the index
@@ -378,6 +437,8 @@ class Module:
     def scan(self, entry, end):
         """Collect labels and external entries referenced by a function."""
         labels, ext, tables = {entry}, set(), {}
+        self.offset_tables = {}
+        branched = {entry}  # (targets of direct branches)
         terminated = False
         for a in range(entry, end, 4):
             ins = self.lift(a)
@@ -385,6 +446,7 @@ class Module:
                 t = ins.target
                 if entry <= t < end:
                     labels.add(t)
+                    branched.add(t)
                 elif self.in_text(t):
                     ext.add(t)
             elif ins.kind == 'bl':
@@ -403,6 +465,13 @@ class Module:
                 else:
                     self.stats['br_dispatch'] += 1
             terminated = ins.kind in ('b', 'br', 'ret', 'trap')
+        # (_jump_table_offsets: the sequence must not be entered midway - by a branch or a table resolved exactly; the
+        # bound of another offset table covers addresses its real entries don't reach, Z-A's two in f_7000048720 each other's)
+        exact = branched | {t for br, jt in tables.items() if br not in self.offset_tables and jt != 'all' for t in jt}
+        for br, start in self.offset_tables.items():
+            if any(start < t <= br for t in exact):
+                tables[br] = 'all'
+                self.stats['br_all_labels'] += 1
         if not terminated and end < self.hi:
             ext.add(end)
         return labels, ext, tables
