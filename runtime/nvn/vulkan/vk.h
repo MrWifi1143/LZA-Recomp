@@ -40,6 +40,7 @@ typedef struct {
     bool depth_clamp;  // depthClamp feature (NVN SetDepthClamp)
     VkShaderStageFlags sg32;  // stages that get a required subgroup size of 32 (the Maxwell warp: vk_sg32)
     bool oq_host_reset, oq_precise;  // occlusion queries (exec.c): slots reset from the CPU; exact sample counts
+    bool minmax;                     // samplerFilterMinmax: min / max reduction samplers
     PFN_vkCmdBindTransformFeedbackBuffersEXT bind_xfb;
     PFN_vkCmdBeginTransformFeedbackEXT begin_xfb;
     PFN_vkCmdEndTransformFeedbackEXT end_xfb;

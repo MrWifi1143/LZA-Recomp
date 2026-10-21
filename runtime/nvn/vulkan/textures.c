@@ -1004,6 +1004,21 @@ static VkSampler sampler_create(NvnSamplerDesc *d, bool cmp) {
             si.pNext = &cb;
         } else si.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
     }
+    // The reduction filter (nvnSamplerBuilderSetReductionFilter: average, min, max - the same values as Vulkan's): a
+    // min / max sampler returns the smallest / largest of the texels it filters instead of their average. Z-A's prop
+    // culling reads its depth pyramid with one; averaged, near and far texels blended into depths nothing on screen
+    // has, and props in plain view tested as hidden behind them (pop-in). LARECOMP_NO_MINMAX=1: averaged (research).
+    VkSamplerReductionModeCreateInfo rm = {.sType = VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO};
+    static int nominmax = -1;
+    if (nominmax < 0) nominmax = getenv("LARECOMP_NO_MINMAX") != NULL;
+    if ((d->reduction == 1 || d->reduction == 2) && g_vk.minmax && !nominmax && !si.compareEnable) {
+        rm.reductionMode = d->reduction == 1 ? VK_SAMPLER_REDUCTION_MODE_MIN : VK_SAMPLER_REDUCTION_MODE_MAX;
+        rm.pNext = si.pNext;
+        si.pNext = &rm;
+        si.anisotropyEnable = VK_FALSE;  // (not with a reduction)
+        static int logged;
+        if (!logged++) LOG("[vk] min / max reduction samplers on (first: %s)\n", d->reduction == 1 ? "min" : "max");
+    }
     VkSampler s;
     VK_CHECK(vkCreateSampler(g_vk.dev, &si, NULL, &s));
     if (cmp) d->backend = (void *)s;

@@ -96,7 +96,6 @@ Tested on Linux with an RTX 4090; the Windows build is tested under Wine.
 Known issues:
 
 - Lumiose free roam runs about 105 fps at the 144 target on an RTX 4090 PC (limited by the game's own CPU work).
-- Indirect compute dispatches are not implemented yet.
 - Running legs: the BipedIK foot lock is worked around (`runtime/hle/za_fixes.c`); its root cause is still open.
 - On a fresh install, shaders and pipelines compile the first time they are seen (short stutters).
 - Expect other missing effects and bugs.
