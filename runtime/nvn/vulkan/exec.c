@@ -5002,8 +5002,15 @@ void backend_execute(uint64_t handle) {
     if (prof) cum_exec += SDL_GetTicksNS() - prof_t0_;
     static int sync_submit = -1;
     if (sync_submit < 0) sync_submit = getenv("LARECOMP_SYNC_SUBMIT") ? 1 : 0;
+    // A submission every ~100 draws: the GPU starts on a frame while the render thread still translates the rest of
+    // it. The game keeps at most two frames in flight (Z-A: f_70017fb59c waits for the older one), so how soon a frame
+    // is done on the GPU is what its frame rate waits on - 2000 draws per submission (about one a frame) left the GPU
+    // idle until the frame was translated: Lumiose ran 112 fps at 144, 120 with this. LARECOMP_SUBMIT_DRAWS=<n> chooses.
+    static uint64_t batch_draws;
+    if (!batch_draws) batch_draws = getenv("LARECOMP_SUBMIT_DRAWS") ? strtoull(getenv("LARECOMP_SUBMIT_DRAWS"), NULL, 0) : 100;
+    if (!batch_draws) batch_draws = 100;
     if (sync_submit) renderer_flush();
-    else if (!batch_lists() || !rt_on_render_thread() || !rt_more_queued() || g_draws_total - submit_draws >= 2000) renderer_submit();
+    else if (!batch_lists() || !rt_on_render_thread() || !rt_more_queued() || g_draws_total - submit_draws >= batch_draws) renderer_submit();
 }
 
 // ================================================================== frame interpolation (prototype)

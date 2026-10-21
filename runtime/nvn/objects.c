@@ -193,6 +193,9 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     if (getenv("LARECOMP_LOG_SYNC") && n++ % 60 == 0) LOG("[nvn] SyncWait #%llu (lr %llx)\n", (unsigned long long)n, c->x[30]);
     static int whole = -1;  // LARECOMP_SYNC_ALL=1: old behaviour, wait for all submitted work
     if (whole < 0) whole = getenv("LARECOMP_SYNC_ALL") ? 1 : 0;
+    static uint64_t skip_lr = 1;  // (research, LARECOMP_SYNC_SKIP_LR=<hex lr>: that call site doesn't wait - unsafe)
+    if (skip_lr == 1) skip_lr = getenv("LARECOMP_SYNC_SKIP_LR") ? strtoull(getenv("LARECOMP_SYNC_SKIP_LR"), NULL, 16) : 0;
+    if (skip_lr && c->x[30] == skip_lr) { wait_note(c->x[30], 0); RET(0); return; }
     if (flush) { rt_drain(); renderer_flush(); }
     else if (whole) { rt_drain(); renderer_sync(); }
     else {

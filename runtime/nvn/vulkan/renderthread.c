@@ -240,8 +240,41 @@ void rt_present(NvnTexture *t) {
     reboot_test_frame(n);
 }
 
+// Research (LARECOMP_PROF_RT=1): every 2 s, the game threads' waits for the render thread (rt_call / rt_drain) by
+// caller: how often and how long - each one stops the game and the render thread working side by side.
+#include <stdatomic.h>
+const char *plat_symbol(uint64_t addr, uint64_t *off);
+uint64_t plat_now_ns(void);
+static struct { _Atomic uintptr_t who; _Atomic uint64_t n, ns; } rtprof[32];
+static void rtprof_note(uintptr_t who, uint64_t ns) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_PROF_RT") != NULL;
+    if (!on) return;
+    for (int i = 0; i < 32; i++) {
+        uintptr_t w = atomic_load(&rtprof[i].who);
+        if (w == who || (!w && atomic_compare_exchange_strong(&rtprof[i].who, &w, who)) || atomic_load(&rtprof[i].who) == who) {
+            atomic_fetch_add(&rtprof[i].n, 1), atomic_fetch_add(&rtprof[i].ns, ns);
+            break;
+        }
+    }
+    static _Atomic uint64_t last;
+    uint64_t now = plat_now_ns(), l = atomic_load(&last);
+    if (now - l > 2000000000ull && atomic_compare_exchange_strong(&last, &l, now)) {
+        for (int i = 0; i < 32; i++) {
+            uintptr_t w = atomic_load(&rtprof[i].who);
+            uint64_t n = atomic_exchange(&rtprof[i].n, 0), t = atomic_exchange(&rtprof[i].ns, 0);
+            if (!w || !n) continue;
+            uint64_t off = 0;
+            const char *sym = plat_symbol((uint64_t)w, &off);
+            LOG("[rtprof] %s+%llx: %llu waits, %.1f ms\n", sym ? sym : "?", (unsigned long long)off, (unsigned long long)n, t / 1e6);
+        }
+    }
+}
+
 // Runs fn(arg) on the render thread, after everything queued before it, and returns when it is done.
 void rt_call(void (*fn)(void *), void *arg) {
+    uint64_t t0_ = plat_now_ns();
+    uintptr_t who_ = (uintptr_t)__builtin_return_address(0);
     if (!rt_active() || on_render_thread) { fn(arg); return; }
     volatile int done = 0;
     Job j = {.kind = RJ_CALL, .fn = fn, .arg = arg, .done = &done};
@@ -250,16 +283,19 @@ void rt_call(void (*fn)(void *), void *arg) {
     kernel_block_begin();
     while (!done) pthread_cond_wait(&c_done, &lk);  // (the render thread never waits for the game: this ends)
     lk_unlock();
+    rtprof_note(who_, plat_now_ns() - t0_);
 }
 
 // Everything queued so far has run.
 void rt_drain(void) {
     if (!rt_active() || on_render_thread) return;
+    uint64_t t0_ = plat_now_ns();
     pthread_mutex_lock(&lk);
     uint64_t target = enq;
     while (fin < target)
         if (!wait_done()) break;
     lk_unlock();
+    rtprof_note((uintptr_t)__builtin_return_address(0) | 1, plat_now_ns() - t0_);
 }
 
 uint64_t rt_fence_ticket(void) {
