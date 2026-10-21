@@ -38,3 +38,83 @@ EEVEE_100_BUILD = '0a3f0d21e67dad80'
 BUILD_ADDRS = {
     '1c375692de4f4b87': {0x7000b88340: 0x7000b88350, 0x7000b6acc8: 0x7000b6acd8, 0x70002d2a44: 0x70002d2a14},  # Pikachu 1.0.0
 }
+
+
+# Legends: Arceus 1.1.1 at more than 30 fps (runtime/hle/fps60.c pla60_*): the world steps by the frame time of its
+# table, but some systems build the 30 fps frame time 1/30 s (0x3d088889) in code - mov w, #0x8889; movk w, #0x3d08,
+# lsl #16 - and step by it on every update, so at 144 fps they run 4.8 times as fast. Each movk below gets the frame
+# time the game runs at instead (rt_step_bits, 1/30 at 30 fps); the runtime turns each site on or off by its index
+# (LARECOMP_STEP_SITES, research). Sites that convert frames to seconds and back keep the constant (not listed).
+PLA_STEP_SITES = [
+    0x70013b33a0, 0x700167ff10, 0x70016832c4, 0x70016832e8, 0x70016836d4, 0x70017177b8, 0x7001728058, 0x7001982934,
+    0x7001983764, 0x700198e024, 0x700198ec70, 0x7001a0baf4, 0x7001a0bee8, 0x7001a0da24, 0x7001a0eea4, 0x7001a0f308,
+    0x7001a0f49c, 0x7001a0f560, 0x7001a17b14, 0x7001a17f40, 0x7001a19108, 0x7001a196c8, 0x7001b48a4c, 0x7001b48a98,
+    0x7001b49008, 0x7001b493f8, 0x7001c5d38c, 0x7001d1b7d0, 0x7001d5d688, 0x700257ac34, 0x700257c9f8, 0x700257ce3c,
+    0x7002795234, 0x70029faf90, 0x7002aefb28, 0x7002af25f8, 0x7002f3e8c8, 0x7002f3ec18, 0x7002fe9660, 0x7003002a08,
+    0x70030143a0, 0x7003014d28, 0x700301526c, 0x7003018b94, 0x700301e520,
+]
+
+
+def _step_site(i):
+    def patch(gen, a):
+        w = gen.words[(a - gen.base) // 4]
+        assert w & 0x7fffffe0 == 0x72a7a100, hex(a)  # movk w/x<d>, #0x3d08, lsl #16 (after mov <d>, #0x8889)
+        d = w & 31
+        keep = '(c->x[%d] & 0xffffffff00000000ull) | ' % d if w >> 31 else ''  # (an x register: the upper half stays)
+        return '{ extern uint32_t rt_step_bits(int); c->x[%d] = %s(uint64_t)rt_step_bits(%d); }' % (d, keep, i)
+    return patch
+
+
+# Frame counters that step once per update (integers): above 30 fps they step only on the updates where 30 fps time
+# moved on a frame (rt_pla_tick, runtime/hle/fps60.c), so what counts on them keeps the game's 30 steps a second.
+def _pla_tick_store(reg, base, off):
+    def patch(gen, a):
+        return ('{ extern int rt_pla_tick(int); if (rt_pla_tick(%d)) ST32(c->x[%d] + %#xull, (uint32_t)c->x[%d]); }' % (a & 0xffff, base, off, reg))
+    return patch
+
+
+# The camera's turn: the stick moves the target yaw and pitch by stick * a turn-rate parameter (f_700193c2c4, read by
+# name hash) on every update, with no frame time in it - 4.8 times as fast at 144 fps. Each call returns that rate
+# scaled to the frame time (rt_scale30_f32: frame time / (1/30), 1 at 30 fps).
+def _scaled_rate_call(target):
+    def patch(gen, a):
+        return ('{ void f_%x(Cpu *c); extern uint32_t rt_scale30_f32(uint32_t); c->x[30] = %#xull; f_%x(c); '
+                'c->v[0] = rt_scale30_f32((uint32_t)c->v[0]); }' % (target, a + 4, target))
+    return patch
+
+
+# The message printer (the state machine of f_7002b31600, x19 = the printer): each update it counts a wait counter
+# (+0x9e) up and prints the next characters once it passes the text speed (+0x9d) - characters per update, 4.8 times
+# as fast at 144 fps. On the updates where 30 fps time didn't move on a frame it waits (rt_pla_tick); the rest of the
+# state machine (the A button, the window's fades) runs as before.
+def _printer_wait(gen, a):
+    return '{ extern int rt_pla_tick(int); if (COND_CS(c) || !rt_pla_tick(%d)) { goto L_7002b31e38; } }' % (a & 0xffff)
+
+
+# The sky's scroll phases (the environment object: x19 + 0x604..0x614, each stepped once per update and wrapped to
+# 0..1): steps sized for 30 fps, scaled to the frame time. fdiv s0, s0, s1 (+0x614's step) and fmul s2, s2, s11
+# (the divisor of the +0x604..+0x610 steps).
+_F32 = 'union { uint32_t u; float f; } a, b; '
+
+
+def _sky_step_div(gen, a):
+    return ('{ extern uint32_t rt_scale30_f32(uint32_t); %sa.u = (uint32_t)c->v[0]; b.u = (uint32_t)c->v[1]; '
+            'a.f = a.f / b.f; c->v[0] = rt_scale30_f32(a.u); }' % _F32)
+
+
+def _sky_step_divisor(gen, a):
+    return ('{ extern uint32_t rt_unscale30_f32(uint32_t); %sa.u = (uint32_t)c->v[2]; b.u = (uint32_t)c->v[11]; '
+            'a.f = a.f * b.f; c->v[2] = rt_unscale30_f32(a.u); }' % _F32)
+
+
+PLA_PATCHES = {a: _step_site(i) for i, a in enumerate(PLA_STEP_SITES)}
+PLA_PATCHES[0x70029c1934] = _sky_step_div      # fdiv s0, s0, s1
+PLA_PATCHES[0x70029c23cc] = _sky_step_divisor  # fmul s2, s2, s11
+PLA_PATCHES[0x7002b31864] = _printer_wait  # b.hs 0x7002b31e38 (still waiting: return)
+for _a in (0x70019358d0, 0x7001935c6c, 0x700193d26c):  # bl f_700193c2c4 (the camera's input turn, three modes)
+    PLA_PATCHES[_a] = _scaled_rate_call(0x700193c2c4)
+PLA_PATCHES[0x7002d407e8] = _pla_tick_store(9, 8, 0xf4)  # str w9, [x8, #0xf4] (f_7002d3f550: each listed object's frame count)
+
+BUILD_PATCHES = {
+    'aee8f150dda1b5a8': PLA_PATCHES,  # Legends: Arceus 1.1.1
+}

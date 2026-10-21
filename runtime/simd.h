@@ -43,6 +43,13 @@ typedef u128 __attribute__((aligned(1), may_alias)) u128u;
 #define VHI64(n) (((sa64 *)&c->v[n])[1])
 #define LD128(a) (*(const u128u *)(uintptr_t)(a))
 #define ST128(a, v) (*(u128u *)(uintptr_t)(a) = (u128)(v))
+#ifdef STORE_TRACE  // (research build, runtime/storetrace.c: a 16-byte store reports its two halves)
+#define ST128T(pc, a, v) do { uint64_t _ta = (uint64_t)(a); u128 _o = LD128(_ta), _n = (u128)(v); ST128(_ta, _n); \
+    if ((uint64_t)_o != (uint64_t)_n) rt_trace_store((pc), _ta, (uint64_t)_o, (uint64_t)_n, 8); \
+    if ((uint64_t)(_o >> 64) != (uint64_t)(_n >> 64)) rt_trace_store((pc), _ta + 8, (uint64_t)(_o >> 64), (uint64_t)(_n >> 64), 8); } while (0)
+#else
+#define ST128T(pc, a, v) ST128(a, v)
+#endif
 #define SHUF __builtin_shufflevector
 #define CVT __builtin_convertvector
 

@@ -364,7 +364,7 @@ class Lifter:
     def ldst(self, w, pc):
         r = self._ldst(w, pc)
         if self.trace_stores and r.kind == 'op' and r.code and 'ST' in r.code:
-            r.code = re.sub(r'ST(8|16|32|64)[(]', lambda m: 'ST%sT(%s, ' % (m.group(1), hx(pc)), r.code)
+            r.code = re.sub(r'ST(8|16|32|64|128)[(]', lambda m: 'ST%sT(%s, ' % (m.group(1), hx(pc)), r.code)
         return r
 
     def _ldst(self, w, pc):

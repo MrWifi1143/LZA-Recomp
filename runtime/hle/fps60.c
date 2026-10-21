@@ -446,6 +446,7 @@ void pla60_configure(const char *exefs) {
     if (n && atoi(n) > 30) on = true, g_pla60_ns = 1000000000ull / (uint64_t)atoi(n);
     g_pla60_entry = 0;
     g_pla60_patched = false;
+    { void dt_probe_init(void), watch_arg_init(void); dt_probe_init(); watch_arg_init(); }
     for (size_t i = 0; on && i < sizeof k_legends60 / sizeof *k_legends60; i++)
         if (!memcmp(id, k_legends60[i].id, 8)) {
             g_pla60_entry = k_legends60[i].entry;
@@ -455,10 +456,176 @@ void pla60_configure(const char *exefs) {
 
 // each present: the table entry, once the game is loaded (read-only data: the page made writable first)
 void pla60_present(void) {
+    { extern void fscan_present(uint64_t frame); extern uint64_t renderer_present_count(void); fscan_present(renderer_present_count()); }
+    { void pla_step_stats(void); pla_step_stats(); }
     if (!g_pla60_entry || g_pla60_patched) return;
     volatile uint64_t *ft = (volatile uint64_t *)(uintptr_t)g_pla60_entry;
     if (*ft != 33333334u) return;
     plat_protect(g_pla60_entry & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);
     *ft = g_pla60_ns;
     g_pla60_patched = true;
+}
+
+// The 1/30 s steps Legends: Arceus builds in code (tools/patches.py PLA_STEP_SITES): the frame time it runs at, at the
+// sites that step by it on every update; 1/30 at 30 fps and at the sites left off. LARECOMP_STEP_SITES (research):
+// "all", "none", or a list of site indices and ranges from the default set ("+3", "-3", "10-20", "-10-20").
+#define PLA_STEP_SITES 45
+static const char k_step_default[PLA_STEP_SITES + 1] =
+    "111110011111111111111111110111111101000000000";  // (by index: 1 = the real frame time)
+static bool g_step_on[PLA_STEP_SITES];
+static _Atomic unsigned g_step_calls[PLA_STEP_SITES];
+
+// Research (LARECOMP_STEP_STATS=1): every 5 s, how many times a second each site ran - once per update (as often as
+// the frame rate: a speed that follows it) or at a rate of its own (a fixed step: right at any frame rate).
+void pla_step_stats(void) {
+    static int on = -1;
+    static uint64_t t0;
+    if (on < 0) on = getenv("LARECOMP_STEP_STATS") != NULL;
+    if (!on) return;
+    extern uint64_t plat_now_ns(void);
+    uint64_t now = plat_now_ns();
+    if (!t0) t0 = now;
+    if (now - t0 < 5000000000ull) return;
+    char line[2048];
+    int n = 0;
+    for (int k = 0; k < PLA_STEP_SITES; k++) {
+        unsigned v = atomic_exchange(&g_step_calls[k], 0);
+        if (v && n < (int)sizeof line - 32) n += snprintf(line + n, sizeof line - n, " %d:%.0f", k, v / ((now - t0) / 1e9));
+    }
+    LOG("[steps] per second:%s\n", n ? line : " none");
+    t0 = now;
+}
+uint32_t rt_step_bits(int i) {
+    static int init;
+    static uint32_t bits;
+    if (!init) {
+        init = 1;
+        for (int k = 0; k < PLA_STEP_SITES; k++) g_step_on[k] = k_step_default[k] == '1';
+        const char *e = getenv("LARECOMP_STEP_SITES");
+        for (const char *s = e; s && *s;) {
+            while (*s == ',' || *s == ' ') s++;
+            if (!strncmp(s, "all", 3)) { for (int k = 0; k < PLA_STEP_SITES; k++) g_step_on[k] = true; s += 3; continue; }
+            if (!strncmp(s, "none", 4)) { for (int k = 0; k < PLA_STEP_SITES; k++) g_step_on[k] = false; s += 4; continue; }
+            bool on = *s != '-';
+            if (*s == '-' || *s == '+') s++;
+            char *t;
+            long a = strtol(s, &t, 10), b = a;
+            if (t == s) break;
+            if (*t == '-') b = strtol(t + 1, &t, 10);
+            for (long k = a; k <= b && k < PLA_STEP_SITES; k++) if (k >= 0) g_step_on[k] = on;
+            s = t;
+        }
+        if (e) {
+            char m[PLA_STEP_SITES + 1];
+            for (int k = 0; k < PLA_STEP_SITES; k++) m[k] = g_step_on[k] ? '1' : '0';
+            m[PLA_STEP_SITES] = 0;
+            LOG("[fps60] step sites %s\n", m);
+        }
+    }
+    if (i < 0 || i >= PLA_STEP_SITES) return 0x3d088889u;
+    atomic_fetch_add_explicit(&g_step_calls[i], 1, memory_order_relaxed);
+    if (!g_pla60_patched || !g_step_on[i]) return 0x3d088889u;  // 1/30
+    if (!bits) { float f = (float)((double)g_pla60_ns * 1e-9); memcpy(&bits, &f, 4); }
+    return bits;
+}
+
+// Legends: Arceus above 30 fps: 1 on the updates where 30 fps time moved on a frame (tools/patches.py _pla_tick_store),
+// 0 on the others; always 1 at 30 fps. LARECOMP_PLA_TICK=0 (research): every update, as the game does.
+int rt_pla_tick(int site) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_PLA_TICK") ? atoi(getenv("LARECOMP_PLA_TICK")) : 1;
+    (void)site;
+    if (!on || !g_pla60_patched) return 1;
+    uint64_t f = renderer_game_frame();
+    return (f * g_pla60_ns) / 33333334u != ((f - 1) * g_pla60_ns) / 33333334u;
+}
+
+// Research (LARECOMP_DT_PROBE="<addr>[,<addr>...]"): functions shaped like f_700141f208 - this = x0, the clock set = x1:
+// the timer index this->vtable[0x50]() picks and the nanoseconds (*x1)->vtable[0](index) hands out, logged.
+static int dt_probe_hook(Cpu *c, uint64_t addr) {
+    static _Atomic int n;
+    if (atomic_fetch_add(&n, 1) > 300) return 0;
+    uint64_t saved[32];
+    memcpy(saved, c->x, sizeof saved);
+    uint64_t self = c->x[0], set = c->x[1];
+    uint64_t vt = self >= 0x7000000000ull ? *(uint64_t *)(uintptr_t)self : 0;
+    if (vt >= 0x7000000000ull && set >= 0x7000000000ull) {
+        c->x[0] = self;
+        guest_call(c, *(uint64_t *)(uintptr_t)(vt + 0x50));
+        uint64_t which = (uint32_t)c->x[0];
+        uint64_t clocks = *(uint64_t *)(uintptr_t)set, cvt = clocks >= 0x7000000000ull ? *(uint64_t *)(uintptr_t)clocks : 0;
+        if (cvt >= 0x7000000000ull) {
+            c->x[0] = clocks, c->x[1] = which;
+            guest_call(c, *(uint64_t *)(uintptr_t)cvt);
+            uint64_t r = c->x[0];
+            LOG("[dt] f_%llx present %llu: this %llx timer %llu -> %llx ns %lld\n", (unsigned long long)addr,
+                (unsigned long long)renderer_game_frame(), (unsigned long long)self, (unsigned long long)which, (unsigned long long)r,
+                r >= 0x7000000000ull ? (long long)*(int64_t *)(uintptr_t)(r + 8) : -1LL);
+        }
+    }
+    memcpy(c->x, saved, sizeof saved);
+    return 0;
+}
+void dt_probe_init(void) {  // (pla60_configure: once the game library is loaded)
+    const char *e = getenv("LARECOMP_DT_PROBE");
+    for (char *s = (char *)e; s && *s;) {
+        uint64_t a = strtoull(s, &s, 16);
+        if (a) { void rt_register_fnhook_at(uint64_t, int (*)(Cpu *, uint64_t)); rt_register_fnhook_at(a, dt_probe_hook); }
+        while (*s == ',') s++;
+        if (*s && !strchr("0123456789abcdefABCDEF", *s)) break;
+    }
+}
+
+// Legends: Arceus above 30 fps: a per-update amount the game sized for 30 fps (a float's bits), scaled to the frame time
+// it runs at (tools/patches.py: the camera's turn rate). LARECOMP_PLA_SCALE=0 (research): the game's own amounts.
+uint32_t rt_scale30_f32(uint32_t bits) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_PLA_SCALE") ? atoi(getenv("LARECOMP_PLA_SCALE")) : 1;
+    if (!on || !g_pla60_patched) return bits;
+    float f;
+    memcpy(&f, &bits, 4);
+    f = (float)((double)f * (double)g_pla60_ns / 33333334.0);
+    memcpy(&bits, &f, 4);
+    return bits;
+}
+
+// Research (LARECOMP_WATCH_ARG="<fn hex>:<offset hex>:<from present>"): from that present on, the first entries of
+// that function arm hardware watchpoints (hwwatch.c) on this + offset - who writes a field of the object it gets
+// (up to 4 objects).
+static uint64_t g_wa_fn, g_wa_off;
+static long g_wa_from;
+static int watch_arg_hook(Cpu *c, uint64_t addr) {
+    static uint64_t seen[4];
+    static int n;
+    (void)addr;
+    if ((long)renderer_game_frame() < g_wa_from || n >= 4) return 0;
+    uint64_t a = c->x[0] + g_wa_off;
+    for (int i = 0; i < n; i++) if (seen[i] == a) return 0;
+    seen[n++] = a;
+    void hwwatch_arm(uint64_t addr, uint64_t len);
+    hwwatch_arm(a & ~3ull, 4);
+    LOG("[watcharg] f_%llx this %llx: watching %llx (present %llu)\n", (unsigned long long)addr, (unsigned long long)c->x[0],
+        (unsigned long long)(a & ~3ull), (unsigned long long)renderer_game_frame());
+    return 0;
+}
+void watch_arg_init(void) {
+    const char *e = getenv("LARECOMP_WATCH_ARG");
+    if (!e) return;
+    char *s;
+    g_wa_fn = strtoull(e, &s, 16);
+    if (*s == ':') g_wa_off = strtoull(s + 1, &s, 16);
+    if (*s == ':') g_wa_from = strtol(s + 1, &s, 10);
+    void rt_register_fnhook_at(uint64_t, int (*)(Cpu *, uint64_t));
+    if (g_wa_fn) rt_register_fnhook_at(g_wa_fn, watch_arg_hook);
+}
+// (the inverse: a divisor that sizes a per-update amount)
+uint32_t rt_unscale30_f32(uint32_t bits) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_PLA_SCALE") ? atoi(getenv("LARECOMP_PLA_SCALE")) : 1;
+    if (!on || !g_pla60_patched) return bits;
+    float f;
+    memcpy(&f, &bits, 4);
+    f = (float)((double)f * 33333334.0 / (double)g_pla60_ns);
+    memcpy(&bits, &f, 4);
+    return bits;
 }
