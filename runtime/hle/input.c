@@ -367,6 +367,7 @@ static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
 //   at frame, up `frames` later): they reach menus and the on-screen keyboard first, as a player's would.
 // "frame:sdlmouse:left|middle|right|x1|x2|wheelup|wheeldown:frames" presses a mouse button (the wheel: one notch),
 // "frame:sdlmove:<dx>/<dy>:frames" moves the mouse by that much every frame, as real events in the game window.
+// "frame:touch:<x>/<y>:frames" puts a finger on the touch screen there (1920 x 1080) for that long.
 // "frame:shot:<name>" saves the window (game + menus) to build/<name>.png.
 // LARECOMP_BIND_TEST="frame:pad|key:<input>:<host>,..." starts a rebind capture of <input> (bind_* name: a, zl,
 //   ls_up...) at that frame (the Controls tab shows it waiting) and presses <host> 90 frames later ("esc" cancels,
@@ -384,6 +385,13 @@ static void test_push(uint64_t frame, unsigned long start, unsigned long len, co
     memset(&e, 0, sizeof e);
     if (!strcmp(dev, "sdlkey")) {
         if (frame == start || frame == start + len) push_key(SDL_GetScancodeFromName(arg), SDL_KMOD_NONE, frame == start);
+        return;
+    }
+    if (!strcmp(dev, "touch")) {  // ("frame:touch:<x>/<y>:frames": a finger on the touch screen there, 1920 x 1080)
+        float tx = 0, ty = 0;
+        if (sscanf(arg, "%f/%f", &tx, &ty) != 2) return;
+        if (frame == start) touch_x = (int32_t)tx, touch_y = (int32_t)ty, touch_down = 1;
+        if (frame == start + len) touch_down = 0;
         return;
     }
     if (!strcmp(dev, "sdlmouse") || !strcmp(dev, "sdlmove")) {
@@ -465,7 +473,7 @@ static void host_test_frame(uint64_t frame) {
             char dev[12] = "", name[400] = "";
             if (sscanf(tok, "%lu:%11[a-z]:%399[^:]:%lu", &start, dev, name, &len) < 3) continue;
             if (!strcmp(dev, "type") || !strcmp(dev, "sdlpad") || !strcmp(dev, "sdlkey") || !strcmp(dev, "shot") ||
-                !strcmp(dev, "sdlmouse") || !strcmp(dev, "sdlmove")) {
+                !strcmp(dev, "sdlmouse") || !strcmp(dev, "sdlmove") || !strcmp(dev, "touch")) {
                 test_push(frame, start, len, dev, name);
                 continue;
             }

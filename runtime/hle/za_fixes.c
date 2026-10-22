@@ -392,6 +392,7 @@ void za_fixes_configure(const char *exefs) {
     if (done || memcmp(id, ZA_MAIN, 8)) return;
     done = true;
     if (!getenv("LARECOMP_ZA_MOUSE_LOOK") || atoi(getenv("LARECOMP_ZA_MOUSE_LOOK")) != 0) rt_register_fnhook_at(ZA_CAM_ANGLES, mouse_look_hook);
+    { extern void za_options_configure(void); za_options_configure(); }
     { extern void za_qstats_configure(void); za_qstats_configure(); }
     { extern void za_passq_configure(void); za_passq_configure(); }
     { extern void za_jobq_configure(void); za_jobq_configure(); }

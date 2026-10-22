@@ -32,6 +32,7 @@ typedef struct {
     int button_prompts;  // PROMPTS_*: which controller's buttons the game's prompts show (runtime/nvn/glyphs.c)
     char game_lang[8];   // the game's language code ("en-US", "es"...: runtime/mods.c game_language)
     char mod[128];       // active mod / fan translation (mods/<name>/), empty = none (runtime/mods.h)
+    int next_fps, next_res_height;  // set in game (hle/za_options.c; the height + 1), 0 = not: for the ini, from the next start
 } Settings;
 
 extern Settings g_settings;

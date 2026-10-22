@@ -111,8 +111,8 @@ void settings_save(void) {
     if (!f) { LOG("[settings] cannot write %s\n", SETTINGS_FILE); return; }
     fprintf(f, "# " RT_APP_NAME " settings (set on the start screen)\n");
     fprintf(f, "fullscreen = %d\n", g_settings.fullscreen);
-    fprintf(f, "fps = %d\n", g_settings.fps);
-    fprintf(f, "render_height = %d\n", g_settings.res_height);
+    fprintf(f, "fps = %d\n", g_settings.next_fps ? g_settings.next_fps : g_settings.fps);
+    fprintf(f, "render_height = %d\n", g_settings.next_res_height ? g_settings.next_res_height - 1 : g_settings.res_height);
     fprintf(f, "smaa = %d\n", g_settings.antialias == AA_SMAA);
     fprintf(f, "mod = %s\n", g_settings.mod);
     fprintf(f, "mouse_sens = %.3f\n", g_settings.mouse_sens);

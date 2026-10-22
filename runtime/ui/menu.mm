@@ -45,6 +45,7 @@ static void pick_menu_language(void) {
 // ------------------------------------------------------------------ state shared with the main thread
 static std::atomic<bool> g_open{false};  // the "close the game?" question is up
 static std::atomic<bool> g_want_fullscreen_apply{false};
+extern "C" void menu_apply_fullscreen(void) { g_want_fullscreen_apply.store(true); }  // (g_settings.fullscreen, set elsewhere)
 
 struct QEvent {
     enum { KEY, ANALOG, MOUSE_POS, MOUSE_BUTTON, WHEEL, TEXT } kind;

@@ -866,6 +866,48 @@ void backend_present(NvnTexture *t) {
                 extern void pscan_start(long period);
                 pscan_start(per);
             }
+            snprintf(path, sizeof path, "%s/find", dir);  // (research: "<text>" -> <dir>/find.out, where game memory has it)
+            if (access(path, F_OK) == 0) {
+                FILE *f = fopen(path, "r");
+                char want[256] = "";
+                if (f) { if (!fgets(want, sizeof want, f)) want[0] = 0; fclose(f); }
+                remove(path);
+                want[strcspn(want, "\r\n")] = 0;
+                extern int kernel_physmem_ranges(uint64_t *lo, uint64_t *hi, int max);
+                extern uint64_t kernel_heap_size(void), g_stdheap_used;
+                static uint64_t lo[520], hi[520];
+                int n = kernel_physmem_ranges(lo + 1, hi + 1, 519) + 1;
+                uint64_t top = g_stdheap_used ? STDHEAP_BASE + g_stdheap_used : 0, heap = HEAP_BASE + kernel_heap_size();
+                lo[0] = HEAP_BASE, hi[0] = top > heap ? top : heap;
+                snprintf(path, sizeof path, "%s/find.tmp", dir);  // (renamed when complete)
+                FILE *o = fopen(path, "w");
+                size_t k = strlen(want);
+                int found = 0;
+                for (int r = 0; o && k && r < n && found < 256; r++)
+                    for (const uint8_t *p = (const uint8_t *)(uintptr_t)lo[r], *e = (const uint8_t *)(uintptr_t)hi[r]; p + k <= e && found < 256; p++)
+                        if (*p == (uint8_t)want[0] && !memcmp(p, want, k)) fprintf(o, "%llx\n", (unsigned long long)(uintptr_t)p), found++;
+                if (o) {
+                    fclose(o);
+                    char done[512];
+                    snprintf(done, sizeof done, "%s/find.out", dir);
+                    rename(path, done);
+                }
+            }
+            snprintf(path, sizeof path, "%s/dump", dir);  // (research: "<addr> <len>" -> <dir>/dump.bin)
+            if (access(path, F_OK) == 0) {
+                FILE *f = fopen(path, "r");
+                unsigned long long a = 0, n = 0;
+                if (f) { if (fscanf(f, "%llx %llx", &a, &n) != 2) a = 0; fclose(f); }
+                remove(path);
+                snprintf(path, sizeof path, "%s/dump.tmp", dir);  // (renamed when complete)
+                FILE *o = a && n && n < (64u << 20) ? fopen(path, "wb") : NULL;
+                if (o) {
+                    fwrite((const void *)(uintptr_t)a, 1, n, o), fclose(o);
+                    char done[512];
+                    snprintf(done, sizeof done, "%s/dump.bin", dir);
+                    rename(path, done);
+                }
+            }
             snprintf(path, sizeof path, "%s/watch", dir);  // (research: hardware watchpoints, hle/hwwatch.c)
             if (access(path, F_OK) == 0) {
                 FILE *f = fopen(path, "r");

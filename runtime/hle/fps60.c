@@ -486,6 +486,7 @@ void pla60_configure(const char *exefs) {
 // each present: the table entry, once the game is loaded (read-only data: the page made writable first)
 void pla60_present(void) {
     { extern void fscan_present(uint64_t frame); extern uint64_t renderer_present_count(void); fscan_present(renderer_present_count()); }
+    { extern void za_options_present(void); za_options_present(); }
     if (!g_pla60_entry || g_pla60_patched) return;
     volatile uint64_t *ft = (volatile uint64_t *)(uintptr_t)g_pla60_entry;
     if (*ft != 33333334u) return;
