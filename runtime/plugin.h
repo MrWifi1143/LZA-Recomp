@@ -1,5 +1,5 @@
 // Runtime plugins: optional shared libraries loaded at startup, for mods that need code rather than files (the VR mod,
-// a separate project: /mnt/ssd/PLA/LegendsVR). Loaded from LARECOMP_PLUGINS (paths separated by ':') and from
+// https://github.com/MrWifi1143/LegendsVR). Loaded from LARECOMP_PLUGINS (paths separated by ':') and from
 // <data root>/plugins/*.so; without either nothing changes. A plugin exports
 //     int larecomp_plugin_init(const LarecompPluginApi *api, LarecompPluginHooks *hooks);
 // which fills in the hooks it wants (the rest stay NULL) and returns 0, or non-zero to stay out.
