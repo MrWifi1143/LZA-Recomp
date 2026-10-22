@@ -91,7 +91,9 @@ Village. Tested on Linux with an RTX 4090; the Windows build is tested under Win
 - The game's own Settings screen (Menu -> Help -> Settings) has the start screen's settings too, as rows like the
   game's after its own: frame rate, resolution, screen mode, anti-aliasing, button prompts, FPS counter, start screen,
   mouse camera, mouse sensitivity, stick dead zone, master volume. They apply at once (frame rate and resolution: from
-  the next start) and are saved with the start screen's.
+  the next start) and are saved with the start screen's. Its Controls row opens the key bindings there: each action
+  with its key and its controller button; select one and press the new key on the keyboard or the new button on the
+  controller (or click the key / the button).
 - Button prompts for what you play with: the bound keys and mouse buttons, Xbox letters or PlayStation shapes instead
   of the Switch's (Auto follows the last used keyboard / mouse or controller, even when it changes while playing;
   remapped buttons show their new button).

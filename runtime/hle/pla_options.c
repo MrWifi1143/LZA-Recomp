@@ -1,5 +1,6 @@
 // Legends: Arceus's Settings screen (Menu -> Help -> Settings) with the start screen's settings in it: rows added
-// after the game's twelve, drawn and driven by the game's code like its own.
+// after the game's twelve, drawn and driven by the game's code like its own; its Controls row opens the key bindings
+// in the list's place (below: "the Controls list").
 //
 // The screen (code 0x700112c000..0x7001133400): one scrolling list, its rows a pool of parts ("L_settings_list_%02d")
 // that show the settings by id. The view V keeps the model at [V+0x5b0] - its +0x88 vector lists the rows' setting ids
@@ -21,6 +22,7 @@
 #include <string.h>
 
 #include "../hle.h"
+#include "../input_bind.h"
 #include "../settings.h"
 
 void rt_register_fnhook_at(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
@@ -45,6 +47,10 @@ void menu_apply_fullscreen(void);  // runtime/ui/menu.mm
 #define GAME_LABEL 0xf78b9ed1507ad6dfull  // (a label of the game's: its text is replaced)
 #define OUR_LABEL 0x5ec0000000000000ull
 #define FIRST_ID 16
+#define BIND_ID 64                       // (the Controls list's rows)
+#define OPT_SLOT_OF 0x700112f5e4ull      // (view, row; -2 the cursor's) -> its part (slot), -1 off screen
+#define UI_FIND 0x7000c2ee24ull          // (view + 0x180, &label) -> the part of that name
+#define UI_LIST_REBUILD 0x700271857cull  // (list): its rows from the model again
 
 // ------------------------------------------------------------------ the rows
 
@@ -77,6 +83,9 @@ static int get_fpsc(void) { return g_settings.show_fps ? 0 : 1; }
 static void set_fpsc(int i) { g_settings.show_fps = i == 0; }
 static int get_skip(void) { return g_settings.skip_start ? 1 : 0; }
 static void set_skip(int i) { g_settings.skip_start = i == 1; }
+int input_last_was_kbm(void);  // runtime/hle/input.c
+static int ctl_col(void) { return input_last_was_kbm() ? 0 : 1; }  // (the Controls list: the column A changes)
+static void ctl_open(int i);
 static int get_mcam(void) { return g_settings.mouse_camera ? 0 : 1; }
 static void set_mcam(int i) { g_settings.mouse_camera = i == 0; }
 // (bars: the nearest step to what the ini has; mouse 0.025 degrees per pixel a step, dead zone 4% of the travel a step)
@@ -88,6 +97,8 @@ static int get_vol(void) { return clampi((int)(g_settings.volume * 10 + 0.5f), 0
 static void set_vol(int v) { g_settings.volume = (float)v / 10; }
 
 static const Row k_rows[] = {
+    {"Controls", "Press A to see and change the key and the controller button for each action.", CHOICE, 2,
+     {"Keyboard", "Controller"}, ctl_col, ctl_open},
     {"Frame Rate", "Choose how many frames are drawn a second. Applies the next time you start the game.", CHOICE, 4,
      {"30 fps", "60 fps", "120 fps", "144 fps"}, get_fps, set_fps},
     {"Resolution", "Choose the resolution the game is drawn at. Applies the next time you start the game.", CHOICE, 5,
@@ -122,6 +133,41 @@ static int shown_value(int r) {
     if (w->kind != CHOICE || w->n <= 3) return v;
     keep_shown(r, v);
     return v - g_first[r];
+}
+
+// ------------------------------------------------------------------ the Controls list
+// A, or a click, on the Controls row puts the bindings (runtime/hle/bindings.c) in the list's place - its row table
+// holds their ids then, the list rebuilt: a row an action (the Switch input the game reads, named as its Game Controls
+// screen does), the key and the controller's button its two choices. A waits for the new one from what pressed it -
+// the keyboard (or a click) for the key, the controller for its button; a click on one changes that one (Esc cancels;
+// one in use swaps over). X puts the defaults back (the keyboard's or the controller's, by the same rule), B goes back.
+// (Its A is "Save and Exit" there: kept from the game on these rows.)
+
+static const struct { int slot; const char *name; } k_binds[] = {
+    {BIND_LS_UP, "Move Forward"}, {BIND_LS_DOWN, "Move Back"}, {BIND_LS_LEFT, "Move Left"}, {BIND_LS_RIGHT, "Move Right"},
+    {BIND_WALK, "Walk (Hold)"}, {BIND_RS_UP, "Camera Up"}, {BIND_RS_DOWN, "Camera Down"}, {BIND_RS_LEFT, "Camera Left"},
+    {BIND_RS_RIGHT, "Camera Right"}, {BIND_A, "Investigate / Talk"}, {BIND_B, "Crouch / Rise"},
+    {BIND_X, "Ready Item / Pokémon"}, {BIND_Y, "Dodge"}, {BIND_ZL, "Focus on Target"}, {BIND_ZR, "Aim and Throw"},
+    {BIND_L, "Previous Item"}, {BIND_R, "Next Item"}, {BIND_LSTICK, "Dash"}, {BIND_RSTICK, "Right Stick Press"},
+    {BIND_UP, "Open Menu"}, {BIND_DOWN, "Pokédex"}, {BIND_LEFT, "Previous Ride Pokémon"}, {BIND_RIGHT, "Next Ride Pokémon"},
+    {BIND_PLUS, "Ride Pokémon"}, {BIND_MINUS, "Arc Phone"},
+};
+#define NBINDS (int)(sizeof k_binds / sizeof *k_binds)
+static bool g_ctl;               // the list holds the bindings
+static int g_ctl_pending = -1;   // (a click: 100 + the Controls row's choice opens it; 0 / 1 on a binding: that column waits)
+bool menu_mouse_value_press(void);  // runtime/hle/menu_mouse.c
+static void ctl_open(int i) { if (menu_mouse_value_press()) g_ctl_pending = 100 + i; }
+static int bind_of(uint32_t id) { return g_ctl && id >= BIND_ID && id < BIND_ID + (uint32_t)NBINDS ? (int)(id - BIND_ID) : -1; }
+
+static const char *ctl_cell(int b, int col, char *buf, size_t n) {
+    int slot = k_binds[b].slot, dev, cslot, ms;
+    if (bind_capture_active(&dev, &cslot, &ms) && cslot == slot && dev == (col ? BIND_DEV_PAD : BIND_DEV_KEY))
+        return col ? "Press a button..." : "Press a key...";
+    if (!col) snprintf(buf, n, "%s", g_bind_key[slot] ? bind_key_label(g_bind_key[slot]) : "-");
+    else if (slot == BIND_WALK) snprintf(buf, n, "-");
+    else if (slot >= BIND_PAD_COUNT) snprintf(buf, n, "%s", slot < BIND_RS_UP ? "Left Stick" : "Right Stick");
+    else snprintf(buf, n, "%s", bind_pad_label(g_bind_pad[slot], bind_label_family()));
+    return buf;
 }
 
 // ------------------------------------------------------------------ text
@@ -201,6 +247,19 @@ static void draw_row(Cpu *c, uint64_t view, int r, uint64_t slot, bool texts, ui
     guest(c, OPT_CHOICES, (uint64_t[]){view, (uint64_t)shown_value(r), (uint64_t)n, slot, active}, 5, 0);
 }
 
+static void draw_bind(Cpu *c, uint64_t view, int b, uint64_t slot, uint64_t active) {
+    static char k[4][64], p[4][64];
+    static int ring;
+    int i = ring++ & 3;
+    guest(c, OPT_HEADING, (uint64_t[]){view, slot, our_label(k_binds[b].name)}, 3, 0);
+    guest(c, OPT_CHOICE_LABEL, (uint64_t[]){view, 0, slot, our_label(ctl_cell(b, 0, k[i], sizeof k[i]))}, 4, 0);
+    guest(c, OPT_CHOICE_LABEL, (uint64_t[]){view, 1, slot, our_label(ctl_cell(b, 1, p[i], sizeof p[i]))}, 4, 0);
+    guest(c, OPT_CHOICE_LAYOUT, (uint64_t[]){view, slot}, 2, 0.0f);
+    guest(c, OPT_CHOICES, (uint64_t[]){view, (uint64_t)ctl_col(), 2, slot, active}, 5, 0);
+}
+
+static uint64_t g_view, g_view_vt, g_page;  // (the Settings screen's view, its class; the page left / right go to)
+
 static int build_rows_hook(Cpu *c, uint64_t addr) {
     uint64_t view = c->x[0];
     rt_call_original(c, addr);
@@ -216,7 +275,12 @@ static int build_rows_hook(Cpu *c, uint64_t addr) {
 static int bind_hook(Cpu *c, uint64_t addr) {  // (view, row, -, slot)
     (void)addr;
     uint64_t view = c->x[0], model = *(const uint64_t *)(uintptr_t)(view + 0x5b0);
+    g_view = view, g_view_vt = *(const uint64_t *)(uintptr_t)view;
     uint32_t id = *(const uint32_t *)(uintptr_t)(*(const uint64_t *)(uintptr_t)(model + 0xa8) + 8 * (uint32_t)c->x[1]);
+    if (bind_of(id) >= 0) {
+        draw_bind(c, view, bind_of(id), c->x[3], *(const uint32_t *)(uintptr_t)(view + 0x5b8) == id);
+        return 1;
+    }
     int r = row_of(id);
     if (r < 0) return 0;
     draw_row(c, view, r, c->x[3], true, *(const uint32_t *)(uintptr_t)(view + 0x5b8) == id);
@@ -225,6 +289,7 @@ static int bind_hook(Cpu *c, uint64_t addr) {  // (view, row, -, slot)
 
 static int show_value_hook(Cpu *c, uint64_t addr) {  // (view, id, slot, active)
     (void)addr;
+    if (bind_of((uint32_t)c->x[1]) >= 0) { draw_bind(c, c->x[0], bind_of((uint32_t)c->x[1]), c->x[2], c->x[3] & 1); return 1; }
     int r = row_of((uint32_t)c->x[1]);
     if (r < 0) return 0;
     draw_row(c, c->x[0], r, c->x[2], k_rows[r].kind == CHOICE && k_rows[r].n > 3, c->x[3] & 1);  // (sliding: texts too)
@@ -233,6 +298,12 @@ static int show_value_hook(Cpu *c, uint64_t addr) {  // (view, id, slot, active)
 
 static int change_hook(Cpu *c, uint64_t addr) {  // (model, id, op)
     (void)addr;
+    g_page = c->x[0];
+    if (bind_of((uint32_t)c->x[1]) >= 0 && ((uint32_t)c->x[2] == 0 || (uint32_t)c->x[2] == 1)) {  // (left / right: nothing;
+        if (menu_mouse_value_press()) g_ctl_pending = (int)(uint32_t)c->x[2];                     // a click: that column)
+        c->x[0] = 0;
+        return 1;
+    }
     int r = row_of((uint32_t)c->x[1]), op = (int)(uint32_t)c->x[2];
     if (r < 0 || (op != 0 && op != 1)) return 0;
     const Row *w = &k_rows[r];
@@ -245,6 +316,19 @@ static int change_hook(Cpu *c, uint64_t addr) {  // (model, id, op)
 
 static int description_hook(Cpu *c, uint64_t addr) {  // (view, id) -> [x8] string
     int r = row_of((uint32_t)c->x[1]);
+    if (bind_of((uint32_t)c->x[1]) >= 0) {
+        int dev, slot, ms;
+        bool wait = bind_capture_active(&dev, &slot, &ms);
+        const char *t = wait ? (dev == BIND_DEV_KEY ? "Press the new key, mouse button or wheel. Esc cancels; one already in use swaps over."
+                                                    : "Press the new controller button. Esc cancels; one already in use swaps over.")
+                             : "A changes it: a key from the keyboard, a button from the controller. X: defaults. B: back.";
+        uint64_t out = c->x[8];
+        c->x[1] = 0;
+        rt_call_original(c, addr);
+        uint8_t *str = (uint8_t *)(uintptr_t)*(const uint64_t *)(uintptr_t)out;
+        if (str) put_text(str, t, 48);
+        return 1;
+    }
     if (r < 0) return 0;
     uint64_t out = c->x[8];
     c->x[1] = 0;
@@ -257,7 +341,85 @@ static int description_hook(Cpu *c, uint64_t addr) {  // (view, id) -> [x8] stri
 // what runtime/hle/menu_mouse.c asks (the game's own rows: not known here)
 bool settings_cursor_row(Cpu *c, uint64_t *type, int *value) { (void)c, (void)type, (void)value; return false; }
 int settings_tab(void) { return -1; }
-uint64_t settings_screen_buttons(Cpu *c, uint64_t b) { (void)c; return b; }
+static void set_rows(Cpu *c, bool ctl) {  // (the row table: the settings, or the bindings; the list rebuilt)
+    uint64_t model = *(const uint64_t *)(uintptr_t)(g_view + 0x5b0);
+    if (!model) return;
+    g_ctl = ctl;
+    *(uint64_t *)(uintptr_t)(model + 0xb0) = 0;  // (its vector's size)
+    static uint32_t entry[2];
+    int n = ctl ? NBINDS : 12 + NROWS;
+    for (int i = 0; i < n; i++) {
+        entry[0] = ctl ? BIND_ID + (uint32_t)i : i < 12 ? (uint32_t)i : FIRST_ID + (uint32_t)(i - 12), entry[1] = 0;
+        guest(c, OPT_VEC_PUSH, (uint64_t[]){model + 0x88, (uint64_t)(uintptr_t)entry}, 2, 0);
+    }
+    static const struct { uint64_t hash; const char *str; uint64_t len, zero; } panel = {0x801e693dd9658f72ull, "scroll_panel_00", 15, 0};
+    uint64_t save[31];
+    memcpy(save, c->x, sizeof save);
+    c->x[0] = g_view + 0x180, c->x[1] = (uint64_t)(uintptr_t)&panel;
+    guest_call(c, UI_FIND);
+    uint64_t list = c->x[0];
+    memcpy(c->x, save, sizeof save);
+    if (list) guest(c, UI_LIST_REBUILD, (uint64_t[]){list}, 1, 0);
+}
+static void redraw_cursor_row(Cpu *c) {  // (and the description)
+    uint32_t id = *(const uint32_t *)(uintptr_t)(g_view + 0x5b8);
+    uint64_t save[31];
+    memcpy(save, c->x, sizeof save);
+    c->x[0] = g_view, c->x[1] = (uint64_t)(int64_t)-2;
+    guest_call(c, OPT_SLOT_OF);
+    int64_t slot = (int32_t)c->x[0];
+    memcpy(c->x, save, sizeof save);
+    if (slot >= 0) guest(c, OPT_SHOW_VALUE, (uint64_t[]){g_view, id, (uint64_t)slot, 1}, 4, 0);
+    if (g_page) guest(c, OPT_CHANGE, (uint64_t[]){g_page, id, 2}, 3, 0);  // (as when the cursor moves to it)
+}
+
+// Each read of the controller (runtime/hle/input.c, the game's thread): A on the Controls row opens the list; in it
+// A / X / B do its things - those presses are kept from the game (until let go).
+uint64_t settings_screen_buttons(Cpu *c, uint64_t b) {
+    enum { A = 1 << 0, B = 1 << 1, X = 1 << 2 };
+    static uint64_t prev, kept;
+    static int serial0 = -1;
+    uint64_t edge = b & ~prev;
+    prev = b;
+    kept &= b;
+    extern bool menu_item_part(const char *prefix);  // runtime/hle/menu_mouse.c
+    static int gone;  // (frames the screen hasn't been seen: gone after 30 - not a frame's gap in what's drawn)
+    bool live = g_view && *(const uint64_t *)(uintptr_t)g_view == g_view_vt;
+    gone = live && menu_item_part("L_settings_list_") ? 0 : gone + 1;
+    if (!live || gone > 30) {
+        g_ctl = false, g_ctl_pending = -1;
+        return b & ~kept;
+    }
+    if (gone) return b & ~kept;
+    uint32_t id = *(const uint32_t *)(uintptr_t)(g_view + 0x5b8);
+    int dev, slot, ms, serial, pending = g_ctl_pending;
+    g_ctl_pending = -1;
+    bind_last_result(&dev, &slot, &ms, &serial);
+    if (serial0 < 0) serial0 = serial;
+    if (g_ctl && bind_capture_active(&dev, &slot, &ms)) { kept |= b; return 0; }  // (the next press is the binding's)
+    if (serial != serial0) {  // (set, swapped or cancelled)
+        serial0 = serial;
+        settings_save();
+        if (g_ctl) redraw_cursor_row(c);
+    }
+    int bi = bind_of(id);
+    if (!g_ctl) {
+        if (id == FIRST_ID && ((edge & A) || pending >= 100)) kept |= edge & A, set_rows(c, true);  // (the Controls row)
+    } else if (pending == 0 || pending == 1) {
+        if (bi >= 0 && !(pending && k_binds[bi].slot >= BIND_PAD_COUNT))
+            bind_capture_begin(pending ? BIND_DEV_PAD : BIND_DEV_KEY, k_binds[bi].slot), redraw_cursor_row(c);
+    } else if (edge & B) {
+        kept |= B, set_rows(c, false);
+    } else if (edge & X) {
+        kept |= X, bind_reset(ctl_col() ? BIND_DEV_PAD : BIND_DEV_KEY), settings_save(), set_rows(c, true);
+    } else if ((edge & A) && bi >= 0) {
+        kept |= A;
+        int col = ctl_col();
+        if (!(col && k_binds[bi].slot >= BIND_PAD_COUNT))  // (a controller's sticks stay its sticks)
+            bind_capture_begin(col ? BIND_DEV_PAD : BIND_DEV_KEY, k_binds[bi].slot), redraw_cursor_row(c);
+    }
+    return b & ~kept;
+}
 
 // ------------------------------------------------------------------ research
 static _Atomic int g_trace_on, g_trace_gen;
