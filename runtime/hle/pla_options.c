@@ -70,7 +70,11 @@ static int find(const int *v, int n, int x) {
 }
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 static int get_fps(void) { return find(k_fps, 4, g_settings.next_fps ? g_settings.next_fps : g_settings.fps); }
-static void set_fps(int i) { g_settings.next_fps = k_fps[i] == g_settings.fps ? 0 : k_fps[i]; }
+bool legends_set_fps(int fps);  // runtime/hle/fps60.c: at once
+static void set_fps(int i) {
+    if (legends_set_fps(k_fps[i])) g_settings.fps = k_fps[i], g_settings.next_fps = 0;
+    else g_settings.next_fps = k_fps[i] == g_settings.fps ? 0 : k_fps[i];
+}
 static int get_res(void) { return find(k_lines, 5, g_settings.next_res_height ? g_settings.next_res_height - 1 : g_settings.res_height); }
 static void set_res(int i) { g_settings.next_res_height = k_lines[i] == g_settings.res_height ? 0 : k_lines[i] + 1; }
 static int get_full(void) { return g_settings.fullscreen ? 1 : 0; }
@@ -99,9 +103,9 @@ static void set_vol(int v) { g_settings.volume = (float)v / 10; }
 static const Row k_rows[] = {
     {"Controls", "Press A to see and change the key and the controller button for each action.", CHOICE, 2,
      {"Keyboard", "Controller"}, ctl_col, ctl_open},
-    {"Frame Rate", "Choose how many frames are drawn a second. Applies the next time you start the game.", CHOICE, 4,
+    {"Frame Rate", "Choose how many frames are drawn a second.", CHOICE, 4,
      {"30 fps", "60 fps", "120 fps", "144 fps"}, get_fps, set_fps},
-    {"Resolution", "Choose the resolution the game is drawn at. Applies the next time you start the game.", CHOICE, 5,
+    {"Resolution (Next Start)", "Choose the resolution the game is drawn at. It applies the next time you start the game.", CHOICE, 5,
      {"Auto", "720p", "1080p", "1440p", "4K"}, get_res, set_res},
     {"Screen Mode", "Choose whether the game fills the screen or plays in a window.", CHOICE, 2, {"Window", "Fullscreen"},
      get_full, set_full},

@@ -425,6 +425,7 @@ static const struct { uint8_t id[8]; uint64_t entry; const char *name; } k_legen
     {{0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a}, 0x7000000000ull + 0x3393E28, "Legends Z-A"},
 };
 static uint64_t g_pla60_entry;  // the interval-2 frame time of the running build (0: off)
+static uint64_t g_pla60_build;  // (that entry of the running build, also at 30)
 static bool g_pla60_patched;
 static uint64_t g_pla60_ns = 16666667;  // the frame time: 60 fps, or LARECOMP_LEGENDS_FPS=<n> (experimental: 90, 120, 144...)
 bool pla60_enabled(void) { return g_pla60_entry != 0; }
@@ -467,7 +468,7 @@ void pla60_configure(const char *exefs) {
     bool on = e ? atoi(e) != 0 : g_settings.fps >= 60;
     g_pla60_ns = !e && g_settings.fps > 60 ? 1000000000ull / (uint64_t)g_settings.fps : 16666667;
     if (n && atoi(n) > 30) on = true, g_pla60_ns = 1000000000ull / (uint64_t)atoi(n);
-    g_pla60_entry = 0;
+    g_pla60_entry = g_pla60_build = 0;
     g_pla60_patched = false;
     { void dt_probe_init(void), watch_arg_init(void), gate_init(void), args_probe_init(void); dt_probe_init(); watch_arg_init(); gate_init(); args_probe_init(); }
     if (!memcmp(id, k_legends60[0].id, 8)) {  // (Legends: Arceus 1.1.1)
@@ -484,11 +485,29 @@ void pla60_configure(const char *exefs) {
             pla_options_configure();
         }
     }
-    for (size_t i = 0; on && i < sizeof k_legends60 / sizeof *k_legends60; i++)
+    for (size_t i = 0; i < sizeof k_legends60 / sizeof *k_legends60; i++)
         if (!memcmp(id, k_legends60[i].id, 8)) {
-            g_pla60_entry = k_legends60[i].entry;
-            LOG("[fps60] %s at %.0f fps\n", k_legends60[i].name, 1e9 / (double)g_pla60_ns);
+            g_pla60_build = k_legends60[i].entry;
+            if (on) g_pla60_entry = g_pla60_build, LOG("[fps60] %s at %.0f fps\n", k_legends60[i].name, 1e9 / (double)g_pla60_ns);
         }
+}
+
+// The frame rate changed while playing (the game's Settings screen, hle/*_options.c): 30 the game's own; above it the
+// table entry and the present pacing (and the rest that follows pla60_period_ns) at once. False: not a known build.
+bool legends_set_fps(int fps) {
+    if (!g_pla60_build) return false;
+    uint64_t ns = fps == 60 ? 16666667 : fps > 30 ? 1000000000ull / (uint64_t)fps : 33333334;
+    volatile uint64_t *ft = (volatile uint64_t *)(uintptr_t)g_pla60_build;
+    bool loaded = g_pla60_patched || *ft == 33333334u;  // (the game's data there: else pla60_present patches it later)
+    if (loaded) {
+        plat_protect(g_pla60_build & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);
+        *ft = ns;
+    }
+    g_pla60_ns = fps > 30 ? ns : 16666667;
+    g_pla60_entry = fps > 30 ? g_pla60_build : 0;
+    g_pla60_patched = fps > 30 && loaded;
+    LOG("[fps60] %d fps from now on\n", fps);
+    return true;
 }
 
 // each present: the table entry, once the game is loaded (read-only data: the page made writable first)
@@ -563,7 +582,8 @@ uint32_t rt_step_bits(int i) {
     if (i < 0 || i >= PLA_STEP_SITES) return 0x3d088889u;
     atomic_fetch_add_explicit(&g_step_calls[i], 1, memory_order_relaxed);
     if (!g_pla60_patched || !g_step_on[i]) return 0x3d088889u;  // 1/30
-    if (!bits) { float f = (float)((double)g_pla60_ns * 1e-9); memcpy(&bits, &f, 4); }
+    static uint64_t bits_ns;  // (the frame time it was worked out for: it may change while playing)
+    if (bits_ns != g_pla60_ns) { float f = (float)((double)g_pla60_ns * 1e-9); memcpy(&bits, &f, 4); bits_ns = g_pla60_ns; }
     return bits;
 }
 
