@@ -181,6 +181,15 @@ void za_fixes_configure(const char *exefs) {
     { extern void za_qstats_configure(void); za_qstats_configure(); }
     { extern void za_passq_configure(void); za_passq_configure(); }
     { extern void za_jobq_configure(void); za_jobq_configure(); }
+    {   // Unscaled: the internal resolution option sizes the game's 1920x1080 targets for the window (1440p: x1.33), but
+        // the rscale fix-ups only cover what shaders read by frag coord, and Z-A addresses many pixels as integers
+        // (texelFetch, image stores, compute: its upscaler, depth pyramid, lighting) - scaled, those passes read a
+        // stretched lattice: a softer image with artifacts. Its own 1920x1080 output (the game's upscaler from its
+        // dynamic resolution) is drawn to the window instead, as LZA Recomp (FerSaiyan) found. LARECOMP_FORCE_SCALE=1:
+        // the scaling back.
+        extern bool g_tex_no_scale;
+        g_tex_no_scale = !getenv("LARECOMP_FORCE_SCALE");
+    }
     { extern void za_jobs_configure(void); za_jobs_configure(); }
     {
         const char *cs = getenv("LARECOMP_ZA_CUTSCENE_SPEED");
