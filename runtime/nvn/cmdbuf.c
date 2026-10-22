@@ -172,7 +172,7 @@ NVN(nvnCommandBufferBeginRecording) {
         hooked = true;
         extern bool vk_interp_enabled(void), fps60_enabled(void);
         // (the 60 fps mode turns interpolation on only inside battles and captures: hooked from the start all the same)
-        if ((vk_interp_enabled() || fps60_enabled()) && !getenv("LARECOMP_INTERP_NOOBJ"))  // (NOOBJ: pair by order, the old prototype)
+        if ((vk_interp_enabled() || fps60_enabled()) && !ENV("LARECOMP_INTERP_NOOBJ"))  // (NOOBJ: pair by order, the old prototype)
             for (size_t i = 0; i < sizeof k_obj_fns / sizeof k_obj_fns[0]; i++) rt_register_fnhook(k_obj_fns[i], obj_hook);
     }
     NvnCmdBuf *cb = cb_of(A(0));
@@ -235,7 +235,7 @@ NVN(nvnCommandBufferBindProgram) {
 // while it is active, with its control section dumped to build/xfb_<code address>.bin
 static void xfb_note_draw(Cpu *c) {
     static int on = -1;
-    if (on < 0) on = getenv("LARECOMP_LOG_XFB") != NULL;
+    if (on < 0) on = ENV("LARECOMP_LOG_XFB") != NULL;
     NvnCmdBuf *cb = cb_of(c->x[0]);
     if (!on || !cb->xfb_active || !cb->last_prog) return;
     NvnProgram *p = cb->last_prog;
@@ -325,7 +325,7 @@ NVN(nvnCommandBufferBindTransformFeedbackBuffers) {  // (cmd, first, count, cons
 }
 NVN(nvnCommandBufferBindTransformFeedbackBuffer) {  // (cmd, index, NVNbufferAddress, size)
     { Snap s_ = snap(c); record(c, CMD_XFB_BIND, 0, &s_); }
-    if (getenv("LARECOMP_LOG_XFB")) { static int n; if (n++ < 12) LOG("[xfb] bind buffer %d: %llx size %#llx\n", (int)c->x[1], (unsigned long long)c->x[2], (unsigned long long)c->x[3]); }
+    if (ENV("LARECOMP_LOG_XFB")) { static int n; if (n++ < 12) LOG("[xfb] bind buffer %d: %llx size %#llx\n", (int)c->x[1], (unsigned long long)c->x[2], (unsigned long long)c->x[3]); }
 }
 STUB(nvnCommandBufferBindCoverageModulationTable)
 
@@ -372,7 +372,7 @@ NVN(nvnCommandBufferSetRenderTargets) {
 static void viewport_trace(Cpu *c, float w, float h) {
     static long want = -2;
     static int n;
-    if (want == -2) want = getenv("LARECOMP_LOG_VIEWPORT") ? atol(getenv("LARECOMP_LOG_VIEWPORT")) : -1;
+    if (want == -2) want = ENV("LARECOMP_LOG_VIEWPORT") ? atol(ENV("LARECOMP_LOG_VIEWPORT")) : -1;
     if (want < 0 || (long)w != want || n >= 4) return;
     n++;
     char line[512];
@@ -491,7 +491,7 @@ PLAIN(nvnCommandBufferClearBuffer, CMD_CLEAR_BUFFER)
 // black there. Treated as a clear to (0,0,0,0) (LARECOMP_KEEP_DISCARD=1: old no-op behaviour).
 NVN(nvnCommandBufferDiscardColor) {
     static int keep = -1, logged;
-    if (keep < 0) keep = getenv("LARECOMP_KEEP_DISCARD") != NULL;
+    if (keep < 0) keep = ENV("LARECOMP_KEEP_DISCARD") != NULL;
     if (logged < 5) { logged++; LOG("[nvn] DiscardColor index %llu%s\n", (unsigned long long)c->x[1], keep ? " (kept)" : " -> clear"); }
     if (keep) return;
     Snap s = snap(c);
@@ -521,7 +521,7 @@ static void trace_chain(Cpu *c) {
 }
 static void trace_draw(Cpu *c, uint64_t count) {
     static long want = -2;
-    if (want == -2) want = getenv("LARECOMP_TRACE_COUNT") ? atol(getenv("LARECOMP_TRACE_COUNT")) : -1;
+    if (want == -2) want = ENV("LARECOMP_TRACE_COUNT") ? atol(ENV("LARECOMP_TRACE_COUNT")) : -1;
     if (want < 0 || (long)count != want) return;
     static int n;
     if (n++ > 4000) return;
@@ -544,7 +544,7 @@ static void trace_draw(Cpu *c, uint64_t count) {
 static bool chains_on(void) {
     static long from = -2, to = -2;
     if (from == -2) {
-        const char *e = getenv("LARECOMP_DRAW_CHAINS");
+        const char *e = ENV("LARECOMP_DRAW_CHAINS");
         from = e ? atol(e) : -1;
         to = e && strchr(e, '-') ? atol(strchr(e, '-') + 1) : from;
     }
@@ -614,12 +614,12 @@ PLAIN(nvnCommandBufferDispatchComputeIndirect, CMD_DISPATCH_INDIRECT)
 NVN(nvnCommandBufferBeginTransformFeedback) {  // (cmd, NVNbufferAddress control buffer)
     { Snap s_ = snap(c); record(c, CMD_XFB_BEGIN, 0, &s_); }
     cb_of(c->x[0])->xfb_active = 1;
-    if (getenv("LARECOMP_LOG_XFB")) { static int n; if (n++ < 6) LOG("[xfb] BeginTransformFeedback control %llx\n", (unsigned long long)c->x[1]); }
+    if (ENV("LARECOMP_LOG_XFB")) { static int n; if (n++ < 6) LOG("[xfb] BeginTransformFeedback control %llx\n", (unsigned long long)c->x[1]); }
 }
 NVN(nvnCommandBufferEndTransformFeedback) {  // (cmd, NVNbufferAddress control buffer)
     { Snap s_ = snap(c); record(c, CMD_XFB_END, 0, &s_); }
     cb_of(c->x[0])->xfb_active = 0;
-    if (getenv("LARECOMP_LOG_XFB")) { static int n; if (n++ < 6) LOG("[xfb] EndTransformFeedback control %llx\n", (unsigned long long)c->x[1]); }
+    if (ENV("LARECOMP_LOG_XFB")) { static int n; if (n++ < 6) LOG("[xfb] EndTransformFeedback control %llx\n", (unsigned long long)c->x[1]); }
 }
 NVN(nvnCommandBufferPauseTransformFeedback) { Snap s_ = snap(c); record(c, CMD_XFB_END, 0, &s_); }
 NVN(nvnCommandBufferResumeTransformFeedback) { Snap s_ = snap(c); record(c, CMD_XFB_BEGIN, 0, &s_); }

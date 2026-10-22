@@ -49,7 +49,7 @@ static void create_instance(void) {
             if (!dup) ext[n_ext++] = pe[i];
         }
     }
-    bool validate = getenv("LARECOMP_VK_VALIDATION") != NULL;
+    bool validate = ENV("LARECOMP_VK_VALIDATION") != NULL;
     if (validate) ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "LARecomp",
@@ -93,7 +93,7 @@ static void pick_device(void) {
     if (!n) FATAL("no Vulkan device\n");
     VkPhysicalDevice *pd = calloc(n, sizeof *pd);
     vkEnumeratePhysicalDevices(g_vk.inst, &n, pd);
-    int want = getenv("LARECOMP_GPU") ? atoi(getenv("LARECOMP_GPU")) : -1, best = -1, best_score = -1;
+    int want = ENV("LARECOMP_GPU") ? atoi(ENV("LARECOMP_GPU")) : -1, best = -1, best_score = -1;
     for (uint32_t i = 0; i < n; i++) {
         VkPhysicalDeviceProperties p;
         vkGetPhysicalDeviceProperties(pd[i], &p);
@@ -170,9 +170,9 @@ static void create_device(void) {
     bool fault = has_ext(ep, ne, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);  // device-lost diagnostics (vk_device_fault_report)
     if (fault) ext[n_ext++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
     // LARECOMP_PIPE_STATS: what the driver says about each compiled shader (registers, spills, ...), exec.c pipe_exec_report
-    g_pipe_exec_stats = getenv("LARECOMP_PIPE_STATS") && has_ext(ep, ne, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
+    g_pipe_exec_stats = ENV("LARECOMP_PIPE_STATS") && has_ext(ep, ne, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
     if (g_pipe_exec_stats) ext[n_ext++] = VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;
-    else if (getenv("LARECOMP_PIPE_STATS")) LOG("[vk] LARECOMP_PIPE_STATS: the driver has no VK_KHR_pipeline_executable_properties\n");
+    else if (ENV("LARECOMP_PIPE_STATS")) LOG("[vk] LARECOMP_PIPE_STATS: the driver has no VK_KHR_pipeline_executable_properties\n");
     g_fault_ext = fault;
     {   // plugins' device extensions, once each and only those the device has
         const char *pe[24];
@@ -258,7 +258,7 @@ static void create_device(void) {
     b->vertexPipelineStoresAndAtomics = h->vertexPipelineStoresAndAtomics;
     b->pipelineStatisticsQuery = h->pipelineStatisticsQuery;  // (LARECOMP_GPUPROF_STATS: invocations per draw)
     b->robustBufferAccess = h->robustBufferAccess;  // guest shaders index cbufs freely: keep OOB reads harmless
-    if (getenv("LARECOMP_NO_ROBUST")) b->robustBufferAccess = VK_FALSE;  // (research: what the bounds checks cost)
+    if (ENV("LARECOMP_NO_ROBUST")) b->robustBufferAccess = VK_FALSE;  // (research: what the bounds checks cost)
     b->shaderClipDistance = h->shaderClipDistance;
     if (!h->shaderInt64) LOG("[vk] warning: no shaderInt64 (64-bit address math in shaders)\n");
     float prio = 1.0f;
@@ -334,7 +334,7 @@ static VkPresentModeKHR present_mode(void) {
     // queued behind the one waiting for a window image, so the game's fence waits followed the presentation engine:
     // a throttled / captured / busy compositor slowed the whole game (4-21 fps with the GPU mostly idle; mailbox:
     // 60). No tearing. LARECOMP_VK_PRESENT=fifo|immediate|mailbox to choose.
-    const char *e = getenv("LARECOMP_VK_PRESENT");
+    const char *e = ENV("LARECOMP_VK_PRESENT");
     VkPresentModeKHR want = !e || !strcmp(e, "mailbox") ? VK_PRESENT_MODE_MAILBOX_KHR
                           : !strcmp(e, "immediate") ? VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_FIFO_KHR;
     uint32_t n = 0;
@@ -436,7 +436,7 @@ bool vk_frame_begin(const float clear[4]) {
     if (!g_vk.swapchain || (uint32_t)w != g_vk.sc_extent.width || (uint32_t)h != g_vk.sc_extent.height) recreate_swapchain();
     if (!g_vk.swapchain) return false;
     static int trace = -1;
-    if (trace < 0) trace = getenv("LARECOMP_VK_TRACE") != NULL;
+    if (trace < 0) trace = ENV("LARECOMP_VK_TRACE") != NULL;
     if (trace) LOG("[vk] frame begin %dx%d (swapchain %ux%u)\n", w, h, g_vk.sc_extent.width, g_vk.sc_extent.height);
     slot = (slot + 1) % FRAMES;
     if (!acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
@@ -547,7 +547,7 @@ static bool shot_raw(const char *path, const uint8_t *rgba, uint32_t w, uint32_t
     static FILE *f; static int init;
     if (!init) {
         init = 1;
-        const char *e = getenv("LARECOMP_SHOT_RAW");
+        const char *e = ENV("LARECOMP_SHOT_RAW");
         if (e && *e) { f = fopen(e, "wb"); if (f) setvbuf(f, NULL, _IOFBF, 1 << 20); else LOG("[vk] cannot open %s\n", e); }
     }
     const char *n = strstr(path, "frame_");
@@ -567,7 +567,7 @@ static bool shot_raw(const char *path, const uint8_t *rgba, uint32_t w, uint32_t
     }
     uint32_t fn = (uint32_t)atol(n + 6);
     fwrite(&fn, 4, 1, f); fwrite(out, sizeof out, 1, f); fflush(f);  // (the game leaves with _exit)
-    if (getenv("LARECOMP_SHOT_RAW_LAST") && (long)fn >= atol(getenv("LARECOMP_SHOT_RAW_LAST"))) { LOG("[vk] raw frames done at %u\n", fn); fflush(stderr); _exit(0); }
+    if (ENV("LARECOMP_SHOT_RAW_LAST") && (long)fn >= atol(ENV("LARECOMP_SHOT_RAW_LAST"))) { LOG("[vk] raw frames done at %u\n", fn); fflush(stderr); _exit(0); }
     return true;
 }
 
@@ -665,28 +665,28 @@ void backend_present(NvnTexture *t) {
         // (0: show everything).
         { extern void bntxscan_present(uint64_t frame); bntxscan_present(total_frames); }  // (research: hle/bntxscan.c)
         static long hide = -1;
-        if (hide < 0) hide = getenv("LARECOMP_HIDE_FIRST_FRAMES") ? atol(getenv("LARECOMP_HIDE_FIRST_FRAMES")) : 2;
+        if (hide < 0) hide = ENV("LARECOMP_HIDE_FIRST_FRAMES") ? atol(ENV("LARECOMP_HIDE_FIRST_FRAMES")) : 2;
         if ((long)total_frames >= hide) vk_present_draw(cb, b, (float)vx, (float)vy, (float)vw, (float)vh, pv);
         static long menu_at = -1;
-        if (menu_at < 0) menu_at = getenv("LARECOMP_MENU_AT") ? atol(getenv("LARECOMP_MENU_AT")) : 0;
+        if (menu_at < 0) menu_at = ENV("LARECOMP_MENU_AT") ? atol(ENV("LARECOMP_MENU_AT")) : 0;
         if (final && menu_at && (long)total_frames + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }
         menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
         { extern uint32_t g_dyn_epoch; g_dyn_epoch++; }  // (the menu set its own state: exec.c draw_'s cache)
         static long win_shot = -1;
-        if (win_shot < 0) win_shot = getenv("LARECOMP_WINDOW_SHOT") ? atol(getenv("LARECOMP_WINDOW_SHOT")) : 0;
+        if (win_shot < 0) win_shot = ENV("LARECOMP_WINDOW_SHOT") ? atol(ENV("LARECOMP_WINDOW_SHOT")) : 0;
         // (the in-between image: build/window_mid.png, with interpolation on)
         bool shot = win_shot && (long)total_frames + 1 == win_shot;
         // LARECOMP_WINDOW_SHOTS=<n>,<n>,...: the in-between image and the frame of each, build/frames/{mid,fin}_<n>.png
         static long list[512]; static int nlist = -1;
         if (nlist < 0) {
             nlist = 0;
-            const char *e = getenv("LARECOMP_WINDOW_SHOTS");
+            const char *e = ENV("LARECOMP_WINDOW_SHOTS");
             for (; e && *e && nlist < 512; nlist++) { list[nlist] = atol(e); e = strchr(e, ','); if (!e) { nlist++; break; } e++; }
         }
         static char lpath[96];
         extern long fps60_scene_start(void);
         static bool rel_list = false;
-        { static bool init; if (!init) { init = true; rel_list = getenv("LARECOMP_WINDOW_SHOTS_REL") != NULL; } }
+        { static bool init; if (!init) { init = true; rel_list = ENV("LARECOMP_WINDOW_SHOTS_REL") != NULL; } }
         const char *path = shot ? (final ? "build/window.png" : "build/window_mid.png") : NULL;
         for (int i = 0; i < nlist; i++)
             if (rel_list ? (fps60_scene_start() >= 0 && (long)total_frames + 1 - fps60_scene_start() == list[i])
@@ -696,7 +696,7 @@ void backend_present(NvnTexture *t) {
                 path = lpath;
             }
         vk_frame_end(path);
-        if (final && shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
+        if (final && shot && ENV("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
     } else {
         renderer_submit();
     }
@@ -713,7 +713,7 @@ void backend_present(NvnTexture *t) {
         static bool initialized;
         if (!initialized) {
             initialized = true;
-            const char *path = getenv("LARECOMP_FRAMETIME_CSV");
+            const char *path = ENV("LARECOMP_FRAMETIME_CSV");
             if (path && *path) {
                 csv = fopen(path, "w");
                 if (csv) fputs("present,dt_ms\n", csv);
@@ -726,7 +726,7 @@ void backend_present(NvnTexture *t) {
             previous = now;
             if (total_frames % 60 == 0) fflush(csv);
             static long exit_at = -1;
-            if (exit_at < 0) exit_at = getenv("LARECOMP_EXIT_AT_PRESENT") ? atol(getenv("LARECOMP_EXIT_AT_PRESENT")) : 0;
+            if (exit_at < 0) exit_at = ENV("LARECOMP_EXIT_AT_PRESENT") ? atol(ENV("LARECOMP_EXIT_AT_PRESENT")) : 0;
             if (exit_at && (long)total_frames >= exit_at) { LOG("[vk] exit at present %llu\n", (unsigned long long)total_frames); fflush(csv); fflush(stderr); _exit(0); }
         }
     }
@@ -738,7 +738,7 @@ void backend_present(NvnTexture *t) {
     extern void input_frame(uint64_t frame);
     if (!rt_on_render_thread()) input_frame(total_frames);
     static long slow_ms = -1;
-    if (slow_ms < 0) slow_ms = getenv("LARECOMP_SLOW_FRAME_MS") ? atol(getenv("LARECOMP_SLOW_FRAME_MS")) : 0;
+    if (slow_ms < 0) slow_ms = ENV("LARECOMP_SLOW_FRAME_MS") ? atol(ENV("LARECOMP_SLOW_FRAME_MS")) : 0;
     if (slow_ms > 0 && total_frames > 2600) SDL_Delay((Uint32)slow_ms);
     extern void fnprof_frame(uint64_t frame);
     if (!rt_on_render_thread()) fnprof_frame(total_frames);
@@ -747,21 +747,21 @@ void backend_present(NvnTexture *t) {
     extern void reboot_test_frame(uint64_t frame);  // runtime/main.c (LARECOMP_REBOOT_AT)
     if (!rt_on_render_thread()) reboot_test_frame(total_frames);
     static long shot_every = -1;
-    if (shot_every < 0) { const char *e = getenv("LARECOMP_SCREENSHOT_EVERY"); shot_every = e ? atol(e) : 0; }
+    if (shot_every < 0) { const char *e = ENV("LARECOMP_SCREENSHOT_EVERY"); shot_every = e ? atol(e) : 0; }
     extern bool g_debug_frame;
     static long debug_at = -1;
-    if (debug_at < 0) { const char *e = getenv("LARECOMP_DEBUG_FRAME"); debug_at = e ? atol(e) : 0; }
+    if (debug_at < 0) { const char *e = ENV("LARECOMP_DEBUG_FRAME"); debug_at = e ? atol(e) : 0; }
     extern volatile int g_debug_frame_request;
     if (g_debug_frame_request) { g_debug_frame_request = 0; debug_at = (long)total_frames + 1; }
     // LARECOMP_DEBUG_FRAMES=<n> (with LARECOMP_DEBUG_FRAME / F9): dump n consecutive frames (build/pass_<frame>_NNN.png)
     static long debug_n = -1;
-    if (debug_n < 0) { const char *e = getenv("LARECOMP_DEBUG_FRAMES"); debug_n = e && atol(e) > 1 ? atol(e) : 1; }
+    if (debug_n < 0) { const char *e = ENV("LARECOMP_DEBUG_FRAMES"); debug_n = e && atol(e) > 1 ? atol(e) : 1; }
     g_debug_frame = debug_at && total_frames >= (uint64_t)debug_at && total_frames < (uint64_t)debug_at + (uint64_t)debug_n;
     {   // LARECOMP_GPUPROF_AT=<frame>[,<frame>...]: GPU time per pass of those frames ("[gpuprof]" in the log)
         extern bool g_gpuprof_frame;
         extern void vk_gpuprof_report(void);
         if (g_gpuprof_frame) { g_gpuprof_frame = false; vk_gpuprof_report(); }
-        const char *e = getenv("LARECOMP_GPUPROF_AT");
+        const char *e = ENV("LARECOMP_GPUPROF_AT");
         for (const char *p = e; p && *p;) {
             long at = strtol(p, (char **)&p, 10);
             if (at == (long)total_frames) { g_gpuprof_frame = true; break; }
@@ -773,7 +773,7 @@ void backend_present(NvnTexture *t) {
         static long at = -1;
         static uint64_t lo, hi;
         if (at < 0) {
-            const char *e = getenv("LARECOMP_WATCH_RANGE");
+            const char *e = ENV("LARECOMP_WATCH_RANGE");
             at = 0;
             if (e) sscanf(e, "%llx,%llx@%ld", (unsigned long long *)&lo, (unsigned long long *)&hi, &at);
         }
@@ -789,7 +789,7 @@ void backend_present(NvnTexture *t) {
         static uint64_t wa[4];
         static int nw;
         if (at < 0) {
-            const char *e = getenv("LARECOMP_HWWATCH");
+            const char *e = ENV("LARECOMP_HWWATCH");
             at = 0;
             for (const char *p = e; p && *p && nw < 4;) {
                 wa[nw++] = strtoull(p, (char **)&p, 16);
@@ -808,7 +808,7 @@ void backend_present(NvnTexture *t) {
         static long at = -1;
         static uint64_t cb;
         if (at < 0) {
-            const char *e = getenv("LARECOMP_CAMSCAN");
+            const char *e = ENV("LARECOMP_CAMSCAN");
             at = 0;
             if (e) sscanf(e, "%llx@%ld", (unsigned long long *)&cb, &at);
         }
@@ -818,7 +818,7 @@ void backend_present(NvnTexture *t) {
     {   // LARECOMP_FIND_VIEW_AT=<frame>[,<frame>...]: camera research, the constant buffers holding view-like matrices
         extern uint64_t g_findview_frame;  // exec.c ("[findview]" in the log)
         g_findview_frame = 0;
-        for (const char *p = getenv("LARECOMP_FIND_VIEW_AT"); p && *p;) {
+        for (const char *p = ENV("LARECOMP_FIND_VIEW_AT"); p && *p;) {
             long at = strtol(p, (char **)&p, 10);
             if (at == (long)total_frames) { g_findview_frame = total_frames; break; }
             if (*p == ',') p++; else break;
@@ -828,10 +828,10 @@ void backend_present(NvnTexture *t) {
     {   // LARECOMP_SHOT_AT=<frame>,<frame>,... (ascending): the game image at those frames -> build/frames/frame_N.png
         static const char *next;
         static int init;
-        if (!init) { init = 1; next = getenv("LARECOMP_SHOT_AT"); if (next) mkdir("build/frames", 0755); }
+        if (!init) { init = 1; next = ENV("LARECOMP_SHOT_AT"); if (next) mkdir("build/frames", 0755); }
         while (next && *next) {
             long at = strtol(next, (char **)&next, 10);
-            if ((long)total_frames < at) { while (next > getenv("LARECOMP_SHOT_AT") && next[-1] != ',') next--; break; }
+            if ((long)total_frames < at) { while (next > ENV("LARECOMP_SHOT_AT") && next[-1] != ',') next--; break; }
             if ((long)total_frames == at) {
                 char path[256];
                 snprintf(path, sizeof path, "build/frames/frame_%05llu.png", (unsigned long long)total_frames);
@@ -844,7 +844,7 @@ void backend_present(NvnTexture *t) {
         // images <every> presents apart as <dir>/live_<frame>.png; the request file is removed once taken
         static const char *dir = (const char *)1;
         static long left, every = 1, next_at;
-        if (dir == (const char *)1) dir = getenv("LARECOMP_LIVE");
+        if (dir == (const char *)1) dir = ENV("LARECOMP_LIVE");
         if (dir) {
             char path[1100];
             snprintf(path, sizeof path, "%s/shot", dir);
@@ -1019,7 +1019,7 @@ void backend_present(NvnTexture *t) {
     {   // LARECOMP_SHOT_REL=<n>,<n>,...: the game image n presents after a capture began (fps60.c marks it)
         extern long fps60_scene_start(void);
         static const char *rel = (const char *)1;
-        if (rel == (const char *)1) { rel = getenv("LARECOMP_SHOT_REL"); if (rel) mkdir("build/frames", 0755); }
+        if (rel == (const char *)1) { rel = ENV("LARECOMP_SHOT_REL"); if (rel) mkdir("build/frames", 0755); }
         long st = rel ? fps60_scene_start() : -1;
         for (const char *p = rel; st >= 0 && p && *p;) {
             long n = strtol(p, (char **)&p, 10);
@@ -1032,7 +1032,7 @@ void backend_present(NvnTexture *t) {
         }
     }
     static long shot_from = -1;
-    if (shot_from < 0) { const char *e = getenv("LARECOMP_SCREENSHOT_FROM"); shot_from = e ? atol(e) : 0; }
+    if (shot_from < 0) { const char *e = ENV("LARECOMP_SCREENSHOT_FROM"); shot_from = e ? atol(e) : 0; }
     if (shot_every && total_frames % shot_every == 0 && (long)total_frames >= shot_from) {
         char path[256];
         if (shot_from) mkdir("build/frames", 0755);
@@ -1040,11 +1040,11 @@ void backend_present(NvnTexture *t) {
                  (unsigned long long)total_frames);
         renderer_save_texture_tex(b, path);
         // a series (SCREENSHOT_FROM) runs on until LARECOMP_WINDOW_SHOT exits
-        if (getenv("LARECOMP_EXIT_AFTER_SHOT") && !shot_from) { fflush(stderr); _exit(0); }
+        if (ENV("LARECOMP_EXIT_AFTER_SHOT") && !shot_from) { fflush(stderr); _exit(0); }
     }
     double now = SDL_GetTicks() / 1000.0;
     static double fps_iv = -1, prev_present, max_gap;
-    if (fps_iv < 0) fps_iv = getenv("LARECOMP_FPS_INTERVAL") ? atof(getenv("LARECOMP_FPS_INTERVAL")) : 2.0;
+    if (fps_iv < 0) fps_iv = ENV("LARECOMP_FPS_INTERVAL") ? atof(ENV("LARECOMP_FPS_INTERVAL")) : 2.0;
     if (prev_present > 0 && now - prev_present > max_gap) max_gap = now - prev_present;
     prev_present = now;
     if (now - last_fps_time >= fps_iv) {
@@ -1065,7 +1065,7 @@ void vk_shaders_init(void);
 // teardown (driver / validation-layer threads can stall it for minutes while the game's threads still run).
 static void quick_exit_handler(void) {
     static int trace = -1;
-    if (trace < 0) trace = getenv("LARECOMP_VK_TRACE") != NULL;
+    if (trace < 0) trace = ENV("LARECOMP_VK_TRACE") != NULL;
     if (trace) LOG("[vk] exit: waiting for the GPU\n");
     if (g_vk.dev) {
         vkDeviceWaitIdle(g_vk.dev);
@@ -1088,14 +1088,14 @@ void ui_window_init(void) {
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) FATAL("SDL_Init: %s\n", SDL_GetError());
     input_load_user_mappings();
     int win_w = 1280, win_h = 720;
-    if (getenv("LARECOMP_WINDOW")) sscanf(getenv("LARECOMP_WINDOW"), "%dx%d", &win_w, &win_h);
+    if (ENV("LARECOMP_WINDOW")) sscanf(ENV("LARECOMP_WINDOW"), "%dx%d", &win_w, &win_h);
     SDL_WindowFlags wflags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
-    if (getenv("LARECOMP_HIDDEN")) wflags |= SDL_WINDOW_HIDDEN;
+    if (ENV("LARECOMP_HIDDEN")) wflags |= SDL_WINDOW_HIDDEN;
     window = SDL_CreateWindow(RT_APP_NAME, win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     rt_window_icon(window);
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
-    if (g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
+    if (g_settings.fullscreen && !ENV("LARECOMP_WINDOW") && !ENV("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
     create_instance();
     if (!SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
     pick_device();

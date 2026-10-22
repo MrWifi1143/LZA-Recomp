@@ -68,9 +68,9 @@ static pthread_t thread;
 bool rt_active(void) {
     static int on = -1;
     if (on < 0) {
-        const char *e = getenv("LARECOMP_RENDER_THREAD");
+        const char *e = ENV("LARECOMP_RENDER_THREAD");
         on = e ? atoi(e) != 0 : g_settings.render_thread;  // (the environment wins over larecomp.ini)
-        if (getenv("LARECOMP_INTERP")) on = 0;  // (research: the interpolation replays lists on the game thread)
+        if (ENV("LARECOMP_INTERP")) on = 0;  // (research: the interpolation replays lists on the game thread)
         if (on) LOG("[rt] render thread on\n");
     }
     return on;
@@ -249,7 +249,7 @@ uint64_t plat_now_ns(void);
 static struct { _Atomic uintptr_t who; _Atomic uint64_t n, ns; } rtprof[32];
 static void rtprof_note(uintptr_t who, uint64_t ns) {
     static int on = -1;
-    if (on < 0) on = getenv("LARECOMP_PROF_RT") != NULL;
+    if (on < 0) on = ENV("LARECOMP_PROF_RT") != NULL;
     if (!on) return;
     for (int i = 0; i < 32; i++) {
         uintptr_t w = atomic_load(&rtprof[i].who);

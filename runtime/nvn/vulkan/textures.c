@@ -81,9 +81,9 @@ static VkFmt fmt_of(uint32_t f) {
     case 0x48: return (VkFmt){VK_FORMAT_BC3_SRGB_BLOCK};
     case 0x49: return (VkFmt){VK_FORMAT_BC4_UNORM_BLOCK};
     case 0x4A: return (VkFmt){VK_FORMAT_BC4_SNORM_BLOCK};
-    case 0x4B: return (VkFmt){getenv("LARECOMP_BC5_SNORM_TEST") ? VK_FORMAT_BC5_SNORM_BLOCK : VK_FORMAT_BC5_UNORM_BLOCK};
+    case 0x4B: return (VkFmt){ENV("LARECOMP_BC5_SNORM_TEST") ? VK_FORMAT_BC5_SNORM_BLOCK : VK_FORMAT_BC5_UNORM_BLOCK};
     // 0x4C = signed RGTC2; LARECOMP_BC5_UNORM=1 decodes it unsigned (see metal.m / notes/PLAN.md)
-    case 0x4C: return (VkFmt){getenv("LARECOMP_BC5_UNORM") ? VK_FORMAT_BC5_UNORM_BLOCK : VK_FORMAT_BC5_SNORM_BLOCK};
+    case 0x4C: return (VkFmt){ENV("LARECOMP_BC5_UNORM") ? VK_FORMAT_BC5_UNORM_BLOCK : VK_FORMAT_BC5_SNORM_BLOCK};
     case 0x4D: return (VkFmt){VK_FORMAT_BC7_UNORM_BLOCK};
     case 0x4E: return (VkFmt){VK_FORMAT_BC7_SRGB_BLOCK};
     case 0x4F: return (VkFmt){VK_FORMAT_BC6H_SFLOAT_BLOCK};
@@ -172,7 +172,7 @@ static uint32_t g_level_gen = 1;
 
 bool renderer_texture_frame_fresh(NvnTexture *t) {
     static int on = -1;
-    if (on < 0) on = getenv("LARECOMP_NO_FRAME_CLEAR") == NULL;
+    if (on < 0) on = ENV("LARECOMP_NO_FRAME_CLEAR") == NULL;
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;
     uint64_t total_frames = renderer_present_count();
     if (!on || !b || !b->scalable || b->frame_cleared == total_frames + 1) return false;
@@ -183,7 +183,7 @@ bool renderer_texture_frame_fresh(NvnTexture *t) {
 bool renderer_texture_level_fresh(NvnTexture *t) {
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;
     static int keep = -1;
-    if (keep < 0) keep = getenv("LARECOMP_KEEP_TARGETS") != NULL;
+    if (keep < 0) keep = ENV("LARECOMP_KEEP_TARGETS") != NULL;
     if (!b || keep || b->level_gen == g_level_gen) return false;
     if (!b->scalable) { b->level_gen = g_level_gen; return false; }
     bool fresh = b->level_gen != 0;
@@ -500,7 +500,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     if (full_hash_budget_frame != frame) { full_hash_budget_frame = frame; full_hash_budget = 1 << 20; }
     const uint8_t *mem = (const uint8_t *)(uintptr_t)t->addr;
     static int always_full = -1;
-    if (always_full < 0) always_full = getenv("LARECOMP_TEX_FULLHASH") ? 1 : 0;
+    if (always_full < 0) always_full = ENV("LARECOMP_TEX_FULLHASH") ? 1 : 0;
     bool full = b->dynamic || !b->uploaded || always_full;
     // (the backstop: 1 MB a frame, or one texture up to 4 MB - reading more evicted the game's data from the shared L3)
     if (!full && frame - b->full_frame >= 120 && (full_hash_budget >= total || (full_hash_budget == 1 << 20 && total <= 4 << 20))) {
@@ -558,7 +558,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 tegra_deswizzle(src, lin, l.wb, l.hb, l.d, fi->bpb, l.block_height_log2, l.block_depth_log2);
             }
             static int dump_fmt = -2;  // LARECOMP_DUMP_TEX_FMT=<nvn format>: level 0 of those textures, untiled -> build/tex/
-            if (dump_fmt == -2) dump_fmt = getenv("LARECOMP_DUMP_TEX_FMT") ? (int)strtol(getenv("LARECOMP_DUMP_TEX_FMT"), NULL, 0) : -1;
+            if (dump_fmt == -2) dump_fmt = ENV("LARECOMP_DUMP_TEX_FMT") ? (int)strtol(ENV("LARECOMP_DUMP_TEX_FMT"), NULL, 0) : -1;
             if ((int)t->format == dump_fmt && lv == 0 && layer == 0) {
                 char path[160];
                 mkdir("build/tex", 0755);
@@ -569,7 +569,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
             // LARECOMP_DUMP_TEX_ALL=<max size>: level 0 of every texture up to that width and height, once per content
             // -> build/tex/all/<hash>_<w>x<h>_f<format>_row<bytes>.bin (deswizzled blocks; <hash> as runtime/nvn/glyphs.c keys them)
             static int dump_all = -1;
-            if (dump_all < 0) dump_all = getenv("LARECOMP_DUMP_TEX_ALL") ? atoi(getenv("LARECOMP_DUMP_TEX_ALL")) : 0;
+            if (dump_all < 0) dump_all = ENV("LARECOMP_DUMP_TEX_ALL") ? atoi(ENV("LARECOMP_DUMP_TEX_ALL")) : 0;
             if (dump_all && lv == 0 && layer == 0 && l.w <= (uint32_t)dump_all && l.h <= (uint32_t)dump_all && l.d == 1) {
                 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
                 static uint64_t seen[65536];
@@ -982,20 +982,20 @@ static VkSampler sampler_create(NvnSamplerDesc *d, bool cmp) {
     // the screen): the game asks for little or none, sized for the Switch. Mipmapped, linearly filtered colour samplers
     // only. LARECOMP_ANISO=<n> chooses (0 or 1: the game's own).
     static int aniso = -1;
-    if (aniso < 0) aniso = getenv("LARECOMP_ANISO") ? atoi(getenv("LARECOMP_ANISO")) : 16;
+    if (aniso < 0) aniso = ENV("LARECOMP_ANISO") ? atoi(ENV("LARECOMP_ANISO")) : 16;
     if (aniso > 1 && mf >= 2 && si.minFilter == VK_FILTER_LINEAR && !d->compare_mode) {
         si.anisotropyEnable = VK_TRUE;
         si.maxAnisotropy = fmaxf(si.maxAnisotropy, fminf((float)aniso, 16));
     }
     static float lodmin = -1;
-    if (lodmin < 0) lodmin = getenv("LARECOMP_LOD_MIN") ? (float)atof(getenv("LARECOMP_LOD_MIN")) : 0;
+    if (lodmin < 0) lodmin = ENV("LARECOMP_LOD_MIN") ? (float)atof(ENV("LARECOMP_LOD_MIN")) : 0;
     if (lodmin > 0 && mf > 1) si.minLod = fmaxf(si.minLod, lodmin);
     static int stest = -1;
-    if (stest < 0) stest = getenv("LARECOMP_SAMPLER_TEST") != NULL;
+    if (stest < 0) stest = ENV("LARECOMP_SAMPLER_TEST") != NULL;
     if (stest && mf > 1) { si.minLod = 0; si.maxLod = VK_LOD_CLAMP_NONE; si.anisotropyEnable = VK_TRUE; si.maxAnisotropy = 16; }
     if (d->compare_mode && cmp) {
         si.compareEnable = VK_TRUE;
-        si.compareOp = getenv("LARECOMP_NO_SHADOW") ? VK_COMPARE_OP_ALWAYS : compare_op(d->compare_func);
+        si.compareOp = ENV("LARECOMP_NO_SHADOW") ? VK_COMPARE_OP_ALWAYS : compare_op(d->compare_func);
     }
     VkSamplerCustomBorderColorCreateInfoEXT cb = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CUSTOM_BORDER_COLOR_CREATE_INFO_EXT};
     if (border) {
@@ -1015,7 +1015,7 @@ static VkSampler sampler_create(NvnSamplerDesc *d, bool cmp) {
     // has, and props in plain view tested as hidden behind them (pop-in). LARECOMP_NO_MINMAX=1: averaged (research).
     VkSamplerReductionModeCreateInfo rm = {.sType = VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO};
     static int nominmax = -1;
-    if (nominmax < 0) nominmax = getenv("LARECOMP_NO_MINMAX") != NULL;
+    if (nominmax < 0) nominmax = ENV("LARECOMP_NO_MINMAX") != NULL;
     if ((d->reduction == 1 || d->reduction == 2) && g_vk.minmax && !nominmax && !si.compareEnable) {
         rm.reductionMode = d->reduction == 1 ? VK_SAMPLER_REDUCTION_MODE_MIN : VK_SAMPLER_REDUCTION_MODE_MAX;
         rm.pNext = si.pNext;

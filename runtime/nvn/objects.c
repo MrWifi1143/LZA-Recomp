@@ -48,7 +48,7 @@ NVN(nvnDeviceGetInteger) {
     static uint64_t seen[4];
     if (which < 256 && !(seen[which >> 6] >> (which & 63) & 1)) {
         seen[which >> 6] |= 1ull << (which & 63);
-        if (getenv("LARECOMP_LOG_NVN_INTS") || which > 64) LOG("[nvn] DeviceGetInteger %u -> %u%s\n", which, v, which > 64 ? " (unknown)" : "");
+        if (ENV("LARECOMP_LOG_NVN_INTS") || which > 64) LOG("[nvn] DeviceGetInteger %u -> %u%s\n", which, v, which > 64 ? " (unknown)" : "");
     }
     *(int32_t *)AP(2) = (int32_t)v;
 }
@@ -163,7 +163,7 @@ static void wait_note(uint64_t lr, uint64_t ns) {
 }
 static void wait_report(void) {
     static int on = -1;
-    if (on < 0) on = getenv("LARECOMP_LOG_WAITS") != NULL;
+    if (on < 0) on = ENV("LARECOMP_LOG_WAITS") != NULL;
     if (!on || ++g_wait_frames < 288) return;
     pthread_mutex_lock(&g_wait_mu);
     char line[1024];
@@ -204,12 +204,12 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     rt_trace('W', c->x[30]);
     static int flush = -1;
     static uint64_t n;
-    if (flush < 0) flush = getenv("LARECOMP_SYNC_FLUSH") ? 1 : 0;
-    if (getenv("LARECOMP_LOG_SYNC") && n++ % 60 == 0) LOG("[nvn] SyncWait #%llu (lr %llx)\n", (unsigned long long)n, c->x[30]);
+    if (flush < 0) flush = ENV("LARECOMP_SYNC_FLUSH") ? 1 : 0;
+    if (ENV("LARECOMP_LOG_SYNC") && n++ % 60 == 0) LOG("[nvn] SyncWait #%llu (lr %llx)\n", (unsigned long long)n, c->x[30]);
     static int whole = -1;  // LARECOMP_SYNC_ALL=1: old behaviour, wait for all submitted work
-    if (whole < 0) whole = getenv("LARECOMP_SYNC_ALL") ? 1 : 0;
+    if (whole < 0) whole = ENV("LARECOMP_SYNC_ALL") ? 1 : 0;
     static uint64_t skip_lr = 1;  // (research, LARECOMP_SYNC_SKIP_LR=<hex lr>: that call site doesn't wait - unsafe)
-    if (skip_lr == 1) skip_lr = getenv("LARECOMP_SYNC_SKIP_LR") ? strtoull(getenv("LARECOMP_SYNC_SKIP_LR"), NULL, 16) : 0;
+    if (skip_lr == 1) skip_lr = ENV("LARECOMP_SYNC_SKIP_LR") ? strtoull(ENV("LARECOMP_SYNC_SKIP_LR"), NULL, 16) : 0;
     if (skip_lr && c->x[30] == skip_lr) { wait_note(c->x[30], 0); RET(0); return; }
     if (flush) { rt_drain(); renderer_flush(); }
     else if (whole) { rt_drain(); renderer_sync(); }
@@ -339,7 +339,7 @@ NVN(nvnTextureBuilderSetSize1D) { TB(uint32_t, 0x10) = (uint32_t)A(1); TB(uint32
 static void texsize_trace(Cpu *c, uint32_t w, uint32_t h) {
     static uint32_t ww = 1, wh;
     static int n;
-    if (ww == 1) { const char *e = getenv("LARECOMP_LOG_TEXSIZE"); ww = e ? (uint32_t)atoi(e) : 0; wh = e && strchr(e, 'x') ? (uint32_t)atoi(strchr(e, 'x') + 1) : 0; }
+    if (ww == 1) { const char *e = ENV("LARECOMP_LOG_TEXSIZE"); ww = e ? (uint32_t)atoi(e) : 0; wh = e && strchr(e, 'x') ? (uint32_t)atoi(strchr(e, 'x') + 1) : 0; }
     if (!ww || w != ww || h != wh || n >= 40) return;
     n++;
     char line[512];
@@ -417,7 +417,7 @@ static void builder_layout(uint64_t b, TexLayout *t) {
     // from the driver default: NVNpackagedTextureLayout's low word is log2(GOBs per block).
     uint64_t pl = G(uint64_t, b, 0x50);
     if (pl && (uint32_t)pl <= 5) t->block_height_log2 = (uint32_t)pl;
-    if (pl && getenv("LARECOMP_LOG_PACKAGED")) {
+    if (pl && ENV("LARECOMP_LOG_PACKAGED")) {
         static int n;
         if (n++ < 4000) LOG("[nvn] packaged layout %016llx fmt %#x %ux%u lv %u -> default bh %u\n", pl, G(uint32_t, b, 0x20), t->width, t->height, t->levels, t->block_height_log2);
     }
@@ -473,7 +473,7 @@ extern NvnDescPool *g_texture_pools[64];
 static uint64_t g_pool_dangling, g_pool_reattached, g_pool_mismatch;
 static int pool_fix(void) {
     static int f = -1;
-    if (f < 0) f = getenv("LARECOMP_POOL_FIX") ? atoi(getenv("LARECOMP_POOL_FIX")) : 1;
+    if (f < 0) f = ENV("LARECOMP_POOL_FIX") ? atoi(ENV("LARECOMP_POOL_FIX")) : 1;
     return f;
 }
 static void pool_note(const char *what, uint64_t n) { if (!(n & (n - 1))) LOG("[nvn] texture pool: %s %llu\n", what, (unsigned long long)n); }
@@ -786,7 +786,7 @@ static void set_shaders(Cpu *c, int stride) {
                 p->xfb_count[b] = ok ? (uint8_t)n_ : 0;
                 p->xfb_stride[b] = ok && n_ ? s_ : 0;
             }
-            if (p->xfb_count[0] && getenv("LARECOMP_LOG_XFB"))
+            if (p->xfb_count[0] && ENV("LARECOMP_LOG_XFB"))
                 LOG("[xfb] program %llx layout: %u/%u %u/%u %u/%u %u/%u\n", (unsigned long long)code, p->xfb_count[0], p->xfb_stride[0],
                     p->xfb_count[1], p->xfb_stride[1], p->xfb_count[2], p->xfb_stride[2], p->xfb_count[3], p->xfb_stride[3]);
         }
@@ -856,7 +856,7 @@ static void present_pace(int interval) {
     static int fps = -1;
     static uint64_t next;
     if (fps < 0) {
-        const char *e = getenv("LARECOMP_FPS");
+        const char *e = ENV("LARECOMP_FPS");
         fps = e ? atoi(e) : -2;  // -2: the game's own interval
     }
     uint64_t period;
@@ -890,7 +890,7 @@ NVN(nvnQueuePresentTexture) {
     int i = (int)A(2);
     {   // LARECOMP_POKE32="<guest addr>=<value>[;...]": 32-bit values written to the game's memory before every present
         static const char *poke = (const char *)1;  // (experiments: a constant the game reads, without rebuilding anything)
-        if (poke == (const char *)1) poke = getenv("LARECOMP_POKE32");
+        if (poke == (const char *)1) poke = ENV("LARECOMP_POKE32");
         for (const char *p = poke; p && *p;) {
             char *eq;
             uint64_t pa = strtoull(p, &eq, 0);
