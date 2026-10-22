@@ -18,6 +18,7 @@
 // the game script that should set the per-frame weights never runs (or takes another branch). Next: find which
 // script (romfs bytecode) references those names and why it doesn't run. (Not the lane-id or skipped-compute bugs
 // fixed the same day: the legs still stretch with LARECOMP_ZA_FOOT_IK=1 after them.)
+#include <SDL3/SDL.h>  // (first: on Windows its intrinsics header must come before others)
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
@@ -25,7 +26,6 @@
 #include <stdatomic.h>
 
 #include "../hle.h"
-#include <SDL3/SDL.h>
 #include "../settings.h"
 #include "../platform.h"
 
