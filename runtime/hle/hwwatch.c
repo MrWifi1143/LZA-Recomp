@@ -41,7 +41,7 @@ static void on_hit(int sig, siginfo_t *si, void *ctx) {
     for (int i = 0; i < nseen; i++) if (!strcmp(seen[i], key)) return;
     if (nseen < 96) snprintf(seen[nseen++], 64, "%s", key);
     Cpu *c = kernel_current_cpu();
-    fprintf(stderr, "[hwwatch] write by %s (host pc %llx)", key, (unsigned long long)pc);
+    fprintf(stderr, "[hwwatch] %s by %s (host pc %llx)", getenv("LARECOMP_HWWATCH_RW") ? "access" : "write", key, (unsigned long long)pc);
     if (c)
         fprintf(stderr, " guest lr %llx x0 %llx x1 %llx x8 %llx x19 %llx x20 %llx", (unsigned long long)c->x[30], (unsigned long long)c->x[0],
                 (unsigned long long)c->x[1], (unsigned long long)c->x[8], (unsigned long long)c->x[19], (unsigned long long)c->x[20]);
@@ -53,7 +53,9 @@ static int bp_open(pid_t tid, uint64_t addr, uint64_t len) {
     memset(&a, 0, sizeof a);
     a.type = PERF_TYPE_BREAKPOINT;
     a.size = sizeof a;
-    a.bp_type = HW_BREAKPOINT_W;
+    static int rw = -1;  // (LARECOMP_HWWATCH_RW=1: reads too)
+    if (rw < 0) rw = getenv("LARECOMP_HWWATCH_RW") != NULL;
+    a.bp_type = rw ? HW_BREAKPOINT_RW : HW_BREAKPOINT_W;
     a.bp_addr = addr;
     a.bp_len = len;
     a.sample_period = 1;
