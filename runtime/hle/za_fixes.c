@@ -211,6 +211,25 @@ static void za_screen_size(uint64_t *w, uint64_t *h) {
     *w = ((uint64_t)(lines * 16.0 / 9.0 + 0.5)) & ~7ull;
 }
 
+// The scene's resolution scale: 0x7000f59970 ([x0] = the scene renderer) reads the engine values ResolutionWidth /
+// ResolutionHeight and stores them over the size its targets are made at, a constant 1920 x 1080 (0x7003308150) -
+// handheld 1280 x 720 draws into part of those targets: 0.667. Effects that read the scene's depth by screen position
+// scale their coordinates by it (the city's hologram walls: the depth they fade against, cbuf 15). With the targets
+// made at the screen size (config_read, below) that constant is wrong: 1440p gave 1.333 - the walls read the depth a
+// third further down and right, lost their lower part where it found the floor and showed the player's outline. The
+// constant itself also serves the UI's 1920 x 1080 layout space, so only this result is corrected: by 1920 / width.
+#define ZA_RES_SCALE 0x7000f59970ull
+static uint64_t g_res_sw = 1920, g_res_sh = 1080;
+static int res_scale_hook(Cpu *c, uint64_t addr) {
+    uint64_t scene = *(const uint64_t *)(uintptr_t)c->x[0];
+    rt_call_original(c, addr);
+    float *k = (float *)(uintptr_t)(scene + 0x24c0);
+    static int logged;
+    if (!logged++) LOG("[za] resolution scale %g %g -> %g %g\n", k[0], k[1], k[0] * 1920.0f / (float)g_res_sw, k[1] * 1080.0f / (float)g_res_sh);
+    k[0] *= 1920.0f / (float)g_res_sw, k[1] *= 1080.0f / (float)g_res_sh;
+    return 1;
+}
+
 // The engine's system config (read by 0x7001b2fc30 (config table, engine info, ...) into the info struct): +0x10 / +0x18
 // the output width / height (1920 x 1080 unless the data sets them), +0x58 the worker core count (hle/za_jobs.c).
 // (the output size: set by the screen size, below)
@@ -231,6 +250,9 @@ static int config_read(Cpu *c, uint64_t addr) {
     uint64_t sw, sh;
     za_screen_size(&sw, &sh);
     if (sw != 1920 || sh != 1080) {
+        g_res_sw = sw, g_res_sh = sh;
+        static bool hooked;
+        if (!hooked) hooked = true, rt_register_fnhook_at(ZA_RES_SCALE, res_scale_hook);
         uint64_t *w = (uint64_t *)(uintptr_t)(info + 0x10), *h = (uint64_t *)(uintptr_t)(info + 0x18);
         LOG("[za] screen %llux%llu (the game draws its scene at 0.65 of it and upscales to it)\n", (unsigned long long)sw, (unsigned long long)sh);
         *w = sw, *h = sh;
