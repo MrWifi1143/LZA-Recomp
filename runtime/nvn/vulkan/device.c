@@ -827,6 +827,82 @@ void backend_present(NvnTexture *t) {
             if (*next == ',') next++;
         }
     }
+    {   // LARECOMP_LIVE=<dir> (testing, hle/input.c): <dir>/shot appears ("<n> <every>", default 1 1) -> the next n game
+        // images <every> presents apart as <dir>/live_<frame>.png; the request file is removed once taken
+        static const char *dir = (const char *)1;
+        static long left, every = 1, next_at;
+        if (dir == (const char *)1) dir = getenv("LARECOMP_LIVE");
+        if (dir) {
+            char path[1100];
+            snprintf(path, sizeof path, "%s/shot", dir);
+            if (!left && access(path, F_OK) == 0) {
+                FILE *f = fopen(path, "r");
+                left = 1, every = 1;
+                if (f) { if (fscanf(f, "%ld %ld", &left, &every) < 1) left = 1; fclose(f); }
+                if (left < 1) left = 1;
+                if (every < 1) every = 1;
+                next_at = (long)total_frames;
+                remove(path);
+            }
+            snprintf(path, sizeof path, "%s/find", dir);  // (research: "<text>" -> <dir>/find.out, where game memory has it)
+            if (access(path, F_OK) == 0) {
+                FILE *f = fopen(path, "r");
+                char want[256] = "";
+                if (f) { if (!fgets(want, sizeof want, f)) want[0] = 0; fclose(f); }
+                remove(path);
+                want[strcspn(want, "\r\n")] = 0;
+                if (!strncmp(want, "hex:", 4)) {  // ("hex:<bytes>": those bytes)
+                    size_t m = 0;
+                    for (const char *h = want + 4; h[0] && h[1] && m < sizeof want - 1; h += 2) {
+                        unsigned v;
+                        if (sscanf(h, "%2x", &v) != 1) break;
+                        want[m++] = (char)v;
+                    }
+                    want[m] = 0, want[255] = (char)m;  // (its length: it may hold zeros)
+                }
+                extern int kernel_physmem_ranges(uint64_t *lo, uint64_t *hi, int max);
+                extern uint64_t kernel_heap_size(void), g_stdheap_used;
+                static uint64_t lo[520], hi[520];
+                int n = kernel_physmem_ranges(lo + 1, hi + 1, 519) + 1;
+                uint64_t top = g_stdheap_used ? STDHEAP_BASE + g_stdheap_used : 0, heap = HEAP_BASE + kernel_heap_size();
+                lo[0] = HEAP_BASE, hi[0] = top > heap ? top : heap;
+                snprintf(path, sizeof path, "%s/find.tmp", dir);  // (renamed when complete)
+                FILE *o = fopen(path, "w");
+                size_t k = want[255] ? (size_t)(uint8_t)want[255] : strlen(want);
+                int found = 0;
+                for (int r = 0; o && k && r < n && found < 256; r++)
+                    for (const uint8_t *p = (const uint8_t *)(uintptr_t)lo[r], *e = (const uint8_t *)(uintptr_t)hi[r]; p + k <= e && found < 256; p++)
+                        if (*p == (uint8_t)want[0] && !memcmp(p, want, k)) fprintf(o, "%llx\n", (unsigned long long)(uintptr_t)p), found++;
+                if (o) {
+                    fclose(o);
+                    char done[512];
+                    snprintf(done, sizeof done, "%s/find.out", dir);
+                    rename(path, done);
+                }
+            }
+            snprintf(path, sizeof path, "%s/dump", dir);  // (research: "<addr> <len>" -> <dir>/dump.bin)
+            if (access(path, F_OK) == 0) {
+                FILE *f = fopen(path, "r");
+                unsigned long long a = 0, n = 0;
+                if (f) { if (fscanf(f, "%llx %llx", &a, &n) != 2) a = 0; fclose(f); }
+                remove(path);
+                snprintf(path, sizeof path, "%s/dump.tmp", dir);  // (renamed when complete)
+                FILE *o = a && n && n < (64u << 20) ? fopen(path, "wb") : NULL;
+                if (o) {
+                    fwrite((const void *)(uintptr_t)a, 1, n, o), fclose(o);
+                    char done[512];
+                    snprintf(done, sizeof done, "%s/dump.bin", dir);
+                    rename(path, done);
+                }
+            }
+            if (left && (long)total_frames >= next_at) {
+                snprintf(path, sizeof path, "%s/live_%06llu.png", dir, (unsigned long long)total_frames);
+                renderer_save_texture_tex(b, path);
+                left--, next_at = (long)total_frames + every;
+            }
+            { extern void menu_mouse_present(void); menu_mouse_present(); }  // (its live files: panes, mouse)
+        }
+    }
     {   // LARECOMP_SHOT_REL=<n>,<n>,...: the game image n presents after a capture began (fps60.c marks it)
         extern long fps60_scene_start(void);
         static const char *rel = (const char *)1;
@@ -952,6 +1028,10 @@ int ui_run(void) {
                 exit(0);
             }
             if (input_user_blocked(&e)) continue;  // scripted test runs: the real keyboard / mouse / pads do nothing
+            {   // (the game's Settings screen waiting for a new key / button: runtime/hle/pla_options.c)
+                extern bool bind_capture_event(const SDL_Event *e);
+                if (bind_capture_event(&e)) continue;
+            }
             if (menu_handle_event(&e)) continue;
             input_handle_event(&e);
         }

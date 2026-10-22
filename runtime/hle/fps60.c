@@ -436,8 +436,12 @@ uint64_t pla60_period_ns(void) { return g_pla60_ns; }
 // speed; a controller's stick still turns it the game's way. The pitch's 0..1 is taken as the yaw's radians scaled by
 // the two turn speeds (+0x708 over +0x420: the stick turns both alike). LARECOMP_PLA_MOUSE_LOOK=0: the mouse is the
 // camera stick instead (as on other cameras: menus, cutscenes, aiming).
+static bool g_pla_mouse_look;
 static int pla_mouse_look_hook(Cpu *c, uint64_t addr) {
     (void)addr;
+    extern uint64_t g_field_camera_frame, renderer_game_frame(void);  // (runtime/hle/menu_mouse.c: not in a menu)
+    g_field_camera_frame = renderer_game_frame();
+    if (!g_pla_mouse_look) return 0;
     extern bool input_mouse_camera_take(float *dyaw, float *dpitch);
     float dy, dp;
     if (!input_mouse_camera_take(&dy, &dp)) return 0;
@@ -469,8 +473,16 @@ void pla60_configure(const char *exefs) {
     if (!memcmp(id, k_legends60[0].id, 8)) {  // (Legends: Arceus 1.1.1)
         void rt_register_fnhook_at(uint64_t, int (*)(Cpu *, uint64_t));
         static bool hooked;
-        if (!hooked && (!getenv("LARECOMP_PLA_MOUSE_LOOK") || atoi(getenv("LARECOMP_PLA_MOUSE_LOOK")) != 0))
-            hooked = true, rt_register_fnhook_at(0x700193d16cull, pla_mouse_look_hook);
+        if (!hooked) {
+            hooked = true;
+            g_pla_mouse_look = !getenv("LARECOMP_PLA_MOUSE_LOOK") || atoi(getenv("LARECOMP_PLA_MOUSE_LOOK")) != 0;
+            rt_register_fnhook_at(0x700193d16cull, pla_mouse_look_hook);
+            // the mouse in the menus (runtime/hle/menu_mouse.c): ui2d's CalculateMtx walk over the panes, each frame
+            extern void menu_mouse_configure(uint64_t calc_mtx);
+            menu_mouse_configure(0x700014319cull);
+            extern void pla_options_configure(void);
+            pla_options_configure();
+        }
     }
     for (size_t i = 0; on && i < sizeof k_legends60 / sizeof *k_legends60; i++)
         if (!memcmp(id, k_legends60[i].id, 8)) {
@@ -482,6 +494,7 @@ void pla60_configure(const char *exefs) {
 // each present: the table entry, once the game is loaded (read-only data: the page made writable first)
 void pla60_present(void) {
     { extern void fscan_present(uint64_t frame); extern uint64_t renderer_present_count(void); fscan_present(renderer_present_count()); }
+    { extern void pla_options_present(void); pla_options_present(); }
     { void pla_step_stats(void); pla_step_stats(); }
     if (!g_pla60_entry || g_pla60_patched) return;
     volatile uint64_t *ft = (volatile uint64_t *)(uintptr_t)g_pla60_entry;

@@ -88,7 +88,7 @@ static void recompute_pad(void) {
     static int user_off = -1;
     if (user_off < 0) {
         const char *v = getenv("LARECOMP_NO_USER_INPUT");
-        user_off = v ? atoi(v) != 0 : getenv("LARECOMP_INPUT") != NULL;
+        user_off = v ? atoi(v) != 0 : getenv("LARECOMP_INPUT") != NULL || getenv("LARECOMP_REPLAY") != NULL;
     }
     if (pad && !host_test && !user_off) {
         for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++)
@@ -132,13 +132,14 @@ static void mouse_release(void) {
 }
 
 // Mouse look (input_mouse_camera_take): a game hook asks each frame for the held mouse's motion as camera angles and
-// adds them to the camera's own (hle/fps60.c) - while it does, the mouse isn't the camera stick (mouse_stick).
+// adds them to the camera's own (the game's camera hook: hle/za_fixes.c / hle/fps60.c) - while it does, the mouse isn't the
+// camera stick (mouse_stick).
 static _Atomic uint64_t mouse_look_ns;  // when it last asked
 bool input_mouse_camera_take(float *dyaw, float *dpitch) {
     if (!mouse_win || gyro_aiming) return false;
     double ax = (double)atomic_exchange(&cam_acc_x, 0) / 1000, ay = (double)atomic_exchange(&cam_acc_y, 0) / 1000;
     double k = g_settings.mouse_sens * M_PI / 180;  // (the sensitivity: degrees per pixel, as the gyro's)
-    *dyaw = (float)(-ax * k), *dpitch = (float)(ay * k);  // (right: the camera turns right; up: as the stick up)
+    *dyaw = (float)(-ax * k), *dpitch = (float)(ay * k);  // (right: the camera turns right; up: it looks up, as the stick)
     atomic_store(&mouse_look_ns, SDL_GetTicksNS());
     return true;
 }
@@ -175,6 +176,10 @@ static double touch_w(void) {
 }
 #define TOUCH_H 1080.0
 static _Atomic int32_t touch_x = 960, touch_y = 540;
+// The free pointer in a menu (runtime/hle/menu_mouse.c): how often it moved, the clicks and wheel notches not yet taken
+static _Atomic uint32_t ptr_moves;
+static _Atomic int ptr_clicks, ptr_rclicks, ptr_wheel;
+bool menu_mouse_active(void);
 static void touch_at(SDL_Window *w, float mx, float my) {
     float d = w ? SDL_GetWindowPixelDensity(w) : 1;
     if (d <= 0) d = 1;
@@ -183,6 +188,12 @@ static void touch_at(SDL_Window *w, float mx, float my) {
     double x = (mx * d - r0) / r2 * touch_w(), y = (my * d - r1) / r3 * TOUCH_H;
     touch_x = (int32_t)(x < 0 ? 0 : x > touch_w() - 1 ? touch_w() - 1 : x);
     touch_y = (int32_t)(y < 0 ? 0 : y > TOUCH_H - 1 ? TOUCH_H - 1 : y);
+}
+
+bool input_menu_pointer(int32_t *x, int32_t *y, uint32_t *moves, int *clicks, int *rclicks, int *wheel) {
+    *x = touch_x, *y = touch_y, *moves = ptr_moves;
+    *clicks = atomic_exchange(&ptr_clicks, 0), *rclicks = atomic_exchange(&ptr_rclicks, 0), *wheel = atomic_exchange(&ptr_wheel, 0);
+    return !mouse_win;
 }
 
 // Forget held keys (the menu took focus) and let the mouse go; the gamepad is re-read on its next event.
@@ -196,6 +207,55 @@ volatile int g_debug_frame_request;  // F9: dump the next frame's passes (build/
 
 // Events a test pushes (LARECOMP_HOST_INPUT type: / sdlkey: / sdlpad:) carry this device id: they go the whole way, menu first.
 #define TEST_DEVICE 0x7E57u
+
+// Research (LARECOMP_LIVE's "mouse" file, runtime/hle/menu_mouse.c): "at <x> <y>" (the game image, 1920 x 1080) moves
+// the pointer there, "move <dx> <dy>" moves it by that, "key <name>" presses a key, "click" / "rclick" press and let go, "wheelup" /
+// "wheeldown" turn the wheel - as SDL events.
+void input_live_mouse(const char *cmd) {
+    int nw = 0;
+    SDL_Window **ws = SDL_GetWindows(&nw);
+    SDL_Window *w = ws && nw > 0 ? ws[0] : NULL;
+    SDL_free(ws);
+    if (!w) return;
+    SDL_Event e;
+    memset(&e, 0, sizeof e);
+    float gx, gy, d = SDL_GetWindowPixelDensity(w);
+    if (d <= 0) d = 1;
+    char kname[64];
+    if (sscanf(cmd, "key %63[^\n]", kname) == 1) {  // ("key <SDL key name>": pressed and let go)
+        for (int down = 1; down >= 0; down--) {
+            e.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP, e.key.which = TEST_DEVICE, e.key.windowID = SDL_GetWindowID(w);
+            e.key.scancode = SDL_GetScancodeFromName(kname), e.key.down = down;
+            SDL_PushEvent(&e);
+        }
+    } else if (sscanf(cmd, "move %f %f", &gx, &gy) == 2) {  // ("move <dx> <dy>": relative, as a held mouse turns)
+        e.type = SDL_EVENT_MOUSE_MOTION, e.motion.which = TEST_DEVICE, e.motion.windowID = SDL_GetWindowID(w);
+        SDL_GetMouseState(&e.motion.x, &e.motion.y);
+        e.motion.xrel = gx, e.motion.yrel = gy;
+        SDL_PushEvent(&e);
+    } else if (sscanf(cmd, "at %f %f", &gx, &gy) == 2) {
+        e.type = SDL_EVENT_MOUSE_MOTION, e.motion.which = TEST_DEVICE, e.motion.windowID = SDL_GetWindowID(w);
+        e.motion.x = (float)((gx / touch_w() * g_present_rect[2] + g_present_rect[0]) / d);
+        e.motion.y = (float)((gy / TOUCH_H * g_present_rect[3] + g_present_rect[1]) / d);
+        e.motion.xrel = 1;
+        SDL_PushEvent(&e);
+    } else if (!strncmp(cmd, "click", 5) || !strncmp(cmd, "rclick", 6)) {
+        float mx, my;
+        SDL_GetMouseState(&mx, &my);
+        for (int down = 1; down >= 0; down--) {
+            e.type = down ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP;
+            e.button.which = TEST_DEVICE, e.button.windowID = SDL_GetWindowID(w), e.button.down = down;
+            e.button.button = cmd[0] == 'r' ? SDL_BUTTON_RIGHT : SDL_BUTTON_LEFT;
+            e.button.x = (float)((touch_x / touch_w() * g_present_rect[2] + g_present_rect[0]) / d);
+            e.button.y = (float)((touch_y / TOUCH_H * g_present_rect[3] + g_present_rect[1]) / d);
+            SDL_PushEvent(&e);
+        }
+    } else if (!strncmp(cmd, "wheel", 5)) {
+        e.type = SDL_EVENT_MOUSE_WHEEL, e.wheel.which = TEST_DEVICE, e.wheel.windowID = SDL_GetWindowID(w);
+        e.wheel.y = strstr(cmd, "up") ? 1 : -1;
+        SDL_PushEvent(&e);
+    }
+}
 static bool test_event(const SDL_Event *e) {
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: return e->key.which == TEST_DEVICE;
@@ -226,7 +286,7 @@ bool input_user_blocked(const SDL_Event *e) {
     static int on = -1;
     if (on < 0) {
         const char *v = getenv("LARECOMP_NO_USER_INPUT");
-        on = v ? atoi(v) != 0 : (getenv("LARECOMP_INPUT") || getenv("LARECOMP_DOORJUMP_TEST") || getenv("LARECOMP_PLACE") ||
+        on = v ? atoi(v) != 0 : (getenv("LARECOMP_INPUT") || getenv("LARECOMP_REPLAY") || getenv("LARECOMP_DOORJUMP_TEST") || getenv("LARECOMP_PLACE") ||
                                  getenv("LARECOMP_HOST_INPUT") || getenv("LARECOMP_BIND_TEST"));
         if (on) LOG("[input] scripted run: keyboard, mouse and controllers ignored\n");
     }
@@ -298,14 +358,15 @@ void input_handle_event(const SDL_Event *e) {
         bool motion = e->type == SDL_EVENT_MOUSE_MOTION, wheel = e->type == SDL_EVENT_MOUSE_WHEEL;
         SDL_Window *w = SDL_GetWindowFromID(motion ? e->motion.windowID : wheel ? e->wheel.windowID : e->button.windowID);
         bool cam = g_settings.mouse_camera, down = e->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+        bool menu = menu_mouse_active();  // (a menu is up: the pointer is for it - a held mouse is let go)
         // aiming takes the mouse (the gyro); with the mouse camera a click does too (and is only that: no press)
-        if (!mouse_win && w && (gyro_aiming || (cam && down))) {
+        if (!mouse_win && w && !menu && (gyro_aiming || (cam && down))) {
             mouse_win = w;
             SDL_SetWindowRelativeMouseMode(w, true);
             touch_down = 0;
             last_kbm = 1;
             if (down && !gyro_aiming) break;
-        } else if (mouse_win && !gyro_aiming && !cam) {
+        } else if (mouse_win && (menu || (!gyro_aiming && !cam))) {
             mouse_release();
         }
         if (motion) {
@@ -315,7 +376,12 @@ void input_handle_event(const SDL_Event *e) {
                 if (e->motion.xrel || e->motion.yrel) last_kbm = 1;
             } else {
                 touch_at(w, e->motion.x, e->motion.y);
+                ptr_moves++;
             }
+            break;
+        }
+        if (wheel && !mouse_win && menu) {  // (a menu's list: up / down)
+            if (e->wheel.y) ptr_wheel += e->wheel.y > 0 ? 1 : -1;
             break;
         }
         if (wheel) {
@@ -325,6 +391,11 @@ void input_handle_event(const SDL_Event *e) {
         }
         // buttons: keyboard bindings while the window holds the mouse; free, the left one is a finger on the touch screen
         uint8_t b = e->button.button;
+        if (!mouse_win && menu && (b == SDL_BUTTON_LEFT || b == SDL_BUTTON_RIGHT)) {  // (a menu's button / back)
+            touch_at(w, e->button.x, e->button.y);
+            if (down) b == SDL_BUTTON_LEFT ? ptr_clicks++ : ptr_rclicks++;
+            break;
+        }
         if (!mouse_win && b == SDL_BUTTON_LEFT) { touch_at(w, e->button.x, e->button.y); touch_down = down; break; }
         if (b >= 1 && b <= 5) keys_down[BIND_MOUSE_BASE + b] = down;
         if (down) last_kbm = 1;
@@ -352,6 +423,8 @@ void input_handle_event(const SDL_Event *e) {
 // Scripted input for testing: LARECOMP_INPUT="frame:BUTTON:frames,..." (BUTTON = A,B,X,Y,L,R,ZL,ZR,PLUS,
 // MINUS,LEFT,UP,RIGHT,DOWN, or STICK_UP/DOWN/LEFT/RIGHT, RSTICK_UP/DOWN/LEFT/RIGHT, STICK_<degrees>: full tilt at
 // that angle, 0 = right, 90 = up).
+static char g_replay_text[8][96];
+static int g_nreplay_text, g_replay_text_next;
 static _Atomic uint64_t script_buttons;
 static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
 
@@ -365,6 +438,7 @@ static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
 //   at frame, up `frames` later): they reach menus and the on-screen keyboard first, as a player's would.
 // "frame:sdlmouse:left|middle|right|x1|x2|wheelup|wheeldown:frames" presses a mouse button (the wheel: one notch),
 // "frame:sdlmove:<dx>/<dy>:frames" moves the mouse by that much every frame, as real events in the game window.
+// "frame:touch:<x>/<y>:frames" puts a finger on the touch screen there (1920 x 1080) for that long.
 // "frame:shot:<name>" saves the window (game + menus) to build/<name>.png.
 // LARECOMP_BIND_TEST="frame:pad|key:<input>:<host>,..." starts a rebind capture of <input> (bind_* name: a, zl,
 //   ls_up...) at that frame (the Controls tab shows it waiting) and presses <host> 90 frames later ("esc" cancels,
@@ -382,6 +456,13 @@ static void test_push(uint64_t frame, unsigned long start, unsigned long len, co
     memset(&e, 0, sizeof e);
     if (!strcmp(dev, "sdlkey")) {
         if (frame == start || frame == start + len) push_key(SDL_GetScancodeFromName(arg), SDL_KMOD_NONE, frame == start);
+        return;
+    }
+    if (!strcmp(dev, "touch")) {  // ("frame:touch:<x>/<y>:frames": a finger on the touch screen there, 1920 x 1080)
+        float tx = 0, ty = 0;
+        if (sscanf(arg, "%f/%f", &tx, &ty) != 2) return;
+        if (frame == start) touch_x = (int32_t)tx, touch_y = (int32_t)ty, touch_down = 1;
+        if (frame == start + len) touch_down = 0;
         return;
     }
     if (!strcmp(dev, "sdlmouse") || !strcmp(dev, "sdlmove")) {
@@ -463,7 +544,7 @@ static void host_test_frame(uint64_t frame) {
             char dev[12] = "", name[400] = "";
             if (sscanf(tok, "%lu:%11[a-z]:%399[^:]:%lu", &start, dev, name, &len) < 3) continue;
             if (!strcmp(dev, "type") || !strcmp(dev, "sdlpad") || !strcmp(dev, "sdlkey") || !strcmp(dev, "shot") ||
-                !strcmp(dev, "sdlmouse") || !strcmp(dev, "sdlmove")) {
+                !strcmp(dev, "sdlmouse") || !strcmp(dev, "sdlmove") || !strcmp(dev, "touch")) {
                 test_push(frame, start, len, dev, name);
                 continue;
             }
@@ -535,6 +616,113 @@ void input_frame(uint64_t frame) {
     extern void watch_arm(void);
     watch_arm();
     host_test_frame(frame);
+    {   // LARECOMP_LIVE=<dir> (testing): steered while it runs - lines appended to <dir>/cmd, "<frames> <keys>" with keys
+        // LARECOMP_INPUT's names joined by '+' (A, STICK_UP, STICK_45 = left stick at 45 degrees, RSTICK_LEFT...; "-": none),
+        // run one after another; <dir>/state says the frame and what's left (screenshots: <dir>/shot, nvn/vulkan/device.c)
+        static const char *dir = (const char *)1;
+        if (dir == (const char *)1) dir = getenv("LARECOMP_LIVE");
+        if (dir) {
+            static long off;
+            static struct { long len; char keys[120]; } q[256];
+            static int qh, qt;
+            static uint64_t until;
+            static bool active;
+            char path[1100], line[160];
+            snprintf(path, sizeof path, "%s/cmd", dir);
+            FILE *f = fopen(path, "r");
+            if (f) {
+                fseek(f, off, SEEK_SET);
+                while (fgets(line, sizeof line, f) && strchr(line, '\n')) {
+                    off = ftell(f);
+                    long len;
+                    char keys[120];
+                    if (sscanf(line, "%ld %119s", &len, keys) == 2 && (qt + 1) % 256 != qh) q[qt].len = len, snprintf(q[qt].keys, 120, "%s", keys), qt = (qt + 1) % 256;
+                }
+                fclose(f);
+            }
+            if (active && frame >= until) active = false, qh = (qh + 1) % 256;
+            if (!active && qh != qt) active = true, until = frame + (uint64_t)q[qh].len;
+            uint64_t b = 0;
+            int32_t lx = 0, ly = 0, rx = 0, ry = 0;
+            static const char *const nm[] = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS",
+                                             "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
+            if (active) {
+                char k[120];
+                snprintf(k, sizeof k, "%s", q[qh].keys);
+                for (char *t = strtok(k, "+"); t; t = strtok(NULL, "+")) {
+                    if (!strcmp(t, "STICK_UP")) ly = 32767;
+                    else if (!strcmp(t, "STICK_DOWN")) ly = -32767;
+                    else if (!strcmp(t, "STICK_LEFT")) lx = -32767;
+                    else if (!strcmp(t, "STICK_RIGHT")) lx = 32767;
+                    else if (!strcmp(t, "RSTICK_UP")) ry = 32767;
+                    else if (!strcmp(t, "RSTICK_DOWN")) ry = -32767;
+                    else if (!strcmp(t, "RSTICK_LEFT")) rx = -32767;
+                    else if (!strcmp(t, "RSTICK_RIGHT")) rx = 32767;
+                    else if (!strncmp(t, "STICK_", 6) && isdigit((unsigned char)t[6])) {
+                        double r = atoi(t + 6) * 3.14159265358979 / 180;
+                        lx = (int32_t)lround(cos(r) * 32767), ly = (int32_t)lround(sin(r) * 32767);
+                    } else if (!strncmp(t, "WALK_", 5) && isdigit((unsigned char)t[5])) {  // (half tilt: walk, not run)
+                        double r = atoi(t + 5) * 3.14159265358979 / 180;
+                        lx = (int32_t)lround(cos(r) * 14000), ly = (int32_t)lround(sin(r) * 14000);
+                    }
+                    for (int i = 0; i < 16; i++) if (!strcmp(t, nm[i])) b |= 1ull << i;
+                }
+            }
+            static uint64_t last_state;
+            if (frame - last_state >= 30) {
+                last_state = frame;
+                snprintf(path, sizeof path, "%s/state", dir);
+                FILE *o = fopen(path, "w");
+                if (o) { fprintf(o, "frame %llu queued %d%s%s\n", (unsigned long long)frame, (qt - qh + 256) % 256, active ? " now " : "", active ? q[qh].keys : ""); fclose(o); }
+            }
+            script_buttons = b, script_lx = lx, script_ly = ly, script_rx = rx, script_ry = ry;
+            return;
+        }
+    }
+    {   // LARECOMP_REPLAY=<file>: a LARECOMP_REC recording, by game frame
+        static struct RecLine { uint64_t f, b; int32_t a[4]; } *rl;
+        static size_t nrl, pos;
+        static int init;
+        if (!init) {
+            init = 1;
+            FILE *f = getenv("LARECOMP_REPLAY") ? fopen(getenv("LARECOMP_REPLAY"), "r") : NULL;
+            size_t cap = 0;
+            unsigned long long fr, bb;
+            int a0, a1, a2, a3;
+            char line[256];
+            while (f && fgets(line, sizeof line, f)) {
+                char text[96];
+                if (line[0] == 'K' && sscanf(line, "K %llu %95[^\n]", &fr, text) == 2) {
+                    if (g_nreplay_text < 8) snprintf(g_replay_text[g_nreplay_text++], sizeof g_replay_text[0], "%s", text);
+                    continue;
+                }
+                if (sscanf(line, "%llu %llx %d %d %d %d", &fr, &bb, &a0, &a1, &a2, &a3) != 6) continue;
+                if (nrl == cap) cap = cap ? cap * 2 : 4096, rl = realloc(rl, cap * sizeof *rl);
+                rl[nrl++] = (struct RecLine){fr, bb, {a0, a1, a2, a3}};
+            }
+            if (f) { fclose(f); LOG("[input] replaying %zu controller changes from %s\n", nrl, getenv("LARECOMP_REPLAY")); }
+        }
+        // LARECOMP_REPLAY_AT=<frame>:<recorded frame>: LARECOMP_INPUT drives the game until <frame>, the recording from
+        // <recorded frame> on after it (a scripted way into the game, then the player's session from where they could move)
+        static long at = -2, from;
+        if (at == -2) { at = -1; if (getenv("LARECOMP_REPLAY_AT")) sscanf(getenv("LARECOMP_REPLAY_AT"), "%ld:%ld", &at, &from); }
+        uint64_t rf = frame;
+        if (nrl && at >= 0) {
+            if ((long)frame < at) goto scripted;
+            rf = frame - (uint64_t)at + (uint64_t)from;
+            static bool said;
+            if (!said) { said = true; LOG("[input] replay takes over at frame %llu (recorded frame %ld)\n", (unsigned long long)frame, from); }
+        }
+        if (nrl) {
+            while (pos + 1 < nrl && rl[pos + 1].f <= rf) pos++;
+            bool on = rl[pos].f <= rf;
+            script_buttons = on ? rl[pos].b : 0;
+            script_lx = on ? rl[pos].a[0] : 0, script_ly = on ? rl[pos].a[1] : 0;
+            script_rx = on ? rl[pos].a[2] : 0, script_ry = on ? rl[pos].a[3] : 0;
+            return;
+        }
+    }
+scripted:;
     const char *spec = getenv("LARECOMP_INPUT");
     if (!spec) return;
     static const char *const names[] = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS",
@@ -602,6 +790,50 @@ uint64_t input_buttons_now(void) { return (menu_input_captured() ? 0 : key_butto
 
 static int32_t clamp_axis(int32_t v) { return v > 32767 ? 32767 : v < -32767 ? -32767 : v; }
 
+// LARECOMP_REC=<file>: what the game reads from the controller (buttons, both sticks), a line "<game frame> <buttons hex>
+// <lx> <ly> <rx> <ry>" each time it changes - a player's session, for LARECOMP_REPLAY=<file> to drive the game the same
+// way from the same save (copied to <file>.save/ when the recording starts).
+static FILE *g_rec;
+static void input_rec_sample(uint64_t b, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
+    static int init;
+    if (!init) {
+        init = 1;
+        const char *path = getenv("LARECOMP_REC");
+        if (path && *path) {
+            g_rec = fopen(path, "w");
+            if (g_rec) {
+                char cmd[2200];
+                snprintf(cmd, sizeof cmd, "rm -rf '%s.save' && cp -a save '%s.save'", path, path);
+                if (system(cmd)) {}
+                LOG("[input] recording the controller to %s (save copied to %s.save)\n", path, path);
+            }
+        }
+    }
+    if (!g_rec) return;
+    static uint64_t lb = ~0ull;
+    static int32_t l[4];
+    b &= ~0xFF0000ull;  // (the stick directions as buttons: derived from the sticks again on replay)
+    if (b == lb && lx == l[0] && ly == l[1] && rx == l[2] && ry == l[3]) return;
+    lb = b, l[0] = lx, l[1] = ly, l[2] = rx, l[3] = ry;
+    extern uint64_t renderer_game_frame(void);
+    fprintf(g_rec, "%llu %llx %d %d %d %d\n", (unsigned long long)renderer_game_frame(), (unsigned long long)b, lx, ly, rx, ry);
+    fflush(g_rec);
+}
+
+// The name typed into the game's keyboard dialog (runtime/ui/menu.mm): a line "K <game frame> <text>" in the recording,
+// and the next one of the replay's answers the dialog at once (no game frames pass while it is open: the game waits)
+void input_rec_text(const char *text) {
+    if (!g_rec) return;
+    extern uint64_t renderer_game_frame(void);
+    fprintf(g_rec, "K %llu %s\n", (unsigned long long)renderer_game_frame(), text);
+    fflush(g_rec);
+}
+bool input_replay_text(char *out, int cap) {
+    if (g_replay_text_next >= g_nreplay_text) return false;
+    snprintf(out, (size_t)cap, "%s", g_replay_text[g_replay_text_next++]);
+    return true;
+}
+
 // NpadFullKeyState / NpadHandheldState / NpadJoy*State share this layout (0x28 bytes):
 // {int64 sampling, u64 buttons, AnalogStick L {x,y}, AnalogStick R {x,y}, u32 attributes}
 static uint32_t npad_id_used(uint32_t *style);  // (below: which controller the player has)
@@ -628,6 +860,13 @@ static void fill_state(Cpu *c) {
     const uint64_t zr = input_pad_finger_on() ? 1ull << BTN_ZR : 0;  // (with the finger on, the controller's ZR touches)
     if (wheel_until[0] || wheel_until[1]) recompute_keyboard();  // (a wheel notch's binding lets go by time)
     uint64_t b = menu ? script_buttons & ~zr : key_buttons | ((pad_buttons | script_buttons) & ~zr);
+    {
+        uint64_t menu_mouse_buttons(Cpu *c);  // (runtime/hle/menu_mouse.c: the mouse in the game's menus)
+        uint64_t m = menu_mouse_buttons(c);
+        if (!menu) b |= m;
+        uint64_t settings_screen_buttons(Cpu *c, uint64_t b);  // (runtime/hle/za_options.c: the Settings screen's Controls list)
+        if (!menu) b = settings_screen_buttons(c, b);
+    }
     {   // injected Plus: held for ~10 presented frames (the game polls several times per frame)
         extern uint64_t renderer_game_frame(void);
         static uint64_t until;
@@ -657,6 +896,7 @@ static void fill_state(Cpu *c) {
     if (rx > 16000) b |= 1ull << 22;
     if (ry < -16000) b |= 1ull << 23;
     *(uint64_t *)(s + 8) = b;
+    input_rec_sample(b, lx, ly, rx, ry);
     static uint64_t last_b;
     if (b != last_b && getenv("LARECOMP_INPUT")) LOG("[input] id %#x buttons %#llx (sampling %lld, lr %llx)\n", id, (unsigned long long)b, (long long)sampling, c->x[30]);
     last_b = b;

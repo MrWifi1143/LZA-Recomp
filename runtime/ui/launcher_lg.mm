@@ -371,6 +371,9 @@ extern "C" void launcher_lg_run(const char *root) {
     for (int i = 0; i < nmods; i++) if (!strcmp(mods[i], g_settings.mod)) mod = i + 1;
     long shot_at = getenv("LARECOMP_LAUNCHER_SHOT") ? atol(getenv("LARECOMP_LAUNCHER_SHOT")) : 0, frame = 0;
     bool autoplay = getenv("LARECOMP_LAUNCHER_AUTOPLAY") != NULL, play = false;
+    // "Skip this screen": straight to the game once it's ready - unless Shift is held in the first moments
+    bool skipstart = g_settings.skip_start, skip_now = skipstart && !getenv("LARECOMP_LAUNCHER_SHOT"), shift_seen = false;
+    uint64_t opened = SDL_GetTicks();
     const char *keys_test = getenv("LARECOMP_LAUNCHER_KEYS");
     if (keys_test && atoi(keys_test) > 0) bind_capture_begin(BIND_DEV_KEY, atoi(keys_test));
     if (getenv("LARECOMP_SETUP_DIR")) setup_start(getenv("LARECOMP_SETUP_DIR"));
@@ -398,6 +401,11 @@ extern "C" void launcher_lg_run(const char *root) {
         last_install = inst;
         bool ready = !setup_running() && setup_ready();
         if (autoplay && ready && inst != MOD_INSTALL_RUNNING) play = true;
+        if (SDL_GetModState() & SDL_KMOD_SHIFT) shift_seen = true;
+        if (skip_now && !shift_seen && SDL_GetTicks() - opened >= 400 && ready && inst != MOD_INSTALL_RUNNING) {
+            fprintf(stderr, "[launcher] start screen skipped (skip_start_screen; Shift at start shows it)\n");
+            play = true;
+        }
         if (!vk_frame_begin(bg)) { SDL_Delay(16); continue; }
         if (keys_test && strchr(keys_test, ':') && frame == 5) {  // "<slot>:<key name>": the key pressed for the test
             SDL_Event k = {};
@@ -456,6 +464,12 @@ extern "C" void launcher_lg_run(const char *root) {
         if (frame == 0 && ready) ImGui::SetKeyboardFocusHere();
         if (ImGui::Button(T("Play", "Jogar"), ImVec2(-FLT_MIN, 0))) play = true;
         ImGui::EndDisabled();
+        ImGui::Checkbox(T("Don't show this screen at start", "Não mostrar esta tela ao iniciar"), &skipstart);
+        if (skipstart)  // (the settings are in the game too: runtime/hle/pla_options.c)
+            ImGui::TextDisabled("%s", T("These settings are also in the game: Menu > Help > Settings.\n"
+                                        "Hold Shift while starting the game to see this screen again.",
+                                        "Estas configurações também estão no jogo: Menu > Help > Settings.\n"
+                                        "Segure Shift ao iniciar o jogo para ver esta tela de novo."));
         ImGui::TextDisabled("v" RT_APP_VERSION);
         ImGui::End();
 
@@ -472,6 +486,7 @@ extern "C" void launcher_lg_run(const char *root) {
     g_settings.fps = fps_i == 3 ? 144 : fps_i == 2 ? 120 : fps_i == 1 ? 60 : 30;
     g_settings.wild_battle = wildb;
     g_settings.show_fps = showfps;
+    g_settings.skip_start = skipstart;
     g_settings.button_prompts = prompts_i;
     snprintf(g_settings.mod, sizeof g_settings.mod, "%s", mod ? mods[mod - 1] : "");
     settings_save();

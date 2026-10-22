@@ -23,6 +23,8 @@ extern "C" {
 #include "../paths.h"
 void input_reset(void);
 bool input_finger_cursor(float *x, float *y, bool *down);  // runtime/hle/input.c
+void input_rec_text(const char *text);                   // (LARECOMP_REC / LARECOMP_REPLAY: the names typed)
+bool input_replay_text(char *out, int cap);
 uint64_t renderer_game_frame(void);  // runtime/nvn: presents the game has made (the fps counter)
 }
 
@@ -43,6 +45,7 @@ static void pick_menu_language(void) {
 // ------------------------------------------------------------------ state shared with the main thread
 static std::atomic<bool> g_open{false};  // the "close the game?" question is up
 static std::atomic<bool> g_want_fullscreen_apply{false};
+extern "C" void menu_apply_fullscreen(void) { g_want_fullscreen_apply.store(true); }  // (g_settings.fullscreen, set elsewhere)
 
 struct QEvent {
     enum { KEY, ANALOG, MOUSE_POS, MOUSE_BUTTON, WHEEL, TEXT } kind;
@@ -374,6 +377,7 @@ extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, in
     g_kbd = 1;
     // (test) LARECOMP_KBD_AUTO=<text>: answer at once
     if (getenv("LARECOMP_KBD_AUTO")) { snprintf(g_kbd_text, sizeof g_kbd_text, "%s", getenv("LARECOMP_KBD_AUTO")); g_kbd = 2; }
+    else if (input_replay_text(g_kbd_text, (int)sizeof g_kbd_text)) g_kbd = 2;  // (LARECOMP_REPLAY: the recorded name)
     while (g_kbd.load() == 1 && !g_rt_unwind) {  // ~60 Hz (a reboot cancels)
         uint64_t t0 = SDL_GetTicks();
         backend_represent();
@@ -382,6 +386,7 @@ extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, in
     }
     bool ok = g_kbd.load() == 2 && g_kbd_text[0];
     if (ok) snprintf(out, cap, "%s", g_kbd_text);
+    if (ok) input_rec_text(g_kbd_text);  // (LARECOMP_REC)
     g_kbd = 0;
     input_reset();
     return ok;

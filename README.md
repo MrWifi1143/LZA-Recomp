@@ -86,13 +86,21 @@ Village. Tested on Linux with an RTX 4090; the Windows build is tested under Win
   turning, sky and water, effects) are patched to its frame time (`tools/patches.py`); no interpolated frames.
 - Graphics: transform-feedback character skinning, cast shadows, render scale up to 4K, SMAA.
 - Start screen: resolution, fullscreen, anti-aliasing, frame rate, FPS counter, button prompts, mods, controller test
-  and remapping, keyboard remapping.
+  and remapping, keyboard remapping. "Don't show this screen at start" goes straight to the game from then on (hold
+  Shift while starting to see it again, or set Start Screen in the game's Settings).
+- The game's own Settings screen (Menu -> Help -> Settings) has the start screen's settings too, as rows like the
+  game's after its own: frame rate, resolution, screen mode, anti-aliasing, button prompts, FPS counter, start screen,
+  mouse camera, mouse sensitivity, stick dead zone, master volume. They apply at once (frame rate and resolution: from
+  the next start) and are saved with the start screen's.
 - Button prompts for what you play with: the bound keys and mouse buttons, Xbox letters or PlayStation shapes instead
   of the Switch's (Auto follows the last used keyboard / mouse or controller, even when it changes while playing;
   remapped buttons show their new button).
 - Keyboard and mouse: WASD (Left Ctrl walks), mouse look (click to take the mouse, Esc lets it go: the camera turns by
   as much as the mouse moves - the sensitivity is degrees per pixel - while a controller's stick still turns it the
-  game's way), mouse buttons and wheel bindable like keys. The game's menus work with the keyboard; clicking them with the mouse isn't possible.
+  game's way), mouse buttons and wheel bindable like keys. The game's menus work with the keyboard and the mouse:
+  pointing at a button moves the game's cursor to it, a click presses it (on the Settings screen: the choice, or the
+  point on a slider, clicked), the right button goes back, the wheel scrolls; where there's nothing to point at (a
+  message, a tip) a click goes on.
 
 Known issues:
 

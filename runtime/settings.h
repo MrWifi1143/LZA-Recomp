@@ -24,6 +24,7 @@ typedef struct {
     bool reverb;         // room reverb effect
     bool movie_audio;
     bool show_fps;
+    bool skip_start;     // the start screen goes straight to the game once it's ready (Shift held at start: shown)
     bool dpad_move;      // the d-pad (and arrow keys) move the player like the stick
     bool render_thread;  // the backend runs on its own thread (runtime/nvn/vulkan/renderthread.c); default on
     int vertex_read;     // VREAD_*: where the GPU reads vertex and index data (runtime/nvn/vulkan/exec.c)
@@ -31,6 +32,7 @@ typedef struct {
     int button_prompts;  // PROMPTS_*: which controller's buttons the game's prompts show (runtime/nvn/glyphs.c)
     char game_lang[8];   // the game's language code ("en-US", "es"...: runtime/mods.c game_language)
     char mod[128];       // active mod / fan translation (mods/<name>/), empty = none (runtime/mods.h)
+    int next_fps, next_res_height;  // set in game (hle/pla_options.c; the height + 1), 0 = not: for the ini, from the next start
 } Settings;
 
 extern Settings g_settings;
