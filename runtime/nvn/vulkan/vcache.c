@@ -123,6 +123,11 @@ bool vcache_get(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off) {
         e->vol = false, e->uploads = 0;
     }
     e->used_frame = frame;
+    if (e->buf && e->used_seq == seq) {  // (checked for this submission already: an upload would run before all of its
+        g_vcache_hits++;                 // draws, so checking again only cost a memcmp of its edges - a draw's worth)
+        *buf = e->buf, *off = 0;
+        return true;
+    }
     uint64_t ilo, ihi, hn, tn;
     split(addr, len, &ilo, &ihi, &hn, &tn);
     bool idirty = ihi > ilo && pagewatch_dirty(ilo, ihi - ilo), edirty = e->buf && edges_changed(e, hn, tn);

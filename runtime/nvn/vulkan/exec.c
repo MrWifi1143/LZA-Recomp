@@ -35,6 +35,7 @@ static uint64_t stat_upload_bytes;
 // sets = descriptor sets incl. cbuf copies, vtx = index scan + vertex copies, submit = vkQueueSubmit2)
 static int prof = -1;
 static uint64_t prof_exec, prof_draw, prof_sets, prof_vtx, prof_submit, prof_pre, prof_key, prof_dyn, prof_tex, prof_up, prof_gpu;
+static uint64_t prof_dalloc, prof_dupd, prof_dbind, prof_bindpipe;  // (research: the driver's descriptor calls)
 static VkQueryPool prof_qp;
 static uint64_t cum_exec, cum_wait, cum_draws, cum_submits;  // (profiling) never reset: hitch log
 static uint32_t prof_end_line[4096];  // passes ended, by the exec.c line that ended them (0: submit / present)
@@ -873,6 +874,10 @@ const char *renderer_stats(void) {
         snprintf(stats_text + n, sizeof stats_text - n, " | gpu %.0f cpu exec %.0f draw %.0f (pre %.0f key %.0f dyn %.0f sets %.0f tex %.0f (upload %.0f) vtx %.0f) submit %.0f ms",
                  prof_gpu / 1e6, prof_exec / 1e6, prof_draw / 1e6, prof_pre / 1e6, prof_key / 1e6, prof_dyn / 1e6, prof_sets / 1e6,
                  prof_tex / 1e6, prof_up / 1e6, prof_vtx / 1e6, prof_submit / 1e6);
+        n = strlen(stats_text);
+        snprintf(stats_text + n, sizeof stats_text - n, " | dsalloc %.0f dsupdate %.0f dsbind %.0f pipebind %.0f ms", prof_dalloc / 1e6,
+                 prof_dupd / 1e6, prof_dbind / 1e6, prof_bindpipe / 1e6);
+        prof_dalloc = prof_dupd = prof_dbind = prof_bindpipe = 0;
         extern uint64_t prof_tex_checks, prof_tex_samples, prof_tex_full, prof_tex_full_bytes, prof_tex_dyn;
         n = strlen(stats_text);
         snprintf(stats_text + n, sizeof stats_text - n, " | tex checks %llu samples %llu full %llu (%.1f MB, dynamic %llu)",
@@ -1228,8 +1233,13 @@ static VkRect2D scissor_rect(void) {
     return (VkRect2D){{x, y}, {(uint32_t)sw, (uint32_t)sh}};
 }
 
+// (the viewport and scissor draw_ set last: its state cache, dc - reset with it by dc_begin)
+static VkViewport dc_vp;
+static VkRect2D dc_sc;
 static void apply_scissor(void) {
     VkRect2D r = scissor_rect();
+    if (!memcmp(&r, &dc_sc, sizeof r)) return;
+    dc_sc = r;
     vkCmdSetScissor(vk_cmd(), 0, 1, &r);
 }
 
@@ -1238,6 +1248,8 @@ static void set_viewport(float x, float y, float w, float h, float zn, float zf)
     if (w <= 0) w = 1;
     if (h == 0) h = 1;
     VkViewport vp = {x, y + h, w, -h, fminf(fmaxf(zn, 0), 1), fminf(fmaxf(zf, 0), 1)};
+    if (!memcmp(&vp, &dc_vp, sizeof vp)) return;  // (the same again: NVIDIA's driver spent as long on it as on a draw)
+    dc_vp = vp;
     vkCmdSetViewport(vk_cmd(), 0, 1, &vp);
 }
 
@@ -1961,6 +1973,18 @@ typedef struct {
 } PipeKey;
 
 typedef struct { PipeKey k; uint64_t hash; VkPipeline pipe; _Atomic int state; } Pipe;  // state: 0 building, 1 ready, 2 failed
+// draw_'s inputs to a PipeKey, and the pipeline of the last draw that had these (vk_exec_reset forgets it)
+typedef struct {
+    Prog *pr;
+    VkFormat pcolor[8], pdepth, pstencil;
+    uint32_t pncolor, psamples, nattrib, nstream, attrib[16], stream[16][2];
+    NvnTexture *rtc[8];
+    uint32_t rtf[8], chmask;
+    uint8_t cstate, ms0c, cls, poly2, dclamp, pad_[3];
+    uint8_t blend[8][8];
+} PipeIn;
+static Pipe *g_pipe_memo;
+static PipeIn g_pipe_memo_in;
 #define PIPE_TAB 8192
 static struct { uint64_t key; Pipe *pipe; } pipe_tab[PIPE_TAB];
 
@@ -2550,6 +2574,25 @@ static VkSpan g_dispatch_drv;         // (its compute driver constants: cbuf_inf
 static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32_t gx, uint32_t gy, uint32_t gz) {
     static const uint8_t zeros[0x10000];
     if (k == 0) {
+        if (stage != 5) {  // (graphics: made of the storage buffer bindings alone - compared by those, not as built per draw)
+            static struct { uint64_t seq, size; Range sb[16]; VkSpan span; } m[2];
+            int sg = stage == 1;
+            uint64_t size = si->cbuf_size[0] > 0x800 ? 0x800 : (si->cbuf_size[0] ? si->cbuf_size[0] : 256), seq = vk_pending_seq();
+            if (m[sg].seq == seq && m[sg].size == size && !memcmp(m[sg].sb, st.sbuf[stage], sizeof m[sg].sb)) return ubo_span(m[sg].span, size);
+            uint32_t drv[0x800 / 4];
+            memset(drv, 0, size);
+            uint32_t base = 0x110 + 0x100 * (stage == 1 ? 4 : 0);
+            for (int i = 0; i < 16; i++) {  // (past `size`: not copied)
+                uint32_t *e = &drv[(base + 16 * i) / 4];
+                e[0] = (uint32_t)st.sbuf[stage][i].addr;
+                e[1] = (uint32_t)(st.sbuf[stage][i].addr >> 32);
+                e[2] = (uint32_t)st.sbuf[stage][i].size;
+            }
+            m[sg].span = vk_transient_copy(drv, size, 256);
+            m[sg].seq = seq, m[sg].size = size;
+            memcpy(m[sg].sb, st.sbuf[stage], sizeof m[sg].sb);
+            return ubo_span(m[sg].span, size);
+        }
         uint32_t drv[0x800 / 4] = {0};
         if (stage == 5) {
             drv[0x200 / 4] = gx; drv[0x204 / 4] = gy; drv[0x208 / 4] = gz;
@@ -2797,6 +2840,7 @@ void vk_exec_reset(void) {
     vcache_reset();
     memset(prog_tab, 0, sizeof prog_tab);
     memset(pipe_tab, 0, sizeof pipe_tab);
+    g_pipe_memo = NULL;
     g_cs_n = 0;
     ngpuw = 0;  // (guest memory is replaced)
     gcopy_gen++;
@@ -3054,14 +3098,12 @@ static void image_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo *
 // viewport decision), or NULL.
 static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t set, int stage, ShaderInfo *si, const float *rscale_row0,
                                  const float tint[8], uint32_t gx, uint32_t gy, uint32_t gz, const VkDescriptorImageInfo *pre_ii) {
-    VkDescriptorSet ds = vk_alloc_set(layout);
+    VkDescriptorSet ds = VK_NULL_HANDLE;  // (allocated below, once the writes are known)
     VkWriteDescriptorSet w[MAX_BIND];
     VkDescriptorBufferInfo bi[MAX_BIND];
     VkDescriptorImageInfo ii[MAX_BIND];
     int n = 0;
     int sg = stage == 1 ? 1 : 0;
-    float rs[65][4] = {{1, 1, 0, 0}};
-    if (rscale_row0) memcpy(rs[0], rscale_row0, 16);
     for (int i = 0; i < p->nbinds; i++) {
         VkBindingInfo *b = &p->binds[i];
         if (b->set != set) continue;
@@ -3098,8 +3140,23 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
         w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = b->binding,
                                       .descriptorCount = 1, .descriptorType = b->type};
         if (b->binding == 18) {
-            for (int t = 0; t < si->ntex && t < 64; t++) { rs[1 + t][0] = tex_sc[sg][t][0]; rs[1 + t][1] = tex_sc[sg][t][1]; }
-            bi[n] = ubo_span(copy_dedupe(sg ? DEDUPE_RSCALE_F : DEDUPE_RSCALE_V, rs, sizeof rs, 256), sizeof rs);
+            // (the block: row 0, then a texture scale per row - the same as the last one of this submission for most
+            // draws: compared by those, not as the whole 1 KB block built and compared per draw)
+            static struct { uint64_t seq; float row0[4], sc[64][2]; int nt; VkSpan span; } m[2];
+            static const float one[4] = {1, 1, 0, 0};
+            const float *row0 = rscale_row0 ? rscale_row0 : one;
+            int nt = si->ntex < 64 ? si->ntex : 64;
+            uint64_t seq = vk_pending_seq();
+            if (!(m[sg].seq == seq && m[sg].nt == nt && !memcmp(m[sg].row0, row0, 16) && !memcmp(m[sg].sc, tex_sc[sg], (size_t)nt * 8))) {
+                float rs[65][4];
+                memset(rs, 0, sizeof rs);
+                memcpy(rs[0], row0, 16);
+                for (int t = 0; t < nt; t++) rs[1 + t][0] = tex_sc[sg][t][0], rs[1 + t][1] = tex_sc[sg][t][1];
+                m[sg].span = vk_transient_copy(rs, sizeof rs, 256);
+                m[sg].seq = seq, m[sg].nt = nt;
+                memcpy(m[sg].row0, row0, 16), memcpy(m[sg].sc, tex_sc[sg], (size_t)nt * 8);
+            }
+            bi[n] = ubo_span(m[sg].span, sizeof(float[65][4]));
         } else {
             float zero[8] = {0};
             bi[n] = ubo_span(copy_dedupe(DEDUPE_TINT, tint ? tint : zero, 32, 256), 32);
@@ -3107,7 +3164,13 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
         w[n].pBufferInfo = &bi[n];
         n++;
     }
+    uint64_t pa_ = prof ? SDL_GetTicksNS() : 0;
+    ds = vk_alloc_set(layout);
+    if (prof) prof_dalloc += SDL_GetTicksNS() - pa_;
+    for (int i = 0; i < n; i++) w[i].dstSet = ds;
+    uint64_t pu_ = prof ? SDL_GetTicksNS() : 0;
     if (n) vkUpdateDescriptorSets(g_vk.dev, (uint32_t)n, w, 0, NULL);
+    if (prof) prof_dupd += SDL_GetTicksNS() - pu_;
     return ds;
 }
 
@@ -3362,11 +3425,20 @@ static struct {
     int64_t rdisc, dtest, dwrite, dcomp, sten, cull, front, topo, prim_restart, dbias_on;
     float dbias[3], blend[4];
     int64_t sop[2][4], smask[2][3];
+    VkBuffer vb[17], ib;  // (the vertex / index buffers bound)
+    VkDeviceSize vboff[17], iboff;
+    int64_t itype;
 } dc;
 #define DC_SET(field, val, call) do { int64_t v_ = (int64_t)(val); if (dc.field != v_) { dc.field = v_; call; } } while (0)
+static void dc_bind_vb(VkCommandBuffer cb, uint32_t s, VkBuffer b, VkDeviceSize off) {
+    if (dc.vb[s] == b && dc.vboff[s] == off) return;
+    dc.vb[s] = b, dc.vboff[s] = off;
+    vkCmdBindVertexBuffers(cb, s, 1, &b, &off);
+}
 static void dc_begin(VkCommandBuffer cb) {
     if (dc.cb == cb && dc.epoch == g_dyn_epoch && !ENV("LARECOMP_NO_DC")) return;  // (LARECOMP_NO_DC: research, no cache)
     memset(&dc, 0xff, sizeof dc);  // (all unknown: -1, NaN)
+    memset(&dc_vp, 0xff, sizeof dc_vp), memset(&dc_sc, 0xff, sizeof dc_sc);
     dc.cb = cb, dc.epoch = g_dyn_epoch, dc.pipe = VK_NULL_HANDLE;
 }
 // Indirect draws (nvnCommandBufferDraw{Elements,Arrays}Indirect): the arguments are in guest memory, written by the
@@ -3540,6 +3612,24 @@ static void draw_(CmdRec *r, bool indexed) {
     uint64_t prof_tk_ = prof ? SDL_GetTicksNS() : 0;
     if (prof) prof_pre += prof_tk_ - prof_tp_;
     // ---- pipeline
+    // (what the key below is made of, as it was: the same as the previous draw's for most draws - then its pipeline,
+    // without building and hashing the ~700-byte key: half a microsecond a draw)
+    PipeIn in;
+    memset(&in, 0, sizeof in);
+    in.pr = pr;
+    memcpy(in.pcolor, pass_color, sizeof in.pcolor);
+    in.pdepth = pass_depth, in.pstencil = pass_stencil, in.pncolor = pass_ncolor, in.psamples = pass_samples;
+    in.nattrib = st.nattrib, in.nstream = st.nstream;
+    memcpy(in.attrib, st.attrib, sizeof in.attrib);
+    memcpy(in.stream, st.stream, sizeof in.stream);
+    for (int i = 0; i < 8; i++) in.rtc[i] = st.rt.color[i], in.rtf[i] = st.rt.color[i] ? st.rt.color[i]->format : 0;
+    in.chmask = st.channel_mask, in.cstate = st.color_state[0], in.ms0c = st.ms[0xC], in.cls = cls, in.poly2 = st.poly[2];
+    in.dclamp = st.depth_clamp;
+    memcpy(in.blend, st.blend, sizeof in.blend);
+    Pipe *pp;
+    if (g_pipe_memo && !memcmp(&in, &g_pipe_memo_in, sizeof in)) {
+        pp = g_pipe_memo;
+    } else {
     PipeKey k;
     memset(&k, 0, sizeof k);
     k.prog = pr;
@@ -3590,7 +3680,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (!ph) ph = 1;
     uint32_t pslot = (uint32_t)(ph ^ (ph >> 29)) & (PIPE_TAB - 1);
     while (pipe_tab[pslot].key && pipe_tab[pslot].key != ph) pslot = (pslot + 1) & (PIPE_TAB - 1);
-    Pipe *pp = pipe_tab[pslot].pipe;
+    pp = pipe_tab[pslot].pipe;
     if (!pp) {
         pp = calloc(1, sizeof *pp);
         pp->k = k;
@@ -3600,8 +3690,13 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     wait_built(&pp->state);
     if (atomic_load(&pp->state) != 1) { SKIP(5 + (atomic_load(&pp->state) > 1)); return; }
+    g_pipe_memo = pp, g_pipe_memo_in = in;
+    }
+    const PipeKey *kp = &pp->k;  // (the key it was built for: this draw's)
     dc_begin(cb);
+    uint64_t pp_ = prof ? SDL_GetTicksNS() : 0;
     if (dc.pipe != pp->pipe) dc.pipe = pp->pipe, vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe);
+    if (prof) prof_bindpipe += SDL_GetTicksNS() - pp_;
     DC_SET(rdisc, st.raster_discard, vkCmdSetRasterizerDiscardEnable(cb, st.raster_discard));
     uint64_t prof_td_ = prof ? SDL_GetTicksNS() : 0;
     if (prof) prof_key += prof_td_ - prof_tk_;
@@ -3833,7 +3928,9 @@ static void draw_(CmdRec *r, bool indexed) {
     VkDescriptorSet fset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, tint, 0, 0, 0, fii);
     if (prof) prof_sets += SDL_GetTicksNS() - prof_t1_;
     VkDescriptorSet sets[2] = {vset, fset};
+    uint64_t pb_ = prof ? SDL_GetTicksNS() : 0;
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 0, 2, sets, 0, NULL);
+    if (prof) prof_dbind += SDL_GetTicksNS() - pb_;
 
     uint64_t prof_t2_ = prof ? SDL_GetTicksNS() : 0;
     // ---- indices (copied; the largest index bounds the vertex data copied below)
@@ -3903,11 +4000,14 @@ static void draw_(CmdRec *r, bool indexed) {
             if (base_vertex > 0) max_index += (uint32_t)base_vertex;
         }
     }
-    if (use_index) vkCmdBindIndexBuffer(cb, ib.buf, ib.off, itype_vk);
+    if (use_index && (dc.ib != ib.buf || dc.iboff != ib.off || dc.itype != (int64_t)itype_vk)) {
+        dc.ib = ib.buf, dc.iboff = ib.off, dc.itype = itype_vk;
+        vkCmdBindIndexBuffer(cb, ib.buf, ib.off, itype_vk);
+    }
 
     // ---- vertex streams: the range this draw can read, copied once per submission
     for (int s = 0; s < 17; s++) {
-        if (!(k.used_streams & (1u << s))) continue;
+        if (!(kp->used_streams & (1u << s))) continue;
         VkSpan sp;
         if (s == ZERO_BINDING) {
             static const float zero[4] = {0, 0, 0, 1};
@@ -3920,10 +4020,10 @@ static void draw_(CmdRec *r, bool indexed) {
             g_vcache_gpuw += gw;
             if (ENV("LARECOMP_LOG_VSTREAM") && g_gpuprof_frame)  // (research: the stream ranges of a profiled frame)
                 LOG("[vstream] %llx +%llu stride %u div %u gpuw %d max_index %u inst %u\n", (unsigned long long)v.addr, (unsigned long long)v.size,
-                    (unsigned)k.stride[s], (unsigned)k.divisor[s], gw, max_index, inst);
+                    (unsigned)kp->stride[s], (unsigned)kp->divisor[s], gw, max_index, inst);
             if (v.addr && v.size && ((!gw && vcache_get(v.addr, v.size, &dbuf, &doff)) ||
                                      vtx_direct(v.addr, v.size, &dbuf, &doff))) {
-                vkCmdBindVertexBuffers(cb, (uint32_t)s, 1, &dbuf, &doff);
+                dc_bind_vb(cb, (uint32_t)s, dbuf, doff);
                 continue;
             }
             if (scan_src) {  // copying after all: the index scan bounds the copy
@@ -3932,23 +4032,22 @@ static void draw_(CmdRec *r, bool indexed) {
                 if (base_vertex > 0) max_index += (uint32_t)base_vertex;
                 scan_src = NULL;
             }
-            uint64_t stride = k.stride[s], need;
+            uint64_t stride = kp->stride[s], need;
             if (!stride) need = 256;
             else if (g_draw_indirect) need = v.size ? v.size : 256;
-            else if (k.divisor[s]) need = ((uint64_t)base_inst + inst + k.divisor[s] - 1) / k.divisor[s] * stride + 256;
+            else if (kp->divisor[s]) need = ((uint64_t)base_inst + inst + kp->divisor[s] - 1) / kp->divisor[s] * stride + 256;
             else need = (uint64_t)max_index * stride + 256;
             if (v.size && need > v.size) need = v.size;
             if (!v.addr) { static const uint8_t zero[256]; sp = vk_transient_copy(zero, 256, 16); }
             else {
-                sp = vertex_copy(v.addr, need ? need : 16, v.size, k.divisor[s] == 0);
+                sp = vertex_copy(v.addr, need ? need : 16, v.size, kp->divisor[s] == 0);
                 if (ENV("LARECOMP_LOG_VCOPY") && g_gpuprof_frame)  // (research: what a profiled frame copies, per stream)
                     LOG("[vcopy] vs %llx stream %d addr %llx need %llu of bound %llu stride %llu %s max_index %u base_vertex %d base_inst %u inst %u\n",
                         (unsigned long long)st.program->stages[0].code_addr, s, (unsigned long long)v.addr, (unsigned long long)need,
-                        (unsigned long long)v.size, (unsigned long long)stride, k.divisor[s] ? "instance" : "vertex", max_index, base_vertex, base_inst, inst);
+                        (unsigned long long)v.size, (unsigned long long)stride, kp->divisor[s] ? "instance" : "vertex", max_index, base_vertex, base_inst, inst);
             }
         }
-        VkDeviceSize off = sp.off;
-        vkCmdBindVertexBuffers(cb, (uint32_t)s, 1, &sp.buf, &off);
+        dc_bind_vb(cb, (uint32_t)s, sp.buf, sp.off);
     }
 
     if (prof) prof_vtx += SDL_GetTicksNS() - prof_t2_;
@@ -3973,7 +4072,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (exp_alt < 0) exp_alt = ENV("LARECOMP_EXP_ALT") != NULL;
     bool exp_hit = exp_mode && st.program->stages[0].code_addr == exp_vs && (!exp_alt || (vk_frame_counter() & 1));
     uint32_t inst_eff = exp_hit && exp_mode == 3 && inst > 1 ? inst / 2 : inst;
-    if (exp_hit && exp_mode == 2) { VkRect2D one = {{0, 0}, {1, 1}}; vkCmdSetScissor(cb, 0, 1, &one); }
+    if (exp_hit && exp_mode == 2) { VkRect2D one = {{0, 0}, {1, 1}}; vkCmdSetScissor(cb, 0, 1, &one); memset(&dc_sc, 0xff, sizeof dc_sc); }
     bool gp_q = g_gpuprof_frame && gp_draw_marks && gps_qp && gp_n && gps_n < GP_MAX;
     if (gp_q) vkCmdBeginQuery(cb, gps_qp, (uint32_t)gps_n, 0);
     // Transform feedback: the program captures its outputs (xfb outputs of its GLSL) into the bound guest buffers, which
@@ -4707,6 +4806,15 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
     vmaDestroyImage(g_vk.vma, img, mem);
 }
 
+// (research, LARECOMP_EXP_DRAW_NS=<n>: the render thread spends n ns more per draw - how much its speed is worth)
+static void exp_draw_delay(void) {
+    static int64_t ns = -1;
+    if (ns < 0) ns = ENV("LARECOMP_EXP_DRAW_NS") ? atol(ENV("LARECOMP_EXP_DRAW_NS")) : 0;
+    if (!ns) return;
+    uint64_t t0 = SDL_GetTicksNS();
+    while (SDL_GetTicksNS() - t0 < (uint64_t)ns) {}
+}
+
 // ================================================================== executor (renderer.m exec_list)
 static void exec_list(uint64_t handle, int depth) {
     if (depth < 9) g_cur_list[depth] = handle;
@@ -4907,9 +5015,9 @@ static void exec_list(uint64_t handle, int depth) {
             g_dispatch_indirect = 0;
             break;
         }
-        case CMD_DRAW_ARRAYS: draw(r, false); break;
+        case CMD_DRAW_ARRAYS: draw(r, false); exp_draw_delay(); break;
         case CMD_DRAW_TEXTURE: draw_texture(r); break;
-        case CMD_DRAW_ELEMENTS: draw(r, true); break;
+        case CMD_DRAW_ELEMENTS: draw(r, true); exp_draw_delay(); break;
         case CMD_UPDATE_UNIFORM_BUFFER:
             inline_note(r->x[0] + r->x[2], r->x[0] + r->x[2] + r->x[3]);  // (copied per draw from now on: g_inline)
             memcpy((void *)(uintptr_t)(r->x[0] + r->x[2]), x, r->x[3]);
