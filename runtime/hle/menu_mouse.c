@@ -214,6 +214,11 @@ static int item_at(float x, float y) {  // the button under the pointer, or -1
 
 bool menu_mouse_active(void) { return atomic_load(&g_menu_up); }
 bool menu_settings_up(void) { return g_settings_up && g_nitems; }  // (runtime/hle/za_options.c, the game's thread)
+bool menu_item_part(const char *prefix) {  // a button on screen is a part of that name (the game's options file)
+    for (int i = 0; i < g_nitems; i++)
+        if (g_items[i].part && !strncmp(g_items[i].part->name, prefix, strlen(prefix))) return true;
+    return false;
+}
 
 // A click on the Settings screen's row (runtime/hle/za_options.c): on one of its choices, or along its bar - the
 // left / right presses that set that (+ right, - left), 0 for anything else.

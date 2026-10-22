@@ -442,11 +442,14 @@ uint64_t settings_screen_buttons(Cpu *c, uint64_t b) {
     prev = b;
     kept &= b;
     extern bool menu_settings_up(void);
-    bool up = g_page && *(const uint64_t *)(uintptr_t)g_page == g_page_vt && menu_settings_up();
-    if (!up) {
+    static int gone;  // (frames the screen hasn't been seen: gone after 30 - not a frame's gap in what's drawn)
+    bool live = g_page && *(const uint64_t *)(uintptr_t)g_page == g_page_vt;
+    gone = live && menu_settings_up() ? 0 : gone + 1;
+    if (!live || gone > 30) {
         g_ctl = false;
         return b & ~kept;
     }
+    if (gone) return b & ~kept;
     const uint8_t *d = (const uint8_t *)(uintptr_t)*(const uint64_t *)(uintptr_t)(g_page + 0x118);
     int tab = *(const int32_t *)(d + 0xb8), row = *(const int32_t *)(d + 0xbc);
     int dev, slot, ms, serial;
