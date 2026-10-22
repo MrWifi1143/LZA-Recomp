@@ -132,7 +132,8 @@ static void mouse_release(void) {
 }
 
 // Mouse look (input_mouse_camera_take): a game hook asks each frame for the held mouse's motion as camera angles and
-// adds them to the camera's own (hle/za_fixes.c) - while it does, the mouse isn't the camera stick (mouse_stick).
+// adds them to the camera's own (the game's camera hook: hle/za_fixes.c / hle/fps60.c) - while it does, the mouse isn't the
+// camera stick (mouse_stick).
 static _Atomic uint64_t mouse_look_ns;  // when it last asked
 bool input_mouse_camera_take(float *dyaw, float *dpitch) {
     if (!mouse_win || gyro_aiming) return false;
@@ -175,10 +176,10 @@ static double touch_w(void) {
 }
 #define TOUCH_H 1080.0
 static _Atomic int32_t touch_x = 960, touch_y = 540;
-// The free pointer in a menu (runtime/hle/za_mouse.c): how often it moved, the clicks and wheel notches not yet taken
+// The free pointer in a menu (runtime/hle/menu_mouse.c): how often it moved, the clicks and wheel notches not yet taken
 static _Atomic uint32_t ptr_moves;
 static _Atomic int ptr_clicks, ptr_rclicks, ptr_wheel;
-bool za_menu_mouse_active(void);
+bool menu_mouse_active(void);
 static void touch_at(SDL_Window *w, float mx, float my) {
     float d = w ? SDL_GetWindowPixelDensity(w) : 1;
     if (d <= 0) d = 1;
@@ -207,7 +208,7 @@ volatile int g_debug_frame_request;  // F9: dump the next frame's passes (build/
 // Events a test pushes (LARECOMP_HOST_INPUT type: / sdlkey: / sdlpad:) carry this device id: they go the whole way, menu first.
 #define TEST_DEVICE 0x7E57u
 
-// Research (LARECOMP_LIVE's "mouse" file, runtime/hle/za_mouse.c): "at <x> <y>" (the game image, 1920 x 1080) moves
+// Research (LARECOMP_LIVE's "mouse" file, runtime/hle/menu_mouse.c): "at <x> <y>" (the game image, 1920 x 1080) moves
 // the pointer there, "move <dx> <dy>" moves it by that, "key <name>" presses a key, "click" / "rclick" press and let go, "wheelup" /
 // "wheeldown" turn the wheel - as SDL events.
 void input_live_mouse(const char *cmd) {
@@ -357,7 +358,7 @@ void input_handle_event(const SDL_Event *e) {
         bool motion = e->type == SDL_EVENT_MOUSE_MOTION, wheel = e->type == SDL_EVENT_MOUSE_WHEEL;
         SDL_Window *w = SDL_GetWindowFromID(motion ? e->motion.windowID : wheel ? e->wheel.windowID : e->button.windowID);
         bool cam = g_settings.mouse_camera, down = e->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
-        bool menu = za_menu_mouse_active();  // (a menu is up: the pointer is for it - a held mouse is let go)
+        bool menu = menu_mouse_active();  // (a menu is up: the pointer is for it - a held mouse is let go)
         // aiming takes the mouse (the gyro); with the mouse camera a click does too (and is only that: no press)
         if (!mouse_win && w && !menu && (gyro_aiming || (cam && down))) {
             mouse_win = w;
@@ -860,11 +861,11 @@ static void fill_state(Cpu *c) {
     if (wheel_until[0] || wheel_until[1]) recompute_keyboard();  // (a wheel notch's binding lets go by time)
     uint64_t b = menu ? script_buttons & ~zr : key_buttons | ((pad_buttons | script_buttons) & ~zr);
     {
-        uint64_t za_menu_mouse_buttons(Cpu *c);  // (runtime/hle/za_mouse.c: the mouse in the game's menus)
-        uint64_t m = za_menu_mouse_buttons(c);
+        uint64_t menu_mouse_buttons(Cpu *c);  // (runtime/hle/menu_mouse.c: the mouse in the game's menus)
+        uint64_t m = menu_mouse_buttons(c);
         if (!menu) b |= m;
-        uint64_t za_options_buttons(Cpu *c, uint64_t b);  // (runtime/hle/za_options.c: the Settings screen's Controls list)
-        if (!menu) b = za_options_buttons(c, b);
+        uint64_t settings_screen_buttons(Cpu *c, uint64_t b);  // (runtime/hle/za_options.c: the Settings screen's Controls list)
+        if (!menu) b = settings_screen_buttons(c, b);
     }
     {   // injected Plus: held for ~10 presented frames (the game polls several times per frame)
         extern uint64_t renderer_game_frame(void);

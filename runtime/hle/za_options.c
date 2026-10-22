@@ -179,8 +179,8 @@ static bool g_ctl;  // the Controls list is up (Gameplay tab)
 
 static bool ctl_on(int tab) { return g_ctl && tab == 0; }
 static int g_ctl_pending = -1;  // (a click on the other cell / on the Controls row: done on the next read of the pad)
-bool za_menu_mouse_value_press(void);  // runtime/hle/za_mouse.c
-static void ctl_open(int i) { if (za_menu_mouse_value_press()) g_ctl_pending = 100 + i; }  // (a click on its cells)
+bool menu_mouse_value_press(void);  // runtime/hle/menu_mouse.c
+static void ctl_open(int i) { if (menu_mouse_value_press()) g_ctl_pending = 100 + i; }  // (a click on its cells)
 // a binding's cell: the key's name / the game's icon for the Switch input ("{...}": runtime text tag), or waiting
 static const char *ctl_cell(int row, int col, char *buf, size_t n) {
     int slot = k_binds[row].slot, dev, cslot, ms;
@@ -309,7 +309,7 @@ static int row_count_hook(Cpu *c, uint64_t addr) {
     return 1;
 }
 
-static uint64_t g_page, g_page_vt;  // (the Settings screen last drawn, its class: za_options_cursor_row)
+static uint64_t g_page, g_page_vt;  // (the Settings screen last drawn, its class: settings_cursor_row)
 
 static int row_type_hook(Cpu *c, uint64_t addr) {
     (void)addr;
@@ -328,7 +328,7 @@ static int row_type_hook(Cpu *c, uint64_t addr) {
 static int row_set_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     if (ctl_on(tab_of(c->x[0]))) {  // (left / right: nothing; a click on the other cell: that one waits)
-        if (za_menu_mouse_value_press()) g_ctl_pending = (int)(uint32_t)c->x[2] & 1;
+        if (menu_mouse_value_press()) g_ctl_pending = (int)(uint32_t)c->x[2] & 1;
         return 1;
     }
     int r = row_index(tab_of(c->x[0]), (int)(uint32_t)c->x[1]);
@@ -397,14 +397,14 @@ static int row_info_hook(Cpu *c, uint64_t addr) {
     return 1;
 }
 
-int za_options_tab(void) {  // the Settings screen's tab (runtime/hle/za_mouse.c), -1 when it isn't up
+int settings_tab(void) {  // the Settings screen's tab (runtime/hle/menu_mouse.c), -1 when it isn't up
     if (!g_page || *(const uint64_t *)(uintptr_t)g_page != g_page_vt) return -1;
     return tab_of(g_page);
 }
 
-// The cursor's row on the Settings screen (runtime/hle/za_mouse.c: a click on a choice or a bar): its type and value,
+// The cursor's row on the Settings screen (runtime/hle/menu_mouse.c: a click on a choice or a bar): its type and value,
 // as left / right see them. (Asked while its rows are on screen: the page is the one they were bound by.)
-bool za_options_cursor_row(Cpu *c, uint64_t *type, int *value) {
+bool settings_cursor_row(Cpu *c, uint64_t *type, int *value) {
     if (!g_page || *(const uint64_t *)(uintptr_t)g_page != g_page_vt) return false;
     uint64_t save[31];
     memcpy(save, c->x, sizeof save);
@@ -434,15 +434,15 @@ static void ctl_set(Cpu *c, bool on) {
     guest(c, OPT_TAB_REFRESH, g_page, 0, 0, 0, 0);
 }
 
-uint64_t za_options_buttons(Cpu *c, uint64_t b) {
+uint64_t settings_screen_buttons(Cpu *c, uint64_t b) {
     enum { A = 1 << 0, B = 1 << 1, X = 1 << 2, L = 1 << 6, R = 1 << 7 };
     static uint64_t prev, kept;
     static int serial0 = -1;
     uint64_t edge = b & ~prev;
     prev = b;
     kept &= b;
-    extern bool za_menu_settings_up(void);
-    bool up = g_page && *(const uint64_t *)(uintptr_t)g_page == g_page_vt && za_menu_settings_up();
+    extern bool menu_settings_up(void);
+    bool up = g_page && *(const uint64_t *)(uintptr_t)g_page == g_page_vt && menu_settings_up();
     if (!up) {
         g_ctl = false;
         return b & ~kept;
