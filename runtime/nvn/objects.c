@@ -335,7 +335,28 @@ NVN(nvnTextureBuilderSetWidth) { TB(uint32_t, 0x10) = (uint32_t)A(1); }
 NVN(nvnTextureBuilderSetHeight) { TB(uint32_t, 0x14) = (uint32_t)A(1); }
 NVN(nvnTextureBuilderSetDepth) { TB(uint32_t, 0x18) = (uint32_t)A(1); }
 NVN(nvnTextureBuilderSetSize1D) { TB(uint32_t, 0x10) = (uint32_t)A(1); TB(uint32_t, 0x14) = 1; TB(uint32_t, 0x18) = 1; }
-NVN(nvnTextureBuilderSetSize2D) { TB(uint32_t, 0x10) = (uint32_t)A(1); TB(uint32_t, 0x14) = (uint32_t)A(2); TB(uint32_t, 0x18) = 1; }
+// (research, LARECOMP_LOG_TEXSIZE=<w>x<h>: the guest call chain of textures made that size)
+static void texsize_trace(Cpu *c, uint32_t w, uint32_t h) {
+    static uint32_t ww = 1, wh;
+    static int n;
+    if (ww == 1) { const char *e = getenv("LARECOMP_LOG_TEXSIZE"); ww = e ? (uint32_t)atoi(e) : 0; wh = e && strchr(e, 'x') ? (uint32_t)atoi(strchr(e, 'x') + 1) : 0; }
+    if (!ww || w != ww || h != wh || n >= 40) return;
+    n++;
+    char line[512];
+    int len = snprintf(line, sizeof line, "[texsize] %ux%u from %llx:", w, h, (unsigned long long)c->x[30]);
+    uint64_t fp = c->x[29];
+    for (int i = 0; i < 12 && fp >= GUEST_LO && fp < GUEST_HI && !(fp & 7) && len < 480; i++) {
+        uint64_t lr = ((uint64_t *)(uintptr_t)fp)[1], up = ((uint64_t *)(uintptr_t)fp)[0];
+        len += snprintf(line + len, sizeof line - (size_t)len, " %llx", (unsigned long long)lr);
+        if (up <= fp) break;
+        fp = up;
+    }
+    LOG("%s\n", line);
+}
+NVN(nvnTextureBuilderSetSize2D) {
+    texsize_trace(c, (uint32_t)A(1), (uint32_t)A(2));
+    TB(uint32_t, 0x10) = (uint32_t)A(1); TB(uint32_t, 0x14) = (uint32_t)A(2); TB(uint32_t, 0x18) = 1;
+}
 NVN(nvnTextureBuilderSetSize3D) {
     TB(uint32_t, 0x10) = (uint32_t)A(1); TB(uint32_t, 0x14) = (uint32_t)A(2); TB(uint32_t, 0x18) = (uint32_t)A(3);
 }

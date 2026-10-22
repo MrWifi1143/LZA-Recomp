@@ -25,6 +25,9 @@
 #include <stdatomic.h>
 
 #include "../hle.h"
+#include <SDL3/SDL.h>
+#include "../settings.h"
+#include "../platform.h"
 
 void rt_register_fnhook_at(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
 void rt_call_original(Cpu *c, uint64_t addr);
@@ -173,10 +176,46 @@ static int timeline_step(Cpu *c, uint64_t addr) {
     return 0;
 }
 
+// Higher resolution, the game's own way. Z-A draws its scene at 0.65 of its screen size inside render targets made at the
+// largest screen size, then upscales to the screen with its own upscaler: docked 1920x1080 (scene 1248x696), handheld
+// 1280x720. Scaling its targets from outside (output_scale.c, as for Legends: Arceus) breaks it - many of its passes
+// address pixels as integers - so the screen size itself is changed: the output size in its system config (below),
+// the docked entry of the render pipeline's screen sizes and the size its targets are made at (two constants), all
+// before the renderer is made. Every pass then agrees on it, as on the Switch 2. The internal resolution option picks
+// it: render_height lines (1440: 2560x1440, scene 1664x936), 1080 x the multiplier, or the display's height (Match
+// display; the 75 / 50 / 25 % choices of it); 16:9, multiples of 8. LARECOMP_ZA_RES=<w>x<h> sets it directly.
+static void za_screen_size(uint64_t *w, uint64_t *h) {
+    const char *r = getenv("LARECOMP_ZA_RES");
+    if (r && strchr(r, 'x') && atoi(r) >= 640 && atoi(strchr(r, 'x') + 1) >= 360) {
+        *w = (uint64_t)atoi(r) & ~7ull, *h = (uint64_t)atoi(strchr(r, 'x') + 1) & ~7ull;
+        return;
+    }
+    double lines = 1080;
+    int mode = g_settings.res_mode;
+    if (g_settings.res_height > 0) lines = g_settings.res_height;
+    else if (mode >= 1 && mode <= 8) lines = 1080.0 * mode;
+    else {
+        int dh = 0;
+        if (SDL_WasInit(SDL_INIT_VIDEO)) {
+            const SDL_DisplayMode *dm = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay());
+            if (dm) dh = dm->h;
+        }
+        lines = dh >= 360 ? dh : 1080;
+        if (mode == RES_Q75) lines *= 0.75;
+        else if (mode == RES_Q50) lines *= 0.5;
+        else if (mode == RES_Q25) lines *= 0.25;
+    }
+    if (lines < 720) lines = 720;
+    if (lines > 4320) lines = 4320;
+    *h = (uint64_t)lines & ~7ull;
+    *w = ((uint64_t)(lines * 16.0 / 9.0 + 0.5)) & ~7ull;
+}
+
 // The engine's system config (read by 0x7001b2fc30 (config table, engine info, ...) into the info struct): +0x10 / +0x18
 // the output width / height (1920 x 1080 unless the data sets them), +0x58 the worker core count (hle/za_jobs.c).
-// LARECOMP_ZA_RES=<w>x<h> (research): another output size.
+// (the output size: set by the screen size, below)
 #define ZA_CONFIG_READ 0x7001b2fc30ull
+#define ZA_SCREEN_SIZES 0x70031a14e0ull  // (u32 handheld w, docked w, handheld h, docked h: 1280, 1920, 720, 1080)
 static int config_read(Cpu *c, uint64_t addr) {
     uint64_t info = c->x[1];
     rt_call_original(c, addr);
@@ -189,11 +228,37 @@ static int config_read(Cpu *c, uint64_t addr) {
         const char *d = getenv("LARECOMP_ZA_DRS");
         if (d && !strcmp(d, "off")) *(uint8_t *)(uintptr_t)drs = 0, LOG("[za] dynamic resolution off (LARECOMP_ZA_DRS)\n");
     }
-    const char *r = getenv("LARECOMP_ZA_RES");
-    if (r && strchr(r, 'x')) {
+    uint64_t sw, sh;
+    za_screen_size(&sw, &sh);
+    if (sw != 1920 || sh != 1080) {
         uint64_t *w = (uint64_t *)(uintptr_t)(info + 0x10), *h = (uint64_t *)(uintptr_t)(info + 0x18);
-        LOG("[za] output %llux%llu -> %s\n", (unsigned long long)*w, (unsigned long long)*h, r);
-        *w = strtoull(r, NULL, 10), *h = strtoull(strchr(r, 'x') + 1, NULL, 10);
+        LOG("[za] screen %llux%llu (the game draws its scene at 0.65 of it and upscales to it)\n", (unsigned long long)sw, (unsigned long long)sh);
+        *w = sw, *h = sh;
+        // the render pipeline's screen sizes by performance mode {handheld w, docked w, handheld h, docked h} (read-only data,
+        // copied into each pipeline when it's made: 0x7000ecf788)
+        uint32_t *t = (uint32_t *)(uintptr_t)ZA_SCREEN_SIZES;
+        if (t[1] == 1920 && t[3] == 1080) {
+            plat_protect(ZA_SCREEN_SIZES & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);
+            t[1] = (uint32_t)*w, t[3] = (uint32_t)*h;
+            LOG("[za] docked screen %ux%u\n", t[1], t[3]);
+        }
+        // the render pipeline's target sizes (read-only data, read when it's made): full, half and quarter of 1920x1080
+        static const struct { uint64_t addr; int u64, f32, div; } k[] = {
+            {0x70031a48b0ull, 1, 0, 1},  // u64 1920, 1080: the targets (0x7000ededa0 and four more setups)
+            {0x70031a3478ull, 0, 0, 1},  // u32 1920, 1080 (0x7000e6d058)
+            {0x70031a0ec0ull, 0, 1, 1},  // f32 1920, 1080 (0x7000e6c7bc)
+            {0x70031a3a70ull, 1, 0, 2},  // u64 960, 540: half-size targets (five setups)
+            {0x70031a1f80ull, 1, 0, 4},  // u64 480, 270 (0x7000ee026c)
+            {0x70031a48d0ull, 0, 0, 4},  // u32 480, 270 (0x7000eeff3c)
+        };
+        for (size_t i = 0; i < sizeof k / sizeof *k; i++) {
+            uint64_t ow = 1920 / k[i].div, oh = 1080 / k[i].div, nw = *w / k[i].div, nh = *h / k[i].div;
+            void *a = (void *)(uintptr_t)k[i].addr;
+            plat_protect(k[i].addr & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);
+            if (k[i].u64) { uint64_t *v = a; if (v[0] == ow && v[1] == oh) v[0] = nw, v[1] = nh; }
+            else if (k[i].f32) { float *v = a; if (v[0] == (float)ow && v[1] == (float)oh) v[0] = (float)nw, v[1] = (float)nh; }
+            else { uint32_t *v = a; if (v[0] == ow && v[1] == oh) v[0] = (uint32_t)nw, v[1] = (uint32_t)nh; }
+        }
     }
     return 1;
 }
@@ -241,6 +306,57 @@ static int rt_lookup_watch(Cpu *c, uint64_t addr) {
     return 0;
 }
 
+// The renderer's setup (0x70017faa10 (renderer, desc)): desc+0x48 / +0x50 = its screen size (u64), what its render
+// targets and the scene's 0.65 viewport are sized from. LARECOMP_ZA_RES=<w>x<h> sets it too.
+#define ZA_RENDERER_SETUP 0x70017faa10ull
+static int renderer_setup(Cpu *c, uint64_t addr) {
+    (void)addr;
+    uint64_t *d = (uint64_t *)(uintptr_t)(c->x[1] + 0x48);
+    const char *r = getenv("LARECOMP_ZA_RES");
+    LOG("[za] renderer setup: screen %llu x %llu\n", (unsigned long long)d[0], (unsigned long long)d[1]);
+    if (r && strchr(r, 'x')) d[0] = strtoull(r, NULL, 10), d[1] = strtoull(strchr(r, 'x') + 1, NULL, 10);
+    return 0;
+}
+
+// (research, LARECOMP_ZA_PERFLOG=1: who asks nn::oe::GetPerformanceMode (sdk 0x70083f70e0), each caller once)
+static int perfmode_log(Cpu *c, uint64_t addr) {
+    (void)addr;
+    static uint64_t seen[32];
+    static int n;
+    for (int i = 0; i < n; i++) if (seen[i] == c->x[30]) return 0;
+    if (n < 32) seen[n++] = c->x[30];
+    uint64_t fp = c->x[29], up1 = fp >= GUEST_LO && fp < GUEST_HI ? ((uint64_t *)(uintptr_t)fp)[1] : 0;
+    LOG("[za] GetPerformanceMode from %llx (its caller %llx)\n", (unsigned long long)c->x[30], (unsigned long long)up1);
+    return 0;
+}
+
+// (research: the render pipeline's per-mode sizes - 0x7000ed2dc0 (pipeline): +0x288 + mode * 4 width, +0x290 + mode * 4
+// height, mode at +0x2b4 (0 normal / handheld, 1 boost / docked))
+static int pipeline_sizes(Cpu *c, uint64_t addr) {
+    (void)addr;
+    const uint32_t *w = (const uint32_t *)(uintptr_t)(c->x[0] + 0x288), *h = (const uint32_t *)(uintptr_t)(c->x[0] + 0x290);
+    static int n;
+    if (n++ < 4)
+        LOG("[za] pipeline %llx sizes: mode 0 %ux%u, mode 1 %ux%u (mode %d)\n", (unsigned long long)c->x[0], w[0], h[0], w[1], h[1],
+            *(int32_t *)(uintptr_t)(c->x[0] + 0x2b4));
+    return 0;
+}
+
+// (research, LARECOMP_ZA_RTLOG=1: render target creation 0x700044e390 (?, desc, ...) - the descriptions holding 1920)
+static int rt_create_log(Cpu *c, uint64_t addr) {
+    (void)addr;
+    const uint32_t *d = (const uint32_t *)(uintptr_t)c->x[1];
+    int at = -1;
+    for (int i = 0; i < 24; i++) if (d[i] == 1920) { at = i; break; }
+    static int n;
+    if (at >= 0 && n < 30) {
+        n++;
+        LOG("[za] rt create from %llx: desc %llx, 1920 at +0x%x: %x %x %x %x %x %x %x %x %x %x %x %x\n", (unsigned long long)c->x[30],
+            (unsigned long long)c->x[1], at * 4, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11]);
+    }
+    return 0;
+}
+
 void za_fixes_configure(const char *exefs) {
     static const uint8_t ZA_MAIN[8] = {0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a};
     static bool done;
@@ -261,14 +377,18 @@ void za_fixes_configure(const char *exefs) {
     {   // Unscaled: the internal resolution option sizes the game's 1920x1080 targets for the window (1440p: x1.33), but
         // the rscale fix-ups only cover what shaders read by frag coord, and Z-A addresses many pixels as integers
         // (texelFetch, image stores, compute: its upscaler, depth pyramid, lighting) - scaled, those passes read a
-        // stretched lattice: a softer image with artifacts. Its own 1920x1080 output (the game's upscaler from its
-        // dynamic resolution) is drawn to the window instead, as LZA Recomp (FerSaiyan) found. LARECOMP_FORCE_SCALE=1:
-        // the scaling back.
+        // stretched lattice: a softer image with artifacts. Its own output is drawn to the window instead, as LZA Recomp
+        // (FerSaiyan) found; the internal resolution option sets the game's screen size instead (za_screen_size, above:
+        // every pass then agrees). LARECOMP_FORCE_SCALE=1: the scaling back.
         extern bool g_tex_no_scale;
         g_tex_no_scale = !getenv("LARECOMP_FORCE_SCALE");
     }
     { extern void za_jobs_configure(void); za_jobs_configure(); }
     rt_register_fnhook_at(ZA_CONFIG_READ, config_read);
+    rt_register_fnhook_at(ZA_RENDERER_SETUP, renderer_setup);
+    if (getenv("LARECOMP_ZA_PERFLOG")) rt_register_fnhook_at(0x7000ed2dc0ull, pipeline_sizes);
+    if (getenv("LARECOMP_ZA_RTLOG")) rt_register_fnhook_at(0x700044e390ull, rt_create_log);
+    if (getenv("LARECOMP_ZA_PERFLOG")) rt_register_fnhook_at(0x70083f70e0ull, perfmode_log);
     if (getenv("LARECOMP_ZA_RTWATCH")) rt_register_fnhook_at(0x70018b7088ull, rt_lookup_watch), rt_register_fnhook_at(0x70018b71a4ull, rt_lookup_watch);
     if (getenv("LARECOMP_ZA_VPWATCH")) rt_register_fnhook_at(0x70018b7390ull, vp_flush_watch);
     {
