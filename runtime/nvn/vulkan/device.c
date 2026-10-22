@@ -1185,8 +1185,11 @@ int ui_run(void) {
     atomic_store(&ui_ready, true);
     for (;;) {
         if (rt_reboot_requested()) return rt_reboot_requested();  // (runtime/main.c tears the game down)
+        int drained = 0;
+        // what's queued, then the window's own requests (fullscreen, text input) - every time: a controller sends
+        // its sticks and motion sensor about a thousand times a second, so the queue may never be empty for long
         SDL_Event e;
-        while (SDL_WaitEventTimeout(&e, 16)) {
+        for (bool got = SDL_WaitEventTimeout(&e, 16); got; got = ++drained < 512 && SDL_PollEvent(&e)) {
             if (e.type == SDL_EVENT_QUIT) {
                 LOG("window closed\n");
                 exit(0);

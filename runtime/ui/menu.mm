@@ -244,7 +244,8 @@ void menu_apply_window_requests(void *win) {
     static bool first = true;
     if (first || g_want_fullscreen_apply.exchange(false)) {
         first = false;
-        SDL_SetWindowFullscreen(w, g_settings.fullscreen);
+        bool ok = SDL_SetWindowFullscreen(w, g_settings.fullscreen);
+        LOG("[window] fullscreen %d: %s (%s)\n", g_settings.fullscreen, ok ? "asked" : SDL_GetError(), SDL_GetCurrentVideoDriver());
     }
 }
 
