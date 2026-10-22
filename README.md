@@ -88,7 +88,8 @@ Tested on Linux with an RTX 4090; the Windows build is tested under Wine.
   4K...: its scene at 0.65 of it, upscaled by its own upscaler, every pass at the new size); 1080p is the Switch's.
 - NPCs animate every frame (the game's own animation level of detail is bypassed).
 - Start screen: resolution, fullscreen, anti-aliasing, frame rate, FPS counter, button prompts, mods, controller test
-  and remapping, keyboard remapping.
+  and remapping, keyboard remapping. "Don't show this screen at start" goes straight to the game from then on (hold
+  Shift while starting to see it again, or set Start Screen in the game's Settings).
 - The game's own Settings screen (Menu -> Help & Settings -> Settings) has the start screen's settings too, as rows
   like the game's: frame rate, resolution, screen mode, anti-aliasing, button prompts and FPS counter on Gameplay,
   mouse camera, mouse sensitivity and stick dead zone on Camera, master volume on Sound. They apply at once (frame

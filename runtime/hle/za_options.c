@@ -87,6 +87,8 @@ static void set_fpsc(int i) { g_settings.show_fps = i == 0; }
 int input_last_was_kbm(void);  // runtime/hle/input.c
 static int ctl_col(void) { return input_last_was_kbm() ? 0 : 1; }  // (the Controls list: the column A changes)
 static void ctl_open(int i);
+static int get_skip(void) { return g_settings.skip_start ? 1 : 0; }
+static void set_skip(int i) { g_settings.skip_start = i == 1; }
 static int get_mcam(void) { return g_settings.mouse_camera ? 0 : 1; }
 static void set_mcam(int i) { g_settings.mouse_camera = i == 0; }
 // (bars: the nearest step to what the ini has; mouse 0.025 degrees per pixel a step, dead zone 4% of the travel a step)
@@ -110,6 +112,8 @@ static const Row k_rows[] = {
     {0, "Anti-Aliasing", "Choose whether to smooth jagged edges (SMAA).", CHOICE, 2, {"On", "Off"}, get_aa, set_aa},
     {0, "Button Prompts", "Choose which buttons prompts show. Auto shows the ones you are playing with.", CHOICE, 5,
      {"Auto", "Switch", "Xbox", "PlayStation", "Keyboard"}, get_prompts, set_prompts},
+    {0, "Start Screen", "Choose whether the start screen shows when the game starts. Holding Shift while starting shows it.",
+     CHOICE, 2, {"Show", "Skip"}, get_skip, set_skip},
     {0, "FPS Counter", "Choose whether to show the frame rate in the corner of the screen.", CHOICE, 2, {"Show", "Hide"},
      get_fpsc, set_fpsc},
     {1, "Mouse Camera", "Choose whether a click in the game lets the mouse turn the camera. Esc lets it go.",

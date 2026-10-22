@@ -24,6 +24,7 @@ typedef struct {
     bool reverb;         // room reverb effect
     bool movie_audio;
     bool show_fps;
+    bool skip_start;     // the start screen goes straight to the game once it's ready (Shift held at start: shown)
     bool dpad_move;      // the d-pad (and arrow keys) move the player like the stick
     bool render_thread;  // the backend runs on its own thread (runtime/nvn/vulkan/renderthread.c); default on
     int vertex_read;     // VREAD_*: where the GPU reads vertex and index data (runtime/nvn/vulkan/exec.c)
