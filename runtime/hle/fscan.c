@@ -37,7 +37,10 @@ static void free_copies(void) {
 void fscan_present(uint64_t frame) {
     static long at = -2;
     if (at == -2) at = getenv("LARECOMP_FSCAN") ? atol(getenv("LARECOMP_FSCAN")) : -1;
-    if (at < 0 || frame < (uint64_t)at || frame > (uint64_t)at + 3) return;
+    static bool started;
+    if (at < 0 || frame < (uint64_t)at) return;
+    if (!started) started = true, at = (long)frame;  // (the first present at or after it: the count can skip one)
+    if (frame > (uint64_t)at + 3) return;
     uint64_t k = frame - (uint64_t)at;
     if (k == 0) {
         uint64_t budget = (getenv("LARECOMP_FSCAN_MAX") ? strtoull(getenv("LARECOMP_FSCAN_MAX"), NULL, 0) : 8192) << 20;
@@ -58,6 +61,33 @@ void fscan_present(uint64_t frame) {
         }
         LOG("[fscan] scanning %llu MB in %d regions (heap %llu MB, %d physical ranges)\n", (unsigned long long)(total >> 20), g_nreg,
             (unsigned long long)(heap >> 20), np);
+        const char *fp = getenv("LARECOMP_FSCAN_PAIR");  // (=<a>,<b>: where two 32-bit integers a, b follow each other)
+        if (fp && strchr(fp, ',')) {
+            uint32_t pa = (uint32_t)strtoul(fp, NULL, 0), pb = (uint32_t)strtoul(strchr(fp, ',') + 1, NULL, 0);
+            int found = 0;
+            for (int r = 0; r < g_nreg && found < 200; r++)
+                for (uint64_t i = 0; i + 1 < g_n[r] && found < 200; i++)
+                    if (g_a[r][i] == pa && g_a[r][i + 1] == pb) LOG("[fscan] %u,%u at %llx\n", pa, pb, (unsigned long long)(g_lo[r] + i * 4)), found++;
+            LOG("[fscan] pair %u,%u: %d places\n", pa, pb, found);
+        }
+        const char *fv = getenv("LARECOMP_FSCAN_VALUE");  // (=<float>: where memory holds exactly it)
+        if (fv) {
+            float want = (float)atof(fv);
+            uint32_t bits;
+            memcpy(&bits, &want, 4);
+            int found = 0;
+            for (int r = 0; r < g_nreg && found < 200; r++)
+                for (uint64_t i = 0; i < g_n[r] && found < 200; i++)
+                    if (g_a[r][i] == bits) {
+                        LOG("[fscan] %g at %llx\n", want, (unsigned long long)(g_lo[r] + i * 4)), found++;
+                        // (=<float>: write this instead, at matches number LARECOMP_FSCAN_SET_FROM..TO - bisecting a value)
+                        const char *sv = getenv("LARECOMP_FSCAN_SET");
+                        long from = getenv("LARECOMP_FSCAN_SET_FROM") ? atol(getenv("LARECOMP_FSCAN_SET_FROM")) : 1;
+                        long to = getenv("LARECOMP_FSCAN_SET_TO") ? atol(getenv("LARECOMP_FSCAN_SET_TO")) : 1000000;
+                        if (sv && found >= from && found <= to) { float nv = (float)atof(sv); memcpy((void *)(uintptr_t)(g_lo[r] + i * 4), &nv, 4); }
+                    }
+            LOG("[fscan] %g: %d places\n", want, found);
+        }
     } else if (k == 1) {
         for (int r = 0; r < g_nreg; r++) if (g_n[r]) memcpy(g_b[r], (const void *)(uintptr_t)g_lo[r], g_n[r] * 4);
     } else if (k == 2) {

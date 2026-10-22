@@ -182,6 +182,13 @@ static int config_read(Cpu *c, uint64_t addr) {
     rt_call_original(c, addr);
     extern void za_jobs_config_read(uint64_t info);
     za_jobs_config_read(info);
+    uint64_t drs = *(uint64_t *)(uintptr_t)(info + 0x28);  // (dynamic resolution: u8 on, then four floats)
+    if (drs) {
+        const float *f = (const float *)(uintptr_t)(drs + 4);
+        LOG("[za] dynamic resolution: on %d, %g %g %g %g\n", *(uint8_t *)(uintptr_t)drs, f[0], f[1], f[2], f[3]);
+        const char *d = getenv("LARECOMP_ZA_DRS");
+        if (d && !strcmp(d, "off")) *(uint8_t *)(uintptr_t)drs = 0, LOG("[za] dynamic resolution off (LARECOMP_ZA_DRS)\n");
+    }
     const char *r = getenv("LARECOMP_ZA_RES");
     if (r && strchr(r, 'x')) {
         uint64_t *w = (uint64_t *)(uintptr_t)(info + 0x10), *h = (uint64_t *)(uintptr_t)(info + 0x18);
@@ -189,6 +196,49 @@ static int config_read(Cpu *c, uint64_t addr) {
         *w = strtoull(r, NULL, 10), *h = strtoull(strchr(r, 'x') + 1, NULL, 10);
     }
     return 1;
+}
+
+// (research, LARECOMP_ZA_VPWATCH=<width>: the render state's viewport flush (0x70018b7390: viewports at x0+0xc4) - the
+// first time one is that wide, a hardware watchpoint on its width names who writes it)
+static int vp_flush_watch(Cpu *c, uint64_t addr) {
+    (void)addr;
+    static int armed;
+    static float want = -1;
+    if (want < 0) want = (float)atof(getenv("LARECOMP_ZA_VPWATCH"));
+    float w;
+    memcpy(&w, (const void *)(uintptr_t)(c->x[0] + 0xc4 + 8), 4);
+    if (!armed && w == want) {
+        armed = 1;
+        extern void hwwatch_arm(uint64_t addr, uint64_t len);
+        LOG("[za] viewport %g in state %llx: watching\n", w, (unsigned long long)c->x[0]);
+        hwwatch_arm(c->x[0] + 0xc4 + 8, 4);
+    }
+    return 0;
+}
+
+// (research, LARECOMP_ZA_RTWATCH=<width>: the render target lookup 0x70018a4da4 (its object: +0x68 / +0x70 the size the
+// viewport is set to) - the first object that wide gets a hardware watchpoint on its width, and is logged)
+static int rt_lookup_watch(Cpu *c, uint64_t addr) {
+    static int armed;
+    static uint64_t want;
+    if (!want) want = strtoull(getenv("LARECOMP_ZA_RTWATCH"), NULL, 0);
+    // (0x70018b7088 (state, slot, target handle, ..): the handle {u8 valid, u64 object} -> the object, as 0x70018a4da4)
+    uint64_t hnd = addr == 0x70018b7088ull ? c->x[2] : c->x[1];
+    uint64_t o = hnd >= GUEST_LO && hnd < GUEST_HI && *(uint8_t *)(uintptr_t)hnd ? *(uint64_t *)(uintptr_t)(hnd + 8) : 0;
+    static int nlog;
+    if (nlog < 30 && o >= GUEST_LO && o < GUEST_HI)
+        nlog++, LOG("[za] bind %llx: target %llx size %llu x %llu\n", (unsigned long long)addr, (unsigned long long)o,
+                    (unsigned long long)*(uint64_t *)(uintptr_t)(o + 0x68), (unsigned long long)*(uint64_t *)(uintptr_t)(o + 0x70));
+    if (!armed && o >= GUEST_LO && o < GUEST_HI && *(uint64_t *)(uintptr_t)(o + 0x68) == want) {
+        armed = 1;
+        const uint64_t *q = (const uint64_t *)(uintptr_t)o;
+        LOG("[za] render target %llx: size %llu x %llu; words %llx %llx %llx %llx %llx %llx %llx %llx\n", (unsigned long long)o,
+            (unsigned long long)q[13], (unsigned long long)q[14], (unsigned long long)q[8], (unsigned long long)q[9], (unsigned long long)q[10],
+            (unsigned long long)q[11], (unsigned long long)q[12], (unsigned long long)q[15], (unsigned long long)q[16], (unsigned long long)q[17]);
+        extern void hwwatch_arm(uint64_t addr, uint64_t len);
+        hwwatch_arm(o + 0x68, 8);
+    }
+    return 0;
 }
 
 void za_fixes_configure(const char *exefs) {
@@ -219,6 +269,8 @@ void za_fixes_configure(const char *exefs) {
     }
     { extern void za_jobs_configure(void); za_jobs_configure(); }
     rt_register_fnhook_at(ZA_CONFIG_READ, config_read);
+    if (getenv("LARECOMP_ZA_RTWATCH")) rt_register_fnhook_at(0x70018b7088ull, rt_lookup_watch), rt_register_fnhook_at(0x70018b71a4ull, rt_lookup_watch);
+    if (getenv("LARECOMP_ZA_VPWATCH")) rt_register_fnhook_at(0x70018b7390ull, vp_flush_watch);
     {
         const char *cs = getenv("LARECOMP_ZA_CUTSCENE_SPEED");
         if (!(cs && atoi(cs) == 0)) rt_register_fnhook_at(ZA_TIMELINE_SET_TIME, timeline_step);

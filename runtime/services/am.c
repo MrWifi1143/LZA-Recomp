@@ -55,8 +55,8 @@ static void common_state_getter(Service *s, IpcReq *req, IpcResp *resp) {
         }
         pthread_mutex_unlock(&g_klock);
         break;
-    case 5: OUT(uint8_t, 0) = 1; resp_size(resp, 1); break;   // GetOperationMode: docked
-    case 6: OUT(uint32_t, 0) = 1; resp_size(resp, 4); break;  // GetPerformanceMode: boost
+    case 5: OUT(uint8_t, 0) = getenv("LARECOMP_HANDHELD") ? 0 : 1; resp_size(resp, 1); break;   // GetOperationMode: docked (research: handheld)
+    case 6: OUT(uint32_t, 0) = getenv("LARECOMP_HANDHELD") ? 0 : 1; resp_size(resp, 4); break;  // GetPerformanceMode: boost
     case 8: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;   // GetBootMode
     case 9: OUT(uint8_t, 0) = 1; resp_size(resp, 1); break;   // GetCurrentFocusState: in focus
     case 13: case 61: resp->copy_handles[resp->ncopy++] = new_event(); break;

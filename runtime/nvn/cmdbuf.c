@@ -368,11 +368,33 @@ NVN(nvnCommandBufferSetRenderTargets) {
 }
 
 // viewports/scissors/depth ranges
-NVN(nvnCommandBufferSetViewports) { record_copy(c, CMD_SET_VIEWPORTS, 3, (uint32_t)A(2) * 16); }
+// (research, LARECOMP_LOG_VIEWPORT=<width>: the first calls setting a viewport that wide - the guest call chain)
+static void viewport_trace(Cpu *c, float w, float h) {
+    static long want = -2;
+    static int n;
+    if (want == -2) want = getenv("LARECOMP_LOG_VIEWPORT") ? atol(getenv("LARECOMP_LOG_VIEWPORT")) : -1;
+    if (want < 0 || (long)w != want || n >= 4) return;
+    n++;
+    char line[512];
+    int len = snprintf(line, sizeof line, "[viewport] %gx%g from %llx:", w, h, (unsigned long long)c->x[30]);
+    uint64_t fp = c->x[29];
+    for (int i = 0; i < 14 && fp >= GUEST_LO && fp < GUEST_HI && !(fp & 7) && len < 480; i++) {
+        uint64_t lr = ((uint64_t *)(uintptr_t)fp)[1], up = ((uint64_t *)(uintptr_t)fp)[0];
+        len += snprintf(line + len, sizeof line - (size_t)len, " %llx", (unsigned long long)lr);
+        if (up <= fp) break;
+        fp = up;
+    }
+    LOG("%s\n", line);
+}
+NVN(nvnCommandBufferSetViewports) {
+    if (A(2)) { const float *v = (const float *)(uintptr_t)A(3); viewport_trace(c, v[2], v[3]); }
+    record_copy(c, CMD_SET_VIEWPORTS, 3, (uint32_t)A(2) * 16);
+}
 NVN(nvnCommandBufferSetViewport) {
     Snap s = snap(c);
     CmdRec *r = record(c, CMD_SET_VIEWPORTS, 16, &s);
     float v[4] = {(float)(int32_t)s.x[1], (float)(int32_t)s.x[2], (float)(int32_t)s.x[3], (float)(int32_t)s.x[4]};
+    viewport_trace(c, v[2], v[3]);
     r->x[0] = 0; r->x[1] = 1;
     memcpy(r->extra, v, 16);
 }

@@ -79,7 +79,36 @@ static void undo_init(void) {
     for (char *t = strtok(buf, ","); t && g_nundo < 32; t = strtok(NULL, ",")) g_undo[g_nundo++] = strtoull(t, NULL, 16);
 }
 
+// LARECOMP_TRACE_VALUE=<n>: every instruction that stores n (4 or 8 bytes) logged once, with where and what it replaced -
+// where a value is computed (the first) and copied to (the rest)
+static void value_match(uint64_t pc, uint64_t addr, uint64_t old, uint64_t nw, int size) {
+    static long long wants[4] = {-2};
+    static int nwant;
+    static uint64_t seen[1024];
+    static int nseen;
+    if (wants[0] == -2) {  // (=<n>[,<n>...]: up to 4 values)
+        wants[0] = -1;
+        const char *e = getenv("LARECOMP_TRACE_VALUE");
+        for (char *q = (char *)e; q && *q && nwant < 4;) { wants[nwant++] = strtoll(q, &q, 0); while (*q == ',') q++; }
+    }
+    if (!nwant || (size != 4 && size != 8)) return;
+    uint64_t v = size == 4 ? (uint32_t)nw : nw;
+    long long want = -1;
+    for (int k = 0; k < nwant; k++) if ((uint64_t)wants[k] == v) want = wants[k];
+    if (want < 0) return;
+    while (atomic_flag_test_and_set(&g_lock)) {}
+    int i = 0;
+    while (i < nseen && seen[i] != pc) i++;
+    if (i == nseen && nseen < 1024) {
+        seen[nseen++] = pc;
+        LOG("[trace] %lld stored by %llx at %llx (was %llx, size %d, present %llu)\n", want, (unsigned long long)pc, (unsigned long long)addr,
+            (unsigned long long)old, size, (unsigned long long)renderer_present_count());
+    }
+    atomic_flag_clear(&g_lock);
+}
+
 void rt_trace_store(uint64_t pc, uint64_t addr, uint64_t old, uint64_t nw, int size) {
+    value_match(pc, addr, old, nw, size);
     if (g_nundo < 0) undo_init();
     if (g_nundo && (renderer_present_count() & 1))
         for (int i = 0; i < g_nundo; i++)
