@@ -81,9 +81,11 @@ Z-A's update is a patch on top of the base game's RomFS, which plain `hactool` c
 Playable through the opening into Lumiose City: boot, character creation, the intro, the station, Lumiose free roam.
 Tested on Linux with an RTX 4090; the Windows build is tested under Wine.
 
-- Frame rates: 30 (the game's own), 60, 120 or 144 fps, with the game and its UI at the right speed.
+- Frame rates: 30 (the game's own), 60, 120 or 144 fps, with the game, its UI and its cutscenes at the right speed
+  (cutscenes follow real time, so they stay with their audio).
 - Graphics: GPU-culled and instanced props (station facade, iron work, trees, hedges, lamp posts), cast shadows,
-  render scale up to 4K, SMAA.
+  SMAA. Resolution the game's own way: the Internal resolution option sets the screen size Z-A renders for (1440p,
+  4K...: its scene at 0.65 of it, upscaled by its own upscaler, every pass at the new size); 1080p is the Switch's.
 - NPCs animate every frame (the game's own animation level of detail is bypassed).
 - Start screen: resolution, fullscreen, anti-aliasing, frame rate, FPS counter, button prompts, mods, controller test
   and remapping, keyboard remapping.
@@ -95,7 +97,9 @@ Tested on Linux with an RTX 4090; the Windows build is tested under Wine.
 
 Known issues:
 
-- Lumiose free roam runs about 120 fps at the 144 target (RTX 4090, i9-12900K): the game's own CPU work on its three cores is the limit there.
+- Lumiose free roam runs about 125 fps at 1080p and 113 at 1440p / 4K at the 144 target (RTX 4090, i9-12900K): the
+  game's own CPU work on its three cores is the limit there (`job_workers` in larecomp.ini adds job threads:
+  experimental).
 - Running legs: the BipedIK foot lock is worked around (`runtime/hle/za_fixes.c`); its root cause is still open.
 - On a fresh install, shaders and pipelines compile the first time they are seen (short stutters).
 - Expect other missing effects and bugs.
