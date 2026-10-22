@@ -357,6 +357,26 @@ static int rt_create_log(Cpu *c, uint64_t addr) {
     return 0;
 }
 
+// Mouse look. The gameplay camera's update (the function around 0x7000371068) turns it by the right stick at its turn
+// speed, from the angles it keeps (yaw in radians, pitch 0..1: +0x4a0 / +0x4a4 of its state), plus two angles of its
+// own (+0x158 yaw, +0x15c pitch, radians: added once, then cleared - direct camera input), and hands them to 0x7000371af0
+// (camera, yaw, pitch). The held mouse's motion goes to those two: the camera turns by as much as the mouse moved,
+// with no stick curve, acceleration or top speed, from the next frame; a controller's stick still turns it as before.
+// LARECOMP_ZA_MOUSE_LOOK=0: the mouse is the camera stick instead (as on other cameras: menus, cutscenes, aiming).
+#define ZA_CAM_ANGLES 0x7000371af0ull      // (camera, s0 yaw, s1 pitch)
+#define ZA_CAM_ANGLES_RET 0x700037106cull  // (the gameplay camera's call)
+static int mouse_look_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    if (c->x[30] != ZA_CAM_ANGLES_RET) return 0;
+    extern bool input_mouse_camera_take(float *dyaw, float *dpitch);
+    float dy, dp;
+    if (input_mouse_camera_take(&dy, &dp)) {
+        float *add = (float *)(uintptr_t)(c->x[0] + 0x158);  // (cleared just before this call: read next frame)
+        add[0] += dy, add[1] += dp;
+    }
+    return 0;
+}
+
 void za_fixes_configure(const char *exefs) {
     static const uint8_t ZA_MAIN[8] = {0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a};
     static bool done;
@@ -371,6 +391,7 @@ void za_fixes_configure(const char *exefs) {
     }
     if (done || memcmp(id, ZA_MAIN, 8)) return;
     done = true;
+    if (!getenv("LARECOMP_ZA_MOUSE_LOOK") || atoi(getenv("LARECOMP_ZA_MOUSE_LOOK")) != 0) rt_register_fnhook_at(ZA_CAM_ANGLES, mouse_look_hook);
     { extern void za_qstats_configure(void); za_qstats_configure(); }
     { extern void za_passq_configure(void); za_passq_configure(); }
     { extern void za_jobq_configure(void); za_jobq_configure(); }

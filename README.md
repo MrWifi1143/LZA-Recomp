@@ -92,8 +92,9 @@ Tested on Linux with an RTX 4090; the Windows build is tested under Wine.
 - Button prompts for what you play with: the bound keys and mouse buttons, Xbox letters or PlayStation shapes instead
   of the Switch's (Auto follows the last used keyboard / mouse or controller, even when it changes while playing;
   remapped buttons show their new button).
-- Keyboard and mouse: WASD (Left Ctrl walks), mouse camera (click to take the mouse, Esc lets it go), mouse buttons
-  and wheel bindable like keys. The game's menus work with the keyboard; clicking them with the mouse isn't possible.
+- Keyboard and mouse: WASD (Left Ctrl walks), mouse look (click to take the mouse, Esc lets it go: the camera turns by
+  as much as the mouse moves - the sensitivity is degrees per pixel - while a controller's stick still turns it the
+  game's way), mouse buttons and wheel bindable like keys. The game's menus work with the keyboard; clicking them with the mouse isn't possible.
 
 Known issues:
 
