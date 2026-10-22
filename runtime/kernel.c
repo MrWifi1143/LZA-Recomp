@@ -993,6 +993,36 @@ static void svc_entry(Cpu *c, uint32_t imm, uint64_t pc) {
         c->x[1], c->x[2], pc);
 }
 
+// What MapPhysicalMemory has mapped (research: hle/fscan.c scans it), as page ranges; an unmap cuts them
+#define NPHYS 512
+static struct { uint64_t lo, hi; } g_phys[NPHYS];
+static int g_nphys;
+static pthread_mutex_t g_phys_lock = PTHREAD_MUTEX_INITIALIZER;
+static void physmem_note(uint64_t addr, uint64_t size, bool map) {
+    uint64_t lo = addr, hi = addr + size;
+    pthread_mutex_lock(&g_phys_lock);
+    if (map) {
+        if (g_nphys < NPHYS) g_phys[g_nphys].lo = lo, g_phys[g_nphys].hi = hi, g_nphys++;
+    } else {
+        for (int i = 0; i < g_nphys; i++) {
+            if (g_phys[i].hi <= lo || g_phys[i].lo >= hi) continue;
+            uint64_t a = g_phys[i].lo, b = g_phys[i].hi;
+            g_phys[i] = g_phys[--g_nphys];
+            i--;
+            if (a < lo && g_nphys < NPHYS) g_phys[g_nphys].lo = a, g_phys[g_nphys].hi = lo, g_nphys++;
+            if (b > hi && g_nphys < NPHYS) g_phys[g_nphys].lo = hi, g_phys[g_nphys].hi = b, g_nphys++;
+        }
+    }
+    pthread_mutex_unlock(&g_phys_lock);
+}
+int kernel_physmem_ranges(uint64_t *lo, uint64_t *hi, int max) {
+    pthread_mutex_lock(&g_phys_lock);
+    int n = g_nphys < max ? g_nphys : max;
+    for (int i = 0; i < n; i++) lo[i] = g_phys[i].lo, hi[i] = g_phys[i].hi;
+    pthread_mutex_unlock(&g_phys_lock);
+    return n;
+}
+
 static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     uint64_t *x = c->x;
     switch (imm) {
@@ -1242,12 +1272,14 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     // regions itself, so they are not added to the svcQueryMemory list (one per page would overflow it).
     case 0x2C:  // MapPhysicalMemory(addr, size)
         plat_commit(x[0], x[1]);
+        physmem_note(x[0], x[1], true);
         x[0] = R_OK;
         break;
     case 0x2D:  // UnmapPhysicalMemory(addr, size)
         if (ENV("LARECOMP_LOG_UNMAP")) LOG("[kernel] UnmapPhysicalMemory %llx +%llx\n", (unsigned long long)x[0], (unsigned long long)x[1]);
         pagewatch_prewrite(x[0], x[1]);  // (zero pages without a store)
         plat_decommit(x[0], x[1]);
+        physmem_note(x[0], x[1], false);
         x[0] = R_OK;
         break;
     case 0x34: x[0] = svc_wait_for_address(x[0], (uint32_t)x[1], (int32_t)x[2], (int64_t)x[3]); break;

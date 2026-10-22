@@ -139,6 +139,31 @@ static int anim_gate_b(Cpu *c, uint64_t addr) {
     return 1;
 }
 
+// Cutscenes (and the other timelines the same player runs) at the right speed above 30 fps. The player's update
+// (0x70010273f0) advances its time by the frame time divided by the engine's frame time for the present interval (the
+// table entry runtime/hle/fps60.c patches to our frame time, so the world steps by it): one 30-fps frame a game frame
+// at any frame rate - the opening ran 4.8 times too fast at 144 fps (over in ~25 s instead of ~2 min). Its call to
+// 0x700102d380 gets the new time (s0) = old time ([player+0x90]) + the advance; the advance is scaled by our frame time /
+// (1/30 s). LARECOMP_ZA_CUTSCENE_SPEED=0: off; LARECOMP_ZA_CUTSCENE_LOG=1: the first steps.
+#define ZA_TIMELINE_SET_TIME 0x700102d380ull  // (player time object, s0 new time, s1 seconds, s2 rate)
+#define ZA_TIMELINE_SET_RET 0x70010275ecull   // (the call from the player's update, x19 = the player)
+static int timeline_step(Cpu *c, uint64_t addr) {
+    (void)addr;
+    extern bool pla60_enabled(void);
+    extern uint64_t pla60_period_ns(void);
+    if (c->x[30] != ZA_TIMELINE_SET_RET || !pla60_enabled()) return 0;
+    float t, old;
+    uint32_t w = (uint32_t)c->v[0];
+    memcpy(&t, &w, 4);
+    memcpy(&old, (const void *)(uintptr_t)(c->x[19] + 0x90), 4);
+    float scale = (float)((double)pla60_period_ns() / 33333333.3), nt = old + (t - old) * scale;
+    static int seen;
+    if (seen < 6 && getenv("LARECOMP_ZA_CUTSCENE_LOG")) seen++, LOG("[za] timeline %g -> %g (was %g)\n", old, nt, t);
+    memcpy(&w, &nt, 4);
+    c->v[0] = w;
+    return 0;
+}
+
 void za_fixes_configure(const char *exefs) {
     static const uint8_t ZA_MAIN[8] = {0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a};
     static bool done;
@@ -157,6 +182,10 @@ void za_fixes_configure(const char *exefs) {
     { extern void za_passq_configure(void); za_passq_configure(); }
     { extern void za_jobq_configure(void); za_jobq_configure(); }
     { extern void za_jobs_configure(void); za_jobs_configure(); }
+    {
+        const char *cs = getenv("LARECOMP_ZA_CUTSCENE_SPEED");
+        if (!(cs && atoi(cs) == 0)) rt_register_fnhook_at(ZA_TIMELINE_SET_TIME, timeline_step);
+    }
     const char *lod = getenv("LARECOMP_ZA_NPC_LOD");
     if (!(lod && atoi(lod))) {
         rt_register_fnhook_at(ZA_ANIM_GATE_A, anim_gate_a);
