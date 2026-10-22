@@ -31,7 +31,9 @@
 #define ALIAS_BASE   0x7400000000ull
 #define ALIAS_SIZE   0x0C00000000ull
 #define HEAP_BASE    0x7240000000ull
-#define HEAP_MAX     0x00D0000000ull   // 3.25 GB
+#define HEAP_MAX     0x01B0000000ull   // 6.75 GB of address space (up to ALIAS_BASE); the game is told 3.25 GB, the
+                                       // Switch's (HEAP_REGION_REPORTED); the StandardAllocator block may grow into it
+#define HEAP_REGION_REPORTED 0x00D0000000ull
 // The game's virtual-memory StandardAllocator (PLA: Initialize(NULL, 32 GB)) gets this fixed block of the heap window
 // instead (runtime/hle/heaps.c): shader global memory (LDG/STG) reaches the heap window only (imported as a GPU buffer,
 // pinned), and the allocator spreads its allocations over its whole reservation. Above the heap SetHeapSize gives.
@@ -44,7 +46,8 @@ void pagewatch_prewrite(uint64_t addr, uint64_t n);  // before host code writes 
 bool pagewatch_dirty(uint64_t addr, uint64_t n);
 void pagewatch_protect(uint64_t addr, uint64_t n);
 void pagewatch_reset(void);
-#define STDHEAP_SIZE 0x00B0000000ull     // 2.75 GB
+#define STDHEAP_SIZE 0x00B0000000ull     // 2.75 GB: the block's usual size (g_stdheap_size: hle/heaps.c)
+extern uint64_t g_stdheap_size;
 
 // ---- loader.c
 typedef struct Module {

@@ -385,6 +385,16 @@ void za_fixes_configure(const char *exefs) {
     }
     { extern void za_jobs_configure(void); za_jobs_configure(); }
     rt_register_fnhook_at(ZA_CONFIG_READ, config_read);
+    {   // a screen above 1440p needs more than the Switch's memory for its targets (4K: the StandardAllocator ran out)
+        uint64_t sw, sh;
+        za_screen_size(&sw, &sh);
+        const char *e = getenv("LARECOMP_ZA_HEAP_MB");
+        if (e) g_stdheap_size = strtoull(e, NULL, 0) << 20;
+        else if (sh > 2160) g_stdheap_size = HEAP_MAX;  // (capped to the window by heaps.c)
+        else if (sh > 1440) g_stdheap_size = 0x120000000ull;  // 4.5 GB (4K's route ran in 4 GB, not in 2.75)
+        if (g_stdheap_size != STDHEAP_SIZE) LOG("[za] screen %llux%llu: %llu MB for the game's allocator\n", (unsigned long long)sw,
+                                                (unsigned long long)sh, (unsigned long long)(g_stdheap_size >> 20));
+    }
     rt_register_fnhook_at(ZA_RENDERER_SETUP, renderer_setup);
     if (getenv("LARECOMP_ZA_PERFLOG")) rt_register_fnhook_at(0x7000ed2dc0ull, pipeline_sizes);
     if (getenv("LARECOMP_ZA_RTLOG")) rt_register_fnhook_at(0x700044e390ull, rt_create_log);

@@ -1028,7 +1028,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     switch (imm) {
     case 0x01: {  // SetHeapSize
         uint64_t size = x[1];
-        if (size > HEAP_MAX) { x[0] = R_OUT_OF_RESOURCE; break; }
+        if (size > HEAP_REGION_REPORTED) { x[0] = R_OUT_OF_RESOURCE; break; }
         heap_size = size;
         if (HEAP_BASE + size > STDHEAP_BASE) {
             extern uint64_t g_stdheap_used;
@@ -1242,7 +1242,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         case 2: v = ALIAS_BASE; break;
         case 3: v = ALIAS_SIZE; break;
         case 4: v = HEAP_BASE; break;
-        case 5: v = HEAP_MAX; break;
+        case 5: v = HEAP_REGION_REPORTED; break;
         case 6: case 21: v = 0xCD500000ull; break;  // application memory (3.2 GB, as on hardware)
         case 7: case 22: v = heap_size + 0x4000000; break;
         case 8: v = 0; break;
