@@ -208,7 +208,7 @@ volatile int g_debug_frame_request;  // F9: dump the next frame's passes (build/
 #define TEST_DEVICE 0x7E57u
 
 // Research (LARECOMP_LIVE's "mouse" file, runtime/hle/za_mouse.c): "at <x> <y>" (the game image, 1920 x 1080) moves
-// the pointer there, "move <dx> <dy>" moves it by that, "click" / "rclick" press and let go, "wheelup" /
+// the pointer there, "move <dx> <dy>" moves it by that, "key <name>" presses a key, "click" / "rclick" press and let go, "wheelup" /
 // "wheeldown" turn the wheel - as SDL events.
 void input_live_mouse(const char *cmd) {
     int nw = 0;
@@ -220,7 +220,14 @@ void input_live_mouse(const char *cmd) {
     memset(&e, 0, sizeof e);
     float gx, gy, d = SDL_GetWindowPixelDensity(w);
     if (d <= 0) d = 1;
-    if (sscanf(cmd, "move %f %f", &gx, &gy) == 2) {  // ("move <dx> <dy>": relative, as a held mouse turns)
+    char kname[64];
+    if (sscanf(cmd, "key %63[^\n]", kname) == 1) {  // ("key <SDL key name>": pressed and let go)
+        for (int down = 1; down >= 0; down--) {
+            e.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP, e.key.which = TEST_DEVICE, e.key.windowID = SDL_GetWindowID(w);
+            e.key.scancode = SDL_GetScancodeFromName(kname), e.key.down = down;
+            SDL_PushEvent(&e);
+        }
+    } else if (sscanf(cmd, "move %f %f", &gx, &gy) == 2) {  // ("move <dx> <dy>": relative, as a held mouse turns)
         e.type = SDL_EVENT_MOUSE_MOTION, e.motion.which = TEST_DEVICE, e.motion.windowID = SDL_GetWindowID(w);
         SDL_GetMouseState(&e.motion.x, &e.motion.y);
         e.motion.xrel = gx, e.motion.yrel = gy;
@@ -856,6 +863,8 @@ static void fill_state(Cpu *c) {
         uint64_t za_menu_mouse_buttons(Cpu *c);  // (runtime/hle/za_mouse.c: the mouse in the game's menus)
         uint64_t m = za_menu_mouse_buttons(c);
         if (!menu) b |= m;
+        uint64_t za_options_buttons(Cpu *c, uint64_t b);  // (runtime/hle/za_options.c: the Settings screen's Controls list)
+        if (!menu) b = za_options_buttons(c, b);
     }
     {   // injected Plus: held for ~10 presented frames (the game polls several times per frame)
         extern uint64_t renderer_game_frame(void);

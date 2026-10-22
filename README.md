@@ -92,7 +92,9 @@ Tested on Linux with an RTX 4090; the Windows build is tested under Wine.
 - The game's own Settings screen (Menu -> Help & Settings -> Settings) has the start screen's settings too, as rows
   like the game's: frame rate, resolution, screen mode, anti-aliasing, button prompts and FPS counter on Gameplay,
   mouse camera, mouse sensitivity and stick dead zone on Camera, master volume on Sound. They apply at once (frame
-  rate and resolution: from the next start) and are saved with the start screen's.
+  rate and resolution: from the next start) and are saved with the start screen's. Its Controls row opens the key
+  bindings there: each action with its key and its controller button (the controller's own button icon); select one
+  and press the new key on the keyboard or the new button on the controller (or click the key / the button).
 - Button prompts for what you play with: the bound keys and mouse buttons, Xbox letters or PlayStation shapes instead
   of the Switch's (Auto follows the last used keyboard / mouse or controller, even when it changes while playing;
   remapped buttons show their new button).

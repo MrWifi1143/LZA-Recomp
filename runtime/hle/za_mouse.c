@@ -92,6 +92,7 @@ typedef struct { const Pane *anchor, *part; float ax, ay, cx, cy, hw, hh; } Item
 static Item g_items[NITEM];
 static int g_nitems;
 static float g_cur_x, g_cur_y;  // the cursor
+static bool g_settings_up;      // the Settings screen is the one with the cursor (its description line drawn)
 static _Atomic bool g_menu_up;
 static uint64_t g_menu_seen;
 
@@ -105,9 +106,13 @@ static void scan_menu(void) {
         const Pane *p = (const Pane *)(uintptr_t)list[i];
         if (pane_ok(list[i]) && !strncmp(p->name, "L_cursor", 8) && shown(p)) cursor = p;  // (the last drawn: on top)
     }
-    g_nitems = 0;
+    g_nitems = 0, g_settings_up = false;
     if (!cursor) return;
     const Pane *box = root_of(cursor);
+    for (int i = 0; i < n && !g_settings_up; i++) {
+        const Pane *p = (const Pane *)(uintptr_t)list[i];
+        g_settings_up = pane_ok(list[i]) && !strcmp(p->name, "T_explanation_00") && root_of(p) == box && shown(p);
+    }
     g_cur_x = cursor->m[3], g_cur_y = cursor->m[7];
     for (int i = 0; i < n && g_nitems < NITEM; i++) {
         const Pane *p = (const Pane *)(uintptr_t)list[i];
@@ -156,6 +161,7 @@ static int item_at(float x, float y) {  // the button under the pointer, or -1
 }
 
 bool za_menu_mouse_active(void) { return atomic_load(&g_menu_up); }
+bool za_menu_settings_up(void) { return g_settings_up && g_nitems; }  // (runtime/hle/za_options.c, the game's thread)
 
 // A click on the Settings screen's row (runtime/hle/za_options.c): on one of its choices, or along its bar - the
 // left / right presses that set that (+ right, - left), 0 for anything else.
@@ -241,6 +247,7 @@ static float g_press_from_x, g_press_from_y;
 static int g_queue_a, g_queue_b, g_queue_wheel, g_queue_value, g_queue_tab;  // (value: right presses, or left when
                                                                             // < 0; tab: R / L)
 static bool g_value_press;
+bool za_menu_mouse_value_press(void) { return g_value_press; }  // (a click's left / right press is going on)
 static float g_click_x, g_click_y;
 
 static void press(int bit, uint64_t f) {
@@ -250,12 +257,12 @@ static void press(int bit, uint64_t f) {
 
 // Each read of the controller: the buttons the mouse presses (worked out once a frame)
 uint64_t za_menu_mouse_buttons(Cpu *c) {
-    if (!g_on) return 0;
     static uint64_t last_f = ~0ull, out;
     uint64_t f = renderer_game_frame();
     if (f == last_f) return out;
     last_f = f;
-    scan_menu();
+    scan_menu();  // (also for the Settings screen's Controls list: za_menu_settings_up)
+    if (!g_on) return out = 0;
     extern uint64_t g_za_field_camera_frame;  // (runtime/hle/za_fixes.c)
     if (g_nitems || f - g_za_field_camera_frame > 8) g_menu_seen = f;  // (or the player's camera stopped: a menu without
     bool up = f - g_menu_seen < 10;                                    // buttons, a dialogue, a cutscene)
@@ -383,7 +390,6 @@ void za_mouse_present(void) {
 
 void za_mouse_configure(void) {
     const char *e = getenv("LARECOMP_ZA_MENU_MOUSE");
-    if (e && atoi(e) == 0) return;
-    g_on = true;
+    g_on = !(e && atoi(e) == 0);
     rt_register_fnhook_at(ZA_PANE_CALC_MTX, pane_calc_hook);
 }

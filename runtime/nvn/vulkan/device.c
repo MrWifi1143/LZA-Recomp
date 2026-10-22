@@ -873,6 +873,15 @@ void backend_present(NvnTexture *t) {
                 if (f) { if (!fgets(want, sizeof want, f)) want[0] = 0; fclose(f); }
                 remove(path);
                 want[strcspn(want, "\r\n")] = 0;
+                if (!strncmp(want, "hex:", 4)) {  // ("hex:<bytes>": those bytes)
+                    size_t m = 0;
+                    for (const char *h = want + 4; h[0] && h[1] && m < sizeof want - 1; h += 2) {
+                        unsigned v;
+                        if (sscanf(h, "%2x", &v) != 1) break;
+                        want[m++] = (char)v;
+                    }
+                    want[m] = 0, want[255] = (char)m;  // (its length: it may hold zeros)
+                }
                 extern int kernel_physmem_ranges(uint64_t *lo, uint64_t *hi, int max);
                 extern uint64_t kernel_heap_size(void), g_stdheap_used;
                 static uint64_t lo[520], hi[520];
@@ -881,7 +890,7 @@ void backend_present(NvnTexture *t) {
                 lo[0] = HEAP_BASE, hi[0] = top > heap ? top : heap;
                 snprintf(path, sizeof path, "%s/find.tmp", dir);  // (renamed when complete)
                 FILE *o = fopen(path, "w");
-                size_t k = strlen(want);
+                size_t k = want[255] ? (size_t)(uint8_t)want[255] : strlen(want);
                 int found = 0;
                 for (int r = 0; o && k && r < n && found < 256; r++)
                     for (const uint8_t *p = (const uint8_t *)(uintptr_t)lo[r], *e = (const uint8_t *)(uintptr_t)hi[r]; p + k <= e && found < 256; p++)
@@ -1183,6 +1192,10 @@ int ui_run(void) {
                 exit(0);
             }
             if (input_user_blocked(&e)) continue;  // scripted test runs: the real keyboard / mouse / pads do nothing
+            {   // (the game's Settings screen waiting for a new key / button: runtime/hle/za_options.c)
+                extern bool bind_capture_event(const SDL_Event *e);
+                if (bind_capture_event(&e)) continue;
+            }
             if (menu_handle_event(&e)) continue;
             input_handle_event(&e);
         }

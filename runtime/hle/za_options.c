@@ -16,6 +16,7 @@
 //
 // Five choices or more don't fit the three a row shows: those rows show three at a time, moving along as the value
 // does. Frame rate and resolution are read at start: a change is kept for the next start (Settings.next_*).
+// Gameplay's Controls row opens the key bindings in the list's place (below: "the Controls list").
 // LARECOMP_ZA_OPTIONS=0: the game's screen as it is.
 //
 // Research: LARECOMP_ZA_ARCDUMP=<name>: every SARC archive the game decompresses (OodleLZ_Decompress, 0x7001a9c9e0)
@@ -28,6 +29,7 @@
 #include <string.h>
 
 #include "../hle.h"
+#include "../input_bind.h"
 #include "../settings.h"
 
 void rt_register_fnhook_at(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
@@ -49,6 +51,9 @@ void menu_apply_fullscreen(void);  // runtime/ui/menu.mm
 #define OPT_SET_CHOICES3 0x7002c83ef0ull  // (view, row item, &label, &label, &label)
 #define OPT_SET_NUMBER 0x7002c840bcull  // (view, row item, number)
 #define OPT_SET_INFO 0x7002c84210ull    // (view, &label)
+#define OPT_TAB_REFRESH 0x7002c8059cull  // (page): the tab's rows again (count, cursor on the first)
+#define UI_LIST_SELECT 0x70009eae60ull  // (list, row): the cursor there (as the tab's refresh does with 0)
+#define UI_LIST_SHOW 0x70009e65d0ull    // (list, row, 0, 1): scrolled to it
 
 // ------------------------------------------------------------------ the rows
 
@@ -79,6 +84,9 @@ static int get_prompts(void) { return g_settings.button_prompts >= 0 && g_settin
 static void set_prompts(int i) { g_settings.button_prompts = i; }
 static int get_fpsc(void) { return g_settings.show_fps ? 0 : 1; }
 static void set_fpsc(int i) { g_settings.show_fps = i == 0; }
+int input_last_was_kbm(void);  // runtime/hle/input.c
+static int ctl_col(void) { return input_last_was_kbm() ? 0 : 1; }  // (the Controls list: the column A changes)
+static void ctl_open(int i);
 static int get_mcam(void) { return g_settings.mouse_camera ? 0 : 1; }
 static void set_mcam(int i) { g_settings.mouse_camera = i == 0; }
 // (bars: the nearest step to what the ini has; mouse 0.025 degrees per pixel a step, dead zone 4% of the travel a step)
@@ -91,6 +99,8 @@ static int get_vol(void) { return clampi((int)(g_settings.volume * 10 + 0.5f), 0
 static void set_vol(int v) { g_settings.volume = (float)v / 10; }
 
 static const Row k_rows[] = {
+    {0, "Controls", "Press A to see and change the key and the controller button for each action.", CHOICE, 2,
+     {"Keyboard", "Controller"}, ctl_col, ctl_open},
     {0, "Frame Rate", "Choose how many frames are drawn a second. Applies the next time you start the game.",
      CHOICE, 4, {"30 fps", "60 fps", "120 fps", "144 fps"}, get_fps, set_fps},
     {0, "Resolution", "Choose the resolution the game is drawn at. Applies the next time you start the game.",
@@ -143,6 +153,70 @@ static int shown_value(int r) {  // the value as the row shows it
     return v - g_first[r];
 }
 
+// ------------------------------------------------------------------ the Controls list
+// A, or a click, on the Controls row puts the bindings (runtime/hle/bindings.c) in the Gameplay tab's place: a row an
+// action (the Switch input the game reads, named as its Game Controls screen does), the key on the left, the
+// controller's button on the right (the game's own icon for that Switch input: it shows the controller button bound
+// to it, runtime/nvn/glyphs.c). A waits for the new one from what pressed it - the keyboard (or a click) for the key,
+// the controller for its button; a click on a cell changes that one (Esc cancels; one already in use swaps over). X
+// puts the defaults back (the keyboard's or the controller's, by the same rule), B goes back to the Gameplay rows.
+
+static const struct { int slot; const char *name; } k_binds[] = {
+    {BIND_LS_UP, "Move Forward"}, {BIND_LS_DOWN, "Move Back"}, {BIND_LS_LEFT, "Move Left"}, {BIND_LS_RIGHT, "Move Right"},
+    {BIND_WALK, "Walk (Hold)"}, {BIND_RS_UP, "Camera Up"}, {BIND_RS_DOWN, "Camera Down"}, {BIND_RS_LEFT, "Camera Left"},
+    {BIND_RS_RIGHT, "Camera Right"}, {BIND_A, "Investigate / Talk"}, {BIND_B, "Dash"}, {BIND_Y, "Roll"},
+    {BIND_X, "Main Menu"}, {BIND_ZL, "Focus on Target"}, {BIND_ZR, "Throw Ball / Aim"}, {BIND_L, "Reset Camera"},
+    {BIND_R, "Rotate Camera (Focus)"}, {BIND_LSTICK, "Crouch / Rise"}, {BIND_RSTICK, "Mega Evolution"},
+    {BIND_UP, "Send Out Pokémon"}, {BIND_DOWN, "Call Pokémon Back"}, {BIND_LEFT, "Previous Pokémon"},
+    {BIND_RIGHT, "Next Pokémon"}, {BIND_PLUS, "Map"}, {BIND_MINUS, "Photo Mode"},
+};
+#define NBINDS (int)(sizeof k_binds / sizeof *k_binds)
+static bool g_ctl;  // the Controls list is up (Gameplay tab)
+
+static bool ctl_on(int tab) { return g_ctl && tab == 0; }
+static int g_ctl_pending = -1;  // (a click on the other cell / on the Controls row: done on the next read of the pad)
+bool za_menu_mouse_value_press(void);  // runtime/hle/za_mouse.c
+static void ctl_open(int i) { if (za_menu_mouse_value_press()) g_ctl_pending = 100 + i; }  // (a click on its cells)
+// a binding's cell: the key's name / the game's icon for the Switch input ("{...}": runtime text tag), or waiting
+static const char *ctl_cell(int row, int col, char *buf, size_t n) {
+    int slot = k_binds[row].slot, dev, cslot, ms;
+    if (bind_capture_active(&dev, &cslot, &ms) && cslot == slot && dev == (col ? BIND_DEV_PAD : BIND_DEV_KEY))
+        return col ? "Press a button..." : "Press a key...";
+    if (!col) {
+        int k = g_bind_key[slot];
+        snprintf(buf, n, "%s", k ? bind_key_label(k) : "-");
+        return buf;
+    }
+    unsigned g = 0;  // (a glyph of the game's or_font, U+E31D.., which its text boxes draw)
+    const char *label = NULL;
+    if (slot == BIND_WALK) label = "-";
+    else if (slot >= BIND_PAD_COUNT) g = slot < BIND_RS_UP ? 0xe335 : 0xe336;  // (the stick)
+    else {
+        int host = g_bind_pad[slot];
+        label = bind_pad_label(host, bind_label_family());
+        switch (host) {
+        case 0: case 1: case 2: case 3:  // (face buttons: the letter the controller has; PlayStation's shapes as words)
+            if (label && label[0] >= 'A' && label[0] <= 'Y' && !label[1] && strchr("ABXY", label[0]))
+                g = 0xe31d + (unsigned)(strchr("ABXY", label[0]) - "ABXY");
+            break;
+        case 4: g = 0xe32a; break;    // back / select / minus
+        case 5: g = 0xe32b; break;    // guide / home
+        case 6: g = 0xe329; break;    // start / plus
+        case 7: g = 0xe338; break;    // left stick press
+        case 8: g = 0xe339; break;    // right stick press
+        case 9: g = 0xe321; break;    // left shoulder
+        case 10: g = 0xe322; break;   // right shoulder
+        case 11: case 12: case 13: case 14: g = 0xe32e + (unsigned)(host - 11); break;  // d-pad up, down, left, right
+        case PADB_LTRIGGER: g = 0xe323; break;
+        case PADB_RTRIGGER: g = 0xe324; break;
+        default: break;
+        }
+    }
+    if (g) snprintf(buf, n, "%c%c%c", 0xe0 | (g >> 12), 0x80 | ((g >> 6) & 0x3f), 0x80 | (g & 0x3f));
+    else snprintf(buf, n, "%s", label ? label : "-");
+    return buf;
+}
+
 // ------------------------------------------------------------------ text
 
 typedef struct { uint64_t hash; const char *str; uint64_t len, zero; } Label;  // (the game's message label)
@@ -156,8 +230,28 @@ static Label g_label;  // (any label of the game's: its text is replaced)
 static __thread const char *t_text[4];  // the texts the next lookups give, in order
 static __thread int t_ntext, t_next;
 
+static int msg_tags_log(Cpu *c, uint64_t addr) {  // (research, LARECOMP_ZA_MSGTAGS=1: texts with tags, as hex)
+    uint64_t res = c->x[8], lab = c->x[2];
+    rt_call_original(c, addr);
+    const uint8_t *obj = (const uint8_t *)(uintptr_t)*(const uint64_t *)(uintptr_t)res;
+    if (!obj || *(const uint64_t *)obj != ZA_MSG_TEXT_VTABLE) return 1;
+    const uint16_t *t = *(uint16_t *const *)(obj + 0x30);
+    int n = *(const uint16_t *)(obj + 0x52), tag = 0;
+    for (int i = 0; i < n; i++) tag |= t[i] == 0x0e || t[i] == 0x10;
+    if (!tag) return 1;
+    char buf[2048];
+    int k = 0;
+    for (int i = 0; i < n && i < 300 && k < (int)sizeof buf - 8; i++)
+        k += t[i] >= 0x20 && t[i] < 0x7f ? snprintf(buf + k, sizeof buf - k, "%c", t[i]) : snprintf(buf + k, sizeof buf - k, "<%x>", t[i]);
+    const Label *l = (const Label *)(uintptr_t)lab;
+    LOG("[msgtags] %.*s: %s\n", (int)(l->len < 80 ? l->len : 80), l->str, buf);
+    return 1;
+}
+
 static int msg_lookup_hook(Cpu *c, uint64_t addr) {
-    if (t_next >= t_ntext) return 0;
+    static int tags = -1;
+    if (tags < 0) tags = getenv("LARECOMP_ZA_MSGTAGS") != NULL;
+    if (t_next >= t_ntext) return tags ? msg_tags_log(c, addr) : 0;
     uint64_t res = c->x[8];
     rt_call_original(c, addr);
     const char *s = t_text[t_next++];
@@ -167,6 +261,14 @@ static int msg_lookup_hook(Cpu *c, uint64_t addr) {
     uint64_t cap = *(const uint64_t *)(obj + 0x40);
     size_t n = 0, col = 0;
     for (const uint8_t *p = (const uint8_t *)s; *p && n + 1 < cap;) {  // (UTF-8 -> UTF-16, up to 3-byte sequences)
+        if (*p == '{' && strchr((const char *)p, '}') && n + 8 < cap) {  // ("{Decide}": the game's button icon by name -
+            const uint8_t *e = (const uint8_t *)strchr((const char *)p, '}');  // tag 0x10 2 0xbd0a <length>, the name;
+            // names seen: Decide (A), Cancel (B), L, R, ZL, ZR, Plus, Minus, Home, Capture)
+            buf[n++] = 0x10, buf[n++] = 2, buf[n++] = 0xbd0a, buf[n++] = (uint16_t)(e - p - 1);
+            for (p++; p < e && n + 1 < cap; p++) buf[n++] = *p;
+            p = e + 1, col += 2;
+            continue;
+        }
         if (*p == ' ') {  // (the text box doesn't wrap - it squeezes a long line: lines of up to 44 characters)
             size_t w = 1;
             while (p[w] && p[w] != ' ') w++;
@@ -199,7 +301,7 @@ static void call_with_texts(Cpu *c, uint64_t fn, const uint64_t *args, int nargs
 static int row_count_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     int tab = *(const int32_t *)(uintptr_t)(c->x[0] + 0xb8);
-    c->x[0] = tab >= 0 && tab < 3 ? 3 + (uint64_t)added(tab) : 0;
+    c->x[0] = ctl_on(tab) ? NBINDS : tab >= 0 && tab < 3 ? 3 + (uint64_t)added(tab) : 0;
     return 1;
 }
 
@@ -208,6 +310,10 @@ static uint64_t g_page, g_page_vt;  // (the Settings screen last drawn, its clas
 static int row_type_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     g_page = c->x[0], g_page_vt = *(const uint64_t *)(uintptr_t)c->x[0];
+    if (ctl_on(tab_of(c->x[0]))) {
+        c->x[0] = 0xa00000001ull, c->x[1] = (uint64_t)ctl_col();
+        return 1;
+    }
     int r = row_index(tab_of(c->x[0]), (int)(uint32_t)c->x[1]);
     if (r < 0) return 0;
     c->x[0] = type_of(&k_rows[r]);
@@ -217,6 +323,10 @@ static int row_type_hook(Cpu *c, uint64_t addr) {
 
 static int row_set_hook(Cpu *c, uint64_t addr) {
     (void)addr;
+    if (ctl_on(tab_of(c->x[0]))) {  // (left / right: nothing; a click on the other cell: that one waits)
+        if (za_menu_mouse_value_press()) g_ctl_pending = (int)(uint32_t)c->x[2] & 1;
+        return 1;
+    }
     int r = row_index(tab_of(c->x[0]), (int)(uint32_t)c->x[1]);
     if (r < 0) return 0;
     const Row *w = &k_rows[r];
@@ -232,6 +342,8 @@ static int row_set_hook(Cpu *c, uint64_t addr) {
 }
 
 static int row_show_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    if (ctl_on(tab_of(c->x[0]))) { c->x[3] = (uint64_t)ctl_col(); return 0; }
     int r = row_index(tab_of(c->x[0]), (int)(uint32_t)c->x[1]);
     if (r >= 0) c->x[3] = (uint64_t)shown_value(r);  // (moved along: not the value the game worked out)
     return 0;
@@ -239,6 +351,16 @@ static int row_show_hook(Cpu *c, uint64_t addr) {
 
 static int row_texts_hook(Cpu *c, uint64_t addr) {
     (void)addr;
+    if (ctl_on((int)(uint32_t)c->x[2])) {
+        int b = (int)(uint32_t)c->x[3];
+        if (b < 0 || b >= NBINDS) return 1;
+        static char k[64], p[64];
+        const char *cells[2] = {ctl_cell(b, 0, k, sizeof k), ctl_cell(b, 1, p, sizeof p)};
+        uint64_t view = c->x[0], item = c->x[1], lab = (uint64_t)(uintptr_t)&g_label;
+        call_with_texts(c, OPT_SET_NAME, (uint64_t[]){view, item, lab}, 3, &k_binds[b].name, 1);
+        call_with_texts(c, OPT_SET_CHOICES2, (uint64_t[]){view, item, lab, lab}, 4, cells, 2);
+        return 1;
+    }
     int r = row_index((int)(uint32_t)c->x[2], (int)(uint32_t)c->x[3]);
     if (r < 0) return 0;
     const Row *w = &k_rows[r];
@@ -256,6 +378,15 @@ static int row_texts_hook(Cpu *c, uint64_t addr) {
 
 static int row_info_hook(Cpu *c, uint64_t addr) {
     (void)addr;
+    if (ctl_on((int)(uint32_t)c->x[1])) {
+        int dev, slot, ms;
+        bool wait = bind_capture_active(&dev, &slot, &ms);
+        const char *t = wait ? (dev == BIND_DEV_KEY ? "Press the new key, mouse button or wheel. Esc cancels; one already in use swaps over."
+                                                    : "Press the new controller button. Esc cancels; one already in use swaps over.")
+                             : "Select an action to change it: a key from the keyboard, a button from the controller.";
+        call_with_texts(c, OPT_SET_INFO, (uint64_t[]){c->x[0], (uint64_t)(uintptr_t)&g_label}, 2, &t, 1);
+        return 1;
+    }
     int r = row_index((int)(uint32_t)c->x[1], (int)(uint32_t)c->x[2]);
     if (r < 0) return 0;
     call_with_texts(c, OPT_SET_INFO, (uint64_t[]){c->x[0], (uint64_t)(uintptr_t)&g_label}, 2, &k_rows[r].info, 1);
@@ -279,6 +410,74 @@ bool za_options_cursor_row(Cpu *c, uint64_t *type, int *value) {
     *type = c->x[0], *value = (int)(uint32_t)c->x[1];
     memcpy(c->x, save, sizeof save);
     return true;
+}
+
+// The Controls list's keys, each read of the controller (runtime/hle/input.c, the game's thread): A on the Controls
+// row opens it, and in it A / X / B / L / R do its things - those presses are kept from the game (until let go).
+static void guest(Cpu *c, uint64_t fn, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
+    uint64_t save[31];
+    memcpy(save, c->x, sizeof save);
+    c->x[0] = a0, c->x[1] = a1, c->x[2] = a2, c->x[3] = a3, c->x[4] = a4;
+    guest_call(c, fn);
+    memcpy(c->x, save, sizeof save);
+}
+static void ctl_redraw_row(Cpu *c, int row) {  // (the cursor's row and the description)
+    guest(c, OPT_ROW_SHOW, g_page, (uint64_t)row, 0xa00000001ull, (uint64_t)ctl_col(), 0);
+    guest(c, OPT_ROW_INFO, *(const uint64_t *)(uintptr_t)(g_page + 0x128), 0, (uint64_t)row, 0, 0);
+}
+static void ctl_set(Cpu *c, bool on) {
+    g_ctl = on;
+    guest(c, OPT_TAB_REFRESH, g_page, 0, 0, 0, 0);
+}
+
+uint64_t za_options_buttons(Cpu *c, uint64_t b) {
+    enum { A = 1 << 0, B = 1 << 1, X = 1 << 2, L = 1 << 6, R = 1 << 7 };
+    static uint64_t prev, kept;
+    static int serial0 = -1;
+    uint64_t edge = b & ~prev;
+    prev = b;
+    kept &= b;
+    extern bool za_menu_settings_up(void);
+    bool up = g_page && *(const uint64_t *)(uintptr_t)g_page == g_page_vt && za_menu_settings_up();
+    if (!up) {
+        g_ctl = false;
+        return b & ~kept;
+    }
+    const uint8_t *d = (const uint8_t *)(uintptr_t)*(const uint64_t *)(uintptr_t)(g_page + 0x118);
+    int tab = *(const int32_t *)(d + 0xb8), row = *(const int32_t *)(d + 0xbc);
+    int dev, slot, ms, serial;
+    bind_last_result(&dev, &slot, &ms, &serial);
+    if (serial0 < 0) serial0 = serial;
+    if (g_ctl && bind_capture_active(&dev, &slot, &ms)) { kept |= b; return 0; }  // (the next press is the binding's)
+    if (serial != serial0) {  // (a binding set, swapped or cancelled: the row again; a swap's other one as it scrolls in)
+        serial0 = serial;
+        settings_save();
+        if (g_ctl) ctl_redraw_row(c, row);
+    }
+    int pending = g_ctl_pending;
+    g_ctl_pending = -1;
+    if (!g_ctl) {
+        if (tab == 0 && row_index(0, row) == 0 && ((edge & A) || pending >= 100)) kept |= edge & A, ctl_set(c, true);  // (Controls)
+    } else if (pending >= 0 && pending < 2 && row >= 0 && row < NBINDS) {  // (a click on a cell)
+        if (!(pending && k_binds[row].slot >= BIND_PAD_COUNT)) {
+            bind_capture_begin(pending ? BIND_DEV_PAD : BIND_DEV_KEY, k_binds[row].slot);
+            ctl_redraw_row(c, row);
+        }
+    } else if (edge & B) {
+        kept |= B, ctl_set(c, false);
+    } else if (edge & (L | R)) {
+        g_ctl = false;  // (another tab: the game's own refresh)
+    } else if (edge & X) {
+        kept |= X, bind_reset(ctl_col() ? BIND_DEV_PAD : BIND_DEV_KEY), ctl_set(c, true);
+    } else if ((edge & A) && row >= 0 && row < NBINDS) {
+        kept |= A;
+        int col = ctl_col();
+        if (!(col && k_binds[row].slot >= BIND_PAD_COUNT)) {  // (a controller's sticks stay its sticks)
+            bind_capture_begin(col ? BIND_DEV_PAD : BIND_DEV_KEY, k_binds[row].slot);
+            ctl_redraw_row(c, row);
+        }
+    }
+    return b & ~kept;
 }
 
 // ------------------------------------------------------------------ research
