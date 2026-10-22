@@ -131,14 +131,28 @@ static void mouse_release(void) {
     recompute_keyboard();
 }
 
+// Mouse look (input_mouse_camera_take): a game hook asks each frame for the held mouse's motion as camera angles and
+// adds them to the camera's own (hle/fps60.c) - while it does, the mouse isn't the camera stick (mouse_stick).
+static _Atomic uint64_t mouse_look_ns;  // when it last asked
+bool input_mouse_camera_take(float *dyaw, float *dpitch) {
+    if (!mouse_win || gyro_aiming) return false;
+    double ax = (double)atomic_exchange(&cam_acc_x, 0) / 1000, ay = (double)atomic_exchange(&cam_acc_y, 0) / 1000;
+    double k = g_settings.mouse_sens * M_PI / 180;  // (the sensitivity: degrees per pixel, as the gyro's)
+    *dyaw = (float)(-ax * k), *dpitch = (float)(ay * k);  // (right: the camera turns right; up: as the stick up)
+    atomic_store(&mouse_look_ns, SDL_GetTicksNS());
+    return true;
+}
+
 // The camera stick from the held mouse: its speed since the last read (smoothed over ~35 ms: the game reads the
-// controller several times a frame), full tilt at 600 px/s at the default sensitivity 0.10.
+// controller several times a frame), full tilt at 600 px/s at the default sensitivity 0.10. Not while the game takes
+// the mouse as angles (mouse look, above).
 static void mouse_stick(int32_t *rx, int32_t *ry) {
     static uint64_t last;
     static double vx, vy;
     uint64_t now = SDL_GetTicksNS();
     double dt = last ? (double)(now - last) / 1e9 : 0;
     last = now;
+    if (now - atomic_load(&mouse_look_ns) < 100000000ull) { vx = vy = 0; return; }
     double ax = (double)atomic_exchange(&cam_acc_x, 0) / 1000, ay = (double)atomic_exchange(&cam_acc_y, 0) / 1000;
     if (dt <= 0 || dt > 0.25 || !mouse_win) { vx = vy = 0; return; }
     double a = dt / 0.035 > 1 ? 1 : dt / 0.035;

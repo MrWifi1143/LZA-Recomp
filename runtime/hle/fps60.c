@@ -430,6 +430,25 @@ static uint64_t g_pla60_ns = 16666667;  // the frame time: 60 fps, or LARECOMP_L
 bool pla60_enabled(void) { return g_pla60_entry != 0; }
 uint64_t pla60_period_ns(void) { return g_pla60_ns; }
 
+// Legends: Arceus mouse look. The free camera's input turn (f_700193d16c, x0 = the camera) adds the stick times its turn
+// rate to the yaw it keeps (+0x360, radians) and the pitch (+0x700, a double 0..1), then sets them. Before it runs, the
+// held mouse's motion is added to both: the camera turns by as much as the mouse moved, with no stick curve or top
+// speed; a controller's stick still turns it the game's way. The pitch's 0..1 is taken as the yaw's radians scaled by
+// the two turn speeds (+0x708 over +0x420: the stick turns both alike). LARECOMP_PLA_MOUSE_LOOK=0: the mouse is the
+// camera stick instead (as on other cameras: menus, cutscenes, aiming).
+static int pla_mouse_look_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    extern bool input_mouse_camera_take(float *dyaw, float *dpitch);
+    float dy, dp;
+    if (!input_mouse_camera_take(&dy, &dp)) return 0;
+    uint8_t *cam = (uint8_t *)(uintptr_t)c->x[0];
+    *(float *)(cam + 0x360) += dy;
+    float ky = *(float *)(cam + 0x420), kp = *(float *)(cam + 0x708);
+    double *pitch = (double *)(cam + 0x700), v = *pitch + dp * (ky > 0 && kp > 0 ? kp / ky : 0.45);
+    *pitch = v < 0 ? 0 : v > 1 ? 1 : v;
+    return 0;
+}
+
 void pla60_configure(const char *exefs) {
     char p[1100];
     snprintf(p, sizeof p, "%s/main", exefs);
@@ -447,6 +466,12 @@ void pla60_configure(const char *exefs) {
     g_pla60_entry = 0;
     g_pla60_patched = false;
     { void dt_probe_init(void), watch_arg_init(void), gate_init(void), args_probe_init(void); dt_probe_init(); watch_arg_init(); gate_init(); args_probe_init(); }
+    if (!memcmp(id, k_legends60[0].id, 8)) {  // (Legends: Arceus 1.1.1)
+        void rt_register_fnhook_at(uint64_t, int (*)(Cpu *, uint64_t));
+        static bool hooked;
+        if (!hooked && (!getenv("LARECOMP_PLA_MOUSE_LOOK") || atoi(getenv("LARECOMP_PLA_MOUSE_LOOK")) != 0))
+            hooked = true, rt_register_fnhook_at(0x700193d16cull, pla_mouse_look_hook);
+    }
     for (size_t i = 0; on && i < sizeof k_legends60 / sizeof *k_legends60; i++)
         if (!memcmp(id, k_legends60[i].id, 8)) {
             g_pla60_entry = k_legends60[i].entry;
