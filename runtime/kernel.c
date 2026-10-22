@@ -941,7 +941,37 @@ static void svc_entry(Cpu *c, uint32_t imm, uint64_t pc) {
         svc_impl(c, imm, pc);
         uint64_t dt = plat_now_ns() - t0;
         static _Atomic int nslow;
-        if (((t_cur && t_cur->id == 80 && (imm == 0x18 || imm == 0x34)) || (dt > 10000000 && imm != 0x0b && imm != 0x1c)) && nslow < 20000) {
+        if (t_cur && t_cur->id == 80) {  // (the main thread: its svc time by caller, every 2 s below - what its frame waits on)
+            static struct { uint64_t lr, ns, n, up[3]; uint32_t imm; } by[256];
+            uint64_t up[3] = {0}, fp = c->x[29];  // (the guest frame records: the callers above the svc's)
+            for (int k = 0; k < 3 && fp >= GUEST_LO && fp < GUEST_HI && !(fp & 7); k++) {
+                up[k] = ((uint64_t *)(uintptr_t)fp)[1];
+                uint64_t nfp = ((uint64_t *)(uintptr_t)fp)[0];
+                if (nfp <= fp) break;
+                fp = nfp;
+            }
+            for (int i = 0; i < 256; i++)
+                if (!by[i].lr || (by[i].lr == lr && by[i].imm == imm && !memcmp(by[i].up, up, sizeof up))) {
+                    by[i].lr = lr, by[i].imm = imm, memcpy(by[i].up, up, sizeof up), by[i].ns += dt, by[i].n++;
+                    break;
+                }
+            static uint64_t last_m;
+            uint64_t now_m = plat_now_ns();
+            if (now_m - last_m > 2000000000ull) {
+                last_m = now_m;
+                for (int k = 0; k < 14; k++) {
+                    int b = -1;
+                    for (int i = 0; i < 256; i++) if (by[i].lr && by[i].ns && (b < 0 || by[i].ns > by[b].ns)) b = i;
+                    if (b < 0) break;
+                    LOG("[svcmain] svc%02x lr %llx < %llx < %llx < %llx: %llu calls, %.1f ms\n", by[b].imm, (unsigned long long)by[b].lr,
+                        (unsigned long long)by[b].up[0], (unsigned long long)by[b].up[1], (unsigned long long)by[b].up[2],
+                        (unsigned long long)by[b].n, by[b].ns / 1e6);
+                    by[b].ns = 0;
+                }
+                memset(by, 0, sizeof by);
+            }
+        }
+        if ((dt > 10000000 && imm != 0x0b && imm != 0x1c) && nslow < 20000) {
             nslow++;
             LOG("[slow] t%llu svc%02x %llums a=%llx,%llx,%llx,%llx h0=%x lr=%llx\n", (unsigned long long)(t_cur ? t_cur->id : 0), imm,
                 (unsigned long long)(dt / 1000000), (unsigned long long)a0, (unsigned long long)a1, (unsigned long long)a2, (unsigned long long)a3, h0, (unsigned long long)lr);
