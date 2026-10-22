@@ -22,7 +22,32 @@ int cpupin_render(void) { return g_render_cpu; }
 static int g_fast;  // fast physical cores (cpupin_init)
 int cpupin_fast_cores(void) { return g_fast; }
 
-#if !defined(__linux__)
+#if defined(_WIN32)
+#include <windows.h>
+// (no pinning: the count only, for hle/za_jobs.c's job_workers = auto - physical cores of the highest efficiency class,
+// the performance cores of a hybrid CPU; all of them otherwise)
+void cpupin_init(void) {
+    DWORD len = 0;
+    GetLogicalProcessorInformationEx(RelationProcessorCore, NULL, &len);
+    uint8_t *buf = len ? malloc(len) : NULL;
+    if (!buf || !GetLogicalProcessorInformationEx(RelationProcessorCore, (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)buf, &len)) {
+        free(buf);
+        return;
+    }
+    int best = -1, n = 0;
+    for (DWORD o = 0; o < len;) {
+        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX e = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)(buf + o);
+        int c = e->Processor.EfficiencyClass;
+        if (c > best) best = c, n = 0;
+        if (c == best) n++;
+        o += e->Size;
+    }
+    free(buf);
+    g_fast = n;
+    LOG("[cpu] %d fast physical cores\n", n);
+}
+void cpupin_self(int cpu) { (void)cpu; }
+#elif !defined(__linux__)
 void cpupin_init(void) {}
 void cpupin_self(int cpu) { (void)cpu; }
 #else

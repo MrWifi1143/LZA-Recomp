@@ -28,7 +28,7 @@ Settings g_settings = {
     .show_fps = false,
     .render_thread = true,
     .vertex_read = VREAD_AUTO,
-    .job_workers = 0,
+    .job_workers = -1,
     .upscaler = UPSCALE_SHARP,
     .antialias = AA_SMAA,  // (the game has no anti-aliasing of its own)
 };
@@ -65,7 +65,8 @@ static void parse_line(const char *line) {
     // (an older "antialias = off" was only LAS Recomp's default being saved: a new key, so SMAA starts on)
     else if (!strcmp(key, "smaa")) g_settings.antialias = atoi(val) != 0 ? AA_SMAA : AA_OFF;
     else if (!strcmp(key, "render_thread")) g_settings.render_thread = atoi(val) != 0;
-    else if (!strcmp(key, "job_workers")) g_settings.job_workers = !strcmp(val, "auto") ? -1 : atoi(val);
+    // (an older "job_workers = 0" was only the default of its experimental days being saved: a new key, so auto starts on)
+    else if (!strcmp(key, "extra_workers")) g_settings.job_workers = !strcmp(val, "auto") ? -1 : atoi(val);
     else if (!strcmp(key, "vertex_read")) g_settings.vertex_read = !strcmp(val, "direct") ? VREAD_DIRECT : !strcmp(val, "copy") ? VREAD_COPY : VREAD_AUTO;
     else if (!strcmp(key, "dpad_move")) g_settings.dpad_move = atoi(val) != 0;
     else if (!strcmp(key, "wild_battle")) g_settings.wild_battle = atoi(val) != 0;
@@ -129,8 +130,8 @@ void settings_save(void) {
     else if (g_settings.res_mode >= 1 && g_settings.res_mode <= 8) fprintf(f, "resolution = %dx\n", g_settings.res_mode);
     else fprintf(f, "resolution = match\n");
     fprintf(f, "render_thread = %d\n", g_settings.render_thread);
-    if (g_settings.job_workers < 0) fprintf(f, "job_workers = auto\n");
-    else fprintf(f, "job_workers = %d\n", g_settings.job_workers);
+    if (g_settings.job_workers < 0) fprintf(f, "extra_workers = auto\n");
+    else fprintf(f, "extra_workers = %d\n", g_settings.job_workers);
     fprintf(f, "vertex_read = %s\n", g_settings.vertex_read == VREAD_DIRECT ? "direct" : g_settings.vertex_read == VREAD_COPY ? "copy" : "auto");
     fprintf(f, "dpad_move = %d\n", g_settings.dpad_move);
     fprintf(f, "wild_battle = %d\n", g_settings.wild_battle);

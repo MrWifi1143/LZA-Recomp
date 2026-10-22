@@ -1,9 +1,10 @@
-// Z-A: more job workers than the Switch's three, on PCs with the cores for them - EXPERIMENTAL, off by default.
-// larecomp.ini job_workers = 0 (the Switch's three), auto (one per fast physical core left after the emulated cores'
-// and the render thread's, up to 3: none on CPUs with fewer than 8) or 1-4; LARECOMP_ZA_WORKERS=<n> overrides it.
-// Lumiose at 144 fps: ~121 -> ~126 fps with 3 (more than 3 was slower on an i9-12900K: the fourth ran on an
-// efficiency core); the render thread is the limit then. Known issue: one route run in five crashed in Lumiose (a job
-// on the main thread found a null object, [x+0x2068] at 0x7000d9afa0) - some per-worker state still assumes three.
+// Z-A: more job workers than the Switch's three, on PCs with the cores for them. larecomp.ini extra_workers = auto
+// (the default: one per fast physical core left after the emulated cores' and the render thread's, up to 3 - none on
+// CPUs with fewer than 8), 0 (the Switch's three) or 1-4; LARECOMP_ZA_WORKERS=<n> overrides it. Lumiose at 144 fps,
+// 1440p: ~122 -> ~127 fps with 3 (more than 3 was slower on an i9-12900K: the fourth ran on an efficiency core); the
+// cores are then busy half the frame, and the game waits on the render path. (An earlier build crashed in one route
+// run in five - a job on the main thread found a null [x+0x2068] at 0x7000d9afa0; 2026-10-22, about 20 route runs and
+// a 15-minute one were clean.)
 //
 // The game runs each frame as jobs on a work-stealing scheduler (built by 0x7001cf44c0): worker 0 is the main thread,
 // JobThread01 / 02 run workers 1 and 2 on cores 1 and 2, each with three priority deques (Chase-Lev: buffer, bottom
@@ -203,6 +204,19 @@ static int tls_worker_hook(Cpu *c, uint64_t addr) {
     return 0;
 }
 
+// A race in the game's own jobs that more workers make likelier: f_70004529d8 replaces an object's +0x2068 (nulls it,
+// releases the old one, stores the new one) as a job, while another job, f_7000d9a740, reads it twice - non-null for
+// the first call, null for the second, f_70028fd5c0, which then read [0x50] (one route run in about 20 with 3 extra
+// workers; the writer runs on any worker, the reader here on the main thread). f_70028fd5c0 answers "no" for an object
+// whose +0x50 is empty: for no object at all it now answers the same.
+static int null_obj_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    if (c->x[0]) return 0;
+    static int n;
+    if (n++ < 8) LOG("[za] f_70028fd5c0 with no object (lr %llx): answered no\n", (unsigned long long)c->x[30]);
+    return 1;  // (x0 = 0: "no")
+}
+
 static int loop_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     for (int i = 0; i < g_nextra; i++)
@@ -230,6 +244,7 @@ void za_jobs_configure(void) {
     rt_register_fnhook_at(SCHED_SETUP, setup_hook);
     rt_register_fnhook_at(STEAL, steal_hook);
     rt_register_fnhook_at(WORKER_LOOP, loop_hook);
+    rt_register_fnhook_at(0x70028fd5c0ull, null_obj_hook);
     rt_register_fnhook_at(RQ_INIT, rq_init_hook);
     rt_register_fnhook_at(ALLOC_INIT, alloc_init_hook);
     rt_register_fnhook_at(TLS_SET_WORKER, tls_worker_hook);

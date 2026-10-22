@@ -97,9 +97,10 @@ Tested on Linux with an RTX 4090; the Windows build is tested under Wine.
 
 Known issues:
 
-- Lumiose free roam runs about 125 fps at 1080p and 113 at 1440p / 4K at the 144 target (RTX 4090, i9-12900K): the
-  game's own CPU work on its three cores is the limit there (`job_workers` in larecomp.ini adds job threads:
-  experimental).
+- Lumiose free roam runs about 128 fps at 1080p and 1440p at the 144 target (RTX 4090, i9-12900K), with three job
+  threads added to the game's three (`extra_workers` in larecomp.ini: `auto` by default - on CPUs with 8 or more fast
+  cores; `0` turns them off: about 122 fps). The game then waits on its render path (the render thread and the
+  emulated core its main thread shares), not on the GPU.
 - Running legs: the BipedIK foot lock is worked around (`runtime/hle/za_fixes.c`); its root cause is still open.
 - On a fresh install, shaders and pipelines compile the first time they are seen (short stutters).
 - Expect other missing effects and bugs.
