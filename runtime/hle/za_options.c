@@ -203,8 +203,11 @@ static int row_count_hook(Cpu *c, uint64_t addr) {
     return 1;
 }
 
+static uint64_t g_page, g_page_vt;  // (the Settings screen last drawn, its class: za_options_cursor_row)
+
 static int row_type_hook(Cpu *c, uint64_t addr) {
     (void)addr;
+    g_page = c->x[0], g_page_vt = *(const uint64_t *)(uintptr_t)c->x[0];
     int r = row_index(tab_of(c->x[0]), (int)(uint32_t)c->x[1]);
     if (r < 0) return 0;
     c->x[0] = type_of(&k_rows[r]);
@@ -257,6 +260,25 @@ static int row_info_hook(Cpu *c, uint64_t addr) {
     if (r < 0) return 0;
     call_with_texts(c, OPT_SET_INFO, (uint64_t[]){c->x[0], (uint64_t)(uintptr_t)&g_label}, 2, &k_rows[r].info, 1);
     return 1;
+}
+
+int za_options_tab(void) {  // the Settings screen's tab (runtime/hle/za_mouse.c), -1 when it isn't up
+    if (!g_page || *(const uint64_t *)(uintptr_t)g_page != g_page_vt) return -1;
+    return tab_of(g_page);
+}
+
+// The cursor's row on the Settings screen (runtime/hle/za_mouse.c: a click on a choice or a bar): its type and value,
+// as left / right see them. (Asked while its rows are on screen: the page is the one they were bound by.)
+bool za_options_cursor_row(Cpu *c, uint64_t *type, int *value) {
+    if (!g_page || *(const uint64_t *)(uintptr_t)g_page != g_page_vt) return false;
+    uint64_t save[31];
+    memcpy(save, c->x, sizeof save);
+    c->x[0] = g_page;
+    c->x[1] = (uint64_t)*(const uint32_t *)(uintptr_t)(*(const uint64_t *)(uintptr_t)(g_page + 0x118) + 0xbc);
+    guest_call(c, OPT_ROW_TYPE);
+    *type = c->x[0], *value = (int)(uint32_t)c->x[1];
+    memcpy(c->x, save, sizeof save);
+    return true;
 }
 
 // ------------------------------------------------------------------ research

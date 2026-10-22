@@ -98,7 +98,10 @@ Tested on Linux with an RTX 4090; the Windows build is tested under Wine.
   remapped buttons show their new button).
 - Keyboard and mouse: WASD (Left Ctrl walks), mouse look (click to take the mouse, Esc lets it go: the camera turns by
   as much as the mouse moves - the sensitivity is degrees per pixel - while a controller's stick still turns it the
-  game's way), mouse buttons and wheel bindable like keys. The game's menus work with the keyboard; clicking them with the mouse isn't possible.
+  game's way), mouse buttons and wheel bindable like keys. The game's menus work with the keyboard and the mouse:
+  pointing at a button moves the game's cursor to it, a click presses it (on the Settings screen: the choice, the
+  point on a bar or the tab clicked), the right button goes back, the wheel scrolls; where there's nothing to point
+  at (a message, a tip) a click goes on.
 
 Known issues:
 

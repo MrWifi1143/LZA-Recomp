@@ -365,9 +365,14 @@ static int rt_create_log(Cpu *c, uint64_t addr) {
 // LARECOMP_ZA_MOUSE_LOOK=0: the mouse is the camera stick instead (as on other cameras: menus, cutscenes, aiming).
 #define ZA_CAM_ANGLES 0x7000371af0ull      // (camera, s0 yaw, s1 pitch)
 #define ZA_CAM_ANGLES_RET 0x700037106cull  // (the gameplay camera's call)
+static bool g_mouse_look;
+uint64_t g_za_field_camera_frame;  // the last frame the player's camera turned (runtime/hle/za_mouse.c: not in a menu)
 static int mouse_look_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     if (c->x[30] != ZA_CAM_ANGLES_RET) return 0;
+    extern uint64_t renderer_game_frame(void);
+    g_za_field_camera_frame = renderer_game_frame();
+    if (!g_mouse_look) return 0;
     extern bool input_mouse_camera_take(float *dyaw, float *dpitch);
     float dy, dp;
     if (input_mouse_camera_take(&dy, &dp)) {
@@ -391,8 +396,10 @@ void za_fixes_configure(const char *exefs) {
     }
     if (done || memcmp(id, ZA_MAIN, 8)) return;
     done = true;
-    if (!getenv("LARECOMP_ZA_MOUSE_LOOK") || atoi(getenv("LARECOMP_ZA_MOUSE_LOOK")) != 0) rt_register_fnhook_at(ZA_CAM_ANGLES, mouse_look_hook);
+    g_mouse_look = !getenv("LARECOMP_ZA_MOUSE_LOOK") || atoi(getenv("LARECOMP_ZA_MOUSE_LOOK")) != 0;
+    rt_register_fnhook_at(ZA_CAM_ANGLES, mouse_look_hook);
     { extern void za_options_configure(void); za_options_configure(); }
+    { extern void za_mouse_configure(void); za_mouse_configure(); }
     { extern void za_qstats_configure(void); za_qstats_configure(); }
     { extern void za_passq_configure(void); za_passq_configure(); }
     { extern void za_jobq_configure(void); za_jobq_configure(); }
