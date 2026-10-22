@@ -157,15 +157,13 @@ static int push_hook(Cpu *c, uint64_t addr) {
 // tables (the render queue's per-core command lists, found by GetCurrentProcessorNumber; a thread on a core past them
 // shares one list that isn't locked - the extra workers' render jobs then corrupted it). Raised to cover the extra
 // workers' cores; the job scheduler, whose worker array holds three, still gets 3 (the extra workers join it here).
-static int config_hook(Cpu *c, uint64_t addr) {
-    uint64_t info = c->x[1];
-    rt_call_original(c, addr);
+void za_jobs_config_read(uint64_t info) {  // (hle/za_fixes.c's hook on the config reader, after it ran)
+    if (!g_want) return;
     int32_t *n = (int32_t *)(uintptr_t)(info + 0x58);
     if (*n == 3) {
         *n = 4 + g_want;
         LOG("[za] worker core count 3 -> %d (cores 0-%d)\n", *n, *n - 1);
     }
-    return 1;
 }
 static int factory_count_hook(Cpu *c, uint64_t addr) {
     int32_t *n = (int32_t *)(uintptr_t)(*(uint64_t *)(uintptr_t)(c->x[0] + 0x40) + 0x58);
@@ -232,7 +230,6 @@ void za_jobs_configure(void) {
     rt_register_fnhook_at(SCHED_SETUP, setup_hook);
     rt_register_fnhook_at(STEAL, steal_hook);
     rt_register_fnhook_at(WORKER_LOOP, loop_hook);
-    rt_register_fnhook_at(CONFIG_READ, config_hook);
     rt_register_fnhook_at(RQ_INIT, rq_init_hook);
     rt_register_fnhook_at(ALLOC_INIT, alloc_init_hook);
     rt_register_fnhook_at(TLS_SET_WORKER, tls_worker_hook);

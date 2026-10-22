@@ -62,8 +62,9 @@ static void common_state_getter(Service *s, IpcReq *req, IpcResp *resp) {
     case 13: case 61: resp->copy_handles[resp->ncopy++] = new_event(); break;
     case 60: {  // GetDefaultDisplayResolution
         int w = getenv("LARECOMP_DISPLAY_W") ? atoi(getenv("LARECOMP_DISPLAY_W")) : 1920;
-        LOG("[am] GetDefaultDisplayResolution -> %dx1080\n", w);
-        OUT(int32_t, 0) = w; OUT(int32_t, 4) = 1080; resp_size(resp, 8); break;
+        int h = getenv("LARECOMP_DISPLAY_H") ? atoi(getenv("LARECOMP_DISPLAY_H")) : 1080;
+        LOG("[am] GetDefaultDisplayResolution -> %dx%d\n", w, h);
+        OUT(int32_t, 0) = w; OUT(int32_t, 4) = h; resp_size(resp, 8); break;
     }
     default: UNHANDLED("ICommonStateGetter");
     }

@@ -143,8 +143,8 @@ static int anim_gate_b(Cpu *c, uint64_t addr) {
 // (0x70010273f0) advances its time by the frame time divided by the engine's frame time for the present interval (the
 // table entry runtime/hle/fps60.c patches to our frame time, so the world steps by it): one 30-fps frame a game frame
 // at any frame rate - the opening ran 4.8 times too fast at 144 fps (over in ~25 s instead of ~2 min). Its call to
-// 0x700102d380 gets the new time (s0) = old time ([player+0x90]) + the advance; the advance is scaled by our frame time /
-// (1/30 s). LARECOMP_ZA_CUTSCENE_SPEED=0: off; LARECOMP_ZA_CUTSCENE_LOG=1: the first steps.
+// 0x700102d380 gets the new time (s0) = old time ([player+0x90]) + the advance; the advance is scaled by the real time
+// since the player's last update / (1/30 s), so a late frame doesn't leave it behind its audio. LARECOMP_ZA_CUTSCENE_SPEED=0: off; LARECOMP_ZA_CUTSCENE_LOG=1: the first steps.
 #define ZA_TIMELINE_SET_TIME 0x700102d380ull  // (player time object, s0 new time, s1 seconds, s2 rate)
 #define ZA_TIMELINE_SET_RET 0x70010275ecull   // (the call from the player's update, x19 = the player)
 static int timeline_step(Cpu *c, uint64_t addr) {
@@ -156,12 +156,39 @@ static int timeline_step(Cpu *c, uint64_t addr) {
     uint32_t w = (uint32_t)c->v[0];
     memcpy(&t, &w, 4);
     memcpy(&old, (const void *)(uintptr_t)(c->x[19] + 0x90), 4);
-    float scale = (float)((double)pla60_period_ns() / 33333333.3), nt = old + (t - old) * scale;
+    // the real time since this player's last update (the audio plays in real time: a frame late - a stutter, a shader
+    // compiled - is made up on the next one), our frame time on its first, 100 ms at most
+    static struct { uint64_t player, at; } last[32];
+    uint64_t now = plat_now_ns(), dt = pla60_period_ns();
+    int k = 0;
+    while (k < 31 && last[k].player && last[k].player != c->x[19]) k++;
+    if (last[k].player == c->x[19] && now - last[k].at < 100000000ull) dt = now - last[k].at;
+    else if (now - last[k].at >= 100000000ull && last[k].player == c->x[19]) dt = 100000000ull;
+    last[k].player = c->x[19], last[k].at = now;
+    float scale = (float)((double)dt / 33333333.3), nt = old + (t - old) * scale;
     static int seen;
     if (seen < 6 && getenv("LARECOMP_ZA_CUTSCENE_LOG")) seen++, LOG("[za] timeline %g -> %g (was %g)\n", old, nt, t);
     memcpy(&w, &nt, 4);
     c->v[0] = w;
     return 0;
+}
+
+// The engine's system config (read by 0x7001b2fc30 (config table, engine info, ...) into the info struct): +0x10 / +0x18
+// the output width / height (1920 x 1080 unless the data sets them), +0x58 the worker core count (hle/za_jobs.c).
+// LARECOMP_ZA_RES=<w>x<h> (research): another output size.
+#define ZA_CONFIG_READ 0x7001b2fc30ull
+static int config_read(Cpu *c, uint64_t addr) {
+    uint64_t info = c->x[1];
+    rt_call_original(c, addr);
+    extern void za_jobs_config_read(uint64_t info);
+    za_jobs_config_read(info);
+    const char *r = getenv("LARECOMP_ZA_RES");
+    if (r && strchr(r, 'x')) {
+        uint64_t *w = (uint64_t *)(uintptr_t)(info + 0x10), *h = (uint64_t *)(uintptr_t)(info + 0x18);
+        LOG("[za] output %llux%llu -> %s\n", (unsigned long long)*w, (unsigned long long)*h, r);
+        *w = strtoull(r, NULL, 10), *h = strtoull(strchr(r, 'x') + 1, NULL, 10);
+    }
+    return 1;
 }
 
 void za_fixes_configure(const char *exefs) {
@@ -191,6 +218,7 @@ void za_fixes_configure(const char *exefs) {
         g_tex_no_scale = !getenv("LARECOMP_FORCE_SCALE");
     }
     { extern void za_jobs_configure(void); za_jobs_configure(); }
+    rt_register_fnhook_at(ZA_CONFIG_READ, config_read);
     {
         const char *cs = getenv("LARECOMP_ZA_CUTSCENE_SPEED");
         if (!(cs && atoi(cs) == 0)) rt_register_fnhook_at(ZA_TIMELINE_SET_TIME, timeline_step);
