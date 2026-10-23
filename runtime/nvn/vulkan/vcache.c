@@ -19,6 +19,8 @@ typedef struct VEnt {
     uint8_t *shadow;      // the range's bytes in its partial first and last pages (split)
     uint64_t win_frame;   // uploads: since this frame (a 120-frame window)
     uint32_t uploads;
+    uint32_t stamp;       // the write clock when it was copied (runtime/pagewatch.c)
+    uint64_t hash;        // (LARECOMP_VCACHE_VERIFY: the bytes copied)
     bool vol;             // volatile: not cached until vol_frame + 300
     uint64_t vol_frame;
     struct VEnt *next;
@@ -96,6 +98,30 @@ static void copy_part(VkCommandBuffer cb, VEnt *e, uint64_t a, uint64_t n, uint6
 // outside the heap; the caller keeps its old path). A written range gets its written parts copied into its buffer - after
 // a barrier against the earlier submissions still reading it - or, when a draw of the pending submission already uses it
 // (the upload buffer runs before all of them), a new buffer with all of it.
+// Research, LARECOMP_VCACHE_VERIFY=1: every 64th hit compares a hash of the game's bytes with the copy's ("[vcache] stale")
+static int verify(void) {
+    static int on = -1;
+    if (on < 0) on = ENV("LARECOMP_VCACHE_VERIFY") != NULL;
+    return on;
+}
+static uint64_t hash_range(uint64_t addr, uint64_t len) {
+    const uint64_t *p = (const uint64_t *)(uintptr_t)addr;
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (uint64_t i = 0; i < len / 8; i++) h = (h ^ p[i]) * 0x100000001b3ull;
+    for (uint64_t i = len & ~7ull; i < len; i++) h = (h ^ ((const uint8_t *)(uintptr_t)addr)[i]) * 0x100000001b3ull;
+    return h;
+}
+static void verify_hit(VEnt *e) {
+    static uint64_t n, stale;
+    if (!verify() || (++n & 63)) return;
+    if (hash_range(e->addr, e->len) != e->hash) {
+        stale++;
+        LOG("[vcache] stale copy drawn: %llx +%llu (%llu of %llu checked)\n", (unsigned long long)e->addr, (unsigned long long)e->len,
+            (unsigned long long)stale, (unsigned long long)(n >> 6));
+        e->hash = hash_range(e->addr, e->len);  // (once per change)
+    }
+}
+
 bool vcache_get(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off) {
     if (!enabled()) return false;
     if (!len || len > (64ull << 20) || !in_heap(addr) || !in_heap(addr + len - 1)) { g_vcache_why[0]++; return false; }
@@ -130,9 +156,10 @@ bool vcache_get(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off) {
     }
     uint64_t ilo, ihi, hn, tn;
     split(addr, len, &ilo, &ihi, &hn, &tn);
-    bool idirty = ihi > ilo && pagewatch_dirty(ilo, ihi - ilo), edirty = e->buf && edges_changed(e, hn, tn);
+    bool idirty = ihi > ilo && pagewatch_written_since(ilo, ihi - ilo, e->stamp), edirty = e->buf && edges_changed(e, hn, tn);
     if (e->buf && !idirty && !edirty) {
         g_vcache_hits++;
+        verify_hit(e);
         e->used_seq = seq;
         *buf = e->buf, *off = 0;
         return true;
@@ -155,15 +182,17 @@ bool vcache_get(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off) {
             VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
             vkCmdPipelineBarrier2(cb, &di);
         }
+        uint32_t now = pagewatch_now(), was = e->stamp;
         for (uint64_t pa = ilo; idirty && pa < ihi;) {
-            if (!pagewatch_dirty(pa, 1)) { pa += 4096; continue; }
+            if (!pagewatch_written_since(pa, 1, was)) { pa += 4096; continue; }
             uint64_t pe = pa + 4096;
-            while (pe < ihi && pagewatch_dirty(pe, 1)) pe += 4096;
+            while (pe < ihi && pagewatch_written_since(pe, 1, was)) pe += 4096;
             pagewatch_protect(pa, pe - pa);
             copy_part(cb, e, pa, pe - pa, hn, tn);
             g_vcache_why[3] += pe - pa;
             pa = pe;
         }
+        if (idirty) e->stamp = now;
         if (edirty) {
             if (hn) copy_part(cb, e, addr, hn, hn, tn);
             if (tn) copy_part(cb, e, addr + len - tn, tn, hn, tn);
@@ -180,12 +209,14 @@ bool vcache_get(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off) {
             return false;
         }
         g_bytes += bi.size;
+        e->stamp = pagewatch_now();
         if (ihi > ilo) pagewatch_protect(ilo, ihi - ilo);
         if (!e->shadow && hn + tn) e->shadow = malloc(hn + tn);
         copy_part(cb, e, addr, len, hn, tn);
         g_vcache_why[4] += len;
     }
     g_vcache_uploads++;
+    if (verify()) e->hash = hash_range(addr, len);
     e->used_seq = seq;
     *buf = e->buf, *off = 0;
     return true;

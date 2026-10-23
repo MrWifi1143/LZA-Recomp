@@ -1,6 +1,7 @@
 // Z-A: more job workers than the Switch's three, on PCs with the cores for them. larecomp.ini extra_workers = auto
-// (the default: one per fast physical core left after the emulated cores' and the render thread's, up to 3 - none on
-// CPUs with fewer than 8), 0 (the Switch's three) or 1-4; LARECOMP_ZA_WORKERS=<n> overrides it. Lumiose at 144 fps,
+// (the default: the Switch's three - since 2026-10-22: a long session showed props (Havok cloth) and models breaking
+// apart after 10+ minutes with them; not proven the cause, but the game was only made for three), 0, or 1-4 (opt-in,
+// experimental); LARECOMP_ZA_WORKERS=<n> overrides it. Lumiose at 144 fps,
 // 1440p: ~122 -> ~127 fps with 3 (more than 3 was slower on an i9-12900K: the fourth ran on an efficiency core); the
 // cores are then busy half the frame, and the game waits on the render path. (An earlier build crashed in one route
 // run in five - a job on the main thread found a null [x+0x2068] at 0x7000d9afa0; 2026-10-22, about 20 route runs and
@@ -236,7 +237,8 @@ void za_jobs_configure(void) {
     settings_load();  // (before boot: the start screen may have been skipped)
     const char *e = getenv("LARECOMP_ZA_WORKERS");
     g_want = e ? atoi(e) : g_settings.job_workers;
-    if (g_want < 0) g_want = cpupin_fast_cores() - 5 < 3 ? cpupin_fast_cores() - 5 : 3;
+    if (g_want < 0) g_want = 0;  // (auto: the game's three - see above)
+    (void)cpupin_fast_cores;
     if (g_want <= 0) { g_want = 0; LOG("[za] job workers: the game's three\n"); return; }
     if (g_want > 4) g_want = 4;
     kernel_set_cores(4 + g_want);
