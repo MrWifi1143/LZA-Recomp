@@ -86,7 +86,7 @@ void plat_thread_realtime(uint64_t period_ns) {
 static char g_log_path[1024];
 
 static void log_to_file_without_terminal(void) {
-    if (isatty(STDERR_FILENO)) return;
+    if (isatty(STDERR_FILENO) || getenv("LARECOMP_LOG_STDERR")) return;  // (main.c: --oodle-server keeps stderr)
     char dir[900];
     const char *env = getenv("LARECOMP_DATA_ROOT"), *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
     struct stat st;

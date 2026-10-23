@@ -126,6 +126,7 @@ void plat_thread_realtime(uint64_t period_ns) {
 static char g_log_path[MAX_PATH];
 
 static void log_to_file_without_console(void) {
+    if (getenv("LARECOMP_LOG_STDERR")) return;  // (main.c: --oodle-server keeps stderr)
     if (GetStdHandle(STD_ERROR_HANDLE) && GetStdHandle(STD_ERROR_HANDLE) != INVALID_HANDLE_VALUE) return;  // console / pipe
     char exe[MAX_PATH];
     DWORD n = GetModuleFileNameA(NULL, exe, sizeof exe);
