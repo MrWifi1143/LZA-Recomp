@@ -479,8 +479,9 @@ void pla60_configure(const char *exefs) {
             g_pla_mouse_look = !getenv("LARECOMP_PLA_MOUSE_LOOK") || atoi(getenv("LARECOMP_PLA_MOUSE_LOOK")) != 0;
             rt_register_fnhook_at(0x700193d16cull, pla_mouse_look_hook);
             // the mouse in the menus (runtime/hle/menu_mouse.c): ui2d's CalculateMtx walk over the panes, each frame
-            extern void menu_mouse_configure(uint64_t calc_mtx);
-            menu_mouse_configure(0x700014319cull);
+            extern void menu_mouse_configure(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t);
+            menu_mouse_configure(0x700014319cull, 0x700272b6d0ull, 0x7002719878ull, 0x910, 0x914);  // (ui2d matrices,
+            // the menu navigator's core, the scroll lists' select cell)
             extern void pla_options_configure(void);
             pla_options_configure();
         }
