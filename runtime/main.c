@@ -175,6 +175,7 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--oodle-server")) {  // (its replies use the real stdout, which plat_init points at the log)
             extern int g_oodle_out_fd;
             g_oodle_out_fd = dup(1);
+            setenv("LARECOMP_LOG_STDERR", "1", 1);  // (and the player's lasrecomp.log is left alone)
         }
     plat_init();
 #ifdef _WIN32
