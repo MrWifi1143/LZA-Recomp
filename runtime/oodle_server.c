@@ -66,20 +66,15 @@ static void serve(Cpu *c) {
     }
 }
 
-void oodle_server_run(const char *root) {
-    // the protocol keeps the real stdout (saved by main.c before plat_init redirects it)
+// main.c, --oodle-server: called by boot() once the modules are loaded. The SDK starts as usual (nn::init::Start: its
+// heap, nn::os's thread objects - Oodle takes nn::os locks), and the game's nnMain is replaced by the server.
+void oodle_server_install(const char *exefs) {
     int fd = g_oodle_out_fd >= 0 ? g_oodle_out_fd : dup(1);
 #ifdef _WIN32
     _setmode(fd, _O_BINARY);
     _setmode(_fileno(stdin), _O_BINARY);
 #endif
     g_out = fdopen(fd, "wb");
-    char exefs[1024], why[512];
-    snprintf(exefs, sizeof exefs, "%s/exefs", root);
-    if (!gamelib_load(root, why, sizeof why)) { fprintf(stderr, "%s\n", why); reply(0, NULL); _exit(2); }
-    loader_load(exefs);
-    kernel_init();
-    dispatch_init();
     uint8_t id[8] = {0};
     char mp[1100];
     snprintf(mp, sizeof mp, "%s/main", exefs);
@@ -90,7 +85,7 @@ void oodle_server_run(const char *root) {
     }
     for (size_t i = 0; i < sizeof k_builds / sizeof *k_builds; i++)
         if (!memcmp(id, k_builds[i].id, 8)) g_fn = k_builds[i].fn;
-    KThread *t = kernel_create_main_thread(hle_register("<oodle_server>", serve), 0x100000, 44);
-    kernel_run_main(t, 0, 0, 0, 0, 0);
-    for (;;) pause();
+    uint64_t nn_main = loader_find_symbol("nnMain");
+    if (!nn_main) { fprintf(stderr, "[oodle] nnMain not found\n"); reply(0, NULL); _exit(2); }
+    hle_override(nn_main, serve, "<oodle_server>");
 }
