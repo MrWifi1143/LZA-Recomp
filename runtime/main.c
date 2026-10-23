@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "gamelib.h"
 #include "gamesetup.h"
@@ -170,6 +171,11 @@ static void boot(const char *root) {
 }
 
 int main(int argc, char **argv) {
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--oodle-server")) {  // (its replies use the real stdout, which plat_init points at the log)
+            extern int g_oodle_out_fd;
+            g_oodle_out_fd = dup(1);
+        }
     plat_init();
 #ifdef _WIN32
     setvbuf(stderr, NULL, _IONBF, 0);  // the Windows CRT treats _IOLBF as full buffering
@@ -186,6 +192,11 @@ int main(int argc, char **argv) {
         else if (argv[i][0] != '-') root = arg_root;
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--oodle-server")) {  // (Legends Studio's decoder: runtime/oodle_server.c; never returns)
+            extern void oodle_server_run(const char *root);
+            oodle_server_run(root);
+        }
     {
         extern void plugins_load(void);
         plugins_load();  // (runtime/plugin.h: before the Vulkan backend, whose instance / device they may extend)
