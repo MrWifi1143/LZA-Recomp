@@ -1,4 +1,5 @@
 // fsp-srv: RomFS as a raw storage image, save data and SD card backed by host directories.
+#include <SDL3/SDL_timer.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -134,6 +135,47 @@ static int64_t dir_lookup(const uint8_t *dm, uint64_t dsz, const char *path) {
     return cur;
 }
 
+// A directory "a/b/c" in the (growable) directory table: found, or made with its missing parents (entries appended,
+// linked as each parent's first child and into the directory hash table) - a mod's files in folders the game's own
+// RomFS doesn't have (Z-A's are almost all in data.trpfs: a Trinity mod's loose files need world/..., ik_pokemon/...)
+static int64_t dir_make(uint8_t **dm, uint64_t *dsz, uint64_t *dcap, uint8_t *dh, uint32_t ndb, const char *path) {
+    int64_t cur = 0;
+    char buf[1024];
+    strlcpy(buf, path, sizeof buf);
+    for (char *tok = strtok(buf, "/"); tok; tok = strtok(NULL, "/")) {
+        uint32_t child, nl = (uint32_t)strlen(tok);
+        memcpy(&child, *dm + cur + 8, 4);
+        while (child != 0xFFFFFFFFu && child + 0x18 <= *dsz) {
+            uint32_t cl;
+            memcpy(&cl, *dm + child + 0x14, 4);
+            if (cl == nl && !memcmp(*dm + child + 0x18, tok, nl)) break;
+            memcpy(&child, *dm + child + 4, 4);
+        }
+        if (child == 0xFFFFFFFFu || child + 0x18 > *dsz) {  // make it: {parent, sibling, first dir, first file, hash next, name}
+            uint64_t need = *dsz + 0x18 + ((nl + 3) & ~3u);
+            if (need > *dcap) { *dcap = need * 2; *dm = realloc(*dm, *dcap); }
+            uint32_t at = (uint32_t)*dsz, parent = (uint32_t)cur, none = 0xFFFFFFFFu, sib, prev;
+            uint32_t bucket = romfs_hash(parent, tok, nl) % ndb;
+            memcpy(&sib, *dm + cur + 8, 4);
+            memcpy(&prev, dh + 4 * bucket, 4);
+            memset(*dm + at, 0, 0x18 + ((nl + 3) & ~3u));
+            memcpy(*dm + at, &parent, 4);
+            memcpy(*dm + at + 4, &sib, 4);
+            memcpy(*dm + at + 8, &none, 4);
+            memcpy(*dm + at + 0xC, &none, 4);
+            memcpy(*dm + at + 0x10, &prev, 4);
+            memcpy(*dm + at + 0x14, &nl, 4);
+            memcpy(*dm + at + 0x18, tok, nl);
+            memcpy(*dm + cur + 8, &at, 4);
+            memcpy(dh + 4 * bucket, &at, 4);
+            *dsz = need;
+            child = at;
+        }
+        cur = child;
+    }
+    return cur;
+}
+
 static void add_new_files(int fd, const uint64_t *h, const uint8_t *dmeta, uint64_t dsz, uint64_t fsz) {
     if (!mod_romfs_dir()) return;  // a mod's new files (runtime/mods.h)
     char root[1100];
@@ -147,10 +189,19 @@ static void add_new_files(int fd, const uint64_t *h, const uint8_t *dmeta, uint6
     free(known);
     if (!n) return;
     rom_files = realloc(rom_files, sizeof(RomFile) * (rom_nfiles + n));
-    uint64_t hoff = h[5], hsz = h[6];
-    uint8_t *dcopy = malloc(dsz), *hcopy = malloc(hsz), *head = malloc(0x50);
+    uint64_t hoff = h[5], hsz = h[6], dhoff = h[1], dhsz = h[2], dsz0 = dsz, dcap = dsz + 4096;
+    uint8_t *dcopy = malloc(dcap), *hcopy = malloc(hsz), *head = malloc(0x50), *dhcopy = malloc(dhsz);
     memcpy(dcopy, dmeta, dsz);
-    if (pread(fd, hcopy, hsz, (off_t)hoff) != (ssize_t)hsz || pread(fd, head, 0x50, 0) != 0x50) return;
+    if (pread(fd, hcopy, hsz, (off_t)hoff) != (ssize_t)hsz || pread(fd, head, 0x50, 0) != 0x50 ||
+        pread(fd, dhcopy, dhsz, (off_t)dhoff) != (ssize_t)dhsz) return;
+    for (int i = 0; i < n; i++) {  // the folders the mod's files need
+        char dirp[1024];
+        strlcpy(dirp, nf[i].rel, sizeof dirp);
+        char *slash = strrchr(dirp, '/');
+        if (slash) *slash = 0; else dirp[0] = 0;
+        if (dirp[0] && dir_lookup(dcopy, dsz, dirp) < 0 && dhsz >= 4) dir_make(&dcopy, &dsz, &dcap, dhcopy, (uint32_t)(dhsz / 4), dirp);
+    }
+    bool new_dirs = dsz != dsz0;
     // the file-meta table to extend: the override-patched copy if there is one
     const uint8_t *base_meta = ov_meta;
     uint8_t *tmp = NULL;
@@ -170,8 +221,9 @@ static void add_new_files(int fd, const uint64_t *h, const uint8_t *dmeta, uint6
         fstat(fd, &rs);
         ov_end = (rs.st_size + 0xF) & ~0xFull;
     }
-    uint64_t meta_at = ov_end;  // the new table first, then the new files' data
-    uint64_t data_at = (meta_at + nsz + 0xF) & ~0xFull;
+    uint64_t meta_at = ov_end;  // the new table first, then (when it grew) the directory table, then the new files' data
+    uint64_t dmeta_at = (meta_at + nsz + 0xF) & ~0xFull;
+    uint64_t data_at = new_dirs ? (dmeta_at + dsz + 0xF) & ~0xFull : dmeta_at;
     uint32_t nb = (uint32_t)(hsz / 4);
     uint64_t o = fsz;
     int added = 0;
@@ -206,17 +258,24 @@ static void add_new_files(int fd, const uint64_t *h, const uint8_t *dmeta, uint6
     }
     // the new table goes before the new data (keep the overlay list sorted by start)
     if (ov_n == ov_cap) { ov_cap = ov_cap ? ov_cap * 2 : 256; ov = realloc(ov, sizeof *ov * ov_cap); }
-    memmove(ov + (ov_n - added) + 1, ov + (ov_n - added), sizeof *ov * added);
+    int tables = new_dirs ? 2 : 1;
+    while (ov_n + tables > ov_cap) { ov_cap = ov_cap ? ov_cap * 2 : 256; ov = realloc(ov, sizeof *ov * ov_cap); }
+    memmove(ov + (ov_n - added) + tables, ov + (ov_n - added), sizeof *ov * added);
     ov[ov_n - added] = (Overlay){meta_at, nsz, NULL, -1, meta};
-    ov_n++;
+    if (new_dirs) ov[ov_n - added + 1] = (Overlay){dmeta_at, dsz, NULL, -1, dcopy};
+    ov_n += tables;
     ov_end = data_at;
     uint64_t fmeta_off = meta_at, fmeta_size = o;
     memcpy(head + 7 * 8, &fmeta_off, 8);
     memcpy(head + 8 * 8, &fmeta_size, 8);
+    if (new_dirs) {  // (the directory table moved: the header points at its new place)
+        memcpy(head + 3 * 8, &dmeta_at, 8);
+        memcpy(head + 4 * 8, &dsz, 8);
+        patches[npatches++] = (Patch){dhoff, dhsz, dhcopy};
+    } else patches[npatches++] = (Patch){h[3], dsz, dcopy};
     patches[npatches++] = (Patch){0, 0x50, head};
-    patches[npatches++] = (Patch){h[3], dsz, dcopy};
     patches[npatches++] = (Patch){hoff, hsz, hcopy};
-    LOG("[fs] mod: %d new romfs files\n", added);
+    LOG("[fs] mod: %d new romfs files%s\n", added, new_dirs ? " (and new folders)" : "");
 }
 
 static void rom_index(int fd) {
@@ -357,6 +416,17 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
             if (path && path != last) {
                 last = path;
                 if (getenv("LARECOMP_LOG_FILES")) LOG("[fs] read %s\n", path);
+            }
+        }
+        {   // LARECOMP_LOG_READS=<file>: every RomFS read as "<offset hex> <size hex> <presented frame> <ms>" (research: which
+            // packs the game loads, and when)
+            static FILE *rl = (FILE *)1;
+            if (rl == (FILE *)1) rl = getenv("LARECOMP_LOG_READS") ? fopen(getenv("LARECOMP_LOG_READS"), "w") : NULL;
+            extern uint64_t renderer_present_count(void);
+            if (rl) {
+                fprintf(rl, "%llx %llx %llu %llu\n", (unsigned long long)off, (unsigned long long)size,
+                        (unsigned long long)renderer_present_count(), (unsigned long long)SDL_GetTicks());
+                fflush(rl);
             }
         }
         static uint64_t reads, bytes;
