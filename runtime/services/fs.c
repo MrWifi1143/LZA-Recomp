@@ -24,8 +24,12 @@ static int romfs_fd = -1;
 typedef struct { uint64_t start, size; char *path; int fd; const uint8_t *mem; } Overlay;
 // in-image patches (copies of RomFS tables with changes): header, dir meta, file hash, file meta
 typedef struct { uint64_t off, size; uint8_t *data; } Patch;
-static Patch patches[8];
-static int npatches;
+static Patch *patches;
+static int npatches, patches_cap;
+static void add_patch(uint64_t off, uint64_t size, uint8_t *data) {
+    if (npatches == patches_cap) { patches_cap = patches_cap ? patches_cap * 2 : 16; patches = realloc(patches, sizeof *patches * patches_cap); }
+    patches[npatches++] = (Patch){off, size, data};
+}
 static Overlay *ov;
 static int ov_n, ov_cap;
 static uint8_t *ov_meta;
@@ -106,6 +110,8 @@ static void walk_new(const char *root, const char *rel, char **known, int nknown
         if (S_ISDIR(sb.st_mode)) { walk_new(root, r2, known, nknown, out, n, cap); continue; }
         const char *key = r2;
         if (bsearch(&key, known, nknown, sizeof *known, path_cmp)) continue;  // replaces an existing file
+        size_t kl = strlen(r2);
+        if (kl > 7 && !strcmp(r2 + kl - 7, ".bpatch")) continue;  // (byte patches of a game file: apply_bpatches)
         if (*n == *cap) { *cap = *cap ? *cap * 2 : 64; *out = realloc(*out, sizeof **out * *cap); }
         strlcpy((*out)[*n].rel, r2, sizeof (*out)[*n].rel);
         strlcpy((*out)[*n].host, h2, sizeof (*out)[*n].host);
@@ -271,11 +277,59 @@ static void add_new_files(int fd, const uint64_t *h, const uint8_t *dmeta, uint6
     if (new_dirs) {  // (the directory table moved: the header points at its new place)
         memcpy(head + 3 * 8, &dmeta_at, 8);
         memcpy(head + 4 * 8, &dsz, 8);
-        patches[npatches++] = (Patch){dhoff, dhsz, dhcopy};
-    } else patches[npatches++] = (Patch){h[3], dsz, dcopy};
-    patches[npatches++] = (Patch){0, 0x50, head};
-    patches[npatches++] = (Patch){hoff, hsz, hcopy};
+        add_patch(dhoff, dhsz, dhcopy);
+    } else add_patch(h[3], dsz, dcopy);
+    add_patch(0, 0x50, head);
+    add_patch(hoff, hsz, hcopy);
     LOG("[fs] mod: %d new romfs files%s\n", added, new_dirs ? " (and new folders)" : "");
+}
+
+// A mod's byte patches of a game file: <path>.bpatch beside the mod's files changes bytes of <path> in place
+// ("LSBP", u32 version 1, u32 count, then count x {u64 offset in the file, u32 size, the bytes}). Legends Studio
+// writes arc/data.trpfs.bpatch: Z-A loads whole packs, so a modded file's entry in its pack gets another hash
+// and the game asks for it by path, which the mod's loose copy answers.
+static void bpatch_walk(const char *root, const char *rel, int depth) {
+    char dirp[1200];
+    snprintf(dirp, sizeof dirp, "%s/%s", root, rel);
+    DIR *d = opendir(dirp);
+    if (!d || depth > 16) { if (d) closedir(d); return; }
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char r2[1024], h2[1200];
+        snprintf(r2, sizeof r2, "%s%s%s", rel, rel[0] ? "/" : "", e->d_name);
+        snprintf(h2, sizeof h2, "%s/%s", root, r2);
+        struct stat sb;
+        if (stat(h2, &sb)) continue;
+        if (S_ISDIR(sb.st_mode)) { bpatch_walk(root, r2, depth + 1); continue; }
+        size_t kl = strlen(r2);
+        if (kl <= 7 || strcmp(r2 + kl - 7, ".bpatch")) continue;
+        r2[kl - 7] = 0;  // the game file it patches
+        int fi = -1;
+        for (int i = 0; i < rom_nfiles; i++) if (!strcmp(rom_files[i].path, r2)) { fi = i; break; }
+        FILE *f = fopen(h2, "rb");
+        if (!f) continue;
+        uint32_t hd[3];
+        int n = 0;
+        if (fi >= 0 && fread(hd, 4, 3, f) == 3 && !memcmp(hd, "LSBP", 4) && hd[1] == 1) {
+            for (uint32_t k = 0; k < hd[2]; k++) {
+                uint64_t off;
+                uint32_t sz;
+                if (fread(&off, 8, 1, f) != 1 || fread(&sz, 4, 1, f) != 1 || sz > (16u << 20)) break;
+                uint8_t *b = malloc(sz ? sz : 1);
+                if (fread(b, 1, sz, f) != sz || off + sz > rom_files[fi].size) { free(b); break; }
+                add_patch(rom_files[fi].off + off, sz, b);
+                n++;
+            }
+        }
+        fclose(f);
+        LOG("[fs] mod: %s patched in %d places%s\n", r2, n, fi < 0 ? " (no such game file)" : "");
+    }
+    closedir(d);
+}
+
+static void apply_bpatches(void) {
+    if (mod_romfs_dir()) bpatch_walk(mod_romfs_dir(), "", 0);
 }
 
 static void rom_index(int fd) {
@@ -336,9 +390,10 @@ static void rom_index(int fd) {
         ov_end = (ov_end + size + 0xF) & ~0xFull;
     }
     if (ov_n) LOG("[fs] mod: %d romfs files replaced\n", ov_n);
-    if (ov_meta) { patches[npatches++] = (Patch){ov_meta_off, ov_meta_size, ov_meta}; }
+    if (ov_meta) add_patch(ov_meta_off, ov_meta_size, ov_meta);
     add_new_files(fd, h, dmeta, dsz, fsz);
     qsort(rom_files, rom_nfiles, sizeof *rom_files, rom_cmp);
+    apply_bpatches();
     free(dmeta);
     free(fmeta);
     LOG("[fs] romfs index: %d files\n", rom_nfiles);
@@ -347,11 +402,11 @@ static void rom_index(int fd) {
 // Virtual RomFS image read: original bytes, with the patched file table and appended replacement files.
 static ssize_t romfs_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
     pagewatch_prewrite((uint64_t)(uintptr_t)dst, size);  // (the kernel writes there: no fault for a watched page)
-    if (!ov_n) return pread(fd, dst, size, (off_t)off);
+    if (!ov_n && !npatches) return pread(fd, dst, size, (off_t)off);
     uint64_t done = 0;
     while (done < size) {
         uint64_t o = off + done, n = size - done;
-        if (o >= ov[0].start) {  // appended region
+        if (ov_n && o >= ov[0].start) {  // appended region
             int i = 0;
             while (i < ov_n && !(o >= ov[i].start && o < ov[i].start + ((ov[i].size + 0xF) & ~0xFull))) i++;
             if (i == ov_n) { memset(dst + done, 0, n); done += n; break; }
@@ -368,7 +423,7 @@ static ssize_t romfs_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
             if (r < 0) r = 0;
             if ((uint64_t)r < n) memset(dst + done + r, 0, n - r);
         } else {
-            if (o + n > ov[0].start) n = ov[0].start - o;
+            if (ov_n && o + n > ov[0].start) n = ov[0].start - o;
             ssize_t r = pread(fd, dst + done, n, (off_t)o);
             if (r < 0) r = 0;
             if ((uint64_t)r < n) memset(dst + done + r, 0, n - r);
