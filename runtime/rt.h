@@ -41,7 +41,8 @@
 bool pagewatch_supported(void);
 bool pagewatch_fault(uint64_t addr);                 // crash handler: a store to a watched page (true: handled, retry)
 void pagewatch_prewrite(uint64_t addr, uint64_t n);  // before host code writes guest memory without CPU stores
-bool pagewatch_dirty(uint64_t addr, uint64_t n);
+uint32_t pagewatch_now(void);  // the write clock: take it before pagewatch_protect, keep it with the copy
+bool pagewatch_written_since(uint64_t addr, uint64_t n, uint32_t since);
 void pagewatch_protect(uint64_t addr, uint64_t n);
 void pagewatch_reset(void);
 #define STDHEAP_SIZE 0x00B0000000ull     // 2.75 GB

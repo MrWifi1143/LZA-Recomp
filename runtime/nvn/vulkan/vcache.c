@@ -19,6 +19,7 @@ typedef struct VEnt {
     uint8_t *shadow;      // the range's bytes in its partial first and last pages (split)
     uint64_t win_frame;   // uploads: since this frame (a 120-frame window)
     uint32_t uploads;
+    uint32_t stamp;       // the write clock when it was copied (runtime/pagewatch.c)
     bool vol;             // volatile: not cached until vol_frame + 300
     uint64_t vol_frame;
     struct VEnt *next;
@@ -125,7 +126,7 @@ bool vcache_get(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off) {
     e->used_frame = frame;
     uint64_t ilo, ihi, hn, tn;
     split(addr, len, &ilo, &ihi, &hn, &tn);
-    bool idirty = ihi > ilo && pagewatch_dirty(ilo, ihi - ilo), edirty = e->buf && edges_changed(e, hn, tn);
+    bool idirty = ihi > ilo && pagewatch_written_since(ilo, ihi - ilo, e->stamp), edirty = e->buf && edges_changed(e, hn, tn);
     if (e->buf && !idirty && !edirty) {
         g_vcache_hits++;
         e->used_seq = seq;
@@ -150,15 +151,17 @@ bool vcache_get(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off) {
             VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
             vkCmdPipelineBarrier2(cb, &di);
         }
+        uint32_t now = pagewatch_now(), was = e->stamp;
         for (uint64_t pa = ilo; idirty && pa < ihi;) {
-            if (!pagewatch_dirty(pa, 1)) { pa += 4096; continue; }
+            if (!pagewatch_written_since(pa, 1, was)) { pa += 4096; continue; }
             uint64_t pe = pa + 4096;
-            while (pe < ihi && pagewatch_dirty(pe, 1)) pe += 4096;
+            while (pe < ihi && pagewatch_written_since(pe, 1, was)) pe += 4096;
             pagewatch_protect(pa, pe - pa);
             copy_part(cb, e, pa, pe - pa, hn, tn);
             g_vcache_why[3] += pe - pa;
             pa = pe;
         }
+        if (idirty) e->stamp = now;
         if (edirty) {
             if (hn) copy_part(cb, e, addr, hn, hn, tn);
             if (tn) copy_part(cb, e, addr + len - tn, tn, hn, tn);
@@ -175,6 +178,7 @@ bool vcache_get(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off) {
             return false;
         }
         g_bytes += bi.size;
+        e->stamp = pagewatch_now();
         if (ihi > ilo) pagewatch_protect(ilo, ihi - ilo);
         if (!e->shadow && hn + tn) e->shadow = malloc(hn + tn);
         copy_part(cb, e, addr, len, hn, tn);
