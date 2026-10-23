@@ -3,7 +3,8 @@
 // The binary is an NVN header (0x30), the shader program header (SPH, 0x50; graphics stages), then
 // instructions in groups of four 64-bit words (one scheduling word + three instructions).
 // Registers are emitted as `uint` variables; float ops use as_type<> conversions. Shaders with
-// branches become a `switch (pc)` state machine with explicit SSY/PBK/PCNT stacks.
+// branches become a `switch (pc)` state machine; the SSY/PBK/PCNT stack is resolved at translation time (flow_static)
+// or kept at run time as one stack, as on the hardware.
 //
 // GLSL: the instruction body is generated in the MSL spelling and converted by glsl_rewrite() (a token-aware
 // pass: as_type<T>() -> as_u/as_f overloads, float4 -> vec4, ulong -> uint64_t, char()/short() casts -> sx8/sx16,
@@ -78,6 +79,7 @@ typedef struct {
     bool glsl;               // emit Vulkan GLSL: dialect-specific constructs here, the rest via glsl_rewrite()
     bool uses_gmem_store;    // STG present: the gmem buffer is not readonly
     uint32_t cbuf_need[18];  // highest constant vec4 index + 1 per cbuf (array size of the GLSL block)
+    const uint32_t *flow_to;  // flow_static: where SYNC / BRK / CONT at instruction i go (flow_to[i]); NULL: run-time stacks
 } Ctx;
 
 static uint64_t bits(uint64_t w, int lo, int n) { return (w >> lo) & ((n == 64) ? ~0ull : ((1ull << n) - 1)); }
@@ -1157,19 +1159,22 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         sp(&c->body, "    pc = %uu; continue;\n", target);
     } else if (OPM(0xe290000000000000ull, 0xfff0000000000020ull)) {  // SSY
         c->uses_branches = true;
-        sp(&c->body, "    ssy[ssy_n++] = %uu;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
+        if (!c->flow_to) sp(&c->body, "    crs[crs_n & 31u] = %uu; crk[crs_n & 31u] = 0u; crs_n++;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
     } else if (OPM(0xe2a0000000000000ull, 0xfff0000000000020ull)) {  // PBK
         c->uses_branches = true;
-        sp(&c->body, "    pbk[pbk_n++] = %uu;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
+        if (!c->flow_to) sp(&c->body, "    crs[crs_n & 31u] = %uu; crk[crs_n & 31u] = 1u; crs_n++;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
     } else if (OPM(0xe2b0000000000000ull, 0xfff0000000000020ull)) {  // PCNT
         c->uses_branches = true;
-        sp(&c->body, "    pcnt[pcnt_n++] = %uu;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
+        if (!c->flow_to) sp(&c->body, "    crs[crs_n & 31u] = %uu; crk[crs_n & 31u] = 2u; crs_n++;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
     } else if (OPM(0xf0f8000000000000ull, 0xfff8000000000000ull)) {  // SYNC
-        sp(&c->body, "    pc = ssy[--ssy_n]; continue;\n");
+        if (c->flow_to) sp(&c->body, "    pc = %uu; continue;\n", c->flow_to[pc / 8]);
+        else sp(&c->body, "    crs_n--; pc = crs[crs_n & 31u]; continue;\n");
     } else if (OPM(0xe340000000000000ull, 0xfff0000000000000ull)) {  // BRK
-        sp(&c->body, "    pc = pbk[--pbk_n]; continue;\n");
+        if (c->flow_to) sp(&c->body, "    pc = %uu; continue;\n", c->flow_to[pc / 8]);
+        else sp(&c->body, "    while (crs_n > 1u && crk[(crs_n - 1u) & 31u] != 1u) crs_n--; crs_n--; pc = crs[crs_n & 31u]; continue;\n");
     } else if (OPM(0xe350000000000000ull, 0xfff0000000000000ull)) {  // CONT
-        sp(&c->body, "    pc = pcnt[pcnt_n - 1]; continue;\n");
+        if (c->flow_to) sp(&c->body, "    pc = %uu; continue;\n", c->flow_to[pc / 8]);
+        else sp(&c->body, "    while (crs_n > 1u && crk[(crs_n - 1u) & 31u] != 2u) crs_n--; pc = crs[(crs_n - 1u) & 31u]; continue;\n");
     } else if (OPM(0xf0f0000000000000ull, 0xfff8000000000000ull) || OPM(0x50b0000000000000ull, 0xfff8000000000000ull) ||
                OPM(0xef98000000000000ull, 0xfff8000000000000ull)) {
         // DEPBAR / NOP / MEMBAR
@@ -2319,7 +2324,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (c->uses_local) sp(&s, "  uint lmem[%d]; for (int li_ = 0; li_ < %d; li_++) lmem[li_] = 0u;\n", LMEM_WORDS, LMEM_WORDS);
     if (dbg) sp(&s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");
     if (any_branch) {
-        sp(&s, "  uint pc = 8u; uint ssy[16]; uint ssy_n = 0u; uint pbk[16]; uint pbk_n = 0u; uint pcnt[16]; uint pcnt_n = 0u;\n");
+        sp(&s, "  uint pc = 8u; uint crs[32]; uint crk[32]; uint crs_n = 0u;\n");
         sp(&s, "  bool exit_now = false;\n");
         sp(&s, "  for (uint guard = 0u; guard < 100000u; guard++) {\n  switch (pc) {\n");
         sp(&s, "%s", body.buf ? body.buf : "");
@@ -2369,7 +2374,121 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     return info;
 }
 
-static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, int stage, const ShaderKey *key) {
+// The instruction that last wrote register r before instruction i on the one path into it (no label in between,
+// up to 24 instructions back): its word, and its index in *at; 0 when none is found that way. Any instruction whose
+// destination field (bits 0-7) covers r counts as writing it (up to 4 registers: vector loads).
+static uint64_t writer_before(const uint8_t *code, const uint8_t *label, size_t i, int r, size_t *at) {
+    size_t after = i;  // the next instruction on the path
+    for (size_t j = i, k = 0; j-- > 0 && k < 24;) {
+        if (j % 4 == 0) continue;
+        k++;
+        if (label[after]) return 0;  // (another path joins there)
+        after = j;
+        uint64_t x = ((const uint64_t *)code)[j];
+        int d = (int)bits(x, 0, 8);
+        if (d == RZ || r < d || r > d + 3) continue;
+        *at = j;
+        return x;
+    }
+    return 0;
+}
+
+// The SSY / PBK / PCNT stack worked out ahead: its contents at every instruction, followed along each path from the
+// entry (branches, BRX tables, SYNC / BRK / CONT). As on the hardware the three push onto one stack: SYNC pops an SSY
+// entry, BRK unwinds to the nearest PBK entry and pops it, CONT unwinds to the nearest PCNT entry and keeps it. When
+// every path into an instruction brings the same stack, a push emits nothing and SYNC / BRK / CONT jump to a constant
+// pc (flow_to[i]): no per-invocation arrays (local memory) and no jumps the GPU compiler can't follow. false (paths
+// disagree, the stack runs out or overflows, or a flow instruction this doesn't model: CAL / RET / JMP ...): the stacks
+// stay at run time.
+typedef struct { uint32_t n; uint8_t kind[32]; uint32_t v[32]; } FlowStack;  // kind: 0 SSY, 1 PBK, 2 PCNT (no padding: memcmp)
+static bool flow_static(const uint64_t *code, size_t end, const size_t *brx, int nbrx, uint32_t *const *brx_to, const int *brx_nto,
+                        uint32_t *flow_to) {
+    FlowStack *st = calloc(end + 4, sizeof *st);
+    uint8_t *seen = calloc(end + 4, 1);
+    size_t *work = malloc((end + 4) * sizeof *work), nwork = 0;
+    bool ok = st && seen && work;
+    const char *why = "";
+    size_t from_ = 0;  // (the log)
+#define FLOW_GO(idx, stk) do { \
+        size_t gi_ = (idx); \
+        if (gi_ >= end || gi_ % 4 == 0) { ok = false; why = "target out of range"; break; } \
+        if (!seen[gi_]) { seen[gi_] = 1; st[gi_] = (stk); work[nwork++] = gi_; } \
+        else if (memcmp(&st[gi_], &(stk), sizeof(FlowStack))) { \
+            ok = false, why = "paths disagree"; \
+            if (getenv("LARECOMP_XLAT_FLOW_LOG")) { \
+                fprintf(stderr, "[xlat]   at pc %zx from pc %zx:", gi_ * 8, from_ * 8); \
+                for (uint32_t q_ = 0; q_ < st[gi_].n; q_++) fprintf(stderr, " %d:%x", st[gi_].kind[q_], st[gi_].v[q_]); \
+                fprintf(stderr, " /"); \
+                for (uint32_t q_ = 0; q_ < (stk).n; q_++) fprintf(stderr, " %d:%x", (stk).kind[q_], (stk).v[q_]); \
+                fprintf(stderr, "\n"); \
+            } \
+        } \
+    } while (0)
+    if (ok) { FlowStack e; memset(&e, 0, sizeof e); FLOW_GO(1, e); }
+    while (ok && nwork) {
+        size_t i = work[--nwork];
+        from_ = i;
+        FlowStack s = st[i];
+        uint64_t w = code[i], top12 = w & 0xfff0000000000000ull;
+        uint32_t pc = (uint32_t)(i * 8);
+        int pr = (int)bits(w, 16, 3);
+        bool prn = bits(w, 19, 1) != 0;
+        bool push = top12 == 0xe290000000000000ull || top12 == 0xe2a0000000000000ull || top12 == 0xe2b0000000000000ull;
+        if (push || top12 == 0xe270000000000000ull) pr = PT, prn = false;  // (no predicate: emit_insn)
+        bool always = pr == PT && !prn, never = pr == PT && prn;
+        size_t next = i + 1 + ((i + 1) % 4 == 0);
+        uint32_t target = norm_target((int64_t)pc + 8 + sbits(w, 20, 24));
+        if (never) { FLOW_GO(next, s); continue; }
+        if (top12 == 0xe300000000000000ull) {  // EXIT
+            if (!always) FLOW_GO(next, s);
+        } else if (top12 == 0xe240000000000000ull) {  // BRA
+            if (w & 0x20) { ok = false; why = "BRA CC"; break; }  // (not modelled)
+            FLOW_GO(target / 8, s);
+            if (!always) FLOW_GO(next, s);
+        } else if (push) {  // SSY / PBK / PCNT
+            if ((w & 0x20) || s.n >= 32) { ok = false; why = "push"; break; }
+            s.kind[s.n] = top12 == 0xe290000000000000ull ? 0 : top12 == 0xe2a0000000000000ull ? 1 : 2;
+            s.v[s.n++] = target;
+            FLOW_GO(next, s);
+        } else if ((w & 0xfff8000000000000ull) == 0xf0f8000000000000ull || top12 == 0xe340000000000000ull ||
+                   top12 == 0xe350000000000000ull) {  // SYNC / BRK / CONT
+            int k = top12 == 0xe340000000000000ull ? 1 : top12 == 0xe350000000000000ull ? 2 : 0;
+            int at = s.n - 1;
+            if (k) while (at >= 0 && s.kind[at] != k) at--;
+            if (at < 0 || s.kind[at] != k) { ok = false; why = "pop without its push"; break; }
+            uint32_t to = s.v[at];
+            if (flow_to[i] && flow_to[i] != to) { ok = false; why = "two targets"; break; }
+            flow_to[i] = to;
+            FlowStack t = s;
+            int keep = k == 2 ? at + 1 : at;  // (CONT keeps its entry)
+            while (t.n > keep) { t.n--; t.kind[t.n] = 0; t.v[t.n] = 0; }
+            FLOW_GO(to / 8, t);
+            if (!always) FLOW_GO(next, s);
+        } else if (top12 == 0xe250000000000000ull) {  // BRX: its table's targets
+            int b = 0;
+            while (b < nbrx && brx[b] != i) b++;
+            if (b == nbrx) { ok = false; why = "BRX"; break; }
+            for (int j = 0; j < brx_nto[b] && ok; j++) FLOW_GO(brx_to[b][j] / 8, s);
+            if (!always) FLOW_GO(next, s);
+        } else if ((w >> 60) == 0xe && (((w >> 56) & 0xf) == 2 || ((w >> 56) & 0xf) == 3) && top12 != 0xe330000000000000ull) {
+            ok = false, why = "flow instruction";  // (CAL, RET, JMP, PRET, PEXIT, ...)
+            if (getenv("LARECOMP_XLAT_FLOW_LOG")) fprintf(stderr, "[xlat] flow op %016llx\n", (unsigned long long)w);
+        } else {
+            FLOW_GO(next, s);
+        }
+    }
+#undef FLOW_GO
+    static int flog = -1;  // (LARECOMP_XLAT_FLOW_LOG=1, research: why a program's stacks stay at run time)
+    if (flog < 0) flog = getenv("LARECOMP_XLAT_FLOW_LOG") != NULL;
+    if (flog && !ok) fprintf(stderr, "[xlat] flow stacks at run time: %s\n", why);
+    free(st);
+    free(seen);
+    free(work);
+    return ok;
+}
+
+static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, const uint8_t *consts, size_t nconsts, int stage,
+                                  const ShaderKey *key) {
     ShaderInfo *info = calloc(1, sizeof *info);
     info->stage = stage;
     Ctx *c = calloc(1, sizeof *c);
@@ -2404,6 +2523,11 @@ static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, int stag
     uint8_t *label = calloc(end + 4, 1);
     label[1] = 1;
     bool any_branch = false;
+    size_t brx[64];
+    int nbrx = 0;
+    bool brx_any = false;
+    uint32_t *brx_to[64] = {0};  // (each BRX's targets, for flow_static)
+    int brx_nto[64] = {0};
     for (size_t i = 0; i < end; i++) {
         if (i % 4 == 0) continue;
         uint64_t w = ((const uint64_t *)code)[i];
@@ -2417,20 +2541,73 @@ static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, int stag
             if (t >= 0 && (size_t)(t / 8) < end) label[t / 8] = 1;
             any_branch = true;
         }
-        if ((w & 0xfff0000000000000ull) == 0xe250000000000000ull) {  // BRX: any instruction may be a target
+        if ((w & 0xfff0000000000000ull) == 0xe250000000000000ull) {  // BRX: its targets below
             any_branch = true;
-            memset(label, 1, end);
+            if (nbrx < 64) brx[nbrx++] = i;
+            else brx_any = true;
         }
         if ((w & 0xfff8000000000000ull) == 0xf0f8000000000000ull || (w & 0xfff0000000000000ull) == 0xe340000000000000ull ||
             (w & 0xfff0000000000000ull) == 0xe350000000000000ull)
             any_branch = true;
         (void)is_branch_target_op;
     }
+    // BRX (computed jump) targets. Without them every instruction needs a case label, which leaves the GPU's compiler
+    // a basic block per instruction (most of Z-A's shaders: switch statements, jump tables). The usual source is a jump
+    // table in the program's compiler constants (c1): "LDC Ra, c[0x1][Rx + off]" shortly before "BRX Ra, imm", on one
+    // path (no label in between). Every word of c1 is then taken as a possible offset - the index can't leave c1 (and
+    // reads past its end give 0) - so the targets are a superset of the real ones. Any other source: every instruction.
+    for (int pass = 0; pass < 2 && !brx_any; pass++) {  // (pass 1: again, with every table's targets marked)
+        for (int b = 0; b < nbrx && !brx_any; b++) {
+            size_t i = brx[b], ldc = 0;
+            int a = (int)bits(((const uint64_t *)code)[i], 8, 8);
+            uint64_t x = 0;
+            bool table = (x = writer_before(code, label, i, a, &ldc)) &&
+                         (x & 0xfff8000000000000ull) == 0xef90000000000000ull && bits(x, 36, 5) == 1 && bits(x, 48, 3) == 4 &&
+                         (int)bits(x, 0, 8) == a && bits(x, 16, 4) == PT;
+            if (!table || !consts || !nconsts) { brx_any = true; break; }
+            if (pass) continue;
+            // the table's length: the index clamped first - "IMNMX y, y, N (min)", "SHL x, y, 2", then the LDC - N + 1
+            // entries from its offset; else every word of c1 (more labels; the stacks then usually stay at run time)
+            uint32_t koff = (uint32_t)bits(x, 20, 16), nent = 0;
+            size_t at;
+            int xr = (int)bits(x, 8, 8);
+            uint64_t sh = writer_before(code, label, ldc, xr, &at), mn;
+            if (sh && (sh & 0xfef8000000000000ull) == 0x3848000000000000ull && (sh >> 56) == 0x38 && !bits(sh, 39, 1) &&
+                bits(sh, 20, 19) == 2 && (int)bits(sh, 0, 8) == xr &&
+                (mn = writer_before(code, label, at, (int)bits(sh, 8, 8), &at)) && (mn >> 56) == 0x38 &&
+                (mn & 0xfef8000000000000ull) == 0x3820000000000000ull && bits(mn, 39, 3) == PT && !bits(mn, 42, 1) &&
+                (int)bits(mn, 0, 8) == (int)bits(sh, 8, 8) && !bits(mn, 56, 1) && bits(mn, 20, 19) < 1024)
+                nent = (uint32_t)bits(mn, 20, 19) + 1;
+            uint32_t base = (uint32_t)(i * 8 + 8) + (uint32_t)sbits(((const uint64_t *)code)[i], 20, 24);
+            size_t o0 = nent ? koff : 0, o1 = nent ? koff + 4 * (size_t)nent : nconsts;
+            for (size_t o = o0; o + 4 <= o1 && o + 4 <= nconsts && o < 0x10000; o += 4) {
+                uint32_t v;
+                memcpy(&v, consts + o, 4);
+                uint32_t t = base + v;
+                if (((t >> 3) & 3u) == 0u) t += 8u;
+                if (!(t & 7u) && t / 8 < end) {
+                    label[t / 8] = 1;
+                    if (!(brx_nto[b] & 63)) brx_to[b] = realloc(brx_to[b], (size_t)(brx_nto[b] + 64) * sizeof *brx_to[b]);
+                    brx_to[b][brx_nto[b]++] = t;
+                } else if (nent) { brx_any = true; break; }  // (an exact table names only instructions)
+            }
+        }
+    }
+    if (brx_any) memset(label, 1, end);
+    uint32_t *flow_to = NULL;
+    static int flow_dyn = -1;  // (LARECOMP_XLAT_FLOW_DYN=1, research: the SSY / PBK / PCNT stacks at run time always)
+    if (flow_dyn < 0) flow_dyn = getenv("LARECOMP_XLAT_FLOW_DYN") != NULL;
+    if (any_branch && !brx_any && !flow_dyn) {
+        flow_to = calloc(end + 4, sizeof *flow_to);
+        if (!flow_static((const uint64_t *)code, end, brx, nbrx, brx_to, brx_nto, flow_to)) { free(flow_to); flow_to = NULL; }
+    }
+    for (int b = 0; b < nbrx; b++) free(brx_to[b]);
     // translate
     bool dbg = maxwell_dbg_code && blob == maxwell_dbg_code && stage == STAGE_FRAGMENT;
     static int annotate = -1;
     if (annotate < 0) annotate = getenv("LARECOMP_SAVE_MSL") != NULL;
     c->branchy = any_branch;
+    c->flow_to = flow_to;
     for (size_t i = 0; i < end && !c->fail; i++) {
         if (i % 4 == 0) continue;
         uint32_t pc = (uint32_t)(i * 8);
@@ -2446,6 +2623,8 @@ static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, int stag
         info->num_insts++;
     }
     free(label);
+    free(flow_to);
+    c->flow_to = NULL;
     if (c->fail) {
         // LARECOMP_DUMP_FAILED_SHADERS=1: the code to build/failed_<stage>_<n>.bin (nvdisasm -b SM50 -raw)
         static int ndump;
@@ -2560,7 +2739,7 @@ static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, int stag
     if (c->uses_local) sp(&s, "  uint lmem[%d] = {};\n", LMEM_WORDS);
     if (dbg) sp(&s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");
     if (any_branch) {
-        sp(&s, "  uint pc = 8u; uint ssy[16]; uint ssy_n = 0; uint pbk[16]; uint pbk_n = 0; uint pcnt[16]; uint pcnt_n = 0;\n");
+        sp(&s, "  uint pc = 8u; uint crs[32]; uint crk[32]; uint crs_n = 0u;\n");
         sp(&s, "  bool exit_now = false;\n");
         sp(&s, "  for (uint guard = 0; guard < 100000u; guard++) {\n  switch (pc) {\n");
         sp(&s, "%s", c->body.buf ? c->body.buf : "");
@@ -2648,14 +2827,22 @@ static size_t program_len(const uint8_t *blob, size_t max_size, int stage) {
 }
 
 ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, const ShaderKey *key) {
+    return maxwell_translate_consts(blob, max_size, NULL, 0, stage, key);
+}
+
+ShaderInfo *maxwell_translate_consts(const uint8_t *blob, size_t max_size, const uint8_t *consts, size_t nconsts, int stage,
+                                     const ShaderKey *key) {
+    if (nconsts > 0x10000) nconsts = 0x10000;
     static int off = -1;
     if (off < 0)
         off = getenv("LARECOMP_NO_XLAT_CACHE") || getenv("LARECOMP_NO_DISCARD") || getenv("LARECOMP_VK_EXACT_H2F") ||
-              getenv("LARECOMP_VK_PRECISE") || getenv("LARECOMP_SAVE_MSL") || getenv("LARECOMP_DUMP_FAILED_SHADERS");
-    if (off || maxwell_dbg_code || !key) return translate_impl(blob, max_size, stage, key);
+              getenv("LARECOMP_VK_PRECISE") || getenv("LARECOMP_SAVE_MSL") || getenv("LARECOMP_DUMP_FAILED_SHADERS") ||
+              getenv("LARECOMP_XLAT_FLOW_DYN");
+    if (off || maxwell_dbg_code || !key) return translate_impl(blob, max_size, consts, nconsts, stage, key);
     uint64_t h = xfnv(k_xlat_build, sizeof k_xlat_build, 0xcbf29ce484222325ull ^ (uint64_t)stage);
     h = xfnv(key, sizeof *key, h);
     h = xfnv(blob, program_len(blob, max_size, stage), h);
+    if (consts) h = xfnv(consts, nconsts, h ^ 0xc1);  // (BRX targets come from them)
     char path[64];
     snprintf(path, sizeof path, "cache/xlat/%016llx.bin", (unsigned long long)h);
     FILE *f = fopen(path, "rb");
@@ -2673,7 +2860,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         free(info);
         fclose(f);
     }
-    ShaderInfo *info = translate_impl(blob, max_size, stage, key);
+    ShaderInfo *info = translate_impl(blob, max_size, consts, nconsts, stage, key);
     if (info && info->msl) {
         static int made;
         if (!made) made = 1, mkdir("cache", 0755), mkdir("cache/xlat", 0755);

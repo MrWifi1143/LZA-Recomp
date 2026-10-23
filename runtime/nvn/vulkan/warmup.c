@@ -41,7 +41,7 @@
 #include "../maxwell/shader.h"
 #include "shaders.h"
 
-bool vk_warm_program(const uint8_t *vs, size_t vmax, const uint8_t *fs, size_t fmax, bool pipeline);  // exec.c
+bool vk_warm_program(const uint8_t *vs, size_t vmax, size_t vcn, const uint8_t *fs, size_t fmax, size_t fcn, bool pipeline);  // exec.c
 
 static uint64_t fnv(const uint8_t *p, size_t n, uint64_t h) {
     for (size_t i = 0; i < n; i++) h = (h ^ p[i]) * 0x100000001b3ull;
@@ -49,6 +49,19 @@ static uint64_t fnv(const uint8_t *p, size_t n, uint64_t h) {
 }
 static inline uint32_t rd32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 static inline uint64_t rd64(const uint8_t *p) { uint64_t v; memcpy(&v, p, 8); return v; }
+// A captured container's name: its hash with host pointers left out. The runtime keeps a few of its own pointers in a
+// loaded container (8-byte words above the guest range, below 2^47 - both Linux and Windows user space), different
+// every run, so hashing them saved the same container again on each start (one Z-A container 486 times: 9 GB).
+static uint64_t container_hash(const uint8_t *c, size_t n) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t v = rd64(c + i);
+        if (v >= GUEST_HI && v < (1ull << 47)) v = 0;
+        h = (h ^ v) * 0x100000001b3ull;
+    }
+    return fnv(c + i, n - i, h);
+}
 
 static bool disabled(void) {
     static int off = -1;
@@ -57,7 +70,8 @@ static bool disabled(void) {
 }
 
 // ---- stages and programs (deduplicated by content), shared by the start's warm-up and the captures
-typedef struct { uint8_t *code; uint32_t len, max; } WStage;  // code from its NVN header on; max = translate's max_size
+typedef struct { uint8_t *code; uint32_t len, max, cn; } WStage;  // code from its NVN header on; max = translate's max_size;
+                                                               // cn: compiler constants after it (code + max)
 typedef struct { int vs, fs; } WProg;                        // stage indices (fs -1: vertex-only)
 typedef struct {
     WStage *stages;
@@ -85,7 +99,7 @@ static void set_free(Set *s) {
     memset(s, 0, sizeof *s);
 }
 
-static int add_stage(Set *s, const uint8_t *code, uint32_t len, uint32_t max) {
+static int add_stage(Set *s, const uint8_t *code, uint32_t len, uint32_t max, uint32_t cn) {
     uint64_t h = fnv(code, len, 0xcbf29ce484222325ull ^ max);
     if (!h) h = 1;
     uint32_t k = (uint32_t)(h ^ (h >> 29)) & (s->stage_tab - 1);
@@ -101,7 +115,7 @@ static int add_stage(Set *s, const uint8_t *code, uint32_t len, uint32_t max) {
     WStage *st = &s->stages[s->nstages];
     st->code = malloc(len);
     memcpy(st->code, code, len);
-    st->len = len, st->max = max;
+    st->len = len, st->max = max, st->cn = cn;
     s->stage_hash[k] = h;
     s->stage_slot[k] = ++s->nstages;
     return s->nstages - 1;
@@ -141,11 +155,13 @@ static int record(Set *s, const uint8_t *c, uint32_t n, uint64_t base, uint32_t 
     if (sph_type != 1 && sph_type != 5) return -1;
     uint32_t const_off = rd32(c + ctrl + 0x700);
     uint32_t max = const_off ? const_off : 0x10000;  // (exec.c get_program: cmax)
-    uint32_t len = max;
+    uint32_t len = max, cn = const_off ? rd32(c + ctrl + 0x6FC) : 0;  // (the compiler constants follow the code)
+    if (cn > 0x10000 || code + max + cn > n) cn = 0;
+    len += cn;
     if (code + len > n) len = (uint32_t)(n - code);
     if (len < 0x40) return -1;
     *stage = (int)sph_type;
-    return add_stage(s, c + code, len, len < max ? len : max);
+    return add_stage(s, c + code, len, len < max ? len : max, cn);
 }
 
 // Every program of the container at c into s; returns how many were new
@@ -174,16 +190,16 @@ static bool container_at(const uint8_t *p, size_t avail, uint32_t *size) {
 static void compile(const WStage *v, const WStage *f) {
     static int pipes = -1;
     if (pipes < 0) pipes = getenv("LARECOMP_WARMUP_PIPELINES") && atoi(getenv("LARECOMP_WARMUP_PIPELINES")) != 0;
-    if (g_vk.dev) { vk_warm_program(v->code, v->max, f ? f->code : NULL, f ? f->max : 0, pipes); return; }
+    if (g_vk.dev) { vk_warm_program(v->code, v->max, v->cn, f ? f->code : NULL, f ? f->max : 0, f ? f->cn : 0, pipes); return; }
     ShaderKey vk = {0}, fk = {0};
     vk.glsl = fk.glsl = 1;  // (flip_y and depth_minus_one 0: window origin and depth mode 1 in both Legends games)
-    ShaderInfo *vi = maxwell_translate(v->code, v->max, STAGE_VERTEX, &vk);
+    ShaderInfo *vi = maxwell_translate_consts(v->code, v->max, v->cn ? v->code + v->max : NULL, v->cn, STAGE_VERTEX, &vk);
     if (vi && vi->msl) {
         size_t n;
         free(vk_glsl_to_spirv(vi->msl, STAGE_VERTEX, "vs", &n));
         if (f) {
             fk.vs_out_mask = vi->out_mask;
-            ShaderInfo *fi = maxwell_translate(f->code, f->max, STAGE_FRAGMENT, &fk);
+            ShaderInfo *fi = maxwell_translate_consts(f->code, f->max, f->cn ? f->code + f->max : NULL, f->cn, STAGE_FRAGMENT, &fk);
             if (fi && fi->msl) free(vk_glsl_to_spirv(fi->msl, STAGE_FRAGMENT, "fs", &n));
             if (fi) maxwell_free(fi);
         }
@@ -362,7 +378,7 @@ static void *cap_worker(void *arg) {
 // A container the game has loaded at base: saved for the next warm-up, its programs queued for the compile thread
 static void capture(uint64_t base, uint32_t size) {
     const uint8_t *c = (const uint8_t *)(uintptr_t)base;
-    uint64_t h = fnv(c, size, 0xcbf29ce484222325ull);
+    uint64_t h = container_hash(c, size);
     char path[96];
     mkdir("cache", 0755);
     mkdir("cache/warm", 0755);

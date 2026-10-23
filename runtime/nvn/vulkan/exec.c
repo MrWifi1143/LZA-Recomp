@@ -1402,6 +1402,7 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
 typedef struct {
     ShaderInfo *vi, *fi;
     uint64_t code[2], cmax[2];  // translation inputs (copied: translated on the translator thread)
+    uint64_t cst[2], ncst[2];   // (and the compiler constants: BRX jump tables)
     ShaderKey vkey, fkey;
     VkShaderModule vs, fs;
     VkBindingInfo binds[MAX_BIND];
@@ -1514,7 +1515,8 @@ static void translate_program(void *arg) {
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
     uint64_t t0 = SDL_GetTicksNS();
-    p->vi = maxwell_translate((const uint8_t *)(uintptr_t)p->code[0], p->cmax[0], STAGE_VERTEX, &p->vkey);
+    p->vi = maxwell_translate_consts((const uint8_t *)(uintptr_t)p->code[0], p->cmax[0], (const uint8_t *)(uintptr_t)p->cst[0], p->ncst[0],
+                                     STAGE_VERTEX, &p->vkey);
     // Experiment (research): LARECOMP_EXP_VS_EARLY=<vertex program address, hex>: that program's vertex shader returns at
     // the start of main (every output at its default), to tell the cost of running the shader from the rest of its draw.
     // (LARECOMP_EXP_VS_EARLY=<address>:<pc, hex>: it returns just before the instruction at that pc instead)
@@ -1611,7 +1613,8 @@ static void translate_program(void *arg) {
         p->fi->msl = strdup("#version 460\nvoid main() {}\n");
     } else if (p->vi->msl) {
         p->fkey.vs_out_mask = p->vi->out_mask;
-        p->fi = maxwell_translate((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], STAGE_FRAGMENT, &p->fkey);
+        p->fi = maxwell_translate_consts((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], (const uint8_t *)(uintptr_t)p->cst[1],
+                                         p->ncst[1], STAGE_FRAGMENT, &p->fkey);
     }
     atomic_fetch_add(&stat_translate_ns, SDL_GetTicksNS() - t0);
     if (!p->vi->msl) {
@@ -1750,6 +1753,8 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     for (int i = 0; i < 2; i++) {
         p->code[i] = np->stages[i].code_addr;
         p->cmax[i] = np->stages[i].const_offset ? np->stages[i].const_offset : 0x10000;
+        if (np->stages[i].const_offset && np->stages[i].const_size <= 0x10000)
+            p->cst[i] = np->stages[i].code_addr + np->stages[i].const_offset, p->ncst[i] = np->stages[i].const_size;
     }
     p->vkey = *vkey;
     p->fkey = *fkey;
@@ -2143,10 +2148,12 @@ static void build_pipeline(void *arg) {
 // state and released, for the driver's shader cache. That only partly helps the draws' own pipelines later (NVIDIA, fresh
 // shader cache, PLA walk test: pipeline creation 10.3 -> 6.0 s) for a long wait (8427 programs: 98 s on 23 threads
 // instead of 17), so the warm-up asks for it only with LARECOMP_WARMUP_PIPELINES=1. false: failed.
-bool vk_warm_program(const uint8_t *vs, size_t vmax, const uint8_t *fs, size_t fmax, bool pipeline) {
+bool vk_warm_program(const uint8_t *vs, size_t vmax, size_t vcn, const uint8_t *fs, size_t fmax, size_t fcn, bool pipeline) {
     Prog *p = calloc(1, sizeof *p);
     p->code[0] = (uint64_t)(uintptr_t)vs, p->cmax[0] = vmax;
     p->code[1] = (uint64_t)(uintptr_t)fs, p->cmax[1] = fs ? fmax : 0;
+    if (vcn) p->cst[0] = (uint64_t)(uintptr_t)(vs + vmax), p->ncst[0] = vcn;
+    if (fs && fcn) p->cst[1] = (uint64_t)(uintptr_t)(fs + fmax), p->ncst[1] = fcn;
     p->vkey.glsl = p->fkey.glsl = 1;  // (flip_y / depth_minus_one 0: window origin and depth mode 1 in both Legends games)
     translate_program(p);  // (and compile_program)
     bool ok = atomic_load(&p->state) == 1;
@@ -3291,7 +3298,10 @@ static CsProg *compute_program(NvnProgram *np) {
     maxwell_gmem_size = HEAP_MAX;
     ShaderKey k = {0};
     k.glsl = 1;
-    cp->si = maxwell_translate((const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, STAGE_COMPUTE, &k);
+    bool kc = ss->const_offset && ss->const_size <= 0x10000;
+    cp->si = maxwell_translate_consts((const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000,
+                                      kc ? (const uint8_t *)(uintptr_t)(ss->code_addr + ss->const_offset) : NULL, kc ? ss->const_size : 0,
+                                      STAGE_COMPUTE, &k);
     cp->p.vi = cp->si;
     if (!cp->si->msl) {
         LOG("[compute] translate failed: %s (code %llx)\n", cp->si->error, (unsigned long long)ss->code_addr);
