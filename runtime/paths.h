@@ -22,7 +22,7 @@ extern "C" {
 
 #define RT_BUNDLE_ID "com.zarecomp"             // (data folder on macOS)
 #define RT_APP_NAME "PL:Z-A Recomp"           // window title, messages, the launcher
-#define RT_APP_VERSION "0.0.1"                // the release (Makefile `dist` names the zip after it)
+#define RT_APP_VERSION "0.2.0-alpha"             // the release (the GitHub release: LegendsZA-v<version>)
 
 void rt_paths_init(void);         // first thing in main(), after plat_init
 const char *rt_data_root(void);   // absolute
