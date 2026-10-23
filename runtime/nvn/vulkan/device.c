@@ -902,6 +902,50 @@ void backend_present(NvnTexture *t) {
                     rename(path, done);
                 }
             }
+            snprintf(path, sizeof path, "%s/vscan", dir);  // (research: "<u32>" - the 4-byte-aligned words equal to it; the
+            if (access(path, F_OK) == 0) {               // next "<u32>" keeps those of them equal to that; "reset" starts
+                FILE *f = fopen(path, "r");              // over. <dir>/vscan.out: how many, and up to 400 of them)
+                char line[64] = "";
+                if (f) { if (!fgets(line, sizeof line, f)) line[0] = 0; fclose(f); }
+                remove(path);
+                static uint64_t *cand;
+                static size_t ncand, capcand;
+                static bool have;
+                if (!strncmp(line, "reset", 5)) have = false, ncand = 0;
+                else {
+                    uint32_t v = (uint32_t)strtoul(line, NULL, 0);
+                    if (!have) {
+                        extern int kernel_physmem_ranges(uint64_t *lo, uint64_t *hi, int max);
+                        extern uint64_t kernel_heap_size(void), g_stdheap_used;
+                        static uint64_t lo[520], hi[520];
+                        int n = kernel_physmem_ranges(lo + 1, hi + 1, 519) + 1;
+                        uint64_t top = g_stdheap_used ? STDHEAP_BASE + g_stdheap_used : 0, heap = HEAP_BASE + kernel_heap_size();
+                        lo[0] = HEAP_BASE, hi[0] = top > heap ? top : heap;
+                        ncand = 0;
+                        for (int r = 0; r < n; r++)
+                            for (const uint32_t *q = (const uint32_t *)(uintptr_t)lo[r], *e = (const uint32_t *)(uintptr_t)hi[r]; q < e; q++)
+                                if (*q == v) {
+                                    if (ncand == capcand) capcand = capcand ? capcand * 2 : 1 << 20, cand = realloc(cand, capcand * 8);
+                                    cand[ncand++] = (uint64_t)(uintptr_t)q;
+                                }
+                        have = true;
+                    } else {
+                        size_t k = 0;
+                        for (size_t i = 0; i < ncand; i++) if (*(const uint32_t *)(uintptr_t)cand[i] == v) cand[k++] = cand[i];
+                        ncand = k;
+                    }
+                }
+                snprintf(path, sizeof path, "%s/vscan.tmp", dir);
+                FILE *o = fopen(path, "w");
+                if (o) {
+                    fprintf(o, "%zu\n", ncand);
+                    for (size_t i = 0; i < ncand && i < 400; i++) fprintf(o, "%llx\n", (unsigned long long)cand[i]);
+                    fclose(o);
+                    char done[512];
+                    snprintf(done, sizeof done, "%s/vscan.out", dir);
+                    rename(path, done);
+                }
+            }
             snprintf(path, sizeof path, "%s/dump", dir);  // (research: "<addr> <len>" -> <dir>/dump.bin)
             if (access(path, F_OK) == 0) {
                 FILE *f = fopen(path, "r");

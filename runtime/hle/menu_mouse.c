@@ -33,6 +33,7 @@
 #include "../hle.h"
 
 void rt_register_fnhook_at(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
+void rt_call_original(Cpu *c, uint64_t addr);
 uint64_t renderer_game_frame(void);
 // runtime/hle/input.c: the free pointer (1920 x 1080), how often it has moved, the clicks and wheel notches not yet taken
 bool input_menu_pointer(int32_t *x, int32_t *y, uint32_t *moves, int *clicks, int *rclicks, int *wheel);
@@ -113,7 +114,7 @@ static const Pane *root_of(const Pane *p) {  // (its layout's RootPane: a screen
 
 // ------------------------------------------------------------------ the menu on screen
 
-typedef struct { const Pane *anchor, *part; float ax, ay, cx, cy, hw, hh; bool listed; } Item;  // anchor, the part: centre,
+typedef struct { const Pane *anchor, *part; float ax, ay, cx, cy, hw, hh; bool listed; int idx; } Item;  // anchor, the part: centre,
                                                                                                // half size; in a scroll list
 #define NITEM 256
 static Item g_items[NITEM];
@@ -128,6 +129,68 @@ static bool is_cursor(const Pane *p) {  // (Z-A: the part "L_cursor_00" / "L_cur
     if (!strncmp(p->name, "L_cursor", 8)) return strncmp(p->name, "L_cursor_l_", 11) && strncmp(p->name, "L_cursor_r_", 11);
     const Pane *up = parent_of(p);
     return !strcmp(p->name, "P_cursor_00") && up && !strcmp(up->name, "N_select_00");
+}
+
+// a button part's number, as the menu counts its buttons: "L_menu_button_03" -> 3 ("..._Copy2": a list's pooled row: -1)
+static int name_index(const char *nm) {
+    size_t n = strnlen(nm, 24);
+    if (n < 3 || nm[n - 3] != '_' || nm[n - 2] < '0' || nm[n - 2] > '9' || nm[n - 1] < '0' || nm[n - 1] > '9') return -1;
+    return (nm[n - 2] - '0') * 10 + (nm[n - 1] - '0');
+}
+
+// Hover selects at once: most of the games' menus move their cursor with a navigator (one class in both games; its
+// core: Z-A 0x7000fe5720, Arceus 0x700272b6d0 - (nav, &direction, &status) -> the new cell; nav +8 the index, +0xc /
+// +0x10 columns / rows, +0x1c column-major). A press towards the hovered button is still made - the menu's own input
+// path, animations and sounds - and the core's answer is the hovered button instead of the next cell: by its part's
+// number when the parts are numbered as the navigator counts (the selected one's number is its index), else by the
+// rows and columns between the two on screen (a list whose parts are reused as it scrolls).
+static struct { _Atomic int idx; uint64_t frame; int dcol, drow, from; bool grid; } g_jump = {-1, 0, 0, 0, -1, false};
+static int nav_move_hook(Cpu *c, uint64_t addr) {  // (the navigator's core: (nav, &direction, &status) -> x0 the new
+    uint64_t nav = c->x[0];                          // cell, low / high 32 bits as the flag at +0x1c says)
+    const int32_t *n = (const int32_t *)(uintptr_t)nav;
+    int want = atomic_load(&g_jump.idx), from = n[2];
+    rt_call_original(c, addr);
+    uint64_t f = renderer_game_frame();
+    static int log = -1;
+    if (log < 0) log = getenv("LARECOMP_MENU_MOUSE_LOG") != NULL;
+    int cols = n[3], rows = n[4];
+    if (want < 0 || f - g_jump.frame > 30 || cols <= 0 || rows <= 0) return 1;
+    uint32_t lo = (uint32_t)c->x[0], hi = (uint32_t)(c->x[0] >> 32);
+    int got = n[7] ? (int)(rows * lo + hi) : (int)(cols * hi + lo);
+    if (got == from) return 1;  // (not a move: a query, or the menu's edge)
+    bool by_name = !g_jump.grid && g_jump.from == from;
+    if (!by_name) {
+        int col = n[7] ? from / rows : from % cols, row = n[7] ? from % rows : from / cols;
+        col += g_jump.dcol, row += g_jump.drow;
+        if (col < 0 || row < 0 || col >= cols || row >= rows) return 1;
+        want = n[7] ? col * rows + row : row * cols + col;
+    } else if (want >= cols * rows) return 1;
+    if (log) LOG("[menumouse] nav %llx %d -> %d, made %d (grid %dx%d)\n", (unsigned long long)nav, from, got, want, cols, rows);
+    lo = n[7] ? (uint32_t)(want / rows) : (uint32_t)(want % cols);
+    hi = n[7] ? (uint32_t)(want % rows) : (uint32_t)(want / cols);
+    c->x[0] = (uint64_t)hi << 32 | lo;
+    return 1;  // (the jump stays for the frame: a menu may ask the core twice for one press)
+}
+
+// Scroll lists (the Settings screens) move their cursor with their own "select cell" (Z-A 0x7000fc2630, Arceus
+// 0x7002719878: (list, a, b), the current a / b in the list at the configured offsets): a one-step move asked while a
+// hover jump waits becomes a move of the whole distance (the rows between the selected and hovered rows on screen).
+static uint64_t g_list_fn;
+static uint32_t g_list_off[2];
+static int list_select_hook(Cpu *c, uint64_t addr) {
+    int want = atomic_load(&g_jump.idx);
+    if (want >= 0 && renderer_game_frame() - g_jump.frame <= 30) {
+        const int32_t *l = (const int32_t *)(uintptr_t)c->x[0];
+        int ca = l[g_list_off[0] / 4], cb = l[g_list_off[1] / 4], a = (int32_t)c->x[1], b = (int32_t)c->x[2];
+        int da = a - ca, db = b - cb, steps = abs(g_jump.drow) >= abs(g_jump.dcol) ? abs(g_jump.drow) : abs(g_jump.dcol);
+        if (abs(da) + abs(db) == 1 && steps > 1) {
+            c->x[1] = (uint64_t)(uint32_t)(ca + da * steps), c->x[2] = (uint64_t)(uint32_t)(cb + db * steps);
+            atomic_store(&g_jump.idx, -1);
+            if (getenv("LARECOMP_MENU_MOUSE_LOG")) LOG("[menumouse] list %d,%d -> %d,%d made %d,%d\n", ca, cb, a, b, ca + da * steps, cb + db * steps);
+        }
+    }
+    (void)addr;
+    return 0;
 }
 
 static void scan_menu(void) {
@@ -173,6 +236,7 @@ static void scan_menu(void) {
         for (int k = 0; part && k < 6 && (part->size[0] <= 0 || part->size[1] <= 0); k++) part = parent_of(part);
         if (!part || part->size[0] <= 0 || part->size[1] <= 0) continue;
         it->part = part;
+        it->idx = name_index(part->name);
         pane_rect(part, &it->cx, &it->cy, &it->hw, &it->hh);
         bool clipped = false;  // (a scrolling list's rows outside it)
         it->listed = false;
@@ -351,8 +415,16 @@ static float g_target_y;
 // between the cursor and it, one press each once the cursor has settled - then the press is for the cursor's row.
 static struct { bool on, a, landed; int left; float x, y, pitch; uint32_t moves; } g_walk;  // (y: the pointer's, the rows
 // counted from; landed: walked to the row under a pointer that hasn't moved since - the list may have scrolled under it)
+static bool g_have_nav;  // (menu_mouse_configure: the navigator's move is hooked - same-family buttons are jumped to)
+static bool same_family(int i, int j) {  // ("L_icon_box_03" and "L_icon_box_17": numbered parts of one menu)
+    const char *a = g_items[i].part->name, *b = g_items[j].part->name;
+    size_t la = strnlen(a, 24), lb = strnlen(b, 24);
+    return g_items[i].idx >= 0 && g_items[j].idx >= 0 && la == lb && !strncmp(a, b, la - 2);
+}
 static bool walk_to(int sel, int t, bool a, float x, float y) {  // (false: not a list's rows - the button is the target)
     if (sel < 0 || t < 0 || !g_items[sel].listed || !g_items[t].listed) return false;
+    if (g_have_nav && same_family(sel, t)) return false;  // (a numbered grid - Boxes: its navigator jumps)
+    if (g_list_fn) return false;  // (a scroll list: its select cell jumps)
     float pitch = 1e9f;
     for (int i = 0; i < g_nitems; i++)
         for (int j = 0; j < g_nitems; j++) {
@@ -512,6 +584,27 @@ uint64_t menu_mouse_buttons(Cpu *c) {
     if (still < 4) return out = 0;  // (a press while the cursor slides can be dropped)
     if (++g_steps > 40) { g_target = NULL; return out = 0; }
     float dx = g_items[t].ax - g_items[sel].ax, dy = g_items[t].ay - g_items[sel].ay;
+    // (the same part family as the selected one - one menu: its navigator jumps there; else a step towards it)
+    if (same_family(t, sel) || (g_items[t].part->size[0] == g_items[sel].part->size[0] && g_items[t].part->size[1] == g_items[sel].part->size[1])) {
+        g_jump.grid = !same_family(t, sel), g_jump.from = g_items[sel].idx;
+        // (same-sized buttons: a grid - the steps in cells, by their pitch)
+        float pw = 2 * g_items[t].hw, ph = 2 * g_items[t].hh;
+        for (int i = 0; i < g_nitems; i++) {  // (the pitch: the nearest neighbours' distance)
+            if (g_items[i].part->size[0] != g_items[t].part->size[0]) continue;
+            float ex = fabsf(g_items[i].ax - g_items[sel].ax), ey = fabsf(g_items[i].ay - g_items[sel].ay);
+            if (ey < 4 && ex > 4 && ex < pw * 1.5f) pw = ex;
+            if (ex < 4 && ey > 4 && ey < ph * 1.5f) ph = ey;
+        }
+        g_jump.dcol = (int)lroundf(dx / pw), g_jump.drow = (int)lroundf(-dy / ph);
+        atomic_store(&g_jump.idx, g_jump.grid ? 0 : g_items[t].idx), g_jump.frame = f;
+        // (one press: the navigator lands on it - a list may scroll under the pointer after, so the walk ends here; a
+        // click is done on the row the cursor settles on)
+        if (g_have_nav) {
+            if (g_target_a) g_walk.on = true, g_walk.a = true, g_walk.left = 0, g_walk.x = g_click_x, g_walk.y = g_click_y,
+                            g_walk.pitch = 2 * g_items[t].hh;
+            g_target = NULL;
+        }
+    }
     press(fabsf(dy) >= fabsf(dx) ? (dy > 0 ? BTN_UP : BTN_DOWN) : (dx > 0 ? BTN_RIGHT : BTN_LEFT), f);
     return out = g_press_bit;
 }
@@ -567,10 +660,14 @@ void menu_mouse_present(void) {
 
 uint64_t g_field_camera_frame;  // the last frame the player's camera turned (the game's camera hook): not in a menu
 
-// calc_mtx: the game's (pane, draw info) function that works out a pane's global matrix
-void menu_mouse_configure(uint64_t calc_mtx) {
+// calc_mtx: the game's (pane, draw info) function that works out a pane's global matrix; nav_move: its menu cursor
+// navigator's core (0: none - the cursor is walked there); list_fn, list_a, list_b: its scroll lists' select cell and
+// where a list keeps the two values it takes (0: none)
+void menu_mouse_configure(uint64_t calc_mtx, uint64_t nav_move, uint64_t list_fn, uint32_t list_a, uint32_t list_b) {
     const char *e = getenv("LARECOMP_MENU_MOUSE");
     g_on = !(e && atoi(e) == 0);
     g_configured = true;
     rt_register_fnhook_at(calc_mtx, pane_calc_hook);
+    if (nav_move && g_on) g_have_nav = true, rt_register_fnhook_at(nav_move, nav_move_hook);
+    if (list_fn && g_on) g_list_fn = list_fn, g_list_off[0] = list_a, g_list_off[1] = list_b, rt_register_fnhook_at(list_fn, list_select_hook);
 }

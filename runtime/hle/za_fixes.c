@@ -421,7 +421,10 @@ void za_fixes_configure(const char *exefs) {
     g_mouse_look = !getenv("LARECOMP_ZA_MOUSE_LOOK") || atoi(getenv("LARECOMP_ZA_MOUSE_LOOK")) != 0;
     rt_register_fnhook_at(ZA_CAM_ANGLES, mouse_look_hook);
     { extern void za_options_configure(void); za_options_configure(); }
-    { extern void menu_mouse_configure(uint64_t calc_mtx); menu_mouse_configure(0x700264424cull); }  // (ui2d pane matrices)
+    {   // (runtime/hle/menu_mouse.c: ui2d pane matrices, the menu navigator's core, the scroll lists' select cell)
+        extern void menu_mouse_configure(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t);
+        menu_mouse_configure(0x700264424cull, 0x7000fe5720ull, 0x7000fc2630ull, 0x690, 0x694);
+    }
     { extern void za_qstats_configure(void); za_qstats_configure(); }
     { extern void za_passq_configure(void); za_passq_configure(); }
     { extern void za_jobq_configure(void); za_jobq_configure(); }
