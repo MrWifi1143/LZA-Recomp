@@ -124,6 +124,8 @@ static void teardown(void) {
     LOG("[reboot] game torn down in %llums (%d reset hooks)\n", (unsigned long long)((plat_now_ns() - t0) / 1000000), n);
 }
 
+static bool g_oodle_server;  // --oodle-server: runtime/oodle_server.c
+
 static void boot(const char *root) {
     char exefs[1024], romfs[1024], npdm_path[1024];
     snprintf(exefs, sizeof exefs, "%s/exefs", root);
@@ -134,6 +136,7 @@ static void boot(const char *root) {
     char why[512];
     if (!gamelib_load(root, why, sizeof why)) FATAL("%s\n", why);
     loader_load(exefs);
+    if (g_oodle_server) { extern void oodle_server_install(const char *exefs); oodle_server_install(exefs); }
     { extern void libcfast_configure(void); libcfast_configure(); }  // (runtime/hle/libcfast.c)
     { extern void settings_load(void); settings_load(); }
     kernel_init();
@@ -174,6 +177,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--oodle-server")) {  // (its replies use the real stdout, which plat_init points at the log)
             extern int g_oodle_out_fd;
+            g_oodle_server = true;
             g_oodle_out_fd = dup(1);
             setenv("LARECOMP_LOG_STDERR", "1", 1);  // (and the player's lasrecomp.log is left alone)
         }
@@ -193,11 +197,10 @@ int main(int argc, char **argv) {
         else if (argv[i][0] != '-') root = arg_root;
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
-    for (int i = 1; i < argc; i++)
-        if (!strcmp(argv[i], "--oodle-server")) {  // (Legends Studio's decoder: runtime/oodle_server.c; never returns)
-            extern void oodle_server_run(const char *root);
-            oodle_server_run(root);
-        }
+    if (g_oodle_server) {  // (Legends Studio's decoder, runtime/oodle_server.c: no window; ends when its stdin does)
+        boot(root);
+        for (;;) SDL_Delay(1000);
+    }
     {
         extern void plugins_load(void);
         plugins_load();  // (runtime/plugin.h: before the Vulkan backend, whose instance / device they may extend)
