@@ -2477,8 +2477,10 @@ static VkDescriptorBufferInfo gmem_info(void) {
 // data for some draws: a 16-byte stream here, a few more there). Vertex or index data inside one of them is read in place when
 // the GPU runs, as the game expects, and is never copied when the draw is recorded (the copy would hold what the GPU has not
 // written yet). Sorted, merged intervals; the render thread is the only user.
-static struct { uint64_t a, e; } gpuw[512];
-static int ngpuw;
+// Grows as needed: a fixed 512 dropped new ranges once full, and the VRAM vertex cache then kept stale copies of
+// GPU-written vertices (Z-A: exploding characters some 10 minutes into a session).
+static struct GpuwRange { uint64_t a, e; } *gpuw;
+static int ngpuw, capgpuw;
 static void gpuw_note(uint64_t a, uint64_t n) {
     uint64_t e = a + (n ? n : 16);
     int i = 0, j;
@@ -2493,7 +2495,10 @@ static void gpuw_note(uint64_t a, uint64_t n) {
         memmove(&gpuw[i + 1], &gpuw[j], (size_t)(ngpuw - j) * sizeof gpuw[0]);
         ngpuw -= j - i - 1;
     } else {
-        if (ngpuw == 512) { if (gpuw[ngpuw - 1].e < e) gpuw[ngpuw - 1].e = e; return; }  // (full: widen the last, stays safe)
+        if (ngpuw == capgpuw) {
+            capgpuw = capgpuw ? capgpuw * 2 : 1024;
+            gpuw = realloc(gpuw, (size_t)capgpuw * sizeof *gpuw);
+        }
         memmove(&gpuw[i + 1], &gpuw[i], (size_t)(ngpuw - i) * sizeof gpuw[0]);
         gpuw[i].a = a; gpuw[i].e = e;
         ngpuw++;
