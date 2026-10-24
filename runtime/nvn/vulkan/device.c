@@ -896,18 +896,27 @@ void backend_present(NvnTexture *t) {
                     want[m] = 0, want[255] = (char)m;  // (its length: it may hold zeros)
                 }
                 extern int kernel_physmem_ranges(uint64_t *lo, uint64_t *hi, int max);
+                extern int kernel_data_regions(uint64_t *addr, uint64_t *size, int max);
                 extern uint64_t kernel_heap_size(void), g_stdheap_used;
-                static uint64_t lo[520], hi[520];
+                static uint64_t lo[1100], hi[1100];
                 int n = kernel_physmem_ranges(lo + 1, hi + 1, 519) + 1;
                 uint64_t top = g_stdheap_used ? STDHEAP_BASE + g_stdheap_used : 0, heap = HEAP_BASE + kernel_heap_size();
                 lo[0] = HEAP_BASE, hi[0] = top > heap ? top : heap;
+                {   // (and the game's own writable data below the heap: module .data / .bss, where its globals are)
+                    uint64_t ra[512], rs[512];
+                    int m = kernel_data_regions(ra, rs, 512);
+                    for (int i = 0; i < m && n < 1100; i++)
+                        if (ra[i] < HEAP_BASE) lo[n] = ra[i], hi[n] = ra[i] + rs[i], n++;
+                }
                 snprintf(path, sizeof path, "%s/find.tmp", dir);  // (renamed when complete)
                 FILE *o = fopen(path, "w");
                 size_t k = want[255] ? (size_t)(uint8_t)want[255] : strlen(want);
                 int found = 0;
+                bool aligned = want[255] == 8;  // (an 8-byte value, a pointer: only 8-aligned places, and quicker)
                 for (int r = 0; o && k && r < n && found < 256; r++)
-                    for (const uint8_t *p = (const uint8_t *)(uintptr_t)lo[r], *e = (const uint8_t *)(uintptr_t)hi[r]; p + k <= e && found < 256; p++)
-                        if (*p == (uint8_t)want[0] && !memcmp(p, want, k)) fprintf(o, "%llx\n", (unsigned long long)(uintptr_t)p), found++;
+                    for (const uint8_t *p = (const uint8_t *)(uintptr_t)lo[r], *e = (const uint8_t *)(uintptr_t)hi[r]; p + k <= e && found < 256; p += aligned ? 8 : 1)
+                        if (aligned ? *(const uint64_t *)p == *(const uint64_t *)want : *p == (uint8_t)want[0] && !memcmp(p, want, k))
+                            fprintf(o, "%llx\n", (unsigned long long)(uintptr_t)p), found++;
                 if (o) {
                     fclose(o);
                     char done[512];
@@ -958,6 +967,68 @@ void backend_present(NvnTexture *t) {
                     snprintf(done, sizeof done, "%s/vscan.out", dir);
                     rename(path, done);
                 }
+            }
+            snprintf(path, sizeof path, "%s/fscan", dir);  // (research: positions. "<x> <y> <z> <r>": the 4-byte-aligned float
+            if (access(path, F_OK) == 0) {                // triplets within r of that point; then "moved" keeps those that
+                FILE *f = fopen(path, "r");               // changed since the last fscan, "still" those that didn't.
+                char line[128] = "";                      // <dir>/fscan.out: how many, then up to 400 "addr x y z")
+                if (f) { if (!fgets(line, sizeof line, f)) line[0] = 0; fclose(f); }
+                remove(path);
+                static uint64_t *cand;
+                static float (*was)[3];
+                static size_t ncand, capcand;
+                float x, y, z, r;
+                bool moved = !strncmp(line, "moved", 5), still = !strncmp(line, "still", 5);
+                if (!moved && !still && sscanf(line, "%f %f %f %f", &x, &y, &z, &r) == 4) {
+                    extern int kernel_physmem_ranges(uint64_t *lo, uint64_t *hi, int max);
+                    extern uint64_t kernel_heap_size(void), g_stdheap_used;
+                    static uint64_t lo[520], hi[520];
+                    int n = kernel_physmem_ranges(lo + 1, hi + 1, 519) + 1;
+                    uint64_t top = g_stdheap_used ? STDHEAP_BASE + g_stdheap_used : 0, heap = HEAP_BASE + kernel_heap_size();
+                    lo[0] = HEAP_BASE, hi[0] = top > heap ? top : heap;
+                    ncand = 0;
+                    for (int k = 0; k < n; k++)
+                        for (const float *q = (const float *)(uintptr_t)lo[k], *e = (const float *)(uintptr_t)hi[k] - 3; q < e; q++) {
+                            float dx = q[0] - x, dy = q[1] - y, dz = q[2] - z;
+                            if (!(dx * dx + dy * dy + dz * dz <= r * r)) continue;  // (NaNs fail too)
+                            if (q[0] == 0 && q[1] == 0 && q[2] == 0) continue;
+                            if (ncand == capcand) capcand = capcand ? capcand * 2 : 1 << 16, cand = realloc(cand, capcand * 8), was = realloc(was, capcand * 12);
+                            cand[ncand] = (uint64_t)(uintptr_t)q, memcpy(was[ncand], q, 12), ncand++;
+                        }
+                } else if (moved || still) {
+                    size_t k = 0;
+                    for (size_t i = 0; i < ncand; i++) {
+                        const float *q = (const float *)(uintptr_t)cand[i];
+                        float d = fabsf(q[0] - was[i][0]) + fabsf(q[1] - was[i][1]) + fabsf(q[2] - was[i][2]);
+                        if (moved ? d > 0.3f && d < 100 : d == 0) cand[k] = cand[i], memcpy(was[k], q, 12), k++;
+                    }
+                    ncand = k;
+                }
+                snprintf(path, sizeof path, "%s/fscan.tmp", dir);
+                FILE *o = fopen(path, "w");
+                if (o) {
+                    fprintf(o, "%zu\n", ncand);
+                    for (size_t i = 0; i < ncand && i < 400; i++) fprintf(o, "%llx %.3f %.3f %.3f\n", (unsigned long long)cand[i], was[i][0], was[i][1], was[i][2]);
+                    fclose(o);
+                    char done[512];
+                    snprintf(done, sizeof done, "%s/fscan.out", dir);
+                    rename(path, done);
+                }
+            }
+            {   // (research: "<addr> <x> <y> <z> [presents]" in <dir>/poke - those floats written there each present)
+                static uint64_t pa;
+                static float pv[3];
+                static long pleft;
+                snprintf(path, sizeof path, "%s/poke", dir);
+                if (access(path, F_OK) == 0) {
+                    FILE *f = fopen(path, "r");
+                    unsigned long long a = 0;
+                    pleft = 1;
+                    if (f) { if (fscanf(f, "%llx %f %f %f %ld", &a, &pv[0], &pv[1], &pv[2], &pleft) < 4) a = 0; fclose(f); }
+                    remove(path);
+                    pa = a >= HEAP_BASE && a < HEAP_BASE + HEAP_MAX ? a : 0;
+                }
+                if (pa && pleft-- > 0) memcpy((void *)(uintptr_t)pa, pv, 12);
             }
             snprintf(path, sizeof path, "%s/dump", dir);  // (research: "<addr> <len>" -> <dir>/dump.bin)
             if (access(path, F_OK) == 0) {

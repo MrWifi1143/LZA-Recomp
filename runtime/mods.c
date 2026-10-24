@@ -79,7 +79,13 @@ static const char *romfs_of(const char *name) {
     return ok ? dir : NULL;
 }
 
-const char *mod_romfs_dir(void) { return romfs_of(g_settings.mod); }
+// LARECOMP_MOD=<name> (Legends Studio's "Play"): that mod for this run, in place of the settings' (which stay as they were)
+static const char *active_mod(void) {
+    const char *e = getenv("LARECOMP_MOD");
+    return e ? e : g_settings.mod;
+}
+
+const char *mod_romfs_dir(void) { return romfs_of(active_mod()); }
 
 bool mod_romfs_override(const char *path, char *out, size_t cap) {
     const char *root = mod_romfs_dir();
@@ -110,7 +116,7 @@ const char *mod_language(const char *name) {
 }
 
 const char *game_language(void) {
-    const char *m = mod_language(g_settings.mod);
+    const char *m = mod_language(active_mod());
     if (m) return m;
     return g_settings.game_lang[0] ? g_settings.game_lang : "en-US";
 }
