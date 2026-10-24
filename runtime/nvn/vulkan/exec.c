@@ -8,9 +8,11 @@
 #include <stdarg.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #include "../../kernel.h"
 #include "shaders.h"
@@ -3394,6 +3396,8 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
 
 // ================================================================== draws
 static void debug_draw(Prog *pr, CmdRec *r, bool indexed);
+static void meshlog(Prog *pr, CmdRec *r, bool indexed);
+static void skinprobe(Prog *pr, CmdRec *r);
 
 // Quads / fans / polygons as a 32-bit triangle index list.
 static uint32_t *expand_indices(uint32_t mode, uint32_t count, const void *indices, int itype, uint32_t first, uint32_t *out_count) {
@@ -3592,6 +3596,8 @@ static void draw_(CmdRec *r, bool indexed) {
                 (unsigned long long)st.program->stages[1].code_addr);
         }
     }
+    if (ENV("LARECOMP_MESHLOG")) meshlog(pr, r, indexed);
+    if (ENV("LARECOMP_SKINPROBE")) skinprobe(pr, r);
     if (g_debug_frame) debug_draw(pr, r, indexed);
     else if ((pr->vi->attr_mask >> 11) & 1) {  // skinned draws (a11: bone indices)
         static int n;
@@ -4134,6 +4140,226 @@ static void draw_(CmdRec *r, bool indexed) {
             snprintf(gp_label[gp_n - 1] + l, sizeof gp_label[0] - l, ", first fs %016llx", (unsigned long long)g_cur_fs_hash);
         }
         gp_draws[gp_n - 1]++;
+    }
+}
+
+// LARECOMP_MESHLOG=<file>: a census of what the game draws, for the mod editor (Legends Studio): each distinct mesh once
+// ("M": its vertex layout - format / stream / offset per attribute, the streams' strides -, index count and a hash of
+// its first vertices and indices, to find it among the game's .trmbf / .trmsh) and each distinct place it is drawn at
+// ("P": the first 3x4 floats of vertex cbufs 5 and 10, where the object / instance matrices are, at most 256 per mesh),
+// with the frame and the wall clock ("T" lines every 60 frames: to line the log up with a screen recording).
+static uint64_t ml_fnv(const void *p, size_t n, uint64_t h) {
+    const uint8_t *b = (const uint8_t *)p;
+    for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 0x100000001b3ull;
+    return h;
+}
+static uint64_t ml_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+static void meshlog(Prog *pr, CmdRec *r, bool indexed) {
+    static FILE *f;
+    static int off;
+    if (off) return;
+    if (!f) {
+        const char *path = ENV("LARECOMP_MESHLOG");
+        if (!path || !(f = fopen(path, "w"))) { off = 1; return; }
+        setvbuf(f, NULL, _IOFBF, 1 << 20);
+        fprintf(f, "# LARECOMP_MESHLOG: M <frame> <ms> <mesh> ..., P <frame> <ms> <mesh> inst <n> cb5 <12 floats> cb10 <12 floats>\n");
+    }
+    static uint64_t *mesh_keys, *place_keys;
+    static uint16_t *mesh_places;
+    enum { MESH_BITS = 20, PLACE_BITS = 23 };
+    if (!mesh_keys) {
+        mesh_keys = calloc((size_t)1 << MESH_BITS, 8), mesh_places = calloc((size_t)1 << MESH_BITS, 2);
+        place_keys = calloc((size_t)1 << PLACE_BITS, 8);
+        if (!mesh_keys || !mesh_places || !place_keys) { off = 1; return; }
+    }
+    static uint64_t last_t;
+    uint64_t frame = renderer_present_count();
+    if (frame >= last_t + 60 || !last_t) { last_t = frame ? frame : 1; fprintf(f, "T %llu %llu\n", (unsigned long long)frame, (unsigned long long)ml_ms()); fflush(f); }
+    if (!st.nattrib || !st.vbuf[0].addr || st.vbuf[0].size < 16) return;
+    uint64_t key = 0xcbf29ce484222645ull;
+    for (int i = 0; i < st.nattrib; i++) if ((pr->vi->attr_mask >> i) & 1) key = ml_fnv(&st.attrib[i], 4, key);
+    for (int s = 0; s < st.nstream && s < 4; s++) key = ml_fnv(&st.stream[s][0], 4, key);
+    uint32_t stride0 = st.stream[0][0] ? st.stream[0][0] : 16;
+    uint64_t count = r->x[2];
+    key = ml_fnv(&st.vbuf[0], sizeof st.vbuf[0], key);  // (where its vertices / indices are, not what they hold: geometry
+    key = ml_fnv(&count, 8, key);                       // rewritten every frame would be new each time)
+    if (indexed) key = ml_fnv(&r->x[3], 8, key);
+    if (!key) key = 1;
+    size_t mi = (size_t)(key >> (64 - MESH_BITS));
+    static size_t nmesh, nplace;
+    static uint64_t bytes;
+    if (bytes > (3ull << 30)) { fprintf(f, "# 3 GB: stopped\n"); fclose(f); off = 1; return; }
+    for (size_t n = 0; mesh_keys[mi] && mesh_keys[mi] != key; n++) {  // (bounded: a full table never loops for ever)
+        if (n > 64) return;
+        mi = (mi + 1) & (((size_t)1 << MESH_BITS) - 1);
+    }
+    uint64_t ms = ml_ms();
+    if (!mesh_keys[mi]) {
+        if (nmesh >= ((size_t)1 << MESH_BITS) / 2) return;  // (half full: no more new ones)
+        nmesh++;
+        mesh_keys[mi] = key;
+        uint64_t vh = 0, ih = 0;
+        uint32_t isz = 0;
+        size_t vn = st.vbuf[0].size < (uint64_t)stride0 * 4 ? (size_t)st.vbuf[0].size : (size_t)stride0 * 4;
+        vh = ml_fnv((const void *)(uintptr_t)st.vbuf[0].addr, vn, 0xcbf29ce484222645ull);
+        if (indexed && r->x[3]) {
+            isz = (uint32_t)r->x[1] == 1 ? 2 : (uint32_t)r->x[1] == 0 ? 1 : 4;
+            ih = ml_fnv((const void *)(uintptr_t)r->x[3], (size_t)(count < 12 ? count : 12) * isz, 0xcbf29ce484222645ull);
+        }
+        bytes += 400;
+        fprintf(f, "M %llu %llu %016llx vs %llx count %llu isz %u base %lld inst %llu vbsize %llu vbhash %016llx ibhash %016llx strides",
+                (unsigned long long)frame, (unsigned long long)ms, (unsigned long long)key, (unsigned long long)st.program->stages[0].code_addr,
+                (unsigned long long)count, isz, indexed ? (long long)(int32_t)r->x[4] : 0, (unsigned long long)(indexed ? r->x[6] : r->x[4]),
+                (unsigned long long)st.vbuf[0].size, (unsigned long long)vh, (unsigned long long)ih);
+        for (int s = 0; s < st.nstream && s < 4; s++) fprintf(f, " %u", st.stream[s][0]);
+        fprintf(f, " attrs");
+        for (int i = 0; i < st.nattrib; i++)
+            if ((pr->vi->attr_mask >> i) & 1) fprintf(f, " a%d=f%#x/s%u/+%u", i, st.attrib[i] & 0xFF, (st.attrib[i] >> 8) & 0x1F, st.attrib[i] >> 13);
+        const uint8_t *v = (const uint8_t *)(uintptr_t)st.vbuf[0].addr;  // (the first vertex's bytes)
+        fprintf(f, " v0");
+        for (uint32_t b = 0; b < stride0 && b < 64 && b < st.vbuf[0].size; b++) fprintf(f, "%s%02x", b ? "" : " ", v[b]);
+        fprintf(f, "\n");
+    }
+    if (mesh_places[mi] >= 256) return;
+    float m[2][12];
+    int cbs[2] = {2, 7};  // (vertex cbufs 5 and 10: st.ubuf[0][c - 3])
+    for (int k = 0; k < 2; k++) {
+        Range u = st.ubuf[0][cbs[k]];
+        if (((pr->vi->cbuf_mask >> (cbs[k] + 3)) & 1) && u.addr && u.size >= 48) memcpy(m[k], (const void *)(uintptr_t)u.addr, 48);
+        else memset(m[k], 0, 48);
+    }
+    int32_t q[24];
+    for (int k = 0; k < 24; k++) q[k] = (int32_t)lrintf(((float *)m)[k] * 100.0f);  // (1 cm / 0.01 steps: one record per place)
+    uint64_t pk = ml_fnv(q, sizeof q, key);
+    if (!pk) pk = 1;
+    size_t pi = (size_t)(pk >> (64 - PLACE_BITS));
+    for (size_t n = 0; place_keys[pi] && place_keys[pi] != pk; n++) {
+        if (n > 64) return;
+        pi = (pi + 1) & (((size_t)1 << PLACE_BITS) - 1);
+    }
+    if (place_keys[pi] || nplace >= ((size_t)1 << PLACE_BITS) / 2) return;
+    nplace++;
+    bytes += 250;
+    place_keys[pi] = pk;
+    mesh_places[mi]++;
+    fprintf(f, "P %llu %llu %016llx inst %llu cb5", (unsigned long long)frame, (unsigned long long)ms, (unsigned long long)key,
+            (unsigned long long)(indexed ? r->x[6] : r->x[4]));
+    for (int k = 0; k < 12; k++) fprintf(f, " %.4g", m[0][k]);
+    fprintf(f, " cb10");
+    for (int k = 0; k < 12; k++) fprintf(f, " %.4g", m[1][k]);
+    fprintf(f, "\n");
+}
+
+// LARECOMP_SKINPROBE=<file>: exploded characters, as they happen. Z-A skins its characters in compute: the draws read
+// the posed vertices from their own streams (s0 float3 positions, s1 / s2 packed normals / tangents) - "pos" lines: a
+// draw whose sampled positions (512 at most) reach more than 20 m from their middle. Draws of the unposed mesh with its
+// bones (a12 u8x4 indices, a13 unorm16x4 weights) and a dynamically indexed palette - "bones" lines: a matrix not
+// finite, scaled over 10x or 20 m from the palette's middle, or an index past its end. At most once a second per
+// program and buffer, with the frame and the wall clock to find it in a recording. Palettes are read as 3x4 row-major
+// matrices (translation in floats 3, 7, 11).
+static int sp_cmp(const void *a, const void *b) { float x = *(const float *)a, y = *(const float *)b; return (x > y) - (x < y); }
+static void skinprobe(Prog *pr, CmdRec *r) {
+    static FILE *f;
+    static int off;
+    if (off) return;
+    if (!f) {
+        if (!(f = fopen(ENV("LARECOMP_SKINPROBE"), "w"))) { off = 1; return; }
+        fprintf(f, "# LARECOMP_SKINPROBE: pos <frame> <ms> ... / bones <frame> <ms> ...\n");
+        fflush(f);
+    }
+    static struct { uint64_t key, frame; } seen[256];
+    uint64_t frame = renderer_present_count();
+    if (st.nattrib > 1 && (st.attrib[0] & 0xFF) == 0x22 && ((st.attrib[0] >> 8) & 0x1F) == 0 && st.stream[0][0] == 12 &&
+        (st.attrib[1] & 0xFF) == 0x69 && ((st.attrib[1] >> 8) & 0x1F) == 1 && st.vbuf[0].addr && st.vbuf[0].size >= 36) {
+        const float *p = (const float *)(uintptr_t)st.vbuf[0].addr;
+        uint64_t nv = st.vbuf[0].size / 12, step = nv > 512 ? nv / 512 : 1;
+        static float xs[512], ys[512], zs[512], ox[512], oy[512], oz[512];
+        int n = 0;
+        for (uint64_t v = 0; v < nv && n < 512; v += step, n++) xs[n] = ox[n] = p[v * 3], ys[n] = oy[n] = p[v * 3 + 1], zs[n] = oz[n] = p[v * 3 + 2];
+        qsort(xs, (size_t)n, 4, sp_cmp), qsort(ys, (size_t)n, 4, sp_cmp), qsort(zs, (size_t)n, 4, sp_cmp);
+        float mx = xs[n / 2], my = ys[n / 2], mz = zs[n / 2], far = 0;
+        static float ds[512], dsort[512];
+        for (int i = 0; i < n; i++) {
+            float dx = ox[i] - mx, dy = oy[i] - my, dz = oz[i] - mz;
+            ds[i] = dsort[i] = dx * dx + dy * dy + dz * dz;
+        }
+        qsort(dsort, (size_t)n, 4, sp_cmp);
+        float d90 = dsort[n * 9 / 10], lim = d90 * 64.0f > 25.0f ? d90 * 64.0f : 25.0f;  // (squared: 8 x the 90% spread, 5 m at least)
+        int out = 0, worst = -1;
+        for (int i = 0; i < n; i++) {
+            float d = ds[i];
+            if (!(d == d) || d > lim) { out++; if (!(d <= far)) far = d, worst = i; }
+        }
+        if (out) {
+            uint64_t key = st.program->stages[0].code_addr ^ st.vbuf[0].addr * 31;
+            int slot = (int)(key % 256);
+            if (!(seen[slot].key == key && frame < seen[slot].frame + 60)) {
+                seen[slot].key = key, seen[slot].frame = frame;
+                fprintf(f, "pos %llu %llu vs %llx vb %llx verts %llu sampled %d out %d spread90 %.2f m middle %.2f %.2f %.2f farthest %.1f m (%.2f %.2f %.2f) count %llu inst %llu\n",
+                        (unsigned long long)frame, (unsigned long long)ml_ms(), (unsigned long long)st.program->stages[0].code_addr,
+                        (unsigned long long)st.vbuf[0].addr, (unsigned long long)nv, n, out, sqrtf(d90), mx, my, mz, sqrtf(far),
+                        worst >= 0 ? ox[worst] : 0, worst >= 0 ? oy[worst] : 0, worst >= 0 ? oz[worst] : 0,
+                        (unsigned long long)r->x[2], (unsigned long long)r->x[6]);
+                fflush(f);
+            }
+        }
+        return;
+    }
+    if (!((pr->vi->attr_mask >> 12) & 1)) return;
+    for (int c = 0; c < 18; c++) {
+        if (!((pr->vi->cbuf_dynamic >> (c + 3)) & 1) || !st.ubuf[0][c].addr || st.ubuf[0][c].size < 48) continue;
+        const float *u = (const float *)(uintptr_t)st.ubuf[0][c].addr;
+        int n = (int)(st.ubuf[0][c].size / 48);
+        if (n > 1024) n = 1024;
+        static float tx[1024], ty[1024], tz[1024];
+        for (int i = 0; i < n; i++) tx[i] = u[i * 12 + 3], ty[i] = u[i * 12 + 7], tz[i] = u[i * 12 + 11];
+        float sx[1024], sy[1024], sz[1024];
+        memcpy(sx, tx, (size_t)n * 4), memcpy(sy, ty, (size_t)n * 4), memcpy(sz, tz, (size_t)n * 4);
+        qsort(sx, (size_t)n, 4, sp_cmp), qsort(sy, (size_t)n, 4, sp_cmp), qsort(sz, (size_t)n, 4, sp_cmp);
+        float mx = sx[n / 2], my = sy[n / 2], mz = sz[n / 2];
+        int bad = 0, first[8], nf = 0;
+        for (int i = 0; i < n; i++) {
+            const float *m = u + i * 12;
+            bool b = false;
+            for (int k = 0; k < 12; k++) if (!(m[k] == m[k]) || fabsf(m[k]) > 1e5f) b = true;
+            for (int row = 0; row < 3 && !b; row++)
+                if (m[row * 4] * m[row * 4] + m[row * 4 + 1] * m[row * 4 + 1] + m[row * 4 + 2] * m[row * 4 + 2] > 100.0f) b = true;
+            float dx = m[3] - mx, dy = m[7] - my, dz = m[11] - mz;
+            if (!b && dx * dx + dy * dy + dz * dz > 400.0f) b = true;
+            if (b) { bad++; if (nf < 8) first[nf++] = i; }
+        }
+        // bone indices past the palette (a12 u8x4 / a 16-bit form: the first 256 vertices of its stream)
+        int over = 0, maxidx = -1;
+        uint32_t a = st.attrib[12];
+        int sidx = (a >> 8) & 0x1F;
+        uint32_t stride = st.stream[sidx][0], off11 = a >> 13, fmt = a & 0xFF;
+        const uint8_t *vb = (const uint8_t *)(uintptr_t)st.vbuf[sidx].addr;
+        int isz = fmt == 0x08 || fmt == 0x09 || fmt == 0x13 || fmt == 0x14 || fmt == 0x2b || fmt == 0x2c ? 2 : 1;
+        if (vb && stride)
+            for (uint64_t v = 0; v < 256 && (v + 1) * stride <= st.vbuf[sidx].size; v++)
+                for (int k = 0; k < 4; k++) {
+                    int idx = isz == 2 ? ((const uint16_t *)(vb + v * stride + off11))[k] : vb[v * stride + off11 + k];
+                    if (idx > maxidx) maxidx = idx;
+                    if (idx >= n) over++;
+                }
+        if (!bad && !over) continue;
+        uint64_t key = st.program->stages[0].code_addr ^ st.ubuf[0][c].addr * 31;
+        int slot = (int)(key % 256);
+        if (seen[slot].key == key && frame < seen[slot].frame + 60) continue;
+        seen[slot].key = key, seen[slot].frame = frame;
+        fprintf(f, "bones %llu %llu vs %llx cb %d bones %d bad %d middle %.2f %.2f %.2f | a12 fmt %#x max index %d past-end %d | count %llu inst %llu |",
+                (unsigned long long)frame, (unsigned long long)ml_ms(), (unsigned long long)st.program->stages[0].code_addr, c + 3, n, bad,
+                mx, my, mz, fmt, maxidx, over, (unsigned long long)r->x[2], (unsigned long long)r->x[6]);
+        for (int k = 0; k < nf; k++) {
+            const float *m = u + first[k] * 12;
+            fprintf(f, " #%d t %.2f %.2f %.2f rows %.3f %.3f %.3f", first[k], m[3], m[7], m[11], m[0], m[5], m[10]);
+        }
+        fprintf(f, "\n");
+        fflush(f);
     }
 }
 
