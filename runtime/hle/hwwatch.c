@@ -41,7 +41,7 @@ static void on_hit(int sig, siginfo_t *si, void *ctx) {
     for (int i = 0; i < nseen; i++) if (!strcmp(seen[i], key)) return;
     if (nseen < 96) snprintf(seen[nseen++], 64, "%s", key);
     Cpu *c = kernel_current_cpu();
-    fprintf(stderr, "[hwwatch] write by %s (host pc %llx)", key, (unsigned long long)pc);
+    fprintf(stderr, "[hwwatch] %s by %s (host pc %llx)", getenv("LARECOMP_HWWATCH_RW") ? "access" : "write", key, (unsigned long long)pc);
     if (c)
         fprintf(stderr, " guest lr %llx x0 %llx x1 %llx x8 %llx x19 %llx x20 %llx", (unsigned long long)c->x[30], (unsigned long long)c->x[0],
                 (unsigned long long)c->x[1], (unsigned long long)c->x[8], (unsigned long long)c->x[19], (unsigned long long)c->x[20]);
@@ -53,7 +53,9 @@ static int bp_open(pid_t tid, uint64_t addr, uint64_t len) {
     memset(&a, 0, sizeof a);
     a.type = PERF_TYPE_BREAKPOINT;
     a.size = sizeof a;
-    a.bp_type = HW_BREAKPOINT_W;
+    static int rw = -1;  // (LARECOMP_HWWATCH_RW=1: reads too)
+    if (rw < 0) rw = getenv("LARECOMP_HWWATCH_RW") != NULL;
+    a.bp_type = rw ? HW_BREAKPOINT_RW : HW_BREAKPOINT_W;
     a.bp_addr = addr;
     a.bp_len = len;
     a.sample_period = 1;
@@ -71,6 +73,13 @@ static int bp_open(pid_t tid, uint64_t addr, uint64_t len) {
     return fd;
 }
 
+static int g_fds[4][256], g_nfd[4];
+void hwwatch_reset(void) {  // (the watchpoints armed so far closed: room for 4 new ones)
+    for (int w = 0; w < g_nw; w++)
+        for (int i = 0; i < g_nfd[w]; i++) close(g_fds[w][i]);
+    memset(g_nfd, 0, sizeof g_nfd);
+    g_nw = 0;
+}
 void hwwatch_arm(uint64_t addr, uint64_t len) {
     if (g_nw >= 4) return;
     static int installed;
@@ -88,11 +97,20 @@ void hwwatch_arm(uint64_t addr, uint64_t len) {
     struct dirent *e;
     while (d && (e = readdir(d))) {
         if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
-        if (bp_open((pid_t)atoi(e->d_name), addr, len) >= 0) n++;
+        int fd = bp_open((pid_t)atoi(e->d_name), addr, len);
+        if (fd >= 0) { n++; if (g_nfd[g_nw - 1] < 256) g_fds[g_nw - 1][g_nfd[g_nw - 1]++] = fd; }
         else fail++;
     }
     if (d) closedir(d);
     fprintf(stderr, "[hwwatch] %llx+%llu on %d thread(s) (%d failed)\n", (unsigned long long)addr, (unsigned long long)len, n, fail);
+}
+
+// The watchpoints armed so far, on the calling thread too (one started after they were armed: kernel.c thread_main)
+void hwwatch_arm_self(void) {
+    for (int w = 0; w < g_nw; w++) {
+        int fd = bp_open((pid_t)syscall(SYS_gettid), g_lo[w], g_len[w]);
+        if (fd >= 0 && g_nfd[w] < 256) g_fds[w][g_nfd[w]++] = fd;
+    }
 }
 
 // LARECOMP_HWWATCH_SRC=<memcpy>,<dst>,<off>: the first time the guest's memcpy (its address) copies to dst, watch what
@@ -119,5 +137,7 @@ void hwwatch_src_arm(void) {
 #else
 #include <stdint.h>
 void hwwatch_arm(uint64_t addr, uint64_t len) { (void)addr, (void)len; }
+void hwwatch_reset(void) {}
+void hwwatch_arm_self(void) {}
 void hwwatch_src_arm(void) {}
 #endif

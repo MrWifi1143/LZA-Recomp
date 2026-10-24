@@ -616,6 +616,8 @@ void input_frame(uint64_t frame) {
     extern void watch_arm(void);
     watch_arm();
     host_test_frame(frame);
+    extern void warp_frame(uint64_t frame);  // (LARECOMP_WARP: hle/warp.c)
+    warp_frame(frame);
     {   // LARECOMP_LIVE=<dir> (testing): steered while it runs - lines appended to <dir>/cmd, "<frames> <keys>" with keys
         // LARECOMP_INPUT's names joined by '+' (A, STICK_UP, STICK_45 = left stick at 45 degrees, RSTICK_LEFT...; "-": none),
         // run one after another; <dir>/state says the frame and what's left (screenshots: <dir>/shot, nvn/vulkan/device.c)
