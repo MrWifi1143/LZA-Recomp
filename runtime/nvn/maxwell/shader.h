@@ -110,6 +110,7 @@ ShaderInfo *maxwell_translate(const uint8_t *code, size_t max_size, int stage, c
 ShaderInfo *maxwell_translate_consts(const uint8_t *code, size_t max_size, const uint8_t *consts, size_t nconsts, int stage,
                                      const ShaderKey *key);
 void maxwell_free(ShaderInfo *s);
-const char *maxwell_build_id(void);  // changes with every build of the translator (its caches key on it)
+const char *maxwell_build_id(void);  // the translator's version: a hash of its source (its caches key on it)
+const char *maxwell_cache_tag(void); // the same as 16 hex digits: the caches' folder (cache/xlat/<tag>, cache/spirv/<tag>)
 // Disassemble for debugging (writes text to f).
 void maxwell_disassemble(const uint8_t *code, size_t max_size, int stage, void *file);

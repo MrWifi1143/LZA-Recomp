@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 
 #include "shaders.h"
+#include "../maxwell/shader.h"
 
 void vk_shaders_init(void) {  // (compilers are per thread: check shaderc works at all)
     shaderc_compiler_t c = shaderc_compiler_initialize();
@@ -17,8 +18,9 @@ static shaderc_shader_kind kind_of(int stage) {
     return stage == STAGE_VERTEX ? shaderc_vertex_shader : stage == STAGE_FRAGMENT ? shaderc_fragment_shader : shaderc_compute_shader;
 }
 
-// SPIR-V disk cache: cache/spirv/<hash of stage + source>.spv, so a known shader costs a file read instead of a
-// GLSL compile (the driver's pipeline cache only covers the step after this one).
+// SPIR-V disk cache: cache/spirv/<translator tag>/<hash of stage + source>.spv, so a known shader costs a file read
+// instead of a GLSL compile (the driver's pipeline cache only covers the step after this one). A changed translator
+// writes different GLSL, so its folder goes with the translator's (the old ones are deleted, warmup.c).
 static uint64_t src_hash(const char *src, int stage) {
     uint64_t h = (0xcbf29ce484222325ull ^ (uint64_t)stage) + 3;  // + version of the post-processing (no_contraction)
     for (const char *p = src; *p; p++) { h ^= (uint8_t)*p; h *= 0x100000001B3ull; }
@@ -26,8 +28,8 @@ static uint64_t src_hash(const char *src, int stage) {
 }
 
 static uint32_t *cache_load(uint64_t h, size_t *nwords) {
-    char path[64];
-    snprintf(path, sizeof path, "cache/spirv/%016llx.spv", (unsigned long long)h);
+    char path[96];
+    snprintf(path, sizeof path, "cache/spirv/%s/%016llx.spv", maxwell_cache_tag(), (unsigned long long)h);
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
     fseek(f, 0, SEEK_END);
@@ -43,9 +45,13 @@ static uint32_t *cache_load(uint64_t h, size_t *nwords) {
 
 static void cache_store(uint64_t h, const uint32_t *spv, size_t nwords) {
     static int made;
-    if (!made) { made = 1; mkdir("cache", 0755); mkdir("cache/spirv", 0755); }
-    char path[64], tmp[80];
-    snprintf(path, sizeof path, "cache/spirv/%016llx.spv", (unsigned long long)h);
+    if (!made) {
+        char dir[64];
+        snprintf(dir, sizeof dir, "cache/spirv/%s", maxwell_cache_tag());
+        made = 1; mkdir("cache", 0755); mkdir("cache/spirv", 0755); mkdir(dir, 0755);
+    }
+    char path[96], tmp[128];
+    snprintf(path, sizeof path, "cache/spirv/%s/%016llx.spv", maxwell_cache_tag(), (unsigned long long)h);
     snprintf(tmp, sizeof tmp, "%s.%llx", path, (unsigned long long)(uintptr_t)&made ^ (unsigned long long)(uintptr_t)spv);
     FILE *f = fopen(tmp, "wb");
     if (!f) return;

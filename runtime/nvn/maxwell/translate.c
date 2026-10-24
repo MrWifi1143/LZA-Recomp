@@ -2794,15 +2794,29 @@ static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, const ui
 // ---- Translation disk cache: cache/xlat/<hash>.bin, the translated program (GLSL / MSL and what it reads) by its
 // code, header, key and stage, so a shader seen before costs a file read instead of a translation - with the SPIR-V
 // and pipeline caches after it, a known shader no longer holds its draws back for a frame (the pop-in on known
-// ground). A rebuilt translator starts a new cache (the build time is in the hash); off with LARECOMP_NO_XLAT_CACHE=1
-// and while a switch that changes the output is set.
+// ground). A changed translator starts a new cache: its version is a hash of its source (Makefile XLAT_SRC_HASH; the build
+// time where that isn't given), and each version has its folder, cache/xlat/<tag> (older ones are deleted, warmup.c).
+// Off with LARECOMP_NO_XLAT_CACHE=1 and while a switch that changes the output is set.
 #include <sys/stat.h>
 #ifdef _WIN32
 #include <direct.h>
 #define mkdir(p, m) _mkdir(p)
 #endif
+#ifdef XLAT_SRC_HASH
+static const char k_xlat_build[] = XLAT_SRC_HASH;
+#else
 static const char k_xlat_build[] = __DATE__ " " __TIME__;
+#endif
 const char *maxwell_build_id(void) { return k_xlat_build; }  // (runtime/nvn/vulkan/warmup.c: its marker)
+const char *maxwell_cache_tag(void) {
+    static char tag[17];
+    if (!tag[0]) {
+        uint64_t h = 0xcbf29ce484222325ull;
+        for (const char *p = k_xlat_build; *p; p++) h = (h ^ (uint8_t)*p) * 0x100000001b3ull;
+        snprintf(tag, sizeof tag, "%016llx", (unsigned long long)h);
+    }
+    return tag;
+}
 
 static uint64_t xfnv(const void *p, size_t n, uint64_t h) {
     const uint8_t *b = p;
@@ -2843,8 +2857,8 @@ ShaderInfo *maxwell_translate_consts(const uint8_t *blob, size_t max_size, const
     h = xfnv(key, sizeof *key, h);
     h = xfnv(blob, program_len(blob, max_size, stage), h);
     if (consts) h = xfnv(consts, nconsts, h ^ 0xc1);  // (BRX targets come from them)
-    char path[64];
-    snprintf(path, sizeof path, "cache/xlat/%016llx.bin", (unsigned long long)h);
+    char path[96];
+    snprintf(path, sizeof path, "cache/xlat/%s/%016llx.bin", maxwell_cache_tag(), (unsigned long long)h);
     FILE *f = fopen(path, "rb");
     if (f) {
         uint32_t hdr[2] = {0}, len = 0;
@@ -2863,8 +2877,12 @@ ShaderInfo *maxwell_translate_consts(const uint8_t *blob, size_t max_size, const
     ShaderInfo *info = translate_impl(blob, max_size, consts, nconsts, stage, key);
     if (info && info->msl) {
         static int made;
-        if (!made) made = 1, mkdir("cache", 0755), mkdir("cache/xlat", 0755);
-        char tmp[96];
+        if (!made) {
+            char dir[64];
+            snprintf(dir, sizeof dir, "cache/xlat/%s", maxwell_cache_tag());
+            made = 1, mkdir("cache", 0755), mkdir("cache/xlat", 0755), mkdir(dir, 0755);
+        }
+        char tmp[128];
         snprintf(tmp, sizeof tmp, "%s.%llx", path, (unsigned long long)(uintptr_t)info);
         if ((f = fopen(tmp, "wb"))) {
             uint32_t hdr[2] = {0x31544c58, sizeof *info}, len = (uint32_t)strlen(info->msl);
