@@ -21,7 +21,12 @@
 // ~45 ms each with an empty driver shader cache). Building each program into a pipeline of a typical state only partly
 // warms the driver for the draws' own (LARECOMP_WARMUP_PIPELINES=1: a much longer wait).
 // PLA, fresh caches, walk test: GLSL -> SPIR-V during play 2.25 s -> 0.2 s, draws skipped while compiling 564 -> ~230.
-// Done once per translator build and game: cache/warm/<game id>. LARECOMP_WARMUP=0: none of it; =1: also with --play.
+// Done once per translator version and game: cache/warm/<game id>. With the start screen skipped (its setting, --play) it
+// runs in the background instead, behind the game's threads, while the game starts (warmup_start_background).
+// LARECOMP_WARMUP=0: none of it; =1: with --play, before the game, as on the start screen.
+// The caches' clean-up (warmup_cleanup_start, every start): other translator versions' folders of cache/xlat and
+// cache/spirv (and their files from before the folders) are deleted, and captured containers saved more than once under
+// old names (the host-pointer hash, below) are merged - Z-A's cache had grown to 38 GB.
 #include <dirent.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -29,12 +34,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #ifdef _WIN32
 #include <windows.h>
 #else
 #include <sys/resource.h>
 #include <sys/syscall.h>
-#include <unistd.h>
 #endif
 
 #include "../../rt.h"
@@ -261,8 +266,18 @@ static void scan_dir(const char *dir, bool captured) {
     closedir(dp);
 }
 
+static bool g_background;  // (warmup_start_background: behind the game's threads)
+static void lower_priority(void) {
+#ifdef _WIN32
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+#else
+    setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);
+#endif
+}
+
 static void *worker(void *arg) {
     (void)arg;
+    if (g_background) lower_priority();
     for (int i; (i = atomic_fetch_add(&g_next, 1)) < g_set.nprogs; atomic_fetch_add(&g_done, 1)) {
         WProg *p = &g_set.progs[i];
         compile(&g_set.stages[p->vs], p->fs >= 0 ? &g_set.stages[p->fs] : NULL);
@@ -270,13 +285,35 @@ static void *worker(void *arg) {
     return NULL;
 }
 
+// Z-A: its shaders are in data.trpfs, which the romfs scan can't read: once, `lasrecomp <root> --extract-shaders`
+// (runtime/oodle_server.c) decodes the shader packs with the game's own decoder into cache/warm/romfs/ (a first start
+// then has them to compile up front, not only what a session has captured)
+static void extract_packed_shaders(void) {
+    char fd[1100], exe[1100];
+    struct stat sb;
+    snprintf(fd, sizeof fd, "%s/romfs/arc/data.trpfd", g_root);
+    if (stat(fd, &sb) || !stat("cache/warm/romfs/.done", &sb) || !plat_exe_path(exe, sizeof exe)) return;
+    uint64_t t0 = plat_now_ns();
+    const char *argv[] = {exe, g_root, "--extract-shaders", NULL};
+    PlatProc p = plat_spawn(argv, "cache/warm/extract.log", false);
+    int rc = p ? plat_proc_wait(p, true) : -1;
+    LOG("[warmup] shaders in data.trpfs: %s (%.1f s, cache/warm/extract.log)\n", rc == 0 ? "extracted" : "not extracted", (double)(plat_now_ns() - t0) / 1e9);
+    if (rc == 0) {
+        FILE *f = fopen("cache/warm/romfs/.done", "w");
+        if (f) fclose(f);
+    }
+}
+
 static void *run(void *arg) {
     (void)arg;
+    if (g_background) lower_priority();
     uint64_t t0 = plat_now_ns();
     set_init(&g_set, 1 << 17, 1 << 18);
     char dir[1100];
     snprintf(dir, sizeof dir, "%s/romfs", g_root);
     scan_dir(dir, false);
+    extract_packed_shaders();
+    scan_dir("cache/warm/romfs", false);
     int from_romfs = g_set.nprogs;
     scan_dir("cache/warm/containers", true);
     uint64_t t1 = plat_now_ns();
@@ -288,12 +325,13 @@ static void *run(void *arg) {
     maxwell_gmem_base = HEAP_BASE;  // (as exec.c sets them before translating)
     maxwell_gmem_size = HEAP_MAX;
     int nt = plat_cpu_count() - 1;
+    if (g_background) nt = plat_cpu_count() / 2;  // (the game runs beside it)
     if (nt < 1) nt = 1;
     if (nt > 32) nt = 32;
     pthread_t th[32];
     for (int i = 0; i < nt; i++) pthread_create(&th[i], NULL, worker, NULL);
     for (int i = 0; i < nt; i++) pthread_join(th[i], NULL);
-    LOG("[warmup] compiled in %.1f s on %d threads\n", (double)(plat_now_ns() - t1) / 1e9, nt);
+    LOG("[warmup] compiled in %.1f s on %d threads%s\n", (double)(plat_now_ns() - t1) / 1e9, nt, g_background ? " (in the background)" : "");
     set_free(&g_set);
     FILE *f = fopen(g_marker, "w");
     if (f) { fprintf(f, "%s\n", maxwell_build_id()); fclose(f); }
@@ -334,6 +372,123 @@ void warmup_start(void) {
     atomic_store(&g_phase, 1);
     pthread_t t;
     pthread_create(&t, NULL, run, NULL);
+    pthread_detach(t);
+}
+
+void warmup_start_background(void) {
+    if (atomic_load(&g_phase)) return;
+    g_background = true;
+    LOG("[warmup] start screen skipped: the shaders are compiled in the background while the game runs\n");
+    warmup_start();
+}
+
+// ---- the caches' clean-up
+static void remove_tree(const char *path) {
+    struct stat sb;
+    if (stat(path, &sb)) return;
+    if (S_ISDIR(sb.st_mode)) {
+        DIR *dp = opendir(path);
+        struct dirent *e;
+        while (dp && (e = readdir(dp))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            char p[2048];
+            snprintf(p, sizeof p, "%s/%s", path, e->d_name);
+            remove_tree(p);
+        }
+        if (dp) closedir(dp);
+        rmdir(path);
+    } else remove(path);
+}
+
+// everything in dir but the folder keep
+static uint64_t prune_dir(const char *dir, const char *keep) {
+    DIR *dp = opendir(dir);
+    if (!dp) return 0;
+    char **names = NULL;
+    size_t n = 0, cap = 0;
+    struct dirent *e;
+    while ((e = readdir(dp))) {  // (names first: removing while reading a folder can skip entries)
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") || !strcmp(e->d_name, keep)) continue;
+        if (n == cap) cap = cap ? cap * 2 : 4096, names = realloc(names, cap * sizeof *names);
+        names[n++] = strdup(e->d_name);
+    }
+    closedir(dp);
+    for (size_t i = 0; i < n; i++) {
+        char p[2048];
+        snprintf(p, sizeof p, "%s/%s", dir, names[i]);
+        remove_tree(p);
+        free(names[i]);
+    }
+    free(names);
+    return n;
+}
+
+// captured containers named by the old hash (with host pointers in it): renamed to their name now, or removed if that
+// one exists (the same container); once, then cache/warm/containers/.merged
+static void merge_containers(void) {
+    const char *dir = "cache/warm/containers", *mark = "cache/warm/containers/.merged";
+    struct stat sb;
+    if (!stat(mark, &sb) || stat(dir, &sb)) return;
+    DIR *dp = opendir(dir);
+    if (!dp) return;
+    char **names = NULL;
+    size_t n = 0, cap = 0;
+    struct dirent *e;
+    while ((e = readdir(dp))) {
+        size_t l = strlen(e->d_name);
+        if (l != 21 || strcmp(e->d_name + 16, ".bnsh")) continue;
+        if (n == cap) cap = cap ? cap * 2 : 4096, names = realloc(names, cap * sizeof *names);
+        names[n++] = strdup(e->d_name);
+    }
+    closedir(dp);
+    uint64_t removed = 0, renamed = 0, freed = 0;
+    for (size_t i = 0; i < n; i++) {
+        char p[1100], q[1100];
+        snprintf(p, sizeof p, "%s/%s", dir, names[i]);
+        FILE *f = fopen(p, "rb");
+        uint8_t *d = NULL;
+        long sz = 0;
+        if (f && !fseek(f, 0, SEEK_END) && (sz = ftell(f)) > 8 && sz < (64l << 20) && !fseek(f, 0, SEEK_SET) && (d = malloc((size_t)sz)) &&
+            fread(d, 1, (size_t)sz, f) != (size_t)sz) {
+            free(d);
+            d = NULL;
+        }
+        if (f) fclose(f);
+        if (d) {
+            snprintf(q, sizeof q, "%s/%016llx.bnsh", dir, (unsigned long long)container_hash(d + 8, (size_t)sz - 8));
+            if (strcmp(p, q)) {
+                if (!stat(q, &sb)) remove(p), removed++, freed += (uint64_t)sz;
+                else if (!rename(p, q)) renamed++;
+            }
+            free(d);
+        }
+        free(names[i]);
+    }
+    free(names);
+    FILE *m = fopen(mark, "w");
+    if (m) fclose(m);
+    LOG("[warmup] captured shader containers merged: %llu duplicates removed (%.0f MB), %llu renamed, of %zu\n", (unsigned long long)removed,
+        (double)freed / 1048576.0, (unsigned long long)renamed, n);
+}
+
+static void *cleanup(void *arg) {
+    (void)arg;
+    lower_priority();
+    uint64_t t0 = plat_now_ns();
+    merge_containers();
+    uint64_t a = prune_dir("cache/xlat", maxwell_cache_tag()), b = prune_dir("cache/spirv", maxwell_cache_tag());
+    if (a || b)
+        LOG("[warmup] old shader caches deleted: %llu entries of cache/xlat, %llu of cache/spirv (%.1f s)\n", (unsigned long long)a,
+            (unsigned long long)b, (double)(plat_now_ns() - t0) / 1e9);
+    return NULL;
+}
+
+void warmup_cleanup_start(void) {
+    static bool started;
+    if (started || disabled()) return;
+    started = true;
+    pthread_t t;
+    pthread_create(&t, NULL, cleanup, NULL);
     pthread_detach(t);
 }
 

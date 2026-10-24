@@ -127,6 +127,12 @@ $(B)/rt/gamebuild.o: $(GAMELIB_SRCS) Makefile
 $(B)/rt/gamebuild.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"' -DGAMELIB_CFLAGS='"$(strip $(filter-out -Iruntime,$(GENFLAGS)))"' \
                                 -DGAMELIB_SHARED='"$(GAMELIB_SHARED)"'
 
+# The shader caches (cache/xlat, cache/spirv, the warm-up's marker) key on the translator's own source, not on when it
+# was compiled: any header change recompiles it, which wiped the caches on almost every build (runtime/nvn/maxwell)
+XLAT_SRCS := runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h
+XLAT_HASH := $(shell cat $(XLAT_SRCS) | sha256sum | cut -c1-16)
+$(B)/rt/nvn/maxwell/translate.o: RTFLAGS += -DXLAT_SRC_HASH='"$(XLAT_HASH)"'
+
 $(B)/rt/%.o: runtime/%.c $(RT_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(RTFLAGS) -c $< -o $@

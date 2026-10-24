@@ -125,6 +125,7 @@ static void teardown(void) {
 }
 
 static bool g_oodle_server;  // --oodle-server: runtime/oodle_server.c
+static bool g_extract_shaders;  // --extract-shaders: the same file (the shader warm-up's first step on Z-A)
 
 static void boot(const char *root) {
     char exefs[1024], romfs[1024], npdm_path[1024];
@@ -137,6 +138,7 @@ static void boot(const char *root) {
     if (!gamelib_load(root, why, sizeof why)) FATAL("%s\n", why);
     loader_load(exefs);
     if (g_oodle_server) { extern void oodle_server_install(const char *exefs); oodle_server_install(exefs); }
+    if (g_extract_shaders) { extern void extract_shaders_install(const char *exefs, const char *romfs); extract_shaders_install(exefs, romfs); }
     { extern void libcfast_configure(void); libcfast_configure(); }  // (runtime/hle/libcfast.c)
     { extern void settings_load(void); settings_load(); }
     kernel_init();
@@ -180,6 +182,9 @@ int main(int argc, char **argv) {
             g_oodle_server = true;
             g_oodle_out_fd = dup(1);
             setenv("LARECOMP_LOG_STDERR", "1", 1);  // (and the player's lasrecomp.log is left alone)
+        } else if (!strcmp(argv[i], "--extract-shaders")) {
+            g_extract_shaders = true;
+            setenv("LARECOMP_LOG_STDERR", "1", 1);
         }
     plat_init();
 #ifdef _WIN32
@@ -197,7 +202,7 @@ int main(int argc, char **argv) {
         else if (argv[i][0] != '-') root = arg_root;
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
-    if (g_oodle_server) {  // (Legends Studio's decoder, runtime/oodle_server.c: no window; ends when its stdin does)
+    if (g_oodle_server || g_extract_shaders) {  // (Legends Studio's decoder / the warm-up's extraction, runtime/oodle_server.c: no window)
         boot(root);
         for (;;) SDL_Delay(1000);
     }
@@ -209,15 +214,22 @@ int main(int argc, char **argv) {
         if (title) {  // start screen: resolution, fullscreen, anti-aliasing, translation, keys (runtime/ui/launcher_lg.mm)
             extern void launcher_lg_run(const char *root);
             launcher_lg_run(root);
-        } else if (getenv("LARECOMP_WARMUP") && atoi(getenv("LARECOMP_WARMUP")) == 1) {  // (no start screen: the warm-up, logged)
+        } else {  // no start screen: the warm-up, if needed, in the background while the game runs
             extern bool warmup_needed(const char *root);
             extern void warmup_start(void);
+            extern void warmup_start_background(void);
             extern int warmup_progress(int *done, int *total);
             if (warmup_needed(root)) {
-                warmup_start();
-                int done, total;
-                while (warmup_progress(&done, &total) != 3) SDL_Delay(50);
+                if (getenv("LARECOMP_WARMUP") && atoi(getenv("LARECOMP_WARMUP")) == 1) {  // (before the game, logged)
+                    warmup_start();
+                    int done, total;
+                    while (warmup_progress(&done, &total) != 3) SDL_Delay(50);
+                } else warmup_start_background();
             }
+        }
+        {
+            extern void warmup_cleanup_start(void);  // (old shader caches: runtime/nvn/vulkan/warmup.c)
+            warmup_cleanup_start();
         }
         {  // (runtime/fnhook.c: the runtime's hooks, in the address tables of the known builds)
             extern void rt_fnhook_set_build(int build);
