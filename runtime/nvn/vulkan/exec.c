@@ -2753,8 +2753,13 @@ static VkDescriptorBufferInfo gmem_info(void) {
 // data for some draws: a 16-byte stream here, a few more there). Vertex or index data inside one of them is read in place when
 // the GPU runs, as the game expects, and is never copied when the draw is recorded (the copy would hold what the GPU has not
 // written yet). Sorted, merged intervals; the render thread is the only user.
-static struct { uint64_t a, e; } gpuw[512];
-static int ngpuw;
+// Grows as needed. It held 512 ranges: once full, a new range below the last one was not recorded at all (only one
+// past the end widened the last), so the VRAM vertex cache (vcache.c) kept a copy of memory the GPU rewrites every
+// frame - posed characters' vertices drawn from a stale copy, exploding. A long session gets there (each posed
+// character, Pokemon, cloth... its own compute outputs, and the list never shrinks); a save just loaded doesn't.
+// LARECOMP_GPUW_CAP=<n>: the old fixed size, to compare.
+static struct GpuwRange { uint64_t a, e; } *gpuw;
+static int ngpuw, capgpuw;
 static void gpuw_note(uint64_t a, uint64_t n) {
     uint64_t e = a + (n ? n : 16);
     int i = 0, j;
@@ -2769,10 +2774,23 @@ static void gpuw_note(uint64_t a, uint64_t n) {
         memmove(&gpuw[i + 1], &gpuw[j], (size_t)(ngpuw - j) * sizeof gpuw[0]);
         ngpuw -= j - i - 1;
     } else {
-        if (ngpuw == 512) { if (gpuw[ngpuw - 1].e < e) gpuw[ngpuw - 1].e = e; return; }  // (full: widen the last, stays safe)
+        static int cap_env = -1;
+        if (cap_env < 0) cap_env = ENV("LARECOMP_GPUW_CAP") ? atoi(ENV("LARECOMP_GPUW_CAP")) : 0;
+        if (cap_env > 0 && ngpuw >= cap_env) {  // (the old behaviour, for comparison)
+            static int nlost;
+            if (gpuw[ngpuw - 1].e < e) gpuw[ngpuw - 1].e = e;
+            else if (nlost++ < 20) LOG("[gpuw] full (%d): %llx-%llx not recorded\n", ngpuw, (unsigned long long)a, (unsigned long long)e);
+            return;
+        }
+        if (ngpuw == capgpuw) {
+            capgpuw = capgpuw ? capgpuw * 2 : 1024;
+            gpuw = realloc(gpuw, (size_t)capgpuw * sizeof *gpuw);
+        }
         memmove(&gpuw[i + 1], &gpuw[i], (size_t)(ngpuw - i) * sizeof gpuw[0]);
         gpuw[i].a = a; gpuw[i].e = e;
         ngpuw++;
+        if ((ngpuw & (ngpuw - 1)) == 0 && ngpuw >= 128)  // (128, 256, 512...: how many a session gathers)
+            LOG("[gpuw] %d ranges the GPU writes (frame %llu)\n", ngpuw, (unsigned long long)vk_frame_counter());
     }
     if (ENV("LARECOMP_LOG_GPUWRITES")) LOG("[gpuw] the GPU may write %llx-%llx (%d ranges)\n", (unsigned long long)a, (unsigned long long)e, ngpuw);
     vcache_invalidate(a, e - a);  // (a copy made before this dispatch was seen would stay stale: the CPU never writes there)

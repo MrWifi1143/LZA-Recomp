@@ -756,6 +756,19 @@ void backend_present(NvnTexture *t) {
     // LARECOMP_DEBUG_FRAMES=<n> (with LARECOMP_DEBUG_FRAME / F9): dump n consecutive frames (build/pass_<frame>_NNN.png)
     static long debug_n = -1;
     if (debug_n < 0) { const char *e = ENV("LARECOMP_DEBUG_FRAMES"); debug_n = e && atol(e) > 1 ? atol(e) : 1; }
+    {   // LARECOMP_LIVE=<dir>: <dir>/debug appears ("<n>", default 1) -> the next n frames dumped as LARECOMP_DEBUG_FRAME does
+        static const char *ldir = (const char *)1;
+        if (ldir == (const char *)1) ldir = ENV("LARECOMP_LIVE");
+        char dpath[1100];
+        if (ldir && (snprintf(dpath, sizeof dpath, "%s/debug", ldir), access(dpath, F_OK) == 0)) {
+            FILE *f = fopen(dpath, "r");
+            long n = 1;
+            if (f) { if (fscanf(f, "%ld", &n) != 1) n = 1; fclose(f); }
+            remove(dpath);
+            debug_n = n > 0 ? n : 1, debug_at = (long)total_frames + 1;
+            LOG("[debug] live request: frames %ld..%ld dumped\n", debug_at, debug_at + debug_n - 1);
+        }
+    }
     g_debug_frame = debug_at && total_frames >= (uint64_t)debug_at && total_frames < (uint64_t)debug_at + (uint64_t)debug_n;
     {   // LARECOMP_GPUPROF_AT=<frame>[,<frame>...]: GPU time per pass of those frames ("[gpuprof]" in the log)
         extern bool g_gpuprof_frame;
