@@ -2762,8 +2762,11 @@ static struct GpuwRange { uint64_t a, e; } *gpuw;
 static int ngpuw, capgpuw;
 static void gpuw_note(uint64_t a, uint64_t n) {
     uint64_t e = a + (n ? n : 16);
-    int i = 0, j;
-    while (i < ngpuw && gpuw[i].e < a) i++;
+    int i = 0, j, hi = ngpuw;  // (sorted, disjoint: the first range ending at or after a, by halving)
+    while (i < hi) {
+        int mid = (i + hi) / 2;
+        if (gpuw[mid].e < a) i = mid + 1; else hi = mid;
+    }
     for (j = i; j < ngpuw && gpuw[j].a <= e; j++) {
         if (gpuw[j].a < a) a = gpuw[j].a;
         if (gpuw[j].e > e) e = gpuw[j].e;
