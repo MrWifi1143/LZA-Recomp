@@ -424,7 +424,13 @@ void input_handle_event(const SDL_Event *e) {
 // MINUS,LEFT,UP,RIGHT,DOWN, or STICK_UP/DOWN/LEFT/RIGHT, RSTICK_UP/DOWN/LEFT/RIGHT, STICK_<degrees>: full tilt at
 // that angle, 0 = right, 90 = up).
 static char g_replay_text[8][96];
+static uint64_t g_replay_text_frame[8];  // (the recorded game frame each was answered at)
 static int g_nreplay_text, g_replay_text_next;
+// The press that confirmed the keyboard (A on OK, Start) is recorded just after its answer: on replay the keyboard
+// answers at once, so that press would reach the game's next screen (the character creation's confirm menu: its
+// first entry, "change hair color", and every input after it on the wrong screen). Replayed buttons stay up until
+// the recording lets go of them after the answer.
+static _Atomic uint64_t g_replay_mute_after;  // (the answer's recorded frame + 1; 0 none)
 static _Atomic uint64_t script_buttons;
 static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
 
@@ -693,7 +699,7 @@ void input_frame(uint64_t frame) {
             while (f && fgets(line, sizeof line, f)) {
                 char text[96];
                 if (line[0] == 'K' && sscanf(line, "K %llu %95[^\n]", &fr, text) == 2) {
-                    if (g_nreplay_text < 8) snprintf(g_replay_text[g_nreplay_text++], sizeof g_replay_text[0], "%s", text);
+                    if (g_nreplay_text < 8) g_replay_text_frame[g_nreplay_text] = fr, snprintf(g_replay_text[g_nreplay_text++], sizeof g_replay_text[0], "%s", text);
                     continue;
                 }
                 if (sscanf(line, "%llu %llx %d %d %d %d", &fr, &bb, &a0, &a1, &a2, &a3) != 6) continue;
@@ -716,6 +722,11 @@ void input_frame(uint64_t frame) {
         if (nrl) {
             while (pos + 1 < nrl && rl[pos + 1].f <= rf) pos++;
             bool on = rl[pos].f <= rf;
+            uint64_t mute = atomic_load(&g_replay_mute_after);
+            if (mute && on && rf >= mute) {
+                if (rl[pos].b == 0) atomic_store(&g_replay_mute_after, 0);  // (let go: the replay goes on as recorded)
+                else on = false;
+            }
             script_buttons = on ? rl[pos].b : 0;
             script_lx = on ? rl[pos].a[0] : 0, script_ly = on ? rl[pos].a[1] : 0;
             script_rx = on ? rl[pos].a[2] : 0, script_ry = on ? rl[pos].a[3] : 0;
@@ -830,6 +841,9 @@ void input_rec_text(const char *text) {
 }
 bool input_replay_text(char *out, int cap) {
     if (g_replay_text_next >= g_nreplay_text) return false;
+    atomic_store(&g_replay_mute_after, g_replay_text_frame[g_replay_text_next] + 1);
+    LOG("[input] replay: keyboard answered \"%s\" (recorded at frame %llu); the press that confirmed it is skipped\n",
+        g_replay_text[g_replay_text_next], (unsigned long long)g_replay_text_frame[g_replay_text_next]);
     snprintf(out, (size_t)cap, "%s", g_replay_text[g_replay_text_next++]);
     return true;
 }
