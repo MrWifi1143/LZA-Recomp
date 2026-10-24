@@ -417,7 +417,10 @@ static ssize_t romfs_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
                 r = in < ov[i].size ? (ssize_t)(n < ov[i].size - in ? n : ov[i].size - in) : 0;
                 memcpy(dst + done, ov[i].mem + in, (size_t)r);
             } else {
-                if (ov[i].fd < 0) ov[i].fd = open(ov[i].path, O_RDONLY);
+                if (ov[i].fd < 0) {
+                    ov[i].fd = open(ov[i].path, O_RDONLY);
+                    if (getenv("LARECOMP_LOG_FILES")) LOG("[fs] read (the mod's) %s\n", ov[i].path);
+                }
                 r = in < ov[i].size ? pread(ov[i].fd, dst + done, n < ov[i].size - in ? n : ov[i].size - in, (off_t)in) : 0;
             }
             if (r < 0) r = 0;

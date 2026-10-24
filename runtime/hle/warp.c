@@ -21,31 +21,43 @@ static int g_state = -1;  // -1 off, 0 waiting, 1 writing, 2 done
 
 static bool in_heap(uint64_t a) { return a >= HEAP_BASE && a < HEAP_BASE + HEAP_MAX; }
 
+static volatile uint64_t g_seen_body;  // (the player's body as last found, warp or not: LARECOMP_LIVE's state shows it)
+
 static int cam_hook(Cpu *c, uint64_t addr) {
     (void)addr;
-    if (g_state == 0 && in_heap(c->x[0])) g_cam = c->x[0];
+    if ((g_state == 0 || g_state == 3) && in_heap(c->x[0])) g_cam = c->x[0];
     return 0;
 }
 
 static int body_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     uint64_t o = c->x[0], cam = g_cam;
-    if (g_state != 0 || !cam || !in_heap(o) || *(const uint64_t *)(uintptr_t)o != BODY_VTABLE) return 0;
+    if ((g_state != 0 && g_state != 3) || !cam || !in_heap(o) || *(const uint64_t *)(uintptr_t)o != BODY_VTABLE) return 0;
     const float *p = (const float *)(uintptr_t)(o + 0x90), *t = (const float *)(uintptr_t)(cam + 0x320);
-    if (fabsf(p[0] - t[0]) + fabsf(p[1] - t[1]) + fabsf(p[2] - t[2]) < 1e-3f) g_body = o;
+    if (fabsf(p[0] - t[0]) + fabsf(p[1] - t[1]) + fabsf(p[2] - t[2]) < 1e-3f) g_seen_body = o, g_body = g_state == 0 ? o : g_body;
     return 0;
 }
 
 __attribute__((constructor)) static void warp_init(void) {
     const char *w = getenv("LARECOMP_WARP");
-    if (!w || sscanf(w, "%f %f %f", &g_to[0], &g_to[1], &g_to[2]) != 3) return;
-    g_state = 0;
+    if (!w || sscanf(w, "%f %f %f", &g_to[0], &g_to[1], &g_to[2]) != 3) {
+        if (!getenv("LARECOMP_LIVE")) return;
+        g_state = 3;  // (no warp: only following the player, for LARECOMP_LIVE)
+    } else g_state = 0;
     rt_register_fnhook_at(0x7002994b70ull, cam_hook);
     rt_register_fnhook_at(0x7002fee4e0ull, body_hook);
 }
 
+// where the player is (LARECOMP_LIVE's state file): false before the body is found
+bool warp_player_pos(float out[3]) {
+    uint64_t b = g_seen_body;
+    if (!b || *(const uint64_t *)(uintptr_t)b != BODY_VTABLE) return false;
+    memcpy(out, (const float *)(uintptr_t)(b + 0x90), 12);
+    return true;
+}
+
 void warp_frame(uint64_t frame) {  // (each game frame: runtime/hle/input.c)
-    if (g_state < 0 || g_state == 2) return;
+    if (g_state < 0 || g_state >= 2) return;
     static uint64_t body, since, still_since, writes;
     static float last[3];
     uint64_t b = g_body;

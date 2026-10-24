@@ -671,11 +671,18 @@ void input_frame(uint64_t frame) {
                 }
             }
             static uint64_t last_state;
-            if (frame - last_state >= 30) {
+            if (frame - last_state >= 5) {  // (often: test scripts steer by the player position in it)
                 last_state = frame;
                 snprintf(path, sizeof path, "%s/state", dir);
                 FILE *o = fopen(path, "w");
-                if (o) { fprintf(o, "frame %llu queued %d%s%s\n", (unsigned long long)frame, (qt - qh + 256) % 256, active ? " now " : "", active ? q[qh].keys : ""); fclose(o); }
+                extern bool warp_player_pos(float out[3]);  // (hle/warp.c)
+                float pp[3];
+                bool hp = warp_player_pos(pp);
+                if (o) {
+                    fprintf(o, "frame %llu queued %d%s%s\n", (unsigned long long)frame, (qt - qh + 256) % 256, active ? " now " : "", active ? q[qh].keys : "");
+                    if (hp) fprintf(o, "player %.2f %.2f %.2f\n", pp[0], pp[1], pp[2]);
+                    fclose(o);
+                }
             }
             script_buttons = b, script_lx = lx, script_ly = ly, script_rx = rx, script_ry = ry;
             return;
