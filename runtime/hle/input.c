@@ -427,6 +427,12 @@ static char g_replay_text[8][96];
 static int g_nreplay_text, g_replay_text_next;
 static _Atomic uint64_t script_buttons;
 static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
+// A plugin's controller (plugin.h set_pad: a VR mod's motion controllers), added to the player's own
+static _Atomic uint64_t plugin_buttons;
+static _Atomic int32_t plugin_lx, plugin_ly, plugin_rx, plugin_ry;
+void input_plugin_pad(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
+    plugin_buttons = buttons, plugin_lx = lx, plugin_ly = ly, plugin_rx = rx, plugin_ry = ry;
+}
 
 // Tests of the bindings, through them like a real player:
 // LARECOMP_HOST_INPUT="frame:key:<SDL key name>:frames,frame:pad:<button>:frames,..." holds a host key / controller
@@ -795,7 +801,7 @@ scripted:;
 extern bool menu_input_captured(void);  // runtime/ui/menu.mm: overlay menu or name entry up (it has the keys / pad)
 
 // Buttons held right now (keyboard, gamepad, test script), independent of whether the game polls (movies).
-uint64_t input_buttons_now(void) { return (menu_input_captured() ? 0 : key_buttons | pad_buttons) | script_buttons; }
+uint64_t input_buttons_now(void) { return (menu_input_captured() ? 0 : key_buttons | pad_buttons | plugin_buttons) | script_buttons; }
 
 static int32_t clamp_axis(int32_t v) { return v > 32767 ? 32767 : v < -32767 ? -32767 : v; }
 
@@ -868,7 +874,7 @@ static void fill_state(Cpu *c) {
     bool input_pad_finger_on(void);
     const uint64_t zr = input_pad_finger_on() ? 1ull << BTN_ZR : 0;  // (with the finger on, the controller's ZR touches)
     if (wheel_until[0] || wheel_until[1]) recompute_keyboard();  // (a wheel notch's binding lets go by time)
-    uint64_t b = menu ? script_buttons & ~zr : key_buttons | ((pad_buttons | script_buttons) & ~zr);
+    uint64_t b = menu ? script_buttons & ~zr : key_buttons | plugin_buttons | ((pad_buttons | script_buttons) & ~zr);
     {
         uint64_t menu_mouse_buttons(Cpu *c);  // (runtime/hle/menu_mouse.c: the mouse in the game's menus)
         uint64_t m = menu_mouse_buttons(c);
@@ -882,14 +888,14 @@ static void fill_state(Cpu *c) {
         if (g_inject_plus > 0) { until = renderer_game_frame() + 10; g_inject_plus = 0; }
         if (renderer_game_frame() < until) b |= 1ull << BTN_PLUS;
     }
-    int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly) + script_ly);
+    int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx + plugin_lx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly + plugin_ly) + script_ly);
     int32_t mrx = 0, mry = 0;
     mouse_stick(&mrx, &mry);
-    int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx + mrx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry + mry) + script_ry);
+    int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx + plugin_rx + mrx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry + plugin_ry + mry) + script_ry);
     // d-pad / arrow keys walk (setting) while the stick is at rest. "At rest" has a dead zone: a controller's stick
     // never reads exactly 0 (a DualSense rests at a few hundred), which used to turn the d-pad off altogether.
     if (!menu && g_settings.dpad_move && (int64_t)lx * lx + (int64_t)ly * ly < 8000ll * 8000) {
-        uint64_t d = key_buttons | pad_buttons | script_buttons;
+        uint64_t d = key_buttons | pad_buttons | plugin_buttons | script_buttons;
         int dx = (int)((d >> BTN_RIGHT) & 1) - (int)((d >> BTN_LEFT) & 1);
         int dy = (int)((d >> BTN_UP) & 1) - (int)((d >> BTN_DOWN) & 1);
         int32_t m = dx && dy ? 23170 : 32767;  // diagonals: same speed (32767 / sqrt 2)

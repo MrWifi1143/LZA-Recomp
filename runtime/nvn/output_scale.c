@@ -8,6 +8,7 @@
 //   Dynamic        Match display, lowered in steps while the GPU can't hold 60 fps and raised again when it can
 //                  (each change reallocates the render targets: a short hitch, so it changes rarely, with hysteresis)
 // Test overrides: LARECOMP_SCALE=<f> (render height = 1080 x f), LARECOMP_WIDE_TEST=<f> (forced shape).
+// A plugin's render height (plugin.h set_render_height: a VR mod's headset resolution) comes before the setting.
 #include <math.h>
 #include <stdlib.h>
 
@@ -79,7 +80,9 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
     // render height in units of the Switch's 1080 lines
     double h;
     int mode = g_settings.res_mode;
+    extern volatile uint32_t g_plugin_render_height;  // (runtime/plugin.c)
     if (forced > 0) h = forced;
+    else if (g_plugin_render_height) h = g_plugin_render_height / 1080.0;
     else if (g_settings.res_height > 0) h = g_settings.res_height / 1080.0;  // (the launcher's choice)
     else if (mode >= 1 && mode <= 8) h = mode;
     else {

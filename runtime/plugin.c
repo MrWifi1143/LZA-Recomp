@@ -50,10 +50,14 @@ static int origin_lower_left(void) {
     return renderer_origin_lower_left();
 }
 
+void input_plugin_pad(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry);  // runtime/hle/input.c
+volatile uint32_t g_plugin_render_height;  // (runtime/nvn/output_scale.c)
+static void set_render_height(uint32_t lines) { g_plugin_render_height = lines >= 360 && lines <= 8640 ? lines : 0; }
+
 static const LarecompPluginApi g_api = {
     .abi = LARECOMP_PLUGIN_ABI, .log = plugin_log, .register_fnhook = rt_register_fnhook_at,
     .call_original = rt_call_original, .title_id = game_title_id, .queue_lock = vk_queue_lock, .queue_unlock = vk_queue_unlock,
-    .image_origin_lower_left = origin_lower_left,
+    .image_origin_lower_left = origin_lower_left, .set_pad = input_plugin_pad, .set_render_height = set_render_height,
 };
 
 volatile int g_plugins_cbuf;
