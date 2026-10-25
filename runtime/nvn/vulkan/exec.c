@@ -2377,6 +2377,7 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
         g_exp_count[0]++;
         return ubo_span(vk_transient_copy(ident, size, 256), size);
     }
+    if (g_plugins_cbuf) plugins_cbuf_bound(stage, r.addr, (uint32_t)size);  // (plugins see every bind, in place or copied)
     // Bound in place in the imported guest heap, read when the GPU runs - as on the console (the game's NVN fences wait
     // for the GPU: nvnSyncWait, rt_wait_ticket), and no per-draw copy (Legends: Arceus copied 6 MB of constants a
     // frame). Ranges the game updates inline are copied (g_inline). LARECOMP_VK_UBO_DIRECT=0: always copy.
@@ -2400,7 +2401,6 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
     // within a command list nothing writes guest memory (no inline UpdateUniformBuffer: that writes through below
     // and drops the shared copies).
     if (g_findview_frame) findview_scan(stage, k, r.addr, size);
-    if (g_plugins_cbuf) plugins_cbuf_bound(stage, r.addr, (uint32_t)size);
     return ubo_span(guest_copy(r.addr, size), size);
 }
 
