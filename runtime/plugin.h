@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <vulkan/vulkan.h>
 
-#define LARECOMP_PLUGIN_ABI 1
+#define LARECOMP_PLUGIN_ABI 2  // (2: set_pad, set_render_height - a plugin checks abi >= 2 before using them)
 
 struct Cpu;  // runtime/cpu.h: the guest registers (x[31], sp, pc, v[32]...)
 
@@ -25,6 +25,14 @@ typedef struct {
     void (*queue_unlock)(void);
     // The game's final image (hooks.frame) is stored bottom row first (the window draw flips it): 1, top row first: 0
     int (*image_origin_lower_left)(void);
+    // ---- ABI 2
+    // The plugin's controller (a VR mod's motion controllers): the Switch buttons held (bit = the BTN_* order: A B X Y
+    // LSTICK RSTICK L R ZL ZR PLUS MINUS LEFT UP RIGHT DOWN) and both sticks (-32767..32767, y up), added to the player's
+    // own controller and keyboard until the next call. Any thread.
+    void (*set_pad)(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry);
+    // The render height wanted (lines; the width follows the window's shape), over the Internal resolution setting;
+    // 0: the setting again. Takes effect at the next presented frame (the render targets are reallocated).
+    void (*set_render_height)(uint32_t lines);
 } LarecompPluginApi;
 
 typedef struct {
