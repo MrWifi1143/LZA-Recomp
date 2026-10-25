@@ -54,3 +54,72 @@ void warp_frame(uint64_t frame) {  // (each game frame: runtime/hle/input.c)
     memcpy(pos, g_to, 12);
     if (++writes >= 10) g_state = 2;
 }
+
+// LARECOMP_STORY="<n>" (Legends Studio's "Play here at a story point"): the level's spawn conditions see the story at
+// phase n (10000 per chapter, 100000 the end). Z-A 1.0 keeps the phase as the work SYS_WORK_PHASE, one entry of the
+// save's works: the work manager (its pointer at 0x7003ec3328, up once the word at +0x200 is set) holds four libc++
+// unordered_maps - buckets at +0xf0 (the array) and +0xf8 (their count), then +0x128, +0x160, +0x198 - of nodes
+// {next, hash, key, i32 value at +0x18} keyed by the FNV-1a 64 of the work's name, read by 0x700048b3b0 (x0 the
+// manager, x1 a key {hash, name, length, shared string}, w0 the value) and written by 0x700092dca0 (x0, x1, w2 the
+// value; never inserting). The phase has a getter of its own, 0x7000066dc0 (w0 the phase), and the placement data's
+// phase_condition (appearingConditionList) is evaluated by 0x7000066930, which calls it from 0x7000066bac and compares
+// with the condition's op. The story's own advance (0x7002ace9cc) reads it the same way, finds the next phase in its
+// table and writes it. Hooked: the getter answers n to the evaluator - the save's value is never written, the story
+// stays where the save has it. "<n> all": n to every reader (both getters), and writes of the phase swallowed.
+#define WORK_MANAGER_PTR 0x7003ec3328ull
+#define PHASE_HASH 0x992fe2a6dec12926ull  // (FNV-1a 64 of SYS_WORK_PHASE)
+#define PHASE_GET 0x7000066dc0ull
+#define PHASE_COND_CALLER 0x7000066bacull  // (the return into the phase_condition evaluator)
+#define WORK_GET 0x700048b3b0ull
+#define WORK_SET 0x700092dca0ull
+static int g_story = -1, g_story_all;
+
+void rt_call_original(Cpu *c, uint64_t addr);  // (runtime/fnhook.c: the game's own function, from inside its hook)
+
+// the save's own phase, by the game's getter: false before the work manager is up (its instance pointer 0x7003ec3328,
+// set and flagged at +0x200 once constructed - the getter reads through it unguarded)
+static bool phase_value(Cpu *c, int *out) {
+    uint64_t mgr = *(const uint64_t *)(uintptr_t)WORK_MANAGER_PTR;
+    if (mgr - 0x7000000000ull >= 0x617b000ull || !*(const volatile uint32_t *)(uintptr_t)(mgr + 0x200)) return false;
+    rt_call_original(c, PHASE_GET);
+    *out = (int)c->x[0];
+    return true;
+}
+
+static int phase_get_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    if (!g_story_all && c->x[30] != PHASE_COND_CALLER) return 0;
+    static int last = -1;  // (the save's own value, as last logged: 0 at the title, the save's once it has loaded)
+    int v;
+    if (phase_value(c, &v) && v != last) last = v, LOG("[warp] story phase %d read as %d%s\n", v, g_story, g_story_all ? "" : " by the spawn conditions");
+    c->x[0] = (uint32_t)g_story;
+    return 1;
+}
+
+static bool phase_key(const Cpu *c) { return c->x[1] && *(const uint64_t *)(uintptr_t)c->x[1] == PHASE_HASH; }
+
+static int work_get_hook(Cpu *c, uint64_t addr) {  // ("all": the generic getter asked for the phase)
+    (void)addr;
+    if (!phase_key(c)) return 0;
+    c->x[0] = (uint32_t)g_story;
+    return 1;
+}
+
+static int work_set_hook(Cpu *c, uint64_t addr) {  // ("all": a write of the phase - the story's advance - swallowed)
+    (void)addr;
+    if (!phase_key(c)) return 0;
+    static int logged;
+    if (logged < 4) logged++, LOG("[warp] story phase write of %d swallowed\n", (int)c->x[2]);
+    c->x[0] = 1;
+    return 1;
+}
+
+__attribute__((constructor)) static void story_init(void) {
+    const char *s = getenv("LARECOMP_STORY");
+    char all[8] = "";
+    if (!s || sscanf(s, "%d %7s", &g_story, all) < 1 || g_story < 0) return;
+    g_story_all = !strcmp(all, "all");
+    rt_register_fnhook_at(PHASE_GET, phase_get_hook);
+    if (g_story_all) rt_register_fnhook_at(WORK_GET, work_get_hook), rt_register_fnhook_at(WORK_SET, work_set_hook);
+    LOG("[warp] story at phase %d%s\n", g_story, g_story_all ? " for everything" : " for the spawn conditions");
+}
