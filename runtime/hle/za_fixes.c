@@ -19,6 +19,7 @@
 // script (romfs bytecode) references those names and why it doesn't run. (Not the lane-id or skipped-compute bugs
 // fixed the same day: the legs still stretch with LARECOMP_ZA_FOOT_IK=1 after them.)
 #include <SDL3/SDL.h>  // (first: on Windows its intrinsics header must come before others)
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
@@ -147,7 +148,9 @@ static int anim_gate_b(Cpu *c, uint64_t addr) {
 // table entry runtime/hle/fps60.c patches to our frame time, so the world steps by it): one 30-fps frame a game frame
 // at any frame rate - the opening ran 4.8 times too fast at 144 fps (over in ~25 s instead of ~2 min). Its call to
 // 0x700102d380 gets the new time (s0) = old time ([player+0x90]) + the advance; the advance is scaled by the real time
-// since the player's last update / (1/30 s), so a late frame doesn't leave it behind its audio. LARECOMP_ZA_CUTSCENE_SPEED=0: off; LARECOMP_ZA_CUTSCENE_LOG=1: the first steps.
+// since the player's last update / (1/30 s), so a late frame doesn't leave it behind its audio. LARECOMP_ZA_CUTSCENE_SPEED=0: off; LARECOMP_ZA_CUTSCENE_LOG=1: the first steps,
+// 2: each player's updates, real time and advance once a second. (s1 is the frame time, s2 the player's rate: 0.5 for
+// the cutscenes, which step 1.0 an update, 1 for the battles' players, which step s1 x 60 x s2 - by time already.)
 #define ZA_TIMELINE_SET_TIME 0x700102d380ull  // (player time object, s0 new time, s1 seconds, s2 rate)
 #define ZA_TIMELINE_SET_RET 0x70010275ecull   // (the call from the player's update, x19 = the player)
 static int timeline_step(Cpu *c, uint64_t addr) {
@@ -155,10 +158,16 @@ static int timeline_step(Cpu *c, uint64_t addr) {
     extern bool pla60_enabled(void);
     extern uint64_t pla60_period_ns(void);
     if (c->x[30] != ZA_TIMELINE_SET_RET || !pla60_enabled()) return 0;
-    float t, old;
-    uint32_t w = (uint32_t)c->v[0];
+    float t, old, s1, s2;
+    uint32_t w = (uint32_t)c->v[0], w1 = (uint32_t)c->v[1], w2 = (uint32_t)c->v[2];
     memcpy(&t, &w, 4);
+    memcpy(&s1, &w1, 4), memcpy(&s2, &w2, 4);
     memcpy(&old, (const void *)(uintptr_t)(c->x[19] + 0x90), 4);
+    // Only the players the game steps a whole frame per update: some (the battles' - their intro, the text's wait for A)
+    // it already steps by time, frame time (s1) x 60 x rate (s2), and scaling those again ran them at a quarter speed
+    // at 144 fps (the trainer's ball behind her arm; "You are challenged by ...!" not taking A for seconds)
+    float by_time = s1 * 60.0f * s2;
+    if (by_time > 0 && fabsf((t - old) - by_time) <= 0.1f * by_time) return 0;
     // the real time since this player's last update (the audio plays in real time: a frame late - a stutter, a shader
     // compiled - is made up on the next one), our frame time on its first, 100 ms at most
     static struct { uint64_t player, at; } last[32];
@@ -171,6 +180,24 @@ static int timeline_step(Cpu *c, uint64_t addr) {
     float scale = (float)((double)dt / 33333333.3), nt = old + (t - old) * scale;
     static int seen;
     if (seen < 6 && getenv("LARECOMP_ZA_CUTSCENE_LOG")) seen++, LOG("[za] timeline %g -> %g (was %g)\n", old, nt, t);
+    {   // (LARECOMP_ZA_CUTSCENE_LOG=2: each player's calls, real time and advance, once a second)
+        static int lv = -1;
+        if (lv < 0) lv = getenv("LARECOMP_ZA_CUTSCENE_LOG") ? atoi(getenv("LARECOMP_ZA_CUTSCENE_LOG")) : 0;
+        static struct { uint64_t player, calls; double dt, adv, game; } st[32];
+        static uint64_t since;
+        if (lv == 2) {
+            st[k].player = c->x[19], st[k].calls++, st[k].dt += (double)dt / 1e9, st[k].adv += nt - old, st[k].game += t - old;
+            if (!since) since = now;
+            if (now - since > 1000000000ull) {
+                for (int j = 0; j < 32; j++)
+                    if (st[j].calls)
+                        LOG("[za] timeline player %llx: %llu updates, %.3f s real, advanced %.2f frames (the game's own advance %.2f)\n",
+                            (unsigned long long)st[j].player, (unsigned long long)st[j].calls, st[j].dt, st[j].adv, st[j].game),
+                        st[j].calls = 0, st[j].dt = st[j].adv = st[j].game = 0;
+                since = now;
+            }
+        }
+    }
     memcpy(&w, &nt, 4);
     c->v[0] = w;
     return 0;
@@ -438,6 +465,7 @@ void za_fixes_configure(const char *exefs) {
         g_tex_no_scale = !getenv("LARECOMP_FORCE_SCALE");
     }
     { extern void za_jobs_configure(void); za_jobs_configure(); }
+    { extern void za_press_configure(void); za_press_configure(); }  // (hle/za_press.c: presses the battle text misses)
     rt_register_fnhook_at(ZA_CONFIG_READ, config_read);
     {   // a screen above 1440p needs more than the Switch's memory for its targets (4K: the StandardAllocator ran out)
         uint64_t sw, sh;
