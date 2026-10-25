@@ -1021,6 +1021,16 @@ void backend_present(NvnTexture *t) {
                 extern void x0s_start(uint64_t fn, int n);
                 if (fn) x0s_start(fn, n);
             }
+            snprintf(path, sizeof path, "%s/calls", dir);  // (research: "<function> [n]" - its next n distinct calls,
+            if (access(path, F_OK) == 0) {                 // logged as "[calls]", hle/x0s.c)
+                FILE *f = fopen(path, "r");
+                unsigned long long fn = 0;
+                int n = 64;
+                if (f) { if (fscanf(f, "%llx %d", &fn, &n) < 1) fn = 0; fclose(f); }
+                remove(path);
+                extern void calls_start(uint64_t fn, int n);
+                if (fn) calls_start(fn, n);
+            }
             snprintf(path, sizeof path, "%s/dump", dir);  // (research: "<addr> <len>" -> <dir>/dump.bin)
             if (access(path, F_OK) == 0) {
                 FILE *f = fopen(path, "r");
