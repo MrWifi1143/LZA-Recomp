@@ -15,6 +15,8 @@
 // same way. The works are an unordered_map<u64, u32> (at +0x1d8 of the event work object, read by 0x7000ff5878 with
 // x1 -> {hash, name, length, 0} as w0) whose nodes are {next, hash, key, u32 value}, hash == key == FNV-1a 64 of the
 // name: the node is looked up the way the getter does it and the value written there (no setter of the game's found).
+// LARECOMP_FLAGS="<name>=<0|1>,..." / LARECOMP_FLAGS_FILE=<file of name=value lines> (the editor's: the flags the story's
+// phases up to that point set and clear) the same way: the flags are the map before it, at +0x1b8, the same nodes.
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -63,28 +65,41 @@ static void map_change(Cpu *c) {
 
 static bool in_heap(uint64_t a) { return a >= HEAP_BASE && a < HEAP_BASE + HEAP_MAX; }
 
-#define MAX_WORKS 16
-static struct { char name[64]; uint64_t hash; uint32_t value; } g_works[MAX_WORKS];  // (LARECOMP_STORY / LARECOMP_WORKS)
+#define MAX_WORKS 4096
+static struct { char name[64]; uint64_t hash; uint32_t value; uint16_t map; } g_works[MAX_WORKS];  // (LARECOMP_STORY / _WORKS / _FLAGS)
 static int g_nworks;
 static volatile int g_works_state;  // 0 none, 1 to write once the save's area is up, 2 written
 
-static void add_work(const char *name, size_t len, uint32_t value) {
+#define WORKS_MAP 0x1d8
+#define FLAGS_MAP 0x1b8
+static void add_work(const char *name, size_t len, uint32_t value, uint16_t map) {
     if (g_nworks >= MAX_WORKS || !len || len >= sizeof g_works[0].name) return;
     memcpy(g_works[g_nworks].name, name, len), g_works[g_nworks].name[len] = 0;
-    g_works[g_nworks].hash = fnv1a64(g_works[g_nworks].name), g_works[g_nworks].value = value;
+    g_works[g_nworks].hash = fnv1a64(g_works[g_nworks].name), g_works[g_nworks].value = value, g_works[g_nworks].map = map;
     g_nworks++, g_works_state = 1;
+}
+
+// "NAME=value,NAME=value" (or one per line) into the list, for that map
+static void add_works(const char *p, uint16_t map) {
+    while (p && *p) {
+        while (*p == ',' || *p == '\n' || *p == '\r' || *p == ' ') p++;
+        if (!*p) break;
+        const char *end = p + strcspn(p, ",\r\n"), *eq = memchr(p, '=', (size_t)(end - p));
+        if (eq) add_work(p, (size_t)(eq - p), (uint32_t)strtoul(eq + 1, NULL, 0), map);
+        p = end;
+    }
 }
 
 // the work's node in the game's own map, as the getter 0x7000ff5878 finds it: the event work object (*(system + 0x228),
 // the system **(0x7004279560)) keeps the map at +0x1d8, {buckets, their count} (libc++: the bucket of a hash is hash &
 // (count - 1) for a power of two, else hash % count; a bucket holds the node before its first); NULL when not there
-static uint32_t *work_node(uint64_t h) {
+static uint32_t *work_node(uint64_t h, uint16_t at) {
 #define RD(a) (*(const uint64_t *)(uintptr_t)(a))
     uint64_t p = RD(0x7004279560ull), sys = p ? RD(p) : 0;
     if (!in_heap(sys)) return NULL;
     uint64_t ew = RD(sys + 0x228);
     if (!in_heap(ew)) return NULL;
-    uint64_t map = RD(ew + 0x1d8);
+    uint64_t map = RD(ew + at);
     if (!in_heap(map)) return NULL;
     uint64_t buckets = RD(map), nb = RD(map + 8);
     if (!in_heap(buckets) || !nb) return NULL;
@@ -105,13 +120,20 @@ static uint32_t *work_node(uint64_t h) {
 static void works_write(void) {
     int left = 0;
     for (int i = 0; i < g_nworks; i++) {
-        uint32_t *v = work_node(g_works[i].hash);
+        uint32_t *v = work_node(g_works[i].hash, g_works[i].map);
         if (!v) { left++; continue; }
-        LOG("[warp] story: %s = %u at %llx (was %u)\n", g_works[i].name, g_works[i].value, (unsigned long long)(uintptr_t)v, *v);
+        if (g_nworks <= 16 || g_works[i].map == WORKS_MAP || *v != g_works[i].value)  // (a long flag list: only the changes told)
+            LOG("[warp] story: %s %s = %u at %llx (was %u)\n", g_works[i].map == FLAGS_MAP ? "flag" : "work", g_works[i].name, g_works[i].value,
+                (unsigned long long)(uintptr_t)v, *v);
         *v = g_works[i].value, g_works[i].hash = 0;
     }
     g_works_state = 2;
+    LOG("[warp] story: %d of %d works / flags written\n", g_nworks - left, g_nworks);
     if (!left) return;
+    if (left > 16) {  // (a long list's missing ones: flags the save never had - not scanned for, one by one)
+        LOG("[warp] story: %d not in the game's maps (not written)\n", left);
+        return;
+    }
     extern int kernel_physmem_ranges(uint64_t *lo, uint64_t *hi, int max);
     extern uint64_t kernel_heap_size(void), g_stdheap_used;
     extern int kernel_data_regions(uint64_t *addr, uint64_t *size, int max);
@@ -175,12 +197,17 @@ __attribute__((constructor)) static void warp_init(void) {
     if (g_state == 0 && a && *a && strlen(a) < sizeof g_area) strcpy(g_area, a), g_area_state = 1;
     if (g_state == 0) {
         const char *s = getenv("LARECOMP_STORY");
-        if (s && *s) add_work("WPHA_STORY", 10, (uint32_t)strtoul(s, NULL, 0));
-        for (const char *p = getenv("LARECOMP_WORKS"); p && *p;) {  // ("NAME=value,NAME=value")
-            const char *eq = strchr(p, '='), *end = strchr(p, ',');
-            if (!end) end = p + strlen(p);
-            if (eq && eq < end) add_work(p, (size_t)(eq - p), (uint32_t)strtoul(eq + 1, NULL, 0));
-            p = *end ? end + 1 : end;
+        if (s && *s) add_work("WPHA_STORY", 10, (uint32_t)strtoul(s, NULL, 0), WORKS_MAP);
+        add_works(getenv("LARECOMP_WORKS"), WORKS_MAP);  // ("NAME=value,NAME=value")
+        add_works(getenv("LARECOMP_FLAGS"), FLAGS_MAP);
+        const char *ff = getenv("LARECOMP_FLAGS_FILE");
+        FILE *f = ff && *ff ? fopen(ff, "rb") : NULL;
+        if (f) {  // (one name=value a line)
+            static char buf[1 << 20];
+            size_t n = fread(buf, 1, sizeof buf - 1, f);
+            buf[n] = 0;
+            fclose(f);
+            add_works(buf, FLAGS_MAP);
         }
     }
     rt_register_fnhook_at(0x7002994b70ull, cam_hook);
