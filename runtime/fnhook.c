@@ -42,29 +42,6 @@ static const uint64_t k_pikachu_100[][2] = {
 };
 static int g_build = -1;  // GAME_BUILD_* (runtime/gamesetup.h); -1 before the first boot
 
-// Legends Z-A: the runtime's constants are 1.x's (main build B1F12FD919EAE86A); in 2.0.0 each is looked up in the
-// table tools/port_addrs.py made from both mains (runtime/hle/za_addrs_8a1c86c4.h). An address the table doesn't have
-// is kept as it is (logged once): a plugin's own, or one the tool couldn't place.
-#include "hle/za_addrs_8a1c86c4.h"
-uint64_t za_addr(uint64_t a) {
-    if (g_build != GAME_BUILD_ZA_200 || a < 0x7000000000ull || a >= 0x7008000000ull) return a;
-    size_t lo = 0, hi = sizeof k_za_8a1c86c4 / sizeof *k_za_8a1c86c4;
-    while (lo < hi) {
-        size_t mid = (lo + hi) / 2;
-        if (k_za_8a1c86c4[mid][0] == a) return k_za_8a1c86c4[mid][1];
-        if (k_za_8a1c86c4[mid][0] < a) lo = mid + 1;
-        else hi = mid;
-    }
-    for (size_t i = 0; i < sizeof k_za_8a1c86c4 / sizeof *k_za_8a1c86c4; i++)
-        if (k_za_8a1c86c4[i][1] == a) return a;  // (a 2.0.0 address already: a hook's own, translated once before)
-    static uint64_t said[64];
-    static int nsaid;
-    for (int i = 0; i < nsaid; i++) if (said[i] == a) return a;
-    if (nsaid < 64) said[nsaid++] = a;
-    LOG("[fnhook] %llx: not in the 2.0.0 address table (kept as it is)\n", (unsigned long long)a);
-    return a;
-}
-
 uint64_t rt_addr(uint64_t eevee) {
     if (g_build == GAME_BUILD_EEVEE_100 || g_build < 0) return eevee;
     if (g_build == GAME_BUILD_PIKACHU_100)
@@ -92,7 +69,7 @@ static void reg(uint64_t addr, FnHook fn, bool user) {
     if (nregs == NREG) { LOG("[fnhook] too many hooks\n"); return; }
     regs[nregs].addr = addr, regs[nregs].fn = fn, regs[nregs].user = user, nregs++;
 add:
-    if (user) add_hook(za_addr(addr), fn);
+    if (user) add_hook(addr, fn);
     else if (g_build >= 0) {
         uint64_t a = rt_addr(addr);
         if (!a) LOG("[fnhook] %llx: no such function in this build\n", (unsigned long long)addr);
@@ -101,7 +78,7 @@ add:
 }
 
 void rt_register_fnhook(uint64_t addr, FnHook fn) { reg(addr, fn, false); }
-// at addr as given, in any build (plugins: runtime/plugin.h) - a Legends Z-A 1.x address in 2.0.0: its 2.0.0 one
+// at addr as given, in any build (plugins: runtime/plugin.h)
 void rt_register_fnhook_at(uint64_t addr, FnHook fn) { reg(addr, fn, true); }
 
 void rt_fnhook_set_build(int build) {
@@ -127,7 +104,6 @@ int rt_fnhook(Cpu *c, uint64_t addr) {
 // The game's function at addr (gamelib tables), run as if called: x0.. as set by the caller of the hook.
 // addr: the hooked function (as the hook received it) or an Eevee 1.0.0 address from the runtime's code (translated).
 void rt_call_original(Cpu *c, uint64_t addr) {
-    addr = za_addr(addr);  // (Z-A 2.0.0: a 1.x constant translated; a 2.0.0 address isn't in the table: kept)
     if (g_build == GAME_BUILD_PIKACHU_100)
         for (size_t i = 0; i < sizeof k_pikachu_100 / sizeof *k_pikachu_100; i++)
             if (k_pikachu_100[i][0] == addr) { addr = k_pikachu_100[i][1]; break; }

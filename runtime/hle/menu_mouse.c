@@ -4,7 +4,7 @@
 // reacts the way it does to a controller.
 //
 // The game's UI is Nintendo's ui2d. Every pane drawn has its screen matrix worked out each frame (menu_mouse_configure's
-// function, (pane, draw info), from the virtual CalculateMtx; Z-A 0x700264424c): those of the last 3 frames are
+// function, (pane, draw info), from the virtual CalculateMtx; Z-A 0x700264486c): those of the last 3 frames are
 // the screen (Arceus doesn't work out every layout on every frame). Pane: +0x08 sibling links, +0x18 parent, +0x20 its children's list, +0x30 translate, +0x50 size, +0x58 flags
 // (bit 0 visible), +0x5a alpha with its parents', +0x70 global matrix (3x4 rows; +0x7c x, +0x8c y: the layout's
 // 1920 x 1080 with 0,0 in the middle, y up), +0xb0 name.
@@ -139,7 +139,7 @@ static int name_index(const char *nm) {
 }
 
 // Hover selects at once: most of the games' menus move their cursor with a navigator (one class in both games; its
-// core: Z-A 0x7000fe5720, Arceus 0x700272b6d0 - (nav, &direction, &status) -> the new cell; nav +8 the index, +0xc /
+// core: Z-A 0x7000fe5d40, Arceus 0x700272b6d0 - (nav, &direction, &status) -> the new cell; nav +8 the index, +0xc /
 // +0x10 columns / rows, +0x1c column-major). A press towards the hovered button is still made - the menu's own input
 // path, animations and sounds - and the core's answer is the hovered button instead of the next cell: by its part's
 // number when the parts are numbered as the navigator counts (the selected one's number is its index), else by the
@@ -172,7 +172,7 @@ static int nav_move_hook(Cpu *c, uint64_t addr) {  // (the navigator's core: (na
     return 1;  // (the jump stays for the frame: a menu may ask the core twice for one press)
 }
 
-// Scroll lists (the Settings screens) move their cursor with their own "select cell" (Z-A 0x7000fc2630, Arceus
+// Scroll lists (the Settings screens) move their cursor with their own "select cell" (Z-A 0x7000fc2c50, Arceus
 // 0x7002719878: (list, a, b), the current a / b in the list at the configured offsets): a one-step move asked while a
 // hover jump waits becomes a move of the whole distance (the rows between the selected and hovered rows on screen).
 static uint64_t g_list_fn;

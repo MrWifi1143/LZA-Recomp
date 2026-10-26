@@ -1,8 +1,8 @@
 // Legends Z-A above 30 fps: a button press is seen by whoever asks for it, not only on the one frame it happened.
 //
-// The game's controller update 0x70012cb3e0(Controller *c) turns the buttons held (+0x278) and those of the update
+// The game's controller update 0x70012cba00(Controller *c) turns the buttons held (+0x278) and those of the update
 // before (+0x280) into held (+0x290), just pressed (+0x298: held & ~before), released (+0x2a0) and repeating (+0x2a8),
-// once a frame. Its users ask through 0x70012ca9f0(c, &action) "was this action just pressed" and 0x70012cac50 "just
+// once a frame. Its users ask through 0x70012cb010(c, &action) "was this action just pressed" and 0x70012cb270 "just
 // pressed or repeating" (an action: a hashed name mapped to button masks). Most ask every frame; the battles' text
 // (the ▼ of "You are challenged by ...!") asks on its timeline's steps, one frame in three at 144 fps: a press lasts
 // one update, so a quick tap between two of its looks could go unseen. (The seconds it took no A at all were its
@@ -22,9 +22,9 @@ void rt_register_fnhook_at(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
 void rt_call_original(Cpu *c, uint64_t addr);
 extern bool pla60_enabled(void);  // (hle/fps60.c: above 30 fps)
 
-#define ZA_PAD_UPDATE 0x70012cb3e0ull
-#define ZA_PAD_PRESSED 0x70012ca9f0ull
-#define ZA_PAD_PRESSED_OR_REPEAT 0x70012cac50ull
+#define ZA_PAD_UPDATE 0x70012cba00ull
+#define ZA_PAD_PRESSED 0x70012cb010ull
+#define ZA_PAD_PRESSED_OR_REPEAT 0x70012cb270ull
 #define PRESSED_OFF 0x298
 #define LATCH_NS 150000000ull
 

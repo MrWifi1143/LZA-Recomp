@@ -1,20 +1,20 @@
-// Legends Z-A workarounds (main build id B1F12FD919EAE86A), until their causes are found.
+// Legends Z-A workarounds (2.0.0, main build id 8A1C86C437394B69), until their causes are found.
 //
 // Stretched legs: running, the player's feet stay where the run began - the legs stretch back toward that spot, and
 // stay so after stopping. The game's biped foot IK (its BipedIK* weights, named float parameters looked up through
-// 0x700134ad10(owner, key {FNV-1a 64 hash, name}) -> s0) locks the feet and never lets go. Its ground raycasts
-// (0x7003014970) hit the ground as they should, and every FP/SIMD, integer and load/store instruction form the game
+// 0x700134b330(owner, key {FNV-1a 64 hash, name}) -> s0) locks the feet and never lets go. Its ground raycasts
+// (0x700300eca0) hit the ground as they should, and every FP/SIMD, integer and load/store instruction form the game
 // uses matches a reference ARM emulator (Unicorn), so the cause is elsewhere. With those weights looked up as 0 the
 // legs follow the animation: correct on flat ground, the feet just don't adapt to slopes and steps.
 // LARECOMP_ZA_FOOT_IK=1 keeps the game's foot IK.
 // Where the cause is (2026-10-19): the lookup returns (owner+0xe0 map [key], default 1.0) x (owner+0xa8 map [key]).
 // The +0xa8 map holds the BipedIK keys at a constant 1.0; the +0xe0 map, the per-frame values that should make the
-// feet let go, stays empty - nothing ever calls its setters (vtable slots 0x700134a100 / 0x700134a2d4) or the
-// command handlers that also fill it (0x7001e70638, and 0x7001e707a0 for +0xa8), for any object, from boot on.
+// feet let go, stays empty - nothing ever calls its setters (vtable slots 0x700134a720 / 0x700134a8f4) or the
+// command handlers that also fill it (0x7001e70c58, and 0x7001e70dc0 for +0xa8), for any object, from boot on.
 // A whole animation parameter feed never runs: what drives those handlers is the next thing to find.
-// Further (2026-10-19): the setters are reached only from two script-VM natives, 0x700133b140 (script name
-// "f26E9E53B": object, mode 0..2 -> one of three BipedIK keys, value) and 0x700133b390 ("fD081658F"), listed in the
-// natives table at main+0x3BEF6F0 ({function, hashed name} pairs). Neither is ever called while other natives are:
+// Further (2026-10-19): the setters are reached only from two script-VM natives, 0x700133b760 (script name
+// "f26E9E53B": object, mode 0..2 -> one of three BipedIK keys, value) and 0x700133b9b0 ("fD081658F"), listed in the
+// natives table at main+0x3BEA6F0 ({function, hashed name} pairs). Neither is ever called while other natives are:
 // the game script that should set the per-frame weights never runs (or takes another branch). Next: find which
 // script (romfs bytecode) references those names and why it doesn't run. (Not the lane-id or skipped-compute bugs
 // fixed the same day: the legs still stretch with LARECOMP_ZA_FOOT_IK=1 after them.)
@@ -29,12 +29,11 @@
 #include "../hle.h"
 #include "../settings.h"
 #include "../platform.h"
-uint64_t za_addr(uint64_t a);  // runtime/fnhook.c: a Z-A 1.x address in the running build
 
 void rt_register_fnhook_at(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
 void rt_call_original(Cpu *c, uint64_t addr);
 
-#define ZA_PARAM_LOOKUP 0x700134ad10ull
+#define ZA_PARAM_LOOKUP 0x700134b330ull
 
 static uint64_t fnv1a(const char *s) {
     uint64_t h = 0xcbf29ce484222645ull;
@@ -82,14 +81,14 @@ static int param_lookup(Cpu *c, uint64_t addr) {
 }
 
 // Choppy NPCs: an NPC's animation advances every frame, but its pose is only applied to the skeleton when a per-frame LOD
-// decision allows it: a callback each animation component holds (component + 0x180, called from 0x7001e73abc) answers
-// whether to evaluate this frame, kept at component + 0x1f4, and 0x7001dcdf40 (animation item -> [+0x48] component)
+// decision allows it: a callback each animation component holds (component + 0x180, called from 0x7001e740dc) answers
+// whether to evaluate this frame, kept at component + 0x1f4, and 0x7001dce560 (animation item -> [+0x48] component)
 // applies the pose only then. NPCs standing or walking around get it once every 60 frames - 2 s at 30 fps, 0.4 s at 144 -
 // while a conversation puts everyone nearby on every frame. Here it is always set: every NPC's pose follows its animation
 // each frame. (2026-10-20: forcing that flag only re-applied the same pose - the gate below is the real fix.)
 // LARECOMP_ZA_NPC_LOD=1 keeps the game's choice.
 
-#define ZA_POSE_APPLY 0x7001dcdf40ull  // (x0 = animation item; [x0 + 0x48] -> its component, + 0x1f4: evaluate this frame)
+#define ZA_POSE_APPLY 0x7001dce560ull  // (x0 = animation item; [x0 + 0x48] -> its component, + 0x1f4: evaluate this frame)
 volatile int g_za_npc_full = 0;  // (research: LARECOMP_LIVE <dir>/npcfull "0" / "1" switches it while the game runs)
 static int pose_apply(Cpu *c, uint64_t addr) {
     uint64_t item = c->x[0];
@@ -114,15 +113,15 @@ static int pose_apply(Cpu *c, uint64_t addr) {
     return 0;
 }
 
-// The real gate (2026-10-20): the component's callback (component + 0x180, called from 0x7001e73abc with x0 = state,
+// The real gate (2026-10-20): the component's callback (component + 0x180, called from 0x7001e740dc with x0 = state,
 // x1 = &dt, x2 = &skip, x3 = &threshold, x4 = &accumulated time, x5 = &&counter) adds dt to the accumulated time and
 // evaluates only once the counter has reached the threshold - then with all the time since the last evaluation.
 // Forcing the "apply" flag alone (pose_apply) re-applied the old pose. These hooks make the threshold always met:
-// 0x7001e75b20 / 0x7001e75b78 (w1 skip, w2 threshold, x3 accumulated, x4 counter) and 0x70029019f8 (handled here:
+// 0x7001e76140 / 0x7001e76198 (w1 skip, w2 threshold, x3 accumulated, x4 counter) and 0x7002901cb8 (handled here:
 // the accumulated time + dt, as the other two compute it).
-#define ZA_ANIM_GATE_A 0x7001e75b20ull
-#define ZA_ANIM_GATE_A2 0x7001e75b78ull
-#define ZA_ANIM_GATE_B 0x70029019f8ull
+#define ZA_ANIM_GATE_A 0x7001e76140ull
+#define ZA_ANIM_GATE_A2 0x7001e76198ull
+#define ZA_ANIM_GATE_B 0x7002901cb8ull
 volatile int g_za_gate_on = 1;  // (research: LARECOMP_LIVE <dir>/npcfull "0" / "1")
 static int anim_gate_a(Cpu *c, uint64_t addr) {
     if (!g_za_gate_on) return 0;
@@ -145,20 +144,20 @@ static int anim_gate_b(Cpu *c, uint64_t addr) {
 }
 
 // Cutscenes (and the other timelines the same player runs) at the right speed above 30 fps. The player's update
-// (0x70010273f0) advances its time by the frame time divided by the engine's frame time for the present interval (the
+// (0x7001027a10) advances its time by the frame time divided by the engine's frame time for the present interval (the
 // table entry runtime/hle/fps60.c patches to our frame time, so the world steps by it): one 30-fps frame a game frame
 // at any frame rate - the opening ran 4.8 times too fast at 144 fps (over in ~25 s instead of ~2 min). Its call to
-// 0x700102d380 gets the new time (s0) = old time ([player+0x90]) + the advance; the advance is scaled by the real time
+// 0x700102d9a0 gets the new time (s0) = old time ([player+0x90]) + the advance; the advance is scaled by the real time
 // since the player's last update / (1/30 s), so a late frame doesn't leave it behind its audio. LARECOMP_ZA_CUTSCENE_SPEED=0: off; LARECOMP_ZA_CUTSCENE_LOG=1: the first steps,
 // 2: each player's updates, real time and advance once a second. (s1 is the frame time, s2 the player's rate: 0.5 for
 // the cutscenes, which step 1.0 an update, 1 for the battles' players, which step s1 x 60 x s2 - by time already.)
-#define ZA_TIMELINE_SET_TIME 0x700102d380ull  // (player time object, s0 new time, s1 seconds, s2 rate)
-#define ZA_TIMELINE_SET_RET 0x70010275ecull   // (the call from the player's update, x19 = the player)
+#define ZA_TIMELINE_SET_TIME 0x700102d9a0ull  // (player time object, s0 new time, s1 seconds, s2 rate)
+#define ZA_TIMELINE_SET_RET 0x7001027c0cull   // (the call from the player's update, x19 = the player)
 static int timeline_step(Cpu *c, uint64_t addr) {
     (void)addr;
     extern bool pla60_enabled(void);
     extern uint64_t pla60_period_ns(void);
-    if (c->x[30] != za_addr(ZA_TIMELINE_SET_RET) || !pla60_enabled()) return 0;
+    if (c->x[30] != ZA_TIMELINE_SET_RET || !pla60_enabled()) return 0;
     float t, old, s1, s2;
     uint32_t w = (uint32_t)c->v[0], w1 = (uint32_t)c->v[1], w2 = (uint32_t)c->v[2];
     memcpy(&t, &w, 4);
@@ -239,14 +238,14 @@ static void za_screen_size(uint64_t *w, uint64_t *h) {
     *w = ((uint64_t)(lines * 16.0 / 9.0 + 0.5)) & ~7ull;
 }
 
-// The scene's resolution scale: 0x7000f59970 ([x0] = the scene renderer) reads the engine values ResolutionWidth /
-// ResolutionHeight and stores them over the size its targets are made at, a constant 1920 x 1080 (0x7003308150) -
+// The scene's resolution scale: 0x7000f59f90 ([x0] = the scene renderer) reads the engine values ResolutionWidth /
+// ResolutionHeight and stores them over the size its targets are made at, a constant 1920 x 1080 (0x7003303130) -
 // handheld 1280 x 720 draws into part of those targets: 0.667. Effects that read the scene's depth by screen position
 // scale their coordinates by it (the city's hologram walls: the depth they fade against, cbuf 15). With the targets
 // made at the screen size (config_read, below) that constant is wrong: 1440p gave 1.333 - the walls read the depth a
 // third further down and right, lost their lower part where it found the floor and showed the player's outline. The
 // constant itself also serves the UI's 1920 x 1080 layout space, so only this result is corrected: by 1920 / width.
-#define ZA_RES_SCALE 0x7000f59970ull
+#define ZA_RES_SCALE 0x7000f59f90ull
 static uint64_t g_res_sw = 1920, g_res_sh = 1080;
 static int res_scale_hook(Cpu *c, uint64_t addr) {
     uint64_t scene = *(const uint64_t *)(uintptr_t)c->x[0];
@@ -258,11 +257,11 @@ static int res_scale_hook(Cpu *c, uint64_t addr) {
     return 1;
 }
 
-// The engine's system config (read by 0x7001b2fc30 (config table, engine info, ...) into the info struct): +0x10 / +0x18
+// The engine's system config (read by 0x7001b30250 (config table, engine info, ...) into the info struct): +0x10 / +0x18
 // the output width / height (1920 x 1080 unless the data sets them), +0x58 the worker core count (hle/za_jobs.c).
 // (the output size: set by the screen size, below)
-#define ZA_CONFIG_READ 0x7001b2fc30ull
-#define ZA_SCREEN_SIZES 0x70031a14e0ull  // (u32 handheld w, docked w, handheld h, docked h: 1280, 1920, 720, 1080)
+#define ZA_CONFIG_READ 0x7001b30250ull
+#define ZA_SCREEN_SIZES 0x700319c4e0ull  // (u32 handheld w, docked w, handheld h, docked h: 1280, 1920, 720, 1080)
 static int config_read(Cpu *c, uint64_t addr) {
     uint64_t info = c->x[1];
     rt_call_original(c, addr);
@@ -285,25 +284,25 @@ static int config_read(Cpu *c, uint64_t addr) {
         LOG("[za] screen %llux%llu (the game draws its scene at 0.65 of it and upscales to it)\n", (unsigned long long)sw, (unsigned long long)sh);
         *w = sw, *h = sh;
         // the render pipeline's screen sizes by performance mode {handheld w, docked w, handheld h, docked h} (read-only data,
-        // copied into each pipeline when it's made: 0x7000ecf788)
-        uint32_t *t = (uint32_t *)(uintptr_t)za_addr(ZA_SCREEN_SIZES);
+        // copied into each pipeline when it's made: 0x7000ecfda8)
+        uint32_t *t = (uint32_t *)(uintptr_t)ZA_SCREEN_SIZES;
         if (t[1] == 1920 && t[3] == 1080) {
-            plat_protect(za_addr(ZA_SCREEN_SIZES) & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);
+            plat_protect(ZA_SCREEN_SIZES & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);
             t[1] = (uint32_t)*w, t[3] = (uint32_t)*h;
             LOG("[za] docked screen %ux%u\n", t[1], t[3]);
         }
         // the render pipeline's target sizes (read-only data, read when it's made): full, half and quarter of 1920x1080
         static const struct { uint64_t addr; int u64, f32, div; } k[] = {
-            {0x70031a48b0ull, 1, 0, 1},  // u64 1920, 1080: the targets (0x7000ededa0 and four more setups)
-            {0x70031a3478ull, 0, 0, 1},  // u32 1920, 1080 (0x7000e6d058)
-            {0x70031a0ec0ull, 0, 1, 1},  // f32 1920, 1080 (0x7000e6c7bc)
-            {0x70031a3a70ull, 1, 0, 2},  // u64 960, 540: half-size targets (five setups)
-            {0x70031a1f80ull, 1, 0, 4},  // u64 480, 270 (0x7000ee026c)
-            {0x70031a48d0ull, 0, 0, 4},  // u32 480, 270 (0x7000eeff3c)
+            {0x700319f8b0ull, 1, 0, 1},  // u64 1920, 1080: the targets (0x7000edf3c0 and four more setups)
+            {0x700319e478ull, 0, 0, 1},  // u32 1920, 1080 (0x7000e6d678)
+            {0x700319bec0ull, 0, 1, 1},  // f32 1920, 1080 (0x7000e6cddc)
+            {0x700319ea70ull, 1, 0, 2},  // u64 960, 540: half-size targets (five setups)
+            {0x700319cf80ull, 1, 0, 4},  // u64 480, 270 (0x7000ee088c)
+            {0x700319f8d0ull, 0, 0, 4},  // u32 480, 270 (0x7000ef055c)
         };
         for (size_t i = 0; i < sizeof k / sizeof *k; i++) {
             uint64_t ow = 1920 / k[i].div, oh = 1080 / k[i].div, nw = *w / k[i].div, nh = *h / k[i].div;
-            void *a = (void *)(uintptr_t)za_addr(k[i].addr);
+            void *a = (void *)(uintptr_t)k[i].addr;
             plat_protect(k[i].addr & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);
             if (k[i].u64) { uint64_t *v = a; if (v[0] == ow && v[1] == oh) v[0] = nw, v[1] = nh; }
             else if (k[i].f32) { float *v = a; if (v[0] == (float)ow && v[1] == (float)oh) v[0] = (float)nw, v[1] = (float)nh; }
@@ -313,7 +312,7 @@ static int config_read(Cpu *c, uint64_t addr) {
     return 1;
 }
 
-// (research, LARECOMP_ZA_VPWATCH=<width>: the render state's viewport flush (0x70018b7390: viewports at x0+0xc4) - the
+// (research, LARECOMP_ZA_VPWATCH=<width>: the render state's viewport flush (0x70018b79b0: viewports at x0+0xc4) - the
 // first time one is that wide, a hardware watchpoint on its width names who writes it)
 static int vp_flush_watch(Cpu *c, uint64_t addr) {
     (void)addr;
@@ -331,14 +330,14 @@ static int vp_flush_watch(Cpu *c, uint64_t addr) {
     return 0;
 }
 
-// (research, LARECOMP_ZA_RTWATCH=<width>: the render target lookup 0x70018a4da4 (its object: +0x68 / +0x70 the size the
+// (research, LARECOMP_ZA_RTWATCH=<width>: the render target lookup 0x70018a53c4 (its object: +0x68 / +0x70 the size the
 // viewport is set to) - the first object that wide gets a hardware watchpoint on its width, and is logged)
 static int rt_lookup_watch(Cpu *c, uint64_t addr) {
     static int armed;
     static uint64_t want;
     if (!want) want = strtoull(getenv("LARECOMP_ZA_RTWATCH"), NULL, 0);
-    // (0x70018b7088 (state, slot, target handle, ..): the handle {u8 valid, u64 object} -> the object, as 0x70018a4da4)
-    uint64_t hnd = addr == za_addr(0x70018b7088ull) ? c->x[2] : c->x[1];
+    // (0x70018b76a8 (state, slot, target handle, ..): the handle {u8 valid, u64 object} -> the object, as 0x70018a53c4)
+    uint64_t hnd = addr == 0x70018b76a8ull ? c->x[2] : c->x[1];
     uint64_t o = hnd >= GUEST_LO && hnd < GUEST_HI && *(uint8_t *)(uintptr_t)hnd ? *(uint64_t *)(uintptr_t)(hnd + 8) : 0;
     static int nlog;
     if (nlog < 30 && o >= GUEST_LO && o < GUEST_HI)
@@ -356,9 +355,9 @@ static int rt_lookup_watch(Cpu *c, uint64_t addr) {
     return 0;
 }
 
-// The renderer's setup (0x70017faa10 (renderer, desc)): desc+0x48 / +0x50 = its screen size (u64), what its render
+// The renderer's setup (0x70017fb030 (renderer, desc)): desc+0x48 / +0x50 = its screen size (u64), what its render
 // targets and the scene's 0.65 viewport are sized from. LARECOMP_ZA_RES=<w>x<h> sets it too.
-#define ZA_RENDERER_SETUP 0x70017faa10ull
+#define ZA_RENDERER_SETUP 0x70017fb030ull
 static int renderer_setup(Cpu *c, uint64_t addr) {
     (void)addr;
     uint64_t *d = (uint64_t *)(uintptr_t)(c->x[1] + 0x48);
@@ -380,7 +379,7 @@ static int perfmode_log(Cpu *c, uint64_t addr) {
     return 0;
 }
 
-// (research: the render pipeline's per-mode sizes - 0x7000ed2dc0 (pipeline): +0x288 + mode * 4 width, +0x290 + mode * 4
+// (research: the render pipeline's per-mode sizes - 0x7000ed33e0 (pipeline): +0x288 + mode * 4 width, +0x290 + mode * 4
 // height, mode at +0x2b4 (0 normal / handheld, 1 boost / docked))
 static int pipeline_sizes(Cpu *c, uint64_t addr) {
     (void)addr;
@@ -392,7 +391,7 @@ static int pipeline_sizes(Cpu *c, uint64_t addr) {
     return 0;
 }
 
-// (research, LARECOMP_ZA_RTLOG=1: render target creation 0x700044e390 (?, desc, ...) - the descriptions holding 1920)
+// (research, LARECOMP_ZA_RTLOG=1: render target creation 0x700044e1a0 (?, desc, ...) - the descriptions holding 1920)
 static int rt_create_log(Cpu *c, uint64_t addr) {
     (void)addr;
     const uint32_t *d = (const uint32_t *)(uintptr_t)c->x[1];
@@ -407,19 +406,19 @@ static int rt_create_log(Cpu *c, uint64_t addr) {
     return 0;
 }
 
-// Mouse look. The gameplay camera's update (the function around 0x7000371068) turns it by the right stick at its turn
+// Mouse look. The gameplay camera's update (the function around 0x7000371058) turns it by the right stick at its turn
 // speed, from the angles it keeps (yaw in radians, pitch 0..1: +0x4a0 / +0x4a4 of its state), plus two angles of its
-// own (+0x158 yaw, +0x15c pitch, radians: added once, then cleared - direct camera input), and hands them to 0x7000371af0
+// own (+0x158 yaw, +0x15c pitch, radians: added once, then cleared - direct camera input), and hands them to 0x7000371ae0
 // (camera, yaw, pitch). The held mouse's motion goes to those two: the camera turns by as much as the mouse moved,
 // with no stick curve, acceleration or top speed, from the next frame; a controller's stick still turns it as before.
 // LARECOMP_ZA_MOUSE_LOOK=0: the mouse is the camera stick instead (as on other cameras: menus, cutscenes, aiming).
-#define ZA_CAM_ANGLES 0x7000371af0ull      // (camera, s0 yaw, s1 pitch)
-#define ZA_CAM_ANGLES_RET 0x700037106cull  // (the gameplay camera's call)
+#define ZA_CAM_ANGLES 0x7000371ae0ull      // (camera, s0 yaw, s1 pitch)
+#define ZA_CAM_ANGLES_RET 0x700037105cull  // (the gameplay camera's call)
 static bool g_mouse_look;
 extern uint64_t g_field_camera_frame;  // (runtime/hle/menu_mouse.c: the player's camera turned - not in a menu)
 static int mouse_look_hook(Cpu *c, uint64_t addr) {
     (void)addr;
-    if (c->x[30] != za_addr(ZA_CAM_ANGLES_RET)) return 0;
+    if (c->x[30] != ZA_CAM_ANGLES_RET) return 0;
     extern uint64_t renderer_game_frame(void);
     g_field_camera_frame = renderer_game_frame();
     if (!g_mouse_look) return 0;
@@ -433,8 +432,7 @@ static int mouse_look_hook(Cpu *c, uint64_t addr) {
 }
 
 void za_fixes_configure(const char *exefs) {
-    static const uint8_t ZA_MAIN[8] = {0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a};          // 1.x
-    static const uint8_t ZA_MAIN_200[8] = {0x8a, 0x1c, 0x86, 0xc4, 0x37, 0x39, 0x4b, 0x69};      // 2.0.0 (addresses: za_addr)
+    static const uint8_t ZA_MAIN[8] = {0x8a, 0x1c, 0x86, 0xc4, 0x37, 0x39, 0x4b, 0x69};  // 2.0.0 (any other build: none of this)
     static bool done;
     char p[1100];
     snprintf(p, sizeof p, "%s/main", exefs);
@@ -445,14 +443,14 @@ void za_fixes_configure(const char *exefs) {
         if (fread(id, 1, 8, f) != 8) memset(id, 0, 8);
         fclose(f);
     }
-    if (done || (memcmp(id, ZA_MAIN, 8) && memcmp(id, ZA_MAIN_200, 8))) return;
+    if (done || memcmp(id, ZA_MAIN, 8)) return;
     done = true;
     g_mouse_look = !getenv("LARECOMP_ZA_MOUSE_LOOK") || atoi(getenv("LARECOMP_ZA_MOUSE_LOOK")) != 0;
     rt_register_fnhook_at(ZA_CAM_ANGLES, mouse_look_hook);
     { extern void za_options_configure(void); za_options_configure(); }
     {   // (runtime/hle/menu_mouse.c: ui2d pane matrices, the menu navigator's core, the scroll lists' select cell)
         extern void menu_mouse_configure(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t);
-        menu_mouse_configure(za_addr(0x700264424cull), za_addr(0x7000fe5720ull), za_addr(0x7000fc2630ull), 0x690, 0x694);
+        menu_mouse_configure(0x700264486cull, 0x7000fe5d40ull, 0x7000fc2c50ull, 0x690, 0x694);
     }
     { extern void za_qstats_configure(void); za_qstats_configure(); }
     { extern void za_passq_configure(void); za_passq_configure(); }
@@ -480,11 +478,11 @@ void za_fixes_configure(const char *exefs) {
                                                 (unsigned long long)sh, (unsigned long long)(g_stdheap_size >> 20));
     }
     rt_register_fnhook_at(ZA_RENDERER_SETUP, renderer_setup);
-    if (getenv("LARECOMP_ZA_PERFLOG")) rt_register_fnhook_at(0x7000ed2dc0ull, pipeline_sizes);
-    if (getenv("LARECOMP_ZA_RTLOG")) rt_register_fnhook_at(0x700044e390ull, rt_create_log);
+    if (getenv("LARECOMP_ZA_PERFLOG")) rt_register_fnhook_at(0x7000ed33e0ull, pipeline_sizes);
+    if (getenv("LARECOMP_ZA_RTLOG")) rt_register_fnhook_at(0x700044e1a0ull, rt_create_log);
     if (getenv("LARECOMP_ZA_PERFLOG")) rt_register_fnhook_at(0x70083f70e0ull, perfmode_log);
-    if (getenv("LARECOMP_ZA_RTWATCH")) rt_register_fnhook_at(0x70018b7088ull, rt_lookup_watch), rt_register_fnhook_at(0x70018b71a4ull, rt_lookup_watch);
-    if (getenv("LARECOMP_ZA_VPWATCH")) rt_register_fnhook_at(0x70018b7390ull, vp_flush_watch);
+    if (getenv("LARECOMP_ZA_RTWATCH")) rt_register_fnhook_at(0x70018b76a8ull, rt_lookup_watch), rt_register_fnhook_at(0x70018b77c4ull, rt_lookup_watch);
+    if (getenv("LARECOMP_ZA_VPWATCH")) rt_register_fnhook_at(0x70018b79b0ull, vp_flush_watch);
     {
         const char *cs = getenv("LARECOMP_ZA_CUTSCENE_SPEED");
         if (!(cs && atoi(cs) == 0)) rt_register_fnhook_at(ZA_TIMELINE_SET_TIME, timeline_step);
@@ -510,13 +508,13 @@ void za_fixes_configure(const char *exefs) {
     LOG("[za] foot IK off (stretched legs workaround; LARECOMP_ZA_FOOT_IK=1 keeps it)\n");
 }
 
-// (research, LARECOMP_ZA_QSTATS=1: the render queue lookup 0x7001802c90 called from the queue walk 0x700180ee10 -
+// (research, LARECOMP_ZA_QSTATS=1: the render queue lookup 0x70018032b0 called from the queue walk 0x700180f430 -
 // how often it finds no renderable for a queued id)
 static uint64_t g_q_calls, g_q_null;
 static int queue_lookup_hook(Cpu *c, uint64_t addr) {
     uint64_t lr = c->x[30], out = c->x[8];
     rt_call_original(c, addr);
-    if (lr == za_addr(0x700180ee74ull)) {
+    if (lr == 0x700180f494ull) {
         g_q_calls++;
         if (out >= 0x7000000000ull && !*(uint64_t *)(uintptr_t)out) g_q_null++;
         if ((g_q_calls & 0x3FFFF) == 0) LOG("[za] render queue lookups %llu, not found %llu\n", (unsigned long long)g_q_calls, (unsigned long long)g_q_null);
@@ -525,10 +523,10 @@ static int queue_lookup_hook(Cpu *c, uint64_t addr) {
 }
 void za_qstats_configure(void);
 void za_qstats_configure(void) {
-    if (getenv("LARECOMP_ZA_QSTATS")) rt_register_fnhook_at(0x7001802c90ull, queue_lookup_hook);
+    if (getenv("LARECOMP_ZA_QSTATS")) rt_register_fnhook_at(0x70018032b0ull, queue_lookup_hook);
 }
 
-// (research, LARECOMP_ZA_PASSQ=1: each render pass's queue walk 0x700180ee10 - the pass object and its queue length)
+// (research, LARECOMP_ZA_PASSQ=1: each render pass's queue walk 0x700180f430 - the pass object and its queue length)
 static int passq_hook(Cpu *c, uint64_t addr) {
     static uint64_t seen[64], last_frame;
     static int nseen;
@@ -551,11 +549,11 @@ static int passq_hook(Cpu *c, uint64_t addr) {
 }
 void za_passq_configure(void);
 void za_passq_configure(void) {
-    if (getenv("LARECOMP_ZA_PASSQ")) rt_register_fnhook_at(0x700180ec2cull, passq_hook);
+    if (getenv("LARECOMP_ZA_PASSQ")) rt_register_fnhook_at(0x700180f24cull, passq_hook);
 }
 
-// (research, LARECOMP_ZA_JOBQ=1: would more job workers help? The job system (scheduler at 0x7001cf5680's x0: workers
-// at +0x18, 3 of them) - a sampler every 200 us: how many jobs run (the job runner 0x7001cf3900, wrapped) and how
+// (research, LARECOMP_ZA_JOBQ=1: would more job workers help? The job system (scheduler at 0x7001cf5ca0's x0: workers
+// at +0x18, 3 of them) - a sampler every 200 us: how many jobs run (the job runner 0x7001cf3f20, wrapped) and how
 // many wait in the workers' queues (each worker: three work-stealing deques at +0x2e0 / +0x310 / +0x340).)
 static _Atomic uint64_t g_jobq_sched;
 static _Atomic int g_jobq_running;
@@ -600,8 +598,8 @@ static void *jobq_sampler(void *arg) {
 void za_jobq_configure(void);
 void za_jobq_configure(void) {
     if (!getenv("LARECOMP_ZA_JOBQ")) return;
-    rt_register_fnhook_at(0x7001cf5680ull, jobq_kick_hook);
-    rt_register_fnhook_at(0x7001cf3900ull, jobq_run_hook);
+    rt_register_fnhook_at(0x7001cf5ca0ull, jobq_kick_hook);
+    rt_register_fnhook_at(0x7001cf3f20ull, jobq_run_hook);
     pthread_t th;
     pthread_create(&th, NULL, jobq_sampler, NULL);
     pthread_detach(th);
