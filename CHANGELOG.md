@@ -3,6 +3,21 @@
 Releases are tagged per game: `LegendsA-v*` (PL:A Recomp, branch `LegendsA`) and `LegendsZA-v*` (PL:Z-A Recomp,
 branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
+## 2026-10-25: Z-A 2.0.0 (branch `LegendsZA`)
+
+Z-A:
+
+- The recomp now targets **Pokémon Legends: Z-A 2.0.0** (base game + the 2.0.0 update, main build
+  `8A1C86C437394B69`) only. Every Z-A address in the runtime (hooks, patched data, the comments that cite them) is
+  2.0.0's, ported from 1.x with `tools/port_addrs.py`; the 1.x -> 2.0.0 translation table is gone.
+- 1.x (main `B1F12FD919EAE86A`) is no longer supported: the start screen says "This needs Pokémon Legends: Z-A
+  version 2.0.0" for those files (also for game files an earlier release set up), and `make gen` stops on a 1.x
+  `main`. Saves made with 1.x load in 2.0.0.
+- README / release notes: dumping and extracting 2.0.0 (base + update with hac2l `--basenca`, the title keys from
+  the `.tik` files).
+- `tools/port_addrs.py --rewrite`: the ported addresses written over the old ones in the given sources, for the
+  next update.
+
 ## 2026-10-20: LegendsA-v0.2.0-alpha, LegendsZA-v0.1.0-alpha (first Windows test builds)
 
 Both games:

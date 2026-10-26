@@ -75,4 +75,4 @@ mkdir -p extracted  # (the start screen keeps your game files, saves and setting
 name=$(sed -n 's/^#define RT_APP_NAME "\(.*\)".*/\1/p' runtime/paths.h)
 say "Done. Start $name with:  ./play.sh"
 echo "On the start screen, click \"Select game folder...\" and pick the folder with your extracted exefs and romfs"
-echo "(with the game's update applied). The game code is then built for this PC once (several minutes)."
+echo "(Z-A 2.0.0: the base game with the 2.0.0 update applied). The game code is then built for this PC once (several minutes)."
