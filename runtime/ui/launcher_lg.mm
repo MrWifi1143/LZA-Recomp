@@ -274,7 +274,7 @@ static bool take(char *slot, char *out, size_t n) {
 }
 
 // ------------------------------------------------------------------ the game files section
-static const ImVec4 k_green(0.45f, 0.85f, 0.50f, 1), k_red(1.0f, 0.45f, 0.40f, 1);
+static const ImVec4 k_green(0.45f, 0.85f, 0.50f, 1), k_red(1.0f, 0.45f, 0.40f, 1), k_yellow(1.0f, 0.82f, 0.35f, 1);
 
 static void game_files_section(SDL_Window *win) {
     ImGui::SeparatorText(T("Game files", "Arquivos do jogo"));
@@ -428,6 +428,14 @@ extern "C" void launcher_lg_run(const char *root) {
         ImGui::Checkbox(T("Anti-aliasing (SMAA)", "Suavizar serrilhado (SMAA)"), &smaa);
         static const char *const fps_names[] = {"30 fps", "60 fps", "120 fps", "144 fps"};  // (above 30: experimental)
         ImGui::Combo(T("Frame rate (experimental above 30)", "Taxa de quadros (experimental acima de 30)"), &fps_i, fps_names, 4);
+        if (fps_i >= 2)  // (120 / 144: the game's own logic was made for 30; some of it counts frames)
+            ImGui::TextColored(k_yellow, "%s",
+                               T("120 and 144 fps are experimental. Some scripted scenes can stall at these rates\n"
+                                 "(a cutscene that walks you somewhere may never let go of you). If that happens,\n"
+                                 "set 60 or 30 fps in the game's Settings and step into the scene again.",
+                                 "120 e 144 fps são experimentais. Algumas cenas com script podem travar nessas taxas\n"
+                                 "(uma cena que leva você a algum lugar pode nunca soltar o controle). Se acontecer,\n"
+                                 "escolha 60 ou 30 fps nas configurações do jogo e entre na cena de novo."));
         ImGui::Checkbox(T("Show FPS counter", "Mostrar contador de FPS"), &showfps);
         // (runtime/nvn/glyphs.c: the game's button icons redrawn for the controller in use)
         const char *const prompt_names[] = {T("Auto (what you play with)", "Automático (o que você usa)"), "Nintendo Switch", "Xbox",

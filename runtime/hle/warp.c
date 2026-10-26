@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "../hle.h"
+uint64_t za_addr(uint64_t a);  // runtime/fnhook.c: a Z-A 1.x address in the running build
 
 void rt_register_fnhook_at(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
 
@@ -21,7 +22,7 @@ static int g_state = -1;  // -1 off, 0 waiting, 1 writing, 2 done
 static int body_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     uint64_t o = c->x[0];
-    if (g_state == 0 && o >= HEAP_BASE && o < HEAP_BASE + HEAP_MAX && *(const uint64_t *)(uintptr_t)o == BODY_VTABLE) g_body = o;
+    if (g_state == 0 && o >= HEAP_BASE && o < HEAP_BASE + HEAP_MAX && *(const uint64_t *)(uintptr_t)o == za_addr(BODY_VTABLE)) g_body = o;
     return 0;
 }
 
@@ -40,7 +41,7 @@ void warp_frame(uint64_t frame) {  // (each game frame: runtime/hle/input.c)
     uint64_t b = g_body;
     if (!b) return;
     float *pos = (float *)(uintptr_t)(b + 0x90);
-    if (b != body || *(const uint64_t *)(uintptr_t)b != BODY_VTABLE) {  // (a new body: the level loaded again)
+    if (b != body || *(const uint64_t *)(uintptr_t)b != za_addr(BODY_VTABLE)) {  // (a new body: the level loaded again)
         body = b, since = still_since = frame, memcpy(last, pos, 12), g_state = 0;
         LOG("[warp] the player's body %llx, at %.2f %.2f %.2f\n", (unsigned long long)b, pos[0], pos[1], pos[2]);
         return;
@@ -76,10 +77,11 @@ static int g_story = -1, g_story_all;
 
 void rt_call_original(Cpu *c, uint64_t addr);  // (runtime/fnhook.c: the game's own function, from inside its hook)
 
+
 // the save's own phase, by the game's getter: false before the work manager is up (its instance pointer 0x7003ec3328,
 // set and flagged at +0x200 once constructed - the getter reads through it unguarded)
 static bool phase_value(Cpu *c, int *out) {
-    uint64_t mgr = *(const uint64_t *)(uintptr_t)WORK_MANAGER_PTR;
+    uint64_t mgr = *(const uint64_t *)(uintptr_t)za_addr(WORK_MANAGER_PTR);
     if (mgr - 0x7000000000ull >= 0x617b000ull || !*(const volatile uint32_t *)(uintptr_t)(mgr + 0x200)) return false;
     rt_call_original(c, PHASE_GET);
     *out = (int)c->x[0];
@@ -88,7 +90,7 @@ static bool phase_value(Cpu *c, int *out) {
 
 static int phase_get_hook(Cpu *c, uint64_t addr) {
     (void)addr;
-    if (!g_story_all && c->x[30] != PHASE_COND_CALLER) return 0;
+    if (!g_story_all && c->x[30] != za_addr(PHASE_COND_CALLER)) return 0;
     static int last = -1;  // (the save's own value, as last logged: 0 at the title, the save's once it has loaded)
     int v;
     if (phase_value(c, &v) && v != last) last = v, LOG("[warp] story phase %d read as %d%s\n", v, g_story, g_story_all ? "" : " by the spawn conditions");

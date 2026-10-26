@@ -81,6 +81,9 @@ int game_build(const char *exefs) {
     uint64_t pid = program_id(exefs);
     if (n == 8 && !memcmp(id, EEVEE_100, 8) && pid == TITLE_EEVEE) return GAME_BUILD_EEVEE_100;
     if (n == 8 && !memcmp(id, PIKACHU_100, 8) && pid == TITLE_PIKACHU) return GAME_BUILD_PIKACHU_100;
+    static const uint8_t ZA_100[8] = {0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a}, ZA_200[8] = {0x8a, 0x1c, 0x86, 0xc4, 0x37, 0x39, 0x4b, 0x69};
+    if (n == 8 && !memcmp(id, ZA_100, 8) && pid == TITLE_ZA) return GAME_BUILD_ZA_100;
+    if (n == 8 && !memcmp(id, ZA_200, 8) && pid == TITLE_ZA) return GAME_BUILD_ZA_200;
     return GAME_BUILD_OTHER;
 }
 

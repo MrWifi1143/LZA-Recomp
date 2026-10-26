@@ -4,6 +4,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include "hle.h"
 #include "platform.h"
@@ -76,6 +77,17 @@ void fnprof_frame(uint64_t frame) {
         const char *e = getenv("LARECOMP_FNPROF");
         if (e && sscanf(e, "%ld:%ld", &from, &to) != 2) from = -1;
     }
+    {   // (research) LARECOMP_FNPROF_FILE=<path>: profiling while <path>.on exists, written when <path>.off appears
+        static const char *fp = (const char *)1;
+        if (fp == (const char *)1) fp = getenv("LARECOMP_FNPROF_FILE");
+        if (fp && frame % 8 == 0) {
+            char p[1100];
+            snprintf(p, sizeof p, "%s.on", fp);
+            if (from < 0 && !g_fnprof && access(p, F_OK) == 0 && to != -9) { from = (long)frame, to = -8; g_fnprof = 1; LOG("[fnprof] on at frame %llu\n", (unsigned long long)frame); }
+            snprintf(p, sizeof p, "%s.off", fp);
+            if (to == -8 && access(p, F_OK) == 0) to = (long)frame;
+        }
+    }
     if (from < 0) return;
     if ((long)frame == from) { g_fnprof = 1; LOG("[fnprof] on at frame %llu\n", (unsigned long long)frame); }
     if ((long)frame != to) return;
@@ -94,6 +106,7 @@ void fnprof_frame(uint64_t frame) {
     free(rows);
     LOG("[fnprof] %d functions, written %s (frames %ld-%ld)\n", n, out, from, to);
     from = -1;
+    if (getenv("LARECOMP_FNPROF_FILE")) to = -9;  // (once)
 }
 
 // LARECOMP_FNPROF=0:<to>: profile from process start (threads the game starts before the first frame)

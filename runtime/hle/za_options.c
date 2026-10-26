@@ -31,11 +31,13 @@
 #include "../hle.h"
 #include "../input_bind.h"
 #include "../settings.h"
+uint64_t za_addr(uint64_t a);  // runtime/fnhook.c: a Z-A 1.x address in the running build
 
 void rt_register_fnhook_at(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
 void rt_call_original(Cpu *c, uint64_t addr);
 void guest_call(Cpu *c, uint64_t addr);
 void menu_apply_fullscreen(void);  // runtime/ui/menu.mm
+
 
 #define ZA_OODLE_DECOMPRESS 0x7001a9c9e0ull  // (comp, comp size, raw, raw size, ...) -> raw size
 #define ZA_MSG_LOOKUP 0x7000410a30ull        // (manager, &file label, &label, language) -> [x8] text object
@@ -73,6 +75,10 @@ static int find(const int *v, int n, int x) {
     return 0;
 }
 static int get_fps(void) { return find(k_fps, 4, g_settings.next_fps ? g_settings.next_fps : g_settings.fps); }
+// (120 / 144: the game's own logic was made for 30 and some of it counts frames; the row's description says so while
+// one of them is chosen - shown again right after the change, settings_screen_buttons)
+static const char *const k_fps_warning = "Experimental: scripted scenes can stall at this rate. If you get stuck, set 60 or 30 fps.";
+static int g_info_pending = -1;  // (a row whose description is to be drawn again)
 bool legends_set_fps(int fps);  // runtime/hle/fps60.c: at once
 static void set_fps(int i) {
     if (legends_set_fps(k_fps[i])) g_settings.fps = k_fps[i], g_settings.next_fps = 0;
@@ -242,7 +248,7 @@ static int msg_tags_log(Cpu *c, uint64_t addr) {  // (research, LARECOMP_ZA_MSGT
     uint64_t res = c->x[8], lab = c->x[2];
     rt_call_original(c, addr);
     const uint8_t *obj = (const uint8_t *)(uintptr_t)*(const uint64_t *)(uintptr_t)res;
-    if (!obj || *(const uint64_t *)obj != ZA_MSG_TEXT_VTABLE) return 1;
+    if (!obj || *(const uint64_t *)obj != za_addr(ZA_MSG_TEXT_VTABLE)) return 1;
     const uint16_t *t = *(uint16_t *const *)(obj + 0x30);
     int n = *(const uint16_t *)(obj + 0x52), tag = 0;
     for (int i = 0; i < n; i++) tag |= t[i] == 0x0e || t[i] == 0x10;
@@ -264,7 +270,7 @@ static int msg_lookup_hook(Cpu *c, uint64_t addr) {
     rt_call_original(c, addr);
     const char *s = t_text[t_next++];
     uint8_t *obj = (uint8_t *)(uintptr_t)*(const uint64_t *)(uintptr_t)res;
-    if (!obj || *(const uint64_t *)obj != ZA_MSG_TEXT_VTABLE) return 1;
+    if (!obj || *(const uint64_t *)obj != za_addr(ZA_MSG_TEXT_VTABLE)) return 1;
     uint16_t *buf = *(uint16_t **)(obj + 0x30);
     uint64_t cap = *(const uint64_t *)(obj + 0x40);
     size_t n = 0, col = 0;
@@ -299,7 +305,7 @@ static void call_with_texts(Cpu *c, uint64_t fn, const uint64_t *args, int nargs
     for (int i = 0; i < nargs; i++) c->x[i] = args[i];
     for (int i = 0; i < ntexts; i++) t_text[i] = texts[i];
     t_ntext = ntexts, t_next = 0;
-    guest_call(c, fn);
+    guest_call(c, za_addr(fn));
     t_ntext = t_next = 0;
     memcpy(c->x, save, sizeof save);
 }
@@ -346,6 +352,7 @@ static int row_set_hook(Cpu *c, uint64_t addr) {
     }
     w->set(v);
     settings_save();
+    if (w->get == get_fps) g_info_pending = (int)(uint32_t)c->x[1];
     return 1;
 }
 
@@ -397,7 +404,8 @@ static int row_info_hook(Cpu *c, uint64_t addr) {
     }
     int r = row_index((int)(uint32_t)c->x[1], (int)(uint32_t)c->x[2]);
     if (r < 0) return 0;
-    call_with_texts(c, OPT_SET_INFO, (uint64_t[]){c->x[0], (uint64_t)(uintptr_t)&g_label}, 2, &k_rows[r].info, 1);
+    const char *info = k_rows[r].get == get_fps && get_fps() >= 2 ? k_fps_warning : k_rows[r].info;
+    call_with_texts(c, OPT_SET_INFO, (uint64_t[]){c->x[0], (uint64_t)(uintptr_t)&g_label}, 2, &info, 1);
     return 1;
 }
 
@@ -414,7 +422,7 @@ bool settings_cursor_row(Cpu *c, uint64_t *type, int *value) {
     memcpy(save, c->x, sizeof save);
     c->x[0] = g_page;
     c->x[1] = (uint64_t)*(const uint32_t *)(uintptr_t)(*(const uint64_t *)(uintptr_t)(g_page + 0x118) + 0xbc);
-    guest_call(c, OPT_ROW_TYPE);
+    guest_call(c, za_addr(OPT_ROW_TYPE));
     *type = c->x[0], *value = (int)(uint32_t)c->x[1];
     memcpy(c->x, save, sizeof save);
     return true;
@@ -426,7 +434,7 @@ static void guest(Cpu *c, uint64_t fn, uint64_t a0, uint64_t a1, uint64_t a2, ui
     uint64_t save[31];
     memcpy(save, c->x, sizeof save);
     c->x[0] = a0, c->x[1] = a1, c->x[2] = a2, c->x[3] = a3, c->x[4] = a4;
-    guest_call(c, fn);
+    guest_call(c, za_addr(fn));
     memcpy(c->x, save, sizeof save);
 }
 static void ctl_redraw_row(Cpu *c, int row) {  // (the cursor's row and the description)
@@ -467,6 +475,10 @@ uint64_t settings_screen_buttons(Cpu *c, uint64_t b) {
     }
     int pending = g_ctl_pending;
     g_ctl_pending = -1;
+    if (g_info_pending >= 0 && !g_ctl) {  // (the frame rate changed: its description again, with or without the warning)
+        guest(c, OPT_ROW_INFO, *(const uint64_t *)(uintptr_t)(g_page + 0x128), (uint64_t)tab, (uint64_t)g_info_pending, 0, 0);
+        g_info_pending = -1;
+    }
     if (!g_ctl) {
         if (tab == 0 && row_index(0, row) == 0 && ((edge & A) || pending >= 100)) kept |= edge & A, ctl_set(c, true);  // (Controls)
     } else if (pending >= 0 && pending < 2 && row >= 0 && row < NBINDS) {  // (a click on a cell)

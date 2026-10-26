@@ -32,8 +32,10 @@ bool setup_ready(void);
 // The game in that exefs/ folder: "Eevee", "Pikachu" or NULL.
 const char *game_name(const char *exefs);
 // The build of that exefs/main: one with address tables (runtime/fnhook.c, tools/patches.py) - the 60 fps and wild
-// battles options and the generator's patches - or GAME_BUILD_OTHER (an update, say: those stay off).
-enum { GAME_BUILD_OTHER, GAME_BUILD_EEVEE_100, GAME_BUILD_PIKACHU_100 };
+// battles options and the generator's patches - or GAME_BUILD_OTHER (an update, say: those stay off). Legends Z-A:
+// 1.x (B1F12FD919EAE86A, the runtime's constants) and 2.0.0 (8A1C86C437394B69: those constants translated,
+// runtime/fnhook.c za_addr).
+enum { GAME_BUILD_OTHER, GAME_BUILD_EEVEE_100, GAME_BUILD_PIKACHU_100, GAME_BUILD_ZA_100, GAME_BUILD_ZA_200 };
 int game_build(const char *exefs);
 // Its version ("1.0.0", "1.0.2"...: the builds known by their build id; "1.0.0" otherwise), told to the game (am).
 const char *game_version(const char *exefs);

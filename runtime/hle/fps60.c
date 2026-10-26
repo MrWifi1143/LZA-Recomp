@@ -21,6 +21,7 @@
 
 #include "../hle.h"
 #include "../settings.h"
+uint64_t za_addr(uint64_t a);  // runtime/fnhook.c: a Z-A 1.x address in the running build
 
 void rt_register_fnhook(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));  // runtime/fnhook.c
 void rt_call_original(Cpu *c, uint64_t addr);
@@ -100,7 +101,7 @@ static int field_hook(Cpu *c, uint64_t addr) {
 
 // G[1] at 60 Hz for the duration of f: the world's step; any other scene keeps the game's value.
 static int accessor_hook(Cpu *c, uint64_t addr) {
-    volatile uint32_t *g1 = (volatile uint32_t *)(uintptr_t)G1_ADDR;
+    volatile uint32_t *g1 = (volatile uint32_t *)(uintptr_t)za_addr(G1_ADDR);
     g_n_acc++;
     if (!g_on || !g_world) return 0;
     *g1 = G1_60HZ;
@@ -110,7 +111,7 @@ static int accessor_hook(Cpu *c, uint64_t addr) {
 }
 
 static int g1_reader_hook(Cpu *c, uint64_t addr) {
-    volatile uint32_t *g1 = (volatile uint32_t *)(uintptr_t)G1_ADDR;
+    volatile uint32_t *g1 = (volatile uint32_t *)(uintptr_t)za_addr(G1_ADDR);
     *g1 = G1_60HZ;
     rt_call_original(c, addr);
     *g1 = G1_ORIGINAL;
@@ -185,7 +186,7 @@ void fps60_present(void) {
         if (!t0) t0 = now, p0 = p;
         if (now - t0 >= 1000000000ull) {
             LOG("[stats] t+%.2fs presents %llu world %lu acc %lu tick_ask %lu tick_do %lu scene %d interval %d G1 %u\n", (now - t0) / 1e9,
-                (unsigned long long)(p - p0), g_n_world, g_n_acc, g_n_tick_ask, g_n_tick_do, g_scene, rt_present_interval(), *(volatile uint32_t *)(uintptr_t)G1_ADDR);
+                (unsigned long long)(p - p0), g_n_world, g_n_acc, g_n_tick_ask, g_n_tick_do, g_scene, rt_present_interval(), *(volatile uint32_t *)(uintptr_t)za_addr(G1_ADDR));
             t0 = now, p0 = p, g_n_world = g_n_acc = g_n_tick_ask = g_n_tick_do = 0;
         }
     }
@@ -429,6 +430,8 @@ static const struct { uint8_t id[8]; uint64_t entry; const char *name; uint64_t 
      {0x70001395a4ull, 0x700013a7d4ull}},
     {{0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a}, 0x7000000000ull + 0x3393E28, "Legends Z-A",
      {0x7002638d2cull, 0x700263a0fcull}},
+    {{0x8a, 0x1c, 0x86, 0xc4, 0x37, 0x39, 0x4b, 0x69}, 0x7000000000ull + 0x338EE08, "Legends Z-A 2.0.0",
+     {0x700263934cull, 0x700263a71cull}},
 };
 static uint64_t g_pla60_entry;  // the interval-2 frame time of the running build (0: off)
 static uint64_t g_pla60_build;  // (that entry of the running build, also at 30)
@@ -454,6 +457,41 @@ static int ui2d_update_frame(Cpu *c, uint64_t addr) {  // (s0 = progress; the or
     return 0;
 }
 
+// (research) LARECOMP_DT_READERS="<fn>[,<fn>...]": the frame time entry reads 1/60 s only while those functions run
+static int dt_reader(Cpu *c, uint64_t addr) {
+    volatile uint64_t *ft = (volatile uint64_t *)(uintptr_t)g_pla60_entry;
+    if (!g_pla60_patched) return 0;
+    {   // (LARECOMP_DT_CHANNEL=<n>: only that w1; logged: the channels and their objects, once)
+        static int ch = -2;
+        if (ch == -2) ch = getenv("LARECOMP_DT_CHANNEL") ? (int)strtol(getenv("LARECOMP_DT_CHANNEL"), NULL, 0) : -1;  // (a mask of channels)
+        static int seen[64];
+        int w1 = (int)c->x[1];
+        if (w1 >= 0 && w1 < 64 && !seen[w1]) seen[w1] = 1, LOG("[fps60] dt channel %d: obj %llx vtable %llx fn %llx\n", w1,
+            (unsigned long long)c->x[0], (unsigned long long)*(uint64_t *)(uintptr_t)c->x[0],
+            (unsigned long long)((uint64_t *)(uintptr_t)*(uint64_t *)(uintptr_t)c->x[0])[2]);
+        if (ch >= 0 && !(w1 >= 0 && w1 < 31 && (ch >> w1 & 1))) return 0;
+    }
+    *ft = 16666667;
+    rt_call_original(c, addr);
+    *ft = g_pla60_ns;
+    return 1;
+}
+void rt_call_original(Cpu *c, uint64_t addr);
+// (research) LARECOMP_CH1_READERS="<fn>,...": channel 1's frame time (the timers object 0x70029f4214 fills) reads
+// 1/60 s while those functions run
+static volatile uint64_t g_timers;
+static int timers_seen(Cpu *c, uint64_t addr) { g_timers = c->x[0]; return 0; }
+static int ch1_reader(Cpu *c, uint64_t addr) {
+    uint64_t t = g_timers;
+    if (!t || !g_pla60_patched) return 0;
+    volatile uint64_t *p = (volatile uint64_t *)(uintptr_t)(t + 0x10 + 16);
+    uint64_t v = *p;
+    *p = 16666667;
+    rt_call_original(c, addr);
+    *p = v;
+    return 1;
+}
+
 void pla60_configure(const char *exefs) {
     char p[1100];
     snprintf(p, sizeof p, "%s/main", exefs);
@@ -475,6 +513,23 @@ void pla60_configure(const char *exefs) {
             g_pla60_build = k_legends60[i].entry;
             if (on) g_pla60_entry = g_pla60_build, LOG("[fps60] %s at %.0f fps\n", k_legends60[i].name, 1e9 / (double)g_pla60_ns);
             g_ui_scale = on ? (float)((double)g_pla60_ns / 33333334.0) : 1.0f;  // (the hooks also at 30: the rate may change)
+            {
+                static bool dth;
+                const char *r = getenv("LARECOMP_DT_READERS");
+                for (const char *q = r; !dth && q && *q;) {
+                    uint64_t fa = strtoull(q, (char **)&q, 16);
+                    if (fa) rt_register_fnhook_at(fa, dt_reader), LOG("[fps60] research: %llx sees 1/60 s\n", (unsigned long long)fa);
+                    if (*q == ',') q++; else break;
+                }
+                const char *r1 = getenv("LARECOMP_CH1_READERS");
+                if (!dth && r1) rt_register_fnhook_at(0x70029f4214ull, timers_seen);
+                for (const char *q = r1; !dth && q && *q;) {
+                    uint64_t fa = strtoull(q, (char **)&q, 16);
+                    if (fa) rt_register_fnhook_at(fa, ch1_reader);
+                    if (*q == ',') q++; else break;
+                }
+                dth = true;
+            }
             static bool hooked;
             const char *u = getenv("LARECOMP_UI_SCALE");
             if (!hooked && !(u && atoi(u) == 0)) {
@@ -506,6 +561,18 @@ bool legends_set_fps(int fps) {
 
 // each present: the table entry, once the game is loaded (read-only data: the page made writable first)
 void pla60_present(void) {
+    {   // (research: LARECOMP_LIVE=<dir> with <dir>/fps holding a number: that frame rate from now on, the file removed)
+        static const char *live = (const char *)1;
+        if (live == (const char *)1) live = getenv("LARECOMP_LIVE");
+        static unsigned n;
+        if (live && ++n % 30 == 0) {
+            char p[1100];
+            snprintf(p, sizeof p, "%s/fps", live);
+            FILE *f = fopen(p, "r");
+            int v = 0;
+            if (f) { if (fscanf(f, "%d", &v) != 1) v = 0; fclose(f); remove(p); if (v >= 30) legends_set_fps(v); }
+        }
+    }
     { extern void fscan_present(uint64_t frame); extern uint64_t renderer_present_count(void); fscan_present(renderer_present_count()); }
     { extern void za_options_present(void); za_options_present(); }
     { extern void menu_mouse_present(void); menu_mouse_present(); }
@@ -514,5 +581,6 @@ void pla60_present(void) {
     if (*ft != 33333334u) return;
     plat_protect(g_pla60_entry & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);
     *ft = g_pla60_ns;
+    if (getenv("LARECOMP_LEGENDS_DT_FPS")) *ft = 1000000000ull / (uint64_t)atoi(getenv("LARECOMP_LEGENDS_DT_FPS"));  // (research: the world's frame time apart from the pacing)
     g_pla60_patched = true;
 }

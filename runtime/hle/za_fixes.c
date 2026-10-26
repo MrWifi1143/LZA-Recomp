@@ -29,6 +29,7 @@
 #include "../hle.h"
 #include "../settings.h"
 #include "../platform.h"
+uint64_t za_addr(uint64_t a);  // runtime/fnhook.c: a Z-A 1.x address in the running build
 
 void rt_register_fnhook_at(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
 void rt_call_original(Cpu *c, uint64_t addr);
@@ -157,7 +158,7 @@ static int timeline_step(Cpu *c, uint64_t addr) {
     (void)addr;
     extern bool pla60_enabled(void);
     extern uint64_t pla60_period_ns(void);
-    if (c->x[30] != ZA_TIMELINE_SET_RET || !pla60_enabled()) return 0;
+    if (c->x[30] != za_addr(ZA_TIMELINE_SET_RET) || !pla60_enabled()) return 0;
     float t, old, s1, s2;
     uint32_t w = (uint32_t)c->v[0], w1 = (uint32_t)c->v[1], w2 = (uint32_t)c->v[2];
     memcpy(&t, &w, 4);
@@ -285,9 +286,9 @@ static int config_read(Cpu *c, uint64_t addr) {
         *w = sw, *h = sh;
         // the render pipeline's screen sizes by performance mode {handheld w, docked w, handheld h, docked h} (read-only data,
         // copied into each pipeline when it's made: 0x7000ecf788)
-        uint32_t *t = (uint32_t *)(uintptr_t)ZA_SCREEN_SIZES;
+        uint32_t *t = (uint32_t *)(uintptr_t)za_addr(ZA_SCREEN_SIZES);
         if (t[1] == 1920 && t[3] == 1080) {
-            plat_protect(ZA_SCREEN_SIZES & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);
+            plat_protect(za_addr(ZA_SCREEN_SIZES) & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);
             t[1] = (uint32_t)*w, t[3] = (uint32_t)*h;
             LOG("[za] docked screen %ux%u\n", t[1], t[3]);
         }
@@ -302,7 +303,7 @@ static int config_read(Cpu *c, uint64_t addr) {
         };
         for (size_t i = 0; i < sizeof k / sizeof *k; i++) {
             uint64_t ow = 1920 / k[i].div, oh = 1080 / k[i].div, nw = *w / k[i].div, nh = *h / k[i].div;
-            void *a = (void *)(uintptr_t)k[i].addr;
+            void *a = (void *)(uintptr_t)za_addr(k[i].addr);
             plat_protect(k[i].addr & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);
             if (k[i].u64) { uint64_t *v = a; if (v[0] == ow && v[1] == oh) v[0] = nw, v[1] = nh; }
             else if (k[i].f32) { float *v = a; if (v[0] == (float)ow && v[1] == (float)oh) v[0] = (float)nw, v[1] = (float)nh; }
@@ -337,7 +338,7 @@ static int rt_lookup_watch(Cpu *c, uint64_t addr) {
     static uint64_t want;
     if (!want) want = strtoull(getenv("LARECOMP_ZA_RTWATCH"), NULL, 0);
     // (0x70018b7088 (state, slot, target handle, ..): the handle {u8 valid, u64 object} -> the object, as 0x70018a4da4)
-    uint64_t hnd = addr == 0x70018b7088ull ? c->x[2] : c->x[1];
+    uint64_t hnd = addr == za_addr(0x70018b7088ull) ? c->x[2] : c->x[1];
     uint64_t o = hnd >= GUEST_LO && hnd < GUEST_HI && *(uint8_t *)(uintptr_t)hnd ? *(uint64_t *)(uintptr_t)(hnd + 8) : 0;
     static int nlog;
     if (nlog < 30 && o >= GUEST_LO && o < GUEST_HI)
@@ -418,7 +419,7 @@ static bool g_mouse_look;
 extern uint64_t g_field_camera_frame;  // (runtime/hle/menu_mouse.c: the player's camera turned - not in a menu)
 static int mouse_look_hook(Cpu *c, uint64_t addr) {
     (void)addr;
-    if (c->x[30] != ZA_CAM_ANGLES_RET) return 0;
+    if (c->x[30] != za_addr(ZA_CAM_ANGLES_RET)) return 0;
     extern uint64_t renderer_game_frame(void);
     g_field_camera_frame = renderer_game_frame();
     if (!g_mouse_look) return 0;
@@ -432,7 +433,8 @@ static int mouse_look_hook(Cpu *c, uint64_t addr) {
 }
 
 void za_fixes_configure(const char *exefs) {
-    static const uint8_t ZA_MAIN[8] = {0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a};
+    static const uint8_t ZA_MAIN[8] = {0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a};          // 1.x
+    static const uint8_t ZA_MAIN_200[8] = {0x8a, 0x1c, 0x86, 0xc4, 0x37, 0x39, 0x4b, 0x69};      // 2.0.0 (addresses: za_addr)
     static bool done;
     char p[1100];
     snprintf(p, sizeof p, "%s/main", exefs);
@@ -443,14 +445,14 @@ void za_fixes_configure(const char *exefs) {
         if (fread(id, 1, 8, f) != 8) memset(id, 0, 8);
         fclose(f);
     }
-    if (done || memcmp(id, ZA_MAIN, 8)) return;
+    if (done || (memcmp(id, ZA_MAIN, 8) && memcmp(id, ZA_MAIN_200, 8))) return;
     done = true;
     g_mouse_look = !getenv("LARECOMP_ZA_MOUSE_LOOK") || atoi(getenv("LARECOMP_ZA_MOUSE_LOOK")) != 0;
     rt_register_fnhook_at(ZA_CAM_ANGLES, mouse_look_hook);
     { extern void za_options_configure(void); za_options_configure(); }
     {   // (runtime/hle/menu_mouse.c: ui2d pane matrices, the menu navigator's core, the scroll lists' select cell)
         extern void menu_mouse_configure(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t);
-        menu_mouse_configure(0x700264424cull, 0x7000fe5720ull, 0x7000fc2630ull, 0x690, 0x694);
+        menu_mouse_configure(za_addr(0x700264424cull), za_addr(0x7000fe5720ull), za_addr(0x7000fc2630ull), 0x690, 0x694);
     }
     { extern void za_qstats_configure(void); za_qstats_configure(); }
     { extern void za_passq_configure(void); za_passq_configure(); }
@@ -514,7 +516,7 @@ static uint64_t g_q_calls, g_q_null;
 static int queue_lookup_hook(Cpu *c, uint64_t addr) {
     uint64_t lr = c->x[30], out = c->x[8];
     rt_call_original(c, addr);
-    if (lr == 0x700180ee74ull) {
+    if (lr == za_addr(0x700180ee74ull)) {
         g_q_calls++;
         if (out >= 0x7000000000ull && !*(uint64_t *)(uintptr_t)out) g_q_null++;
         if ((g_q_calls & 0x3FFFF) == 0) LOG("[za] render queue lookups %llu, not found %llu\n", (unsigned long long)g_q_calls, (unsigned long long)g_q_null);

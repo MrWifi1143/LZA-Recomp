@@ -27,6 +27,7 @@
 
 #include "../hle.h"
 #include "../settings.h"
+uint64_t za_addr(uint64_t a);  // runtime/fnhook.c: a Z-A 1.x address in the running build
 
 void rt_register_fnhook_at(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
 void rt_call_original(Cpu *c, uint64_t addr);
@@ -98,7 +99,7 @@ static int setup_hook(Cpu *c, uint64_t addr) {
         c->x[1] = c->sp, c->x[2] = c->sp + 8, c->x[3] = c->sp + 16, c->x[4] = c->sp + 24, c->x[5] = c->sp + 32;
         c->x[8] = c->sp + 40;
         g_ctor_seen = -1;
-        guest_call(c, WORKER_CTOR);
+        guest_call(c, za_addr(WORKER_CTOR));
         g_ctor_seen = 1;
         uint64_t ctx = s[5];
         if (!ctx) { LOG("[za] job workers: worker %u wasn't made\n", index); break; }
@@ -109,15 +110,15 @@ static int setup_hook(Cpu *c, uint64_t addr) {
         // whose array has three - here a spare word of the function object's own storage, holding this context)
         *(uint64_t *)(w + 0x258) = ctx;
         *(uint64_t *)(w + 0x248) = ctx + 0x258 - 0x18 - 8 * (uint64_t)index;
-        *(uint64_t *)(w + 0x268) = THREAD_FN, *(uint64_t *)(w + 0x270) = THREAD_FN_DESTROY;
+        *(uint64_t *)(w + 0x268) = za_addr(THREAD_FN), *(uint64_t *)(w + 0x270) = za_addr(THREAD_FN_DESTROY);
         *(uint32_t *)(w + 0x250) = index;
-        *(uint64_t *)(w + 0x278) = THREAD_FN_COPY, *(uint64_t *)(w + 0x280) = THREAD_FN_MOVE;
+        *(uint64_t *)(w + 0x278) = za_addr(THREAD_FN_COPY), *(uint64_t *)(w + 0x280) = za_addr(THREAD_FN_MOVE);
         __atomic_store_n((uint32_t *)(w + 0x23c), 1, __ATOMIC_RELEASE);
         g_extra[g_nextra++] = ctx;
         char *name = (char *)&s[8];
         snprintf(name, 32, "JobThread%02u", index);
         c->x[0] = ctx, c->x[1] = (uint64_t)(uintptr_t)name, c->x[2] = 4 + (uint64_t)k, c->x[3] = 0x10;
-        guest_call(c, THREAD_START);
+        guest_call(c, za_addr(THREAD_START));
         LOG("[za] job worker %u (%s) on core %d\n", index, name, 4 + k);
     }
     c->sp = sp0, c->x[0] = x0;
@@ -134,7 +135,7 @@ static int steal_hook(Cpu *c, uint64_t addr) {
         uint64_t w = worker_ctx((self + k) % n);
         if (!w) continue;
         c->x[0] = w;
-        guest_call(c, STEAL_FROM);
+        guest_call(c, za_addr(STEAL_FROM));
         if (c->x[0]) return 1;
     }
     c->x[0] = 0;
@@ -146,12 +147,12 @@ static int steal_hook(Cpu *c, uint64_t addr) {
 // the extra workers' indexes past its array of three
 static int push_hook(Cpu *c, uint64_t addr) {
     if (!g_nextra || c->x[0] != g_sched) return 0;
-    int64_t index = addr == PUSH_BY_INFO ? *(int32_t *)(uintptr_t)(c->x[2] + 0xc) : (int64_t)c->x[2];
+    int64_t index = addr == za_addr(PUSH_BY_INFO) ? *(int32_t *)(uintptr_t)(c->x[2] + 0xc) : (int64_t)c->x[2];
     if (index < 3) return 0;
     uint64_t w = worker_ctx((int)index);
     if (!w) return 0;
     c->x[0] = w;
-    guest_call(c, PUSH_TO);
+    guest_call(c, za_addr(PUSH_TO));
     return 1;
 }
 
