@@ -70,6 +70,10 @@ static int find(const int *v, int n, int x) {
 }
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 static int get_fps(void) { return find(k_fps, 4, g_settings.next_fps ? g_settings.next_fps : g_settings.fps); }
+// (120 / 144: the game's own logic was made for 30 and some of it counts frames; the row's description says so while
+// one of them is chosen - drawn again right after the change, settings_screen_buttons)
+static const char *const k_fps_warning = "Experimental: scripted scenes can stall at this rate. If you get stuck, set 60 or 30 fps.";
+static bool g_info_pending;
 bool legends_set_fps(int fps);  // runtime/hle/fps60.c: at once
 static void set_fps(int i) {
     if (legends_set_fps(k_fps[i])) g_settings.fps = k_fps[i], g_settings.next_fps = 0;
@@ -313,6 +317,7 @@ static int change_hook(Cpu *c, uint64_t addr) {  // (model, id, op)
     const Row *w = &k_rows[r];
     int v = w->get(), to = clampi(v + (op ? 1 : -1), 0, w->kind == BAR10 ? 10 : w->n - 1);
     if (to != v) w->set(to), settings_save();
+    if (to != v && w->get == get_fps) g_info_pending = true;
     if (w->kind == CHOICE && w->n > 3) keep_shown(r, to);
     c->x[0] = to != v;
     return 1;
@@ -338,7 +343,7 @@ static int description_hook(Cpu *c, uint64_t addr) {  // (view, id) -> [x8] stri
     c->x[1] = 0;
     rt_call_original(c, addr);
     uint8_t *str = (uint8_t *)(uintptr_t)*(const uint64_t *)(uintptr_t)out;
-    if (str) put_text(str, k_rows[r].info, 48);
+    if (str) put_text(str, k_rows[r].get == get_fps && get_fps() >= 2 ? k_fps_warning : k_rows[r].info, 48);
     return 1;
 }
 
@@ -406,6 +411,7 @@ uint64_t settings_screen_buttons(Cpu *c, uint64_t b) {
         settings_save();
         if (g_ctl) redraw_cursor_row(c);
     }
+    if (g_info_pending && !g_ctl) redraw_cursor_row(c), g_info_pending = false;  // (the frame rate changed: its description again)
     int bi = bind_of(id);
     if (!g_ctl) {
         if (id == FIRST_ID && ((edge & A) || pending >= 100)) kept |= edge & A, set_rows(c, true);  // (the Controls row)
