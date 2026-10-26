@@ -3,6 +3,20 @@
 Releases are tagged per game: `LegendsA-v*` (PL:A Recomp, branch `LegendsA`) and `LegendsZA-v*` (PL:Z-A Recomp,
 branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
+## 2026-10-26: LegendsZA-v0.5.0-alpha
+
+Z-A (Pokémon Legends: Z-A **2.0.2** only; see the entry below):
+
+- Shadows: the blotchy grey patches on characters' faces and hair (cutscenes, e.g. Taunie at night) are gone. The
+  shader translator ignored condition-code branches (`FSET.CC` + `BRA` on a condition), so the contact-shadow test lost
+  its lower bound and every ray hit its own surface. Compared against Eden (RenderDoc): the shadow mask now matches.
+- Shadows: the half-resolution depth the shadow and blur passes read takes the same texel of each 2x2 block as the
+  console does (it mixed them before: speckled edges).
+- Texture filtering: the game's own anisotropic filtering by default. The forced 16x kept tiled detail sharp out to the
+  horizon (Arceus's sea showed its wave tiles as a checkerboard). `LARECOMP_ANISO=<n>` still raises it.
+- The intro (start to the station platform) was compared shot by shot with Eden: it matches apart from timing.
+- Integer textures (`R8_UINT` id maps) are read as integers.
+
 ## 2026-10-25: Z-A 2.0.2 (branch `LegendsZA`)
 
 Z-A:
