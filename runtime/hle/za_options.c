@@ -1,16 +1,16 @@
 // Z-A's Settings screen (main menu -> Help & Settings -> Settings) with the start screen's settings in it: rows added
 // after the game's own three on each tab, drawn and driven by the game's code like its own.
 //
-// The screen (GameSettingPage, code 0x7002c78b30..0x7002c82b30; layout ui/data/option/option_gamesetting_00.arc):
+// The screen (GameSettingPage, code 0x7002c7b000..0x7002c85000; layout ui/data/option/option_gamesetting_00.arc):
 // three tabs, each a scrolling list (7 rows on screen, one row layout reused) of three rows. The page P keeps its state
 // at [P+0x118] (tab +0xb8, cursor row +0xbc), its text view at [P+0x128]. The list asks for its row count
-// (f_7002c7d2a8: 3 per tab), then binds each row on screen (f_7002c7f3f8) from its type and value (f_7002c7dd60:
+// (f_7002c7f778: 3 per tab), then binds each row on screen (f_7002c818c8) from its type and value (f_7002c80230:
 // x0 = the type - 0 three choices, 1 two choices, 2 a bar: 5 steps 1..5 when the high word is 0, else 10, 0..10 - and
-// x1 = the value) and its texts (f_7002c81290 -> per tab: the name f_7002c81834, the choices f_7002c818d4 /
-// f_7002c81a20, a bar's number f_7002c81bec). Left / right compute the next value from the type and store it
-// (f_7002c7e20c -> per tab), then redraw the row (f_7002c7e238); the cursor's row shows its description
-// (f_7002c815c4). Past row 2 the per-tab functions stop the game (or show nothing): those six are hooked for the rows
-// added here. Text: every one of those goes through the message lookup (0x700040c490, (manager, file, label) -> text
+// x1 = the value) and its texts (f_7002c83760 -> per tab: the name f_7002c83d04, the choices f_7002c83da4 /
+// f_7002c83ef0, a bar's number f_7002c840bc). Left / right compute the next value from the type and store it
+// (f_7002c806dc -> per tab), then redraw the row (f_7002c80708); the cursor's row shows its description
+// (f_7002c83a94). Past row 2 the per-tab functions stop the game (or show nothing): those six are hooked for the rows
+// added here. Text: every one of those goes through the message lookup (0x7000410a30, (manager, file, label) -> text
 // object: UTF-16 at +0x30, length +0x52), asked with one of the game's labels while ours waits in a queue; the text it
 // returns is replaced by ours.
 //
@@ -19,7 +19,7 @@
 // Gameplay's Controls row opens the key bindings in the list's place (below: "the Controls list").
 // LARECOMP_ZA_OPTIONS=0: the game's screen as it is.
 //
-// Research: LARECOMP_ZA_ARCDUMP=<name>: every SARC archive the game decompresses (OodleLZ_Decompress, 0x7001a9d000)
+// Research: LARECOMP_ZA_ARCDUMP=<name>: every SARC archive the game decompresses (OodleLZ_Decompress, 0x7001a9c9e0)
 // whose file names include <name> is written to arcdump_<n>.sarc in the working directory.
 // LARECOMP_ZA_OPTTRACE=<file of hex addresses>: while LARECOMP_LIVE's dir has a file "opttrace", each entry of those
 // functions is logged ("[opttrace] <fn> from <lr> x0..x3"), at most 40 times per function per "opttrace" file.
@@ -38,23 +38,23 @@ void guest_call(Cpu *c, uint64_t addr);
 void menu_apply_fullscreen(void);  // runtime/ui/menu.mm
 
 
-#define ZA_OODLE_DECOMPRESS 0x7001a9d000ull  // (comp, comp size, raw, raw size, ...) -> raw size
-#define ZA_MSG_LOOKUP 0x700040c490ull        // (manager, &file label, &label, language) -> [x8] text object
-#define ZA_MSG_TEXT_VTABLE 0x7003bd2038ull
-#define OPT_ROW_COUNT 0x7002c7d2a8ull   // (page state) -> rows of its tab
-#define OPT_ROW_TYPE 0x7002c7dd60ull    // (page, row) -> x0 type, x1 value
-#define OPT_ROW_SET 0x7002c7e20cull     // (page, row, value)
-#define OPT_ROW_SHOW 0x7002c7e238ull    // (page, row, type, value, animate)
-#define OPT_ROW_TEXTS 0x7002c81290ull   // (view, row item, tab, row, value)
-#define OPT_ROW_INFO 0x7002c815c4ull    // (view, tab, row)
-#define OPT_SET_NAME 0x7002c81834ull    // (view, row item, &label)
-#define OPT_SET_CHOICES2 0x7002c818d4ull  // (view, row item, &label, &label)
-#define OPT_SET_CHOICES3 0x7002c81a20ull  // (view, row item, &label, &label, &label)
-#define OPT_SET_NUMBER 0x7002c81becull  // (view, row item, number)
-#define OPT_SET_INFO 0x7002c81d40ull    // (view, &label)
-#define OPT_TAB_REFRESH 0x7002c7e0ccull  // (page): the tab's rows again (count, cursor on the first)
-#define UI_LIST_SELECT 0x70009e9600ull  // (list, row): the cursor there (as the tab's refresh does with 0)
-#define UI_LIST_SHOW 0x70009e4d70ull    // (list, row, 0, 1): scrolled to it
+#define ZA_OODLE_DECOMPRESS 0x7001a9c9e0ull  // (comp, comp size, raw, raw size, ...) -> raw size
+#define ZA_MSG_LOOKUP 0x7000410a30ull        // (manager, &file label, &label, language) -> [x8] text object
+#define ZA_MSG_TEXT_VTABLE 0x7003bd7038ull
+#define OPT_ROW_COUNT 0x7002c7f778ull   // (page state) -> rows of its tab
+#define OPT_ROW_TYPE 0x7002c80230ull    // (page, row) -> x0 type, x1 value
+#define OPT_ROW_SET 0x7002c806dcull     // (page, row, value)
+#define OPT_ROW_SHOW 0x7002c80708ull    // (page, row, type, value, animate)
+#define OPT_ROW_TEXTS 0x7002c83760ull   // (view, row item, tab, row, value)
+#define OPT_ROW_INFO 0x7002c83a94ull    // (view, tab, row)
+#define OPT_SET_NAME 0x7002c83d04ull    // (view, row item, &label)
+#define OPT_SET_CHOICES2 0x7002c83da4ull  // (view, row item, &label, &label)
+#define OPT_SET_CHOICES3 0x7002c83ef0ull  // (view, row item, &label, &label, &label)
+#define OPT_SET_NUMBER 0x7002c840bcull  // (view, row item, number)
+#define OPT_SET_INFO 0x7002c84210ull    // (view, &label)
+#define OPT_TAB_REFRESH 0x7002c8059cull  // (page): the tab's rows again (count, cursor on the first)
+#define UI_LIST_SELECT 0x70009eae60ull  // (list, row): the cursor there (as the tab's refresh does with 0)
+#define UI_LIST_SHOW 0x70009e65d0ull    // (list, row, 0, 1): scrolled to it
 
 // ------------------------------------------------------------------ the rows
 

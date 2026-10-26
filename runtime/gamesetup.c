@@ -30,9 +30,10 @@
 #define TITLE_ZA 0x0100F43008C44000ull   // Pokemon Legends: Z-A
 static const uint8_t EEVEE_100[8] = {0x0a, 0x3f, 0x0d, 0x21, 0xe6, 0x7d, 0xad, 0x80};    // Let's Go, Eevee! v1.0.0 main
 static const uint8_t PIKACHU_100[8] = {0x1c, 0x37, 0x56, 0x92, 0xde, 0x4f, 0x4b, 0x87};  // Let's Go, Pikachu! v1.0.0
-// Legends Z-A 2.0.0 (base game + the 2.0.0 update): the build the runtime's Z-A addresses are written for. The 1.x
-// builds (main B1F12FD919EAE86A) and any other aren't played: the start screen asks for 2.0.0 (game_za_unsupported).
-static const uint8_t ZA_200[8] = {0x8a, 0x1c, 0x86, 0xc4, 0x37, 0x39, 0x4b, 0x69};
+// Legends Z-A 2.0.2 (base game 1.0.0 + the 2.0.2 update, patch v6): the build the runtime's Z-A addresses are written
+// for. Any other (2.0.0: main 8A1C86C437394B69, the base game alone...) isn't played: the start screen asks for 2.0.2
+// (game_za_unsupported).
+static const uint8_t ZA_202[8] = {0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a};
 
 static _Atomic int g_state;
 static _Atomic float g_progress;
@@ -84,12 +85,12 @@ int game_build(const char *exefs) {
     uint64_t pid = program_id(exefs);
     if (n == 8 && !memcmp(id, EEVEE_100, 8) && pid == TITLE_EEVEE) return GAME_BUILD_EEVEE_100;
     if (n == 8 && !memcmp(id, PIKACHU_100, 8) && pid == TITLE_PIKACHU) return GAME_BUILD_PIKACHU_100;
-    if (n == 8 && !memcmp(id, ZA_200, 8) && pid == TITLE_ZA) return GAME_BUILD_ZA_200;
+    if (n == 8 && !memcmp(id, ZA_202, 8) && pid == TITLE_ZA) return GAME_BUILD_ZA_202;
     return GAME_BUILD_OTHER;
 }
 
 bool game_za_unsupported(const char *exefs) {
-    return program_id(exefs) == TITLE_ZA && game_build(exefs) != GAME_BUILD_ZA_200;
+    return program_id(exefs) == TITLE_ZA && game_build(exefs) != GAME_BUILD_ZA_202;
 }
 
 const char *game_version(const char *exefs) {

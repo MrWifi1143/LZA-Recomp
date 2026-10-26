@@ -427,8 +427,8 @@ __attribute__((constructor)) static void probe_init(void) {
 static const struct { uint8_t id[8]; uint64_t entry; const char *name; uint64_t ui2d[2]; } k_legends60[] = {
     {{0xae, 0xe8, 0xf1, 0x50, 0xdd, 0xa1, 0xb5, 0xa8}, 0x7000000000ull + 0x397E8D8, "Legends: Arceus 1.1.1",
      {0x70001395a4ull, 0x700013a7d4ull}},
-    {{0x8a, 0x1c, 0x86, 0xc4, 0x37, 0x39, 0x4b, 0x69}, 0x7000000000ull + 0x338EE08, "Legends Z-A 2.0.0",
-     {0x700263934cull, 0x700263a71cull}},
+    {{0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a}, 0x7000000000ull + 0x3393E28, "Legends Z-A 2.0.2",
+     {0x7002638d2cull, 0x700263a0fcull}},
 };
 static uint64_t g_pla60_entry;  // the interval-2 frame time of the running build (0: off)
 static uint64_t g_pla60_build;  // (that entry of the running build, also at 30)
@@ -474,7 +474,7 @@ static int dt_reader(Cpu *c, uint64_t addr) {
     return 1;
 }
 void rt_call_original(Cpu *c, uint64_t addr);
-// (research) LARECOMP_CH1_READERS="<fn>,...": channel 1's frame time (the timers object 0x70029f43d4 fills) reads
+// (research) LARECOMP_CH1_READERS="<fn>,...": channel 1's frame time (the timers object 0x70029f4214 fills) reads
 // 1/60 s while those functions run
 static volatile uint64_t g_timers;
 static int timers_seen(Cpu *c, uint64_t addr) { g_timers = c->x[0]; return 0; }
@@ -519,7 +519,7 @@ void pla60_configure(const char *exefs) {
                     if (*q == ',') q++; else break;
                 }
                 const char *r1 = getenv("LARECOMP_CH1_READERS");
-                if (!dth && r1) rt_register_fnhook_at(0x70029f43d4ull, timers_seen);
+                if (!dth && r1) rt_register_fnhook_at(0x70029f4214ull, timers_seen);
                 for (const char *q = r1; !dth && q && *q;) {
                     uint64_t fa = strtoull(q, (char **)&q, 16);
                     if (fa) rt_register_fnhook_at(fa, ch1_reader);

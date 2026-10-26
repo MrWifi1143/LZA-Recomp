@@ -20,10 +20,11 @@ oodle_server.c: tables by build id, Arceus / Let's Go addresses next to Z-A ones
 another game still finds a "unique" match by chance. A match is the same instructions, not proof: an address
 the update rewrote (a function moved or changed) needs a look at its callers (testtools callers.py / xref.py).
 
-Legends Z-A 1.x -> 2.0.0 (2026-10-25) was ported this way: code moved by -17824..+2432 bytes (mostly +1568), rodata
-and data by -20480. Four addresses needed a hand: a mid-function load (0x7000ededa0 -> 0x7000edf3c0), two script
-natives (by their entries in the natives table, main+0x3BEF6F0 -> 0x3BEA6F0) and the story's phase advance, which
-moved (0x7002ace9cc -> 0x7000adb384, found by its calls to the phase getter and the work setter).
+Legends Z-A 2.0.2 -> 2.0.0 (2026-10-25: the older 2.0.0, main 8A1C86C437394B69, was briefly supported this way; the
+table is kept out of the repo): code moved by -17824..+2432 bytes (mostly +1568), rodata and data by -20480. Four
+addresses needed a hand: a mid-function load (0x7000ededa0 -> 0x7000edf3c0), two script natives (by their entries in
+the natives table, main+0x3BEF6F0 -> 0x3BEA6F0) and the story's phase advance, which moved (0x7002ace9cc ->
+0x7000adb384, found by its calls to the phase getter and the work setter).
 """
 import json
 import re

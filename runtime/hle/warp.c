@@ -1,5 +1,5 @@
 // LARECOMP_WARP="<x> <y> <z>" (Legends Studio's "Play here"): the player put at that spot of the level once it has
-// loaded. Z-A's player character body - the one object of its class, vtable 0x7003be1218 - keeps the player's
+// loaded. Z-A's player character body - the one object of its class, vtable 0x7003be6218 - keeps the player's
 // position at +0x90 (its rotation matrix before it, at +0x60) and the game follows it: the character, its transform and
 // the camera move there and stay. The functions that step it each frame (0x7000081ce0, 0x700004c3e8) get it as x0,
 // which is how it is found. Written once it has existed for two seconds and stood still for one (the save's own
@@ -13,7 +13,7 @@
 
 void rt_register_fnhook_at(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
 
-#define BODY_VTABLE 0x7003be1218ull
+#define BODY_VTABLE 0x7003be6218ull
 static float g_to[3];
 static volatile uint64_t g_body;
 static int g_state = -1;  // -1 off, 0 waiting, 1 writing, 2 done
@@ -57,30 +57,30 @@ void warp_frame(uint64_t frame) {  // (each game frame: runtime/hle/input.c)
 
 // LARECOMP_STORY="<n>" (Legends Studio's "Play here at a story point"): the level's spawn conditions see the story at
 // phase n (10000 per chapter, 100000 the end). Z-A keeps the phase as the work SYS_WORK_PHASE, one entry of the
-// save's works: the work manager (its pointer at 0x7003ebe300, up once the word at +0x200 is set) holds four libc++
+// save's works: the work manager (its pointer at 0x7003ec3328, up once the word at +0x200 is set) holds four libc++
 // unordered_maps - buckets at +0xf0 (the array) and +0xf8 (their count), then +0x128, +0x160, +0x198 - of nodes
-// {next, hash, key, i32 value at +0x18} keyed by the FNV-1a 64 of the work's name, read by 0x700048b1c0 (x0 the
-// manager, x1 a key {hash, name, length, shared string}, w0 the value) and written by 0x700092dc10 (x0, x1, w2 the
+// {next, hash, key, i32 value at +0x18} keyed by the FNV-1a 64 of the work's name, read by 0x700048b3b0 (x0 the
+// manager, x1 a key {hash, name, length, shared string}, w0 the value) and written by 0x700092dca0 (x0, x1, w2 the
 // value; never inserting). The phase has a getter of its own, 0x7000066dc0 (w0 the phase), and the placement data's
 // phase_condition (appearingConditionList) is evaluated by 0x7000066930, which calls it from 0x7000066bac and compares
-// with the condition's op. The story's own advance (0x7000adb384) reads it the same way, finds the next phase in its
+// with the condition's op. The story's own advance (0x7002ace9cc) reads it the same way, finds the next phase in its
 // table and writes it. Hooked: the getter answers n to the evaluator - the save's value is never written, the story
 // stays where the save has it. "<n> all": n to every reader (both getters), and writes of the phase swallowed.
-#define WORK_MANAGER_PTR 0x7003ebe300ull
+#define WORK_MANAGER_PTR 0x7003ec3328ull
 #define PHASE_HASH 0x992fe2a6dec12926ull  // (FNV-1a 64 of SYS_WORK_PHASE)
 #define PHASE_GET 0x7000066dc0ull
 #define PHASE_COND_CALLER 0x7000066bacull  // (the return into the phase_condition evaluator)
-#define WORK_GET 0x700048b1c0ull
-#define WORK_SET 0x700092dc10ull
+#define WORK_GET 0x700048b3b0ull
+#define WORK_SET 0x700092dca0ull
 static int g_story = -1, g_story_all;
 
 void rt_call_original(Cpu *c, uint64_t addr);  // (runtime/fnhook.c: the game's own function, from inside its hook)
 
-// the save's own phase, by the game's getter: false before the work manager is up (its instance pointer 0x7003ebe300,
+// the save's own phase, by the game's getter: false before the work manager is up (its instance pointer 0x7003ec3328,
 // set and flagged at +0x200 once constructed - the getter reads through it unguarded)
 static bool phase_value(Cpu *c, int *out) {
     uint64_t mgr = *(const uint64_t *)(uintptr_t)WORK_MANAGER_PTR;
-    if (mgr - 0x7000000000ull >= 0x6176000ull ||  // (in main's image, 0x6176000 bytes)
+    if (mgr - 0x7000000000ull >= 0x617b000ull ||  // (in main's image, 0x617b000 bytes)
         !*(const volatile uint32_t *)(uintptr_t)(mgr + 0x200)) return false;
     rt_call_original(c, PHASE_GET);
     *out = (int)c->x[0];

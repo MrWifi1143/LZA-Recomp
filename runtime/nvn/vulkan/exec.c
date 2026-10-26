@@ -5398,7 +5398,7 @@ void backend_execute(uint64_t handle) {
     static int sync_submit = -1;
     if (sync_submit < 0) sync_submit = ENV("LARECOMP_SYNC_SUBMIT") ? 1 : 0;
     // A submission every ~100 draws: the GPU starts on a frame while the render thread still translates the rest of
-    // it. The game keeps at most two frames in flight (Z-A: f_70017fbbbc waits for the older one), so how soon a frame
+    // it. The game keeps at most two frames in flight (Z-A: f_70017fb59c waits for the older one), so how soon a frame
     // is done on the GPU is what its frame rate waits on - 2000 draws per submission (about one a frame) left the GPU
     // idle until the frame was translated: Lumiose ran 112 fps at 144, 120 with this. LARECOMP_SUBMIT_DRAWS=<n> chooses.
     static uint64_t batch_draws;

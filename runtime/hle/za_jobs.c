@@ -4,22 +4,22 @@
 // experimental); LARECOMP_ZA_WORKERS=<n> overrides it. Lumiose at 144 fps,
 // 1440p: ~122 -> ~127 fps with 3 (more than 3 was slower on an i9-12900K: the fourth ran on an efficiency core); the
 // cores are then busy half the frame, and the game waits on the render path. (An earlier build crashed in one route
-// run in five - a job on the main thread found a null [x+0x2068] at 0x7000d9b920; 2026-10-22, about 20 route runs and
+// run in five - a job on the main thread found a null [x+0x2068] at 0x7000d9afa0; 2026-10-22, about 20 route runs and
 // a 15-minute one were clean.)
 //
-// The game runs each frame as jobs on a work-stealing scheduler (built by 0x7001cf4ae0): worker 0 is the main thread,
+// The game runs each frame as jobs on a work-stealing scheduler (built by 0x7001cf44c0): worker 0 is the main thread,
 // JobThread01 / 02 run workers 1 and 2 on cores 1 and 2, each with three priority deques (Chase-Lev: buffer, bottom
 // +0x20, top +0x28, at +0x2e0 / +0x310 / +0x340 of its 0xc98-byte context). The scheduler keeps them in a fixed array
 // of three (+0x18; the count at +0x16c). In Lumiose, half the frame had all three busy with ~14 more jobs waiting in
 // the deques (LARECOMP_ZA_JOBQ) - work for more workers.
 //
-// The extra workers are made the game's own way - its worker constructor (0x7001cf51e0, the arguments its setup
-// passed for worker 2), the same thread function and start (0x7000a89ecc, "JobThreadNN") - as workers 3, 4... on
+// The extra workers are made the game's own way - its worker constructor (0x7001cf4bc0, the arguments its setup
+// passed for worker 2), the same thread function and start (0x7000a8a54c, "JobThreadNN") - as workers 3, 4... on
 // emulated cores 4+ (kernel_set_cores; core 3 keeps the game's system and audio threads). They aren't in the
-// scheduler's array; instead its steal (0x7001cf6a20: from the other workers in the array) is replaced by one that
+// scheduler's array; instead its steal (0x7001cf6400: from the other workers in the array) is replaced by one that
 // takes from all of them, extra ones included, so the jobs their own jobs spawn are shared too. They sleep and are
 // woken on the scheduler's condition variable like the others, and get the frame's values (+0xc08 / +0xc10, set for
-// the three by 0x7001cf5ca0) when their loop (0x7001cf7d10) starts. Where the scheduler finds a worker by its index
+// the three by 0x7001cf5680) when their loop (0x7001cf76f0) starts. Where the scheduler finds a worker by its index
 // (its thread function; scheduling a job on a given worker) the extra ones are found too.
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,22 +34,22 @@ void guest_call(Cpu *c, uint64_t addr);
 void kernel_set_cores(int n);
 
 enum {
-    SCHED_SETUP = 0x7001cf4ae0ull,  // (sched, config): builds the scheduler and its workers
-    WORKER_CTOR = 0x7001cf51e0ull,  // (allocator, &index, &sched, &[sched+0xf0], &[sched], &[config+0x10]) -> x8: context
-    THREAD_START = 0x7000a89eccull, // (context, name, core, priority)
-    STEAL = 0x7001cf6a20ull,        // (sched, own index) -> a job from another worker, or 0
-    STEAL_FROM = 0x7001cf7c60ull,   // (context) -> a job from its deques, or 0
-    WORKER_LOOP = 0x7001cf7d10ull,  // (context): runs jobs, sleeps when there are none
-    PUSH_BY_INFO = 0x7001cf69fcull, // (sched, job, &worker info): job onto workers[info index] (0x7001cf79d0)
-    PUSH_BY_INDEX = 0x7001cf6a0cull,// (sched, job, index): job onto workers[index]
-    PUSH_TO = 0x7001cf79d0ull,      // (context, job)
-    CONFIG_READ = 0x7001b30250ull,  // (config table, engine info, ...): info+0x58 = the worker core count (3 if unset)
-    SCHED_FACTORY = 0x7001b25444ull,// (engine): the job scheduler, with [[engine+0x40]+0x58] workers
-    ALLOC_INIT = 0x700261e900ull,   // (allocator, ?, config): a heap with per-core caches
-    TLS_SET_WORKER = 0x7001b509d8ull,// (thread's game TLS block, worker index): +0xb0 = it
-    RQ_INIT = 0x70026863e0ull,      // (render queue, ?, ?, desc): its per-core command lists, desc+0x48 of them
-    THREAD_FN = 0x7001cf6ed0ull, THREAD_FN_DESTROY = 0x7001cf6f28ull,      // (the worker thread's function object,
-    THREAD_FN_COPY = 0x7001cf6f2cull, THREAD_FN_MOVE = 0x7001cf6f38ull,    //  as the setup fills it in)
+    SCHED_SETUP = 0x7001cf44c0ull,  // (sched, config): builds the scheduler and its workers
+    WORKER_CTOR = 0x7001cf4bc0ull,  // (allocator, &index, &sched, &[sched+0xf0], &[sched], &[config+0x10]) -> x8: context
+    THREAD_START = 0x7000a8a54cull, // (context, name, core, priority)
+    STEAL = 0x7001cf6400ull,        // (sched, own index) -> a job from another worker, or 0
+    STEAL_FROM = 0x7001cf7640ull,   // (context) -> a job from its deques, or 0
+    WORKER_LOOP = 0x7001cf76f0ull,  // (context): runs jobs, sleeps when there are none
+    PUSH_BY_INFO = 0x7001cf63dcull, // (sched, job, &worker info): job onto workers[info index] (0x7001cf73b0)
+    PUSH_BY_INDEX = 0x7001cf63ecull,// (sched, job, index): job onto workers[index]
+    PUSH_TO = 0x7001cf73b0ull,      // (context, job)
+    CONFIG_READ = 0x7001b2fc30ull,  // (config table, engine info, ...): info+0x58 = the worker core count (3 if unset)
+    SCHED_FACTORY = 0x7001b24e24ull,// (engine): the job scheduler, with [[engine+0x40]+0x58] workers
+    ALLOC_INIT = 0x700261e2e0ull,   // (allocator, ?, config): a heap with per-core caches
+    TLS_SET_WORKER = 0x7001b503b8ull,// (thread's game TLS block, worker index): +0xb0 = it
+    RQ_INIT = 0x7002685dc0ull,      // (render queue, ?, ?, desc): its per-core command lists, desc+0x48 of them
+    THREAD_FN = 0x7001cf68b0ull, THREAD_FN_DESTROY = 0x7001cf6908ull,      // (the worker thread's function object,
+    THREAD_FN_COPY = 0x7001cf690cull, THREAD_FN_MOVE = 0x7001cf6918ull,    //  as the setup fills it in)
 };
 
 static int g_want;                // extra workers asked for
@@ -102,7 +102,7 @@ static int setup_hook(Cpu *c, uint64_t addr) {
         g_ctor_seen = 1;
         uint64_t ctx = s[5];
         if (!ctx) { LOG("[za] job workers: worker %u wasn't made\n", index); break; }
-        // its thread's function object, as the setup fills in a new worker's (0x7001cf4d54)
+        // its thread's function object, as the setup fills in a new worker's (0x7001cf4734)
         uint8_t *w = (uint8_t *)(uintptr_t)ctx;
         *(uint64_t *)(w + 0x250) = 0, *(uint32_t *)(w + 0x260) = 0;
         // (it runs the worker found at [base + 0x18 + 8 * index], base = what the setup stores here: the scheduler,
@@ -176,7 +176,7 @@ static int factory_count_hook(Cpu *c, uint64_t addr) {
     return 1;
 }
 
-// The render queue's per-core command lists (0x70026863e0's desc+0x48 of them, 3; found by GetCurrentProcessorNumber):
+// The render queue's per-core command lists (0x7002685dc0's desc+0x48 of them, 3; found by GetCurrentProcessorNumber):
 // a thread on a core past them shares one list that isn't locked - the extra workers' render jobs corrupted it.
 static int rq_init_hook(Cpu *c, uint64_t addr) {
     (void)addr;
@@ -185,7 +185,7 @@ static int rq_init_hook(Cpu *c, uint64_t addr) {
     return 0;
 }
 
-// The game's heap allocators (made by 0x700261e900 (allocator, ?, config)) keep a cache per core, found by
+// The game's heap allocators (made by 0x700261e2e0 (allocator, ?, config)) keep a cache per core, found by
 // GetCurrentProcessorNumber: config+0x16a18+0x8a0 = on, +0x8a4 = how many (3; room for 8). Past them the extra
 // workers' allocations corrupted the heap - one per core they run on.
 static int alloc_init_hook(Cpu *c, uint64_t addr) {
@@ -205,16 +205,16 @@ static int tls_worker_hook(Cpu *c, uint64_t addr) {
     return 0;
 }
 
-// A race in the game's own jobs that more workers make likelier: f_70004527e8 replaces an object's +0x2068 (nulls it,
-// releases the old one, stores the new one) as a job, while another job, f_7000d9b0c0, reads it twice - non-null for
-// the first call, null for the second, f_70028fd880, which then read [0x50] (one route run in about 20 with 3 extra
-// workers; the writer runs on any worker, the reader here on the main thread). f_70028fd880 answers "no" for an object
+// A race in the game's own jobs that more workers make likelier: f_70004529d8 replaces an object's +0x2068 (nulls it,
+// releases the old one, stores the new one) as a job, while another job, f_7000d9a740, reads it twice - non-null for
+// the first call, null for the second, f_70028fd5c0, which then read [0x50] (one route run in about 20 with 3 extra
+// workers; the writer runs on any worker, the reader here on the main thread). f_70028fd5c0 answers "no" for an object
 // whose +0x50 is empty: for no object at all it now answers the same.
 static int null_obj_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     if (c->x[0]) return 0;
     static int n;
-    if (n++ < 8) LOG("[za] f_70028fd880 with no object (lr %llx): answered no\n", (unsigned long long)c->x[30]);
+    if (n++ < 8) LOG("[za] f_70028fd5c0 with no object (lr %llx): answered no\n", (unsigned long long)c->x[30]);
     return 1;  // (x0 = 0: "no")
 }
 
@@ -246,7 +246,7 @@ void za_jobs_configure(void) {
     rt_register_fnhook_at(SCHED_SETUP, setup_hook);
     rt_register_fnhook_at(STEAL, steal_hook);
     rt_register_fnhook_at(WORKER_LOOP, loop_hook);
-    rt_register_fnhook_at(0x70028fd880ull, null_obj_hook);
+    rt_register_fnhook_at(0x70028fd5c0ull, null_obj_hook);
     rt_register_fnhook_at(RQ_INIT, rq_init_hook);
     rt_register_fnhook_at(ALLOC_INIT, alloc_init_hook);
     rt_register_fnhook_at(TLS_SET_WORKER, tls_worker_hook);

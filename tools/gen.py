@@ -637,10 +637,10 @@ class Module:
 
 from patches import BUILD_ADDRS, EEVEE_100_BUILD, PATCHES
 
-# Legends Z-A: the runtime's addresses are 2.0.0's (main build 8a1c86c437394b69). An older main would build, then run
-# with every Z-A fix and option at the wrong place: stopped here instead (the start screen says the same:
+# Legends Z-A: the runtime's addresses are 2.0.2's (main build b1f12fd919eae86a). Another known main would build, then
+# run with every Z-A fix and option at the wrong place: stopped here instead (the start screen says the same:
 # runtime/gamesetup.c game_za_unsupported).
-ZA_OLD_BUILDS = {'b1f12fd919eae86a': '1.x'}
+ZA_OTHER_BUILDS = {'8a1c86c437394b69': '2.0.0'}
 
 import json as _json
 import os as _os
@@ -682,9 +682,9 @@ def main():
     t0 = time.time()
     m = Module(args.name, args.nso, args.base, args.simd, args.trace_stores)
     bid = m.nso.build_id[:16]
-    if args.name == 'main' and bid in ZA_OLD_BUILDS:
-        sys.exit(f'main: Pokemon Legends: Z-A {ZA_OLD_BUILDS[bid]} (build {bid}). This recomp needs Z-A 2.0.0 (main build '
-                 '8a1c86c437394b69): dump the base game and the 2.0.0 update and extract them together (README.md).')
+    if args.name == 'main' and bid in ZA_OTHER_BUILDS:
+        sys.exit(f'main: Pokemon Legends: Z-A {ZA_OTHER_BUILDS[bid]} (build {bid}). This recomp needs Z-A 2.0.2 (main build '
+                 'b1f12fd919eae86a): dump the base game and the 2.0.2 update and extract them together (README.md).')
     if args.name == 'main' and bid != EEVEE_100_BUILD:
         # The instruction patches are written for Let's Go Eevee 1.0.0's main: moved to the same instructions of a
         # build with an address table (tools/patches.py), left out of any other (another update has other code there).

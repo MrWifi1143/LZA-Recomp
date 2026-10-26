@@ -1,6 +1,6 @@
 # PL:Z-A Recomp (LZ&A Recomp, branch `LegendsZA`)
 
-A native PC port of **Pokémon Legends: Z-A** (Nintendo Switch, **version 2.0.0**) by **static recompilation**: the game's
+A native PC port of **Pokémon Legends: Z-A** (Nintendo Switch, **version 2.0.2**) by **static recompilation**: the game's
 ARM64 code is translated to C and compiled into a regular Windows or Linux program, with a runtime standing in for
 the Switch's operating system (kernel, system services, NVN graphics on Vulkan, audio, controllers).
 
@@ -9,12 +9,12 @@ LZ&A Recomp has one branch per game:
 - **`LegendsA`**: Pokémon Legends: Arceus (PL:A Recomp)
 - **`LegendsZA`** (this branch): Pokémon Legends: Z-A (PL:Z-A Recomp)
 
-> **No game files are included, and none ever will be.** You need your own dump of the game and its 2.0.0 update.
+> **No game files are included, and none ever will be.** You need your own dump of the game and its 2.0.2 update.
 > Nothing derived from the game (game code, recompiled or not, assets, keys) is in this repository or its releases.
 
-> **Version 2.0.0 only.** The recomp is made for Z-A 2.0.0 (base game + the 2.0.0 update, main build
-> `8A1C86C437394B69`). Earlier versions of the game - the 1.x builds the first releases were made for - are no longer
-> supported: the start screen tells you so if you pick them. Update the game on your Switch and dump it again.
+> **Version 2.0.2 only.** The recomp is made for Z-A 2.0.2 (base game 1.0.0 + the 2.0.2 update, main build
+> `B1F12FD919EAE86A`). Other versions (2.0.0, or the base game without its update) are not supported: the start
+> screen tells you so if you pick them. Update the game to 2.0.2 on your Switch and dump it again.
 
 > This project was made largely with AI (Anthropic's Claude, through Claude Code), directed and tested by a human.
 
@@ -60,17 +60,17 @@ the tool you extract with.
 
 What you need, all from your own Switch:
 
-- the base game and the **2.0.0 update**, dumped as `.nsp` (or `.xci` for the game card)
+- the base game and the **2.0.2 update**, dumped as `.nsp` (or `.xci` for the game card)
 - `prod.keys` and `title.keys` (dumped with Lockpick_RCM)
 
-The extracted files must have the 2.0.0 update applied: the recomp is made for 2.0.0, and the base game alone or
-an earlier update won't work (the start screen says "This needs Pokémon Legends: Z-A version 2.0.0"). Z-A's update
+The extracted files must have the 2.0.2 update applied: the recomp is made for 2.0.2, and the base game alone or
+another update won't work (the start screen says "This needs Pokémon Legends: Z-A version 2.0.2"). Z-A's update
 is a patch on top of the base game's RomFS, which plain `hactool` can't apply. Use
 [hac2l](https://github.com/Atmosphere-NX/hac2l) or [hactoolnet](https://github.com/Thealexbarney/LibHac/releases):
 
 1. Unpack both `.nsp` files (they are plain archives), e.g. `hactoolnet -t pfs0 base.nsp --outdir base` and the same
    for the update. In each, the **program NCA** is the biggest `.nca` file.
-2. Extract the 2.0.0 update on top of the base game:
+2. Extract the 2.0.2 update on top of the base game:
 
    ```sh
    hac2l -k prod.keys --titlekeys=title.keys --basenca=base/<base program>.nca \
@@ -82,9 +82,14 @@ is a patch on top of the base game's RomFS, which plain `hactool` can't apply. U
    0x180) - the base game's and the update's each have one.
 3. Pick the `game` folder on the start screen.
 
-Coming from an earlier release set up with 1.x files: the start screen shows the version message; pick the new
-2.0.0 `game` folder with **Select game folder...** and the game code is built again for it. Saves stay where they
-are (2.0.0 loads 1.x saves).
+Which update is a dump? The update `.nsp`'s `.cnmt.xml` (or its unpacked `.cnmt.nca` metadata) has the patch
+version: `<Version>393216</Version>` (patch v6) is **2.0.2**; 262144 (v4) is 2.0.0. The update's `control.nacp`
+also holds the display version ("2.0.2"). The extracted `exefs/main` of 2.0.2 has the build id `B1F12FD919EAE86A`
+(bytes 0x40..0x47 of the file).
+
+Set up with other files before (2.0.0, say): the start screen shows the version message; pick the 2.0.2 `game`
+folder with **Select game folder...** and the game code is built again for it. Saves stay where they are (2.0.2
+loads saves made with 2.0.0).
 
 ## Status
 
@@ -135,7 +140,7 @@ make -j$(nproc) all SHADERC=-lshaderc_shared  # build/lasrecomp (Debian / Ubuntu
 mkdir -p extracted && ./play.sh               # the start screen sets up your game files and builds the game code
 ```
 
-For development, with the game code built by the Makefile instead: your own Z-A 2.0.0 files in extracted/exefs
+For development, with the game code built by the Makefile instead: your own Z-A 2.0.2 files in extracted/exefs
 (main, sdk, main.npdm) and extracted/romfs, then
 
 ```sh
@@ -148,9 +153,9 @@ cc -O2 -Iruntime tools/romfs/mkromfs.c runtime/romfs_build.c -o build/mkromfs
 
 `SHADERC=-lshaderc_shared` is for distributions that ship only the shared shaderc library, such as Arch.
 
-`make gen` stops with a message on a 1.x `main`. The runtime's Z-A addresses (hooks, patched data, the comments
-that cite them) are 2.0.0's. For a future update, `tools/port_addrs.py` finds each of them in the new `main` and can
-rewrite the Z-A sources in place (its header says how, and which addresses needed a hand from 1.x to 2.0.0).
+`make gen` stops with a message on a 2.0.0 `main`. The runtime's Z-A addresses (hooks, patched data, the comments
+that cite them) are 2.0.2's. For a future update, `tools/port_addrs.py` finds each of them in the new `main` and can
+rewrite the Z-A sources in place (its header says how, and which addresses needed a hand between 2.0.2 and 2.0.0).
 
 The Windows release is cross-built from Linux with zig: see `tools/windows/README.md`.
 

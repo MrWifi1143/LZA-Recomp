@@ -23,7 +23,7 @@
 // OodleLZ_Decompress in the builds the runtime knows, by main's build id (the function passes its own name to a profiler
 // hook; its only caller gives it decoder memory and thread phase 3, as below)
 static const struct { uint8_t id[8]; uint64_t fn; } k_builds[] = {
-    {{0x8a, 0x1c, 0x86, 0xc4, 0x37, 0x39, 0x4b, 0x69}, 0x7001a9d000ull},  // Legends Z-A 2.0.0 (caller 0x7001a9bd38)
+    {{0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a}, 0x7001a9c9e0ull},  // Legends Z-A 2.0.2 (caller 0x7001a9b718)
     {{0xae, 0xe8, 0xf1, 0x50, 0xdd, 0xa1, 0xb5, 0xa8}, 0x7000004fc0ull},  // Legends: Arceus (caller 0x7002975eac)
 };
 static uint64_t g_fn;

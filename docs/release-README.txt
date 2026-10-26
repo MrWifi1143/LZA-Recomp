@@ -3,12 +3,14 @@ PL:Z-A Recomp (LZ&A Recomp) - Windows test build
 
 A native Windows port of Pokemon Legends: Z-A (Nintendo Switch) by static recompilation.
 
-NO GAME FILES ARE INCLUDED. You need your own dump of Pokemon Legends: Z-A with the 2.0.0 update, extracted to
+NO GAME FILES ARE INCLUDED. You need your own dump of Pokemon Legends: Z-A with the 2.0.2 update, extracted to
 an exefs folder (main, sdk, main.npdm) and a romfs folder. This program never asks for keys: they are only used by
 the tool you extract the game with.
 
-VERSION 2.0.0 ONLY. Earlier versions of the game (1.x, which the first releases were made for) are no longer
-supported: update the game on your Switch and dump it again.
+VERSION 2.0.2 ONLY (base game 1.0.0 + the 2.0.2 update). Other versions (2.0.0, or the base game alone) are not
+supported: update the game to 2.0.2 on your Switch and dump it again. To check a dump: the update .nsp's .cnmt.xml
+says <Version>393216</Version> (patch v6) for 2.0.2 (262144 / v4 is 2.0.0), and its control.nacp's display version
+says 2.0.2.
 
 Requirements
 ------------
@@ -19,8 +21,8 @@ Requirements
 
 Getting exefs and romfs
 -----------------------
-Dump the base game and the 2.0.0 update from your own Switch (.nsp / .xci), and prod.keys + title.keys
-(Lockpick_RCM). The extracted files must have the 2.0.0 update applied; other versions won't work. Plain hactool
+Dump the base game and the 2.0.2 update from your own Switch (.nsp / .xci), and prod.keys + title.keys
+(Lockpick_RCM). The extracted files must have the 2.0.2 update applied; other versions won't work. Plain hactool
 can't apply Z-A's update: use hac2l or hactoolnet.
 1. Unpack both .nsp files (e.g. hactoolnet -t pfs0 base.nsp --outdir base). The program NCA is the biggest .nca.
 2. hac2l -k prod.keys --titlekeys=title.keys --basenca=base\<base program>.nca
@@ -69,8 +71,8 @@ Everything stays in this folder: settings (larecomp.ini), saves (save\), the gam
 Troubleshooting
 ---------------
 - "That's not a supported game": pick the folder of your own extracted Pokemon Legends: Z-A.
-- "This needs Pokemon Legends: Z-A version 2.0.0": those files are another version (1.x, or the base game without
-  its update). Dump the base game and the 2.0.0 update and extract them together (above).
+- "This needs Pokemon Legends: Z-A version 2.0.2": those files are another version (2.0.0, or the base game without
+  its update). Dump the base game and the 2.0.2 update and extract them together (above).
 - "Those are packed game files": extract them first (above).
 - The game code didn't build: check the free disk space; details are in lasrecomp.log. An antivirus may also have
   quarantined part of zig\ or python\: restore it or add this folder as an exception.

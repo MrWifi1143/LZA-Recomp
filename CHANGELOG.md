@@ -3,20 +3,22 @@
 Releases are tagged per game: `LegendsA-v*` (PL:A Recomp, branch `LegendsA`) and `LegendsZA-v*` (PL:Z-A Recomp,
 branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
-## 2026-10-25: Z-A 2.0.0 (branch `LegendsZA`)
+## 2026-10-25: Z-A 2.0.2 (branch `LegendsZA`)
 
 Z-A:
 
-- The recomp now targets **Pokémon Legends: Z-A 2.0.0** (base game + the 2.0.0 update, main build
-  `8A1C86C437394B69`) only. Every Z-A address in the runtime (hooks, patched data, the comments that cite them) is
-  2.0.0's, ported from 1.x with `tools/port_addrs.py`; the 1.x -> 2.0.0 translation table is gone.
-- 1.x (main `B1F12FD919EAE86A`) is no longer supported: the start screen says "This needs Pokémon Legends: Z-A
-  version 2.0.0" for those files (also for game files an earlier release set up), and `make gen` stops on a 1.x
-  `main`. Saves made with 1.x load in 2.0.0.
-- README / release notes: dumping and extracting 2.0.0 (base + update with hac2l `--basenca`, the title keys from
-  the `.tik` files).
-- `tools/port_addrs.py --rewrite`: the ported addresses written over the old ones in the given sources, for the
-  next update.
+- Correction: for a few hours this branch's notes and code said "2.0.0 only" and called the older build "1.x". That
+  was a mistake - the versions were mixed up. Main build `B1F12FD919EAE86A` is **2.0.2** (patch v6, the newest);
+  `8A1C86C437394B69` is 2.0.0 (patch v4). The base game is 1.0.0 in both.
+- The recomp targets **Pokémon Legends: Z-A 2.0.2** (base game 1.0.0 + the 2.0.2 update) only. Every Z-A address in
+  the runtime is 2.0.2's, as before; the 2.0.0 translation table (`za_addr`) is gone.
+- Other versions are not played: the start screen says "This needs Pokémon Legends: Z-A version 2.0.2" for them
+  (also for game files set up before), and `make gen` stops on a 2.0.0 `main`. 2.0.2 loads saves made with 2.0.0.
+- README / release notes: the supported version, how to tell which update a dump is (the update's cnmt Version
+  393216 = 2.0.2 / patch v6, or its control.nacp display version), dumping and extracting (base + update with hac2l
+  `--basenca`, the title keys from the `.tik` files).
+- `tools/port_addrs.py`: reads `f_700...` names too; `--rewrite` writes the ported addresses into the given sources,
+  for the next update.
 
 ## 2026-10-20: LegendsA-v0.2.0-alpha, LegendsZA-v0.1.0-alpha (first Windows test builds)
 
