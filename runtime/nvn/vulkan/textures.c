@@ -973,11 +973,12 @@ static VkSampler sampler_create(NvnSamplerDesc *d, bool cmp) {
     if (si.maxLod < si.minLod) si.maxLod = si.minLod;
     si.mipLodBias = d->lod_bias;
     if (d->max_aniso > 1) { si.anisotropyEnable = VK_TRUE; si.maxAnisotropy = fminf(d->max_aniso, 16); }
-    // Anisotropic filtering raised to 16x (textures stay sharp at grazing angles: paths and grass towards the top of
-    // the screen): the game asks for little or none, sized for the Switch. Mipmapped, linearly filtered colour samplers
-    // only. LARECOMP_ANISO=<n> chooses (0 or 1: the game's own).
+    // Anisotropic filtering: the game's own by default (it asks for little or none, sized for the Switch). Raising it
+    // (LARECOMP_ANISO=<n>, mipmapped, linearly filtered colour samplers) keeps paths and grass sharp at grazing angles but
+    // also keeps tiled detail sharp out to the horizon: Arceus's sea then shows its wave texture's tiles as a checkerboard
+    // (Eden and the Switch blur it), so it is not the default.
     static int aniso = -1;
-    if (aniso < 0) aniso = getenv("LARECOMP_ANISO") ? atoi(getenv("LARECOMP_ANISO")) : 16;
+    if (aniso < 0) aniso = getenv("LARECOMP_ANISO") ? atoi(getenv("LARECOMP_ANISO")) : 0;
     if (aniso > 1 && mf >= 2 && si.minFilter == VK_FILTER_LINEAR && !d->compare_mode) {
         si.anisotropyEnable = VK_TRUE;
         si.maxAnisotropy = fmaxf(si.maxAnisotropy, fminf((float)aniso, 16));

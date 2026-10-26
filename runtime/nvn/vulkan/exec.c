@@ -890,6 +890,7 @@ bool renderer_texture_frame_fresh(NvnTexture *t);
 void renderer_texture_mark_presented(NvnTexture *t);
 uint64_t renderer_present_count(void);
 void renderer_save_texture_tex(TexBackend *b, const char *path);
+static uint32_t g_save_level;  // (the mip level renderer_save_texture_tex saves: debug dumps of a texture's mips)
 static float pass_sx = 1, pass_sy = 1;
 static float vp_sx = 1, vp_sy = 1, vp_ox = 0, vp_oy = 0;
 static float tex_sc[2][64][2];
@@ -2651,6 +2652,35 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
             renderer_save_texture_tex(dt->backend, path);
         }
     }
+    {   // LARECOMP_DUMP_TEX_ADDR=<hex guest address>[,..] (with the frame dump): those textures' every mip level as sampled,
+        // build/mip_<addr>_<level>.png (each once); LARECOMP_DUMP_TEX_ADDR=all: every sampled BC texture of 256+ texels with mips (up to 200)
+        static uint64_t want[16]; static int nwant = -1, nall;
+        static bool all;
+        if (nwant < 0) {
+            nwant = 0;
+            const char *e = getenv("LARECOMP_DUMP_TEX_ADDR");
+            all = e && !strcmp(e, "all");
+            for (const char *q = all ? NULL : e; q && *q && nwant < 16;) { want[nwant++] = strtoull(q, (char **)&q, 16); if (*q == ',') q++; else break; }
+        }
+        NvnTexture *dt = (nwant || all) && g_debug_frame && st.tpool && tic < (uint32_t)st.tpool->count ? ((NvnTexEntry *)st.tpool->entries)[tic].tex : NULL;
+        int hit = -1;
+        for (int k = 0; dt && k < nwant; k++) if (want[k] == dt->addr) hit = k;
+        static uint64_t done[256]; static int ndone;
+        for (int k = 0; dt && k < ndone; k++) if (done[k] == dt->addr) hit = -2;
+        if (dt && all && hit == -1 && dt->backend && ((TexBackend *)dt->backend)->levels > 1 && dt->width >= 256 && dt->format >= 0x42 && dt->format <= 0x50 && nall < 200) hit = 99, nall++;
+        if (dt && hit >= 0 && dt->backend && ndone < 256) {
+            done[ndone++] = dt->addr;
+            TexBackend *tb = dt->backend;
+            for (uint32_t l = 0; l < tb->levels && l < 16; l++) {
+                char path[96];
+                snprintf(path, sizeof path, "build/mip_%llx_%u.png", (unsigned long long)dt->addr, l);
+                g_save_level = l;
+                renderer_save_texture_tex(tb, path);
+            }
+            g_save_level = 0;
+            LOG("[vk] texture %llx: %u levels dumped (%ux%u fmt %#x)\n", (unsigned long long)dt->addr, tb->levels, tb->width, tb->height, dt->format);
+        }
+    }
     if (g_debug_frame && h && st.spool && tsc < (uint32_t)st.spool->count) {
         const NvnSamplerDesc *sd = &((NvnSamplerDesc *)st.spool->entries)[tsc];
         LOG("[draw]   sampler %u (tex %u): min %u mag %u wrap %u/%u lod %.2f..%.2f bias %.2f aniso %.1f\n", tsc, tic, sd->min_filter,
@@ -3917,7 +3947,7 @@ static VkImageView raw_view(TexBackend *b) {
     VkFormat f = b->format == VK_FORMAT_R8G8B8A8_SRGB ? VK_FORMAT_R8G8B8A8_UNORM
                : b->format == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_B8G8R8A8_UNORM : b->format;
     static const VkComponentMapping id = {0};
-    return vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, f, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
+    return vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, f, g_save_level, 1, 0, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
 }
 
 // ---- post passes (Video tab "Anti-aliasing" / "Upscaler"): SMAA 1x at the game image's size, then AMD FSR 1 (EASU
@@ -4140,7 +4170,8 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
     extern const float *vk_shot_crop(void);
     float crop[4] = {0, 0, 1, 1};
     if (strstr(path, "frame_")) memcpy(crop, vk_shot_crop(), sizeof crop);
-    uint32_t w = (uint32_t)(b->width * crop[2]), h = (uint32_t)(b->height * crop[3]);
+    uint32_t lw = b->width >> g_save_level, lh = b->height >> g_save_level;
+    uint32_t w = (uint32_t)((lw ? lw : 1) * crop[2]), h = (uint32_t)((lh ? lh : 1) * crop[3]);
     if (!w || !h) return;
     vk_end_pass();
     VkImage img;
