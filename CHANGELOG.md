@@ -3,6 +3,18 @@
 Releases are tagged per game: `LegendsA-v*` (PL:A Recomp, branch `LegendsA`) and `LegendsZA-v*` (PL:Z-A Recomp,
 branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
+## 2026-10-26: LegendsA-v0.5.3-alpha
+
+Arceus:
+
+- Texture filtering: the game's own anisotropic filtering by default. The forced 16x kept the sea's wave texture sharp
+  out to the horizon, where its tiles showed as a checkerboard (the intro's beach; Eden blurs it).
+  `LARECOMP_ANISO=<n>` still raises it.
+- The intro (start to Prelude Beach) was compared shot by shot with Eden: it matches apart from timing.
+- 120 / 144 fps: a warning on the start screen and in the in-game Settings row (scripted scenes count frames).
+- Research: frame dumps on request while running (`LARECOMP_LIVE`'s `debug` file), mip level dumps
+  (`LARECOMP_DUMP_TEX_ADDR`).
+
 ## 2026-10-20: LegendsA-v0.2.0-alpha, LegendsZA-v0.1.0-alpha (first Windows test builds)
 
 Both games:
