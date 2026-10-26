@@ -2997,6 +2997,13 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
             done[ndone++] = tic;
             snprintf(path, sizeof path, "build/sampled_tex%u_f%x.png", tic, dt->format);
             renderer_save_texture_tex(dt->backend, path);
+        } else if (dt && dt->backend && !seen && ndone < 64 && ENV("LARECOMP_DUMP_SAMPLED_FMT") &&
+                   dt->format == strtoul(ENV("LARECOMP_DUMP_SAMPLED_FMT"), NULL, 16)) {
+            char path[64];  // (LARECOMP_DUMP_SAMPLED_FMT=<hex NVN format>: textures of that format as sampled, level 0)
+            done[ndone++] = tic;
+            snprintf(path, sizeof path, "build/sampled_tex%u_f%x.png", tic, dt->format);
+            renderer_save_texture_tex(dt->backend, path);
+            LOG("[vk] %s: %ux%u addr %llx\n", path, dt->width, dt->height, (unsigned long long)dt->addr);
         }
     }
     if (g_debug_frame && h && st.spool && tsc < (uint32_t)st.spool->count) {
