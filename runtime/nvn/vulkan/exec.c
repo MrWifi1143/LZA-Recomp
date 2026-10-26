@@ -1650,6 +1650,28 @@ static void translate_program(void *arg) {
             }
         }
     }
+    // Legends Z-A's half-resolution depth (fs 6023c3a85ef7d692: one nearest read of the full-resolution depth per
+    // half-res pixel). Each pixel's coordinate lands exactly on the corner of four full-res texels, and which one a
+    // nearest read takes then rests on the last bit of the interpolated coordinate: on this GPU it changes from column
+    // to column (78% the top-left texel, 19% the top-right), the console (and Eden) take the top-left one every time.
+    // The half-res depth came out jagged (a 20x rougher surface) for what reads it, the shadow mask's contact shadows
+    // among them. The read is moved a quarter of a full-res texel up-left, inside the top-left texel - the
+    // half-res depth then matches Eden's texel for texel. LARECOMP_ZA_DEPTH_DS_FIX=0: as translated.
+    if (p->code[1] && !(ENV("LARECOMP_ZA_DEPTH_DS_FIX") && atoi(ENV("LARECOMP_ZA_DEPTH_DS_FIX")) == 0)) {
+        extern uint64_t vk_fs_hash(uint64_t fs);
+        static const char old[] = "texture(t0, vec2(", fix[] = "texture(t0, vec2(-0.25) / vec2(textureSize(t0, 0)) + vec2(";
+        const char *at;
+        if (vk_fs_hash(p->code[1]) == 0x6023c3a85ef7d692ull && (at = strstr(p->fi->msl, old)) && !strstr(at + 1, old)) {
+            size_t len = strlen(p->fi->msl), pre = (size_t)(at - p->fi->msl);
+            char *s = malloc(len + sizeof fix);
+            memcpy(s, p->fi->msl, pre);
+            memcpy(s + pre, fix, sizeof fix - 1);
+            memcpy(s + pre + sizeof fix - 1, at + sizeof old - 1, len - pre - (sizeof old - 1) + 1);
+            p->fi->msl = s;
+            static int logged;
+            if (!logged++) LOG("[za] half-resolution depth: reads moved into the top-left texel (fs %llx)\n", (unsigned long long)p->code[1]);
+        }
+    }
     if (p->vkey.xfb_count[0]) xfb_rewrite(p);
     p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
     save_glsl(p->vi->msl, p->code[0], "vs");
@@ -1948,15 +1970,23 @@ static void image_kinds(int stage, uint8_t kind[8]) {
     }
 }
 
-// The texture slots of a stage bound to a depth-stencil texture in stencil mode (ShaderKey.tex_stencil: usampler)
+// The texture slots of a stage bound to a depth-stencil texture in stencil mode, or to an unsigned integer color
+// format (ShaderKey.tex_stencil: usampler). A float sampler on a UINT view is undefined in Vulkan: Z-A's shadow
+// filter reads its R8_UINT object-id map (which taps are the object's own, not self-shadowing) through one.
+// LARECOMP_VK_UINT_TEX_FLOAT=1: the old float sampler for those.
 static uint32_t stencil_slots(int stage) {
+    static int uint_float = -1;
+    if (uint_float < 0) uint_float = ENV("LARECOMP_VK_UINT_TEX_FLOAT") != NULL;
     uint32_t m = 0;
     for (int i = 0; i < 32; i++) {
         uint64_t h = st.tex[stage][i];
         uint32_t tic = h & 0xFFFFF;
         if (!h || !st.tpool || tic >= (uint32_t)st.tpool->count) continue;
         NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
-        if (!e->tex || !renderer_format_is_depth(e->tex->format)) continue;
+        if (!e->tex) continue;
+        uint32_t f = e->has_view && (e->view.setmask & 4) ? e->view.format : e->tex->format;
+        if (!uint_float && !renderer_format_is_depth(e->tex->format) && rt_kind(f) == 2) { m |= 1u << i; continue; }
+        if (!renderer_format_is_depth(e->tex->format)) continue;
         uint32_t dsm = e->has_view && (e->view.setmask & 16) ? e->view.ds_mode : e->tex->ds_mode;
         if (dsm == 1) m |= 1u << i;
     }
@@ -4434,6 +4464,22 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
     LOG(" | vp %.0f %.0f %.0f %.0f | attrs %#x blend %#x ds %02x%02x%02x poly %02x%02x off %x (%.3g %.3g %.3g) chmask %08x\n",
         st.viewport[0][0], st.viewport[0][1], st.viewport[0][2], st.viewport[0][3], pr->vi->attr_mask, st.color_state[0], st.ds[0],
         st.ds[1], st.ds[2], st.poly[0], st.poly[1], st.poly[3], st.poly_offset[0], st.poly_offset[1], st.poly_offset[2], st.channel_mask);
+    if (ENV("LARECOMP_DEBUG_CBUF_DUMP")) {  // (debug frames: the fragment stage's cbufs 2..17 raw, build/cb_<draw>_c<k>.bin)
+        static uint64_t last_frame = ~0ull;
+        static int nd;
+        if (renderer_present_count() != last_frame) last_frame = renderer_present_count(), nd = 0;
+        for (int k = 3; k < 18; k++) {
+            Range r = st.ubuf[1][k - 3];
+            if (!r.addr || !((pr->fi->cbuf_mask >> k) & 1)) continue;
+            uint64_t size = r.size ? r.size : 0x1000;
+            if (size > 0x10000) size = 0x10000;
+            char path[128];
+            snprintf(path, sizeof path, "build/cb_%04d_c%d.bin", nd, k);
+            FILE *f = fopen(path, "wb");
+            if (f) { fwrite((const void *)(uintptr_t)r.addr, 1, size, f); fclose(f); }
+        }
+        LOG("[draw]   cbufs dumped as build/cb_%04d_c*.bin\n", nd++);
+    }
     LOG("[draw]   attribs:");  // format / stream / offset per attribute, and the streams' strides
     for (int i = 0; i < st.nattrib; i++)
         if ((pr->vi->attr_mask >> i) & 1)
@@ -5018,6 +5064,43 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
     uint32_t w = (uint32_t)(b->width * crop[2]), h = (uint32_t)(b->height * crop[3]);
     if (!w || !h) return;
     vk_end_pass();
+    static int raw_rgba = -1;  // LARECOMP_DEBUG_RAW_RGBA=1: RGBA8 targets saved as stored (alpha too), not through the present shader
+    if (raw_rgba < 0) raw_rgba = ENV("LARECOMP_DEBUG_RAW_RGBA") != NULL;
+    if (raw_rgba && b->format == VK_FORMAT_R8G8B8A8_UNORM && b->layers <= 1) {
+        VkCommandBuffer cb = vk_cmd();
+        vk_full_barrier(cb);
+        VkSpan out = vk_readback((uint64_t)b->width * b->height * 4);
+        VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                               .imageExtent = {b->width, b->height, 1}};
+        vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
+        renderer_flush();
+        vk_save_png(path, out.ptr, b->width, b->height);
+        return;
+    }
+    if (b->format == VK_FORMAT_R8_UINT) {  // (an id map: copied as it is, layer 0; R = the value, G / B spread it apart)
+        VkCommandBuffer cb = vk_cmd();
+        vk_full_barrier(cb);
+        VkSpan out = vk_readback((uint64_t)b->width * b->height);
+        VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                               .imageExtent = {b->width, b->height, 1}};
+        vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
+        renderer_flush();
+        uint8_t *rgba = malloc((size_t)b->width * b->height * 4);
+        uint32_t hist[256] = {0};
+        for (size_t i = 0; i < (size_t)b->width * b->height; i++) {
+            uint8_t v = ((const uint8_t *)out.ptr)[i];
+            hist[v]++;
+            rgba[4 * i] = v, rgba[4 * i + 1] = (uint8_t)(v * 37), rgba[4 * i + 2] = (uint8_t)(v * 91), rgba[4 * i + 3] = 255;
+        }
+        vk_save_png(path, rgba, b->width, b->height);
+        free(rgba);
+        char line[1024];
+        int n = snprintf(line, sizeof line, "[vk] %s: id values", path);
+        for (int v = 0; v < 256 && n < (int)sizeof line - 24; v++)
+            if (hist[v]) n += snprintf(line + n, sizeof line - n, " %d:%u", v, hist[v]);
+        LOG("%s\n", line);
+        return;
+    }
     VkImage img;
     VmaAllocation mem;
     VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM,

@@ -65,6 +65,7 @@ typedef struct {
     uint32_t in_attr_mask, out_attr_mask;
     uint32_t vs_in_comp[32];
     bool uses_branches, uses_cc, uses_local, uses_vid, uses_iid, uses_frag_coord, uses_front_facing, uses_lane;
+    bool ccz_modelled;  // (an instruction that sets the zero / sign flags came before: a BRA may test them)
     bool uses_rscale;  // resolution-scale table (fragment/compute only)
     uint32_t flat_mask;           // fragment inputs using constant (flat) interpolation
     uint32_t noperspective_mask;  // fragment inputs using pass (linear) interpolation
@@ -1156,7 +1157,15 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     } else if (OPM(0xe240000000000000ull, 0xfff0000000000020ull)) {  // BRA
         uint32_t target = norm_target((int64_t)pc + 8 + sbits(w, 20, 24));
         c->uses_branches = true;
-        sp(&c->body, "    pc = %uu; continue;\n", target);
+        // bits 0-4: the condition code test (15 T: always) on the flags a .CC instruction left (zero ccz, sign ccs;
+        // overflow isn't tracked: 0). The U forms (unordered too) test the same flags.
+        static const char *const cc_test[16] = {"false", "ccs", "ccz", "(ccz || ccs)", "(!ccz && !ccs)", "!ccz", "!ccs", NULL,
+                                                NULL, "ccs", "ccz", "(ccz || ccs)", "(!ccz && !ccs)", "!ccz", "!ccs", NULL};
+        uint32_t cond = (uint32_t)bits(w, 0, 5);
+        if (cond != 15 && cond < 16 && cc_test[cond] && c->ccz_modelled) {
+            c->uses_cc = true;
+            sp(&c->body, "    if (%s) { pc = %uu; continue; }\n", cc_test[cond], target);
+        } else sp(&c->body, "    pc = %uu; continue;\n", target);  // (T, or flags no modelled instruction set: as before)
     } else if (OPM(0xe290000000000000ull, 0xfff0000000000020ull)) {  // SSY
         c->uses_branches = true;
         if (!c->flow_to) sp(&c->body, "    crs[crs_n & 31u] = %uu; crk[crs_n & 31u] = 0u; crs_n++;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
@@ -1382,6 +1391,12 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         sprintf(t, "((%s) %s %s)", cmp, bool_op((int)bits(w, 45, 2)), P((int)bits(w, 39, 3), bits(w, 42, 1)));
         sprintf(u, bits(w, 52, 1) ? "(%s ? 0x3f800000u : 0u)" : "(%s ? 0xFFFFFFFFu : 0u)", t);
         set_reg(c, d, u);
+        if (bits(w, 47, 1)) {  // .CC: zero/sign flags of the result, often with RZ as the destination - a test for a
+                               // following BRA's condition (Z-A's contact shadows: FSET.GT.CC RZ then BRA NEU)
+            c->uses_cc = true;
+            sp(&c->body, "    { uint ccv = %s; ccz = ccv == 0u; ccs = int(ccv) < 0; }\n", u);
+            c->ccz_modelled = true;
+        }
     } else if (OPM(0x5ba0000000000000ull, 0xfff0000000000000ull) || OPM(0x4ba0000000000000ull, 0xfff0000000000000ull) ||
                OPM(0x36a0000000000000ull, 0xfef0000000000000ull) || OPM(0x53a0000000000000ull, 0xfff0000000000000ull)) {  // FCMP
         char cmp[512], cb[256], bb[256];
@@ -1790,6 +1805,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (bits(w, 47, 1)) {  // .CC: zero/sign flags of the result
             c->uses_cc = true;
             sp(&c->body, "    { uint ccv = %s; ccz = ccv == 0u; ccs = int(ccv) < 0; }\n", t);
+            c->ccz_modelled = true;
         }
     } else if (OPM(0x5bc0000000000000ull, 0xfff0000000000000ull) || OPM(0x4bc0000000000000ull, 0xfff0000000000000ull) ||
                OPM(0x36c0000000000000ull, 0xfef0000000000000ull) || OPM(0x53c0000000000000ull, 0xfff0000000000000ull)) {  // PRMT
