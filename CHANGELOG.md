@@ -8,6 +8,12 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Arceus:
 
+- PKHeX (from Z-A, the same runtime/hle/pkm_link.c): Settings > PKHeX Link (Off / This PC / Network) answers PKHeX's
+  LiveHeX plugin like sys-botbase on a Switch (port 6000): it detects Arceus 1.1.1 and reads and writes the boxes
+  while you play. Settings > Pokémon Files: A on Export saves every Pokémon in your boxes as a PKHeX .pa8 file
+  (pokemon/export/<date>/), A on Import puts the .pa8 files in pokemon/import/ into the first empty box slots. Save
+  in the game to keep them.
+
 - Time zone service: ToPosixTime(rule) and ToPosixTimeWithMyRule were mixed up (Z-A's save screen showed UTC); rules
   a game loads are now kept apart from the device's own.
 - Screenshots: F12 (or a controller's capture / share button) saves the game image, without the overlay, as a PNG in

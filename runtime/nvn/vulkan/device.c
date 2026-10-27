@@ -857,6 +857,10 @@ void backend_present(NvnTexture *t) {
                 next_at = (long)total_frames;
                 remove(path);
             }
+            for (int k = 0; k < 2; k++) {  // (testing: Settings > Pokémon Files' Export / Import without the menu, hle/pkm_link.c)
+                snprintf(path, sizeof path, "%s/%s", dir, k ? "pkimport" : "pkexport");
+                if (access(path, F_OK) == 0) { remove(path); extern void pkm_files_run(int v); pkm_files_run(k); }
+            }
             snprintf(path, sizeof path, "%s/find", dir);  // (research: "<text>" -> <dir>/find.out, where game memory has it)
             if (access(path, F_OK) == 0) {
                 FILE *f = fopen(path, "r");

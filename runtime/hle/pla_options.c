@@ -61,6 +61,7 @@ typedef struct {
     const char *choice[5];
     int (*get)(void);
     void (*set)(int);
+    void (*act)(int);  // (A on the row: runs it for the choice shown)
 } Row;
 
 static const int k_fps[] = {30, 60, 120, 144}, k_lines[] = {0, 720, 1080, 1440, 2160};
@@ -107,6 +108,11 @@ static int get_minvx(void) { return g_settings.mouse_invert_x ? 1 : 0; }
 static void set_minvx(int i) { g_settings.mouse_invert_x = i == 1; }
 static int get_bg(void) { return g_settings.background >= BG_KEEP && g_settings.background <= BG_PAUSE ? g_settings.background : BG_KEEP; }
 static void set_bg(int i) { g_settings.background = i; }
+void pkm_link_apply(void);  // (hle/pkm_link.c)
+int pkm_files_get(void);
+void pkm_files_set(int v), pkm_files_run(int v);
+static int get_pklink(void) { return g_settings.pkhex_link >= 0 && g_settings.pkhex_link <= 2 ? g_settings.pkhex_link : 0; }
+static void set_pklink(int i) { g_settings.pkhex_link = i; pkm_link_apply(); }
 static int get_vol(void) { return clampi((int)(g_settings.volume * 10 + 0.5f), 0, 10); }
 static void set_vol(int v) { g_settings.volume = (float)v / 10; }
 
@@ -137,6 +143,10 @@ static const Row k_rows[] = {
      {"Regular", "Inverted"}, get_minvx, set_minvx},
     {"Stick Dead Zone", "Choose how far a controller's sticks must move before they count.", BAR10, 0, {0}, get_dz, set_dz},
     {"Master Volume", "Adjust the volume of all of the game's sound.", BAR10, 0, {0}, get_vol, set_vol},
+    {"PKHeX Link", "Let PKHeX's LiveHeX plugin see and edit your boxes as you play: on this PC or your network.",
+     CHOICE, 3, {"Off", "This PC", "Network"}, get_pklink, set_pklink},
+    {"Pokémon Files", "Press A to save your boxed Pokémon as PKHeX files, or to add the ones in pokemon/import.",
+     CHOICE, 2, {"Export", "Import"}, pkm_files_get, pkm_files_set, pkm_files_run},
 };
 #define NROWS (int)(sizeof k_rows / sizeof *k_rows)
 static int g_first[NROWS];  // CHOICE rows of more than 3: the first of the three shown
@@ -427,6 +437,8 @@ uint64_t settings_screen_buttons(Cpu *c, uint64_t b) {
     int bi = bind_of(id);
     if (!g_ctl) {
         if (id == FIRST_ID && ((edge & A) || pending >= 100)) kept |= edge & A, set_rows(c, true);  // (the Controls row)
+        else if ((edge & A) && row_of(id) >= 0 && k_rows[row_of(id)].act)  // (Pokémon Files)
+            kept |= A, k_rows[row_of(id)].act(k_rows[row_of(id)].get());
     } else if (pending == 0 || pending == 1) {
         if (bi >= 0 && !(pending && k_binds[bi].slot >= BIND_PAD_COUNT))
             bind_capture_begin(pending ? BIND_DEV_PAD : BIND_DEV_KEY, k_binds[bi].slot), redraw_cursor_row(c);

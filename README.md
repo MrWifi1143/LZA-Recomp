@@ -103,6 +103,12 @@ Village. Tested on Linux with an RTX 4090; the Windows build is tested under Win
   pointing at a button moves the game's cursor to it, a click presses it (on the Settings screen: the choice, or the
   point on a slider, clicked), the right button goes back, the wheel scrolls; where there's nothing to point at (a
   message, a tip) a click goes on.
+- PKHeX: saves are the Switch's own files (`save/save_0/main`), so PKHeX opens them (close the game first). Settings
+  -> **PKHeX Link** lets PKHeX's LiveHeX plugin (PKHeX-Plugins) connect to the running game and read and write your
+  boxes, as it does with sys-botbase on a Switch: in LiveHeX, IP `127.0.0.1` (Network: this PC's address), port 6000.
+  **Pokémon Files** (A on it): Export saves every Pokémon in your boxes as a `.pa8` file in `pokemon/export/<date>/`;
+  Import puts the `.pa8` files in `pokemon/import/` into the first empty box slots (placed files move to
+  `pokemon/import/done/`). Save in the game afterwards to keep imported Pokémon.
 
 Known issues:
 
