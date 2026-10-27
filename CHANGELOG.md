@@ -3,6 +3,21 @@
 Releases are tagged per game: `LegendsA-v*` (PL:A Recomp, branch `LegendsA`) and `LegendsZA-v*` (PL:Z-A Recomp,
 branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
+## Unreleased (branch `LegendsZA`)
+
+Z-A:
+
+- Mega Dimension (DLC): if you own it, put its RomFS in a `dlc` folder beside `exefs` and `romfs` (see the README);
+  the game then sees it as on a Switch that owns it (add-on 2, mounted from that folder). Optional - without it the
+  game runs as before.
+- Title screen: the "Downloadable Content Available" banner (an eShop link) is hidden and MINUS does nothing there.
+  The eShop isn't emulated: pressing it froze the game. With the DLC, the "Downloadable content ready" line stays.
+- Library applets the game starts (the eShop, error pages) no longer leave it waiting forever: the "applet can start"
+  event is signalled and each applet ends at once. (Z-A's eShop link still stops itself after that - hence the
+  hidden banner.)
+- Debug aids: `LARECOMP_LOG_HANDLES=1` names the service behind each handle; the thread dump shows the handles a
+  thread waits on. `LARECOMP_AOC=0` runs as without the DLC.
+
 ## 2026-10-26: LegendsZA-v0.5.0-alpha
 
 Z-A (Pokémon Legends: Z-A **2.0.2** only; see the entry below):

@@ -74,7 +74,15 @@ static void self_controller(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;
     switch (req->cmd) {
     case 0: LOG("[am] application requested exit\n"); exit(0);
-    case 9: resp->copy_handles[resp->ncopy++] = new_event(); break;
+    case 9: {  // GetLibraryAppletLaunchableEvent: signalled (the game has focus: an applet may start - one waits on it first)
+        uint32_t w, r;
+        KEvent *e = kernel_create_event_pair(&w, &r);
+        pthread_mutex_lock(&g_klock);
+        kernel_signal(e);
+        pthread_mutex_unlock(&g_klock);
+        resp->copy_handles[resp->ncopy++] = r;
+        break;
+    }
     case 40: OUT(uint64_t, 0) = 1; resp_size(resp, 8); break;  // CreateManagedDisplayLayer
     case 69: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;
     default: UNHANDLED("ISelfController");
@@ -169,6 +177,49 @@ static void application_functions(Service *s, IpcReq *req, IpcResp *resp) {
     }
 }
 
+// Library applets the game starts through am (the eShop page behind the title screen's "Downloadable content
+// available", error and web pages ...): none is emulated, so each one ends at once, as a closed applet - the game
+// carries on (an empty answer used to leave it waiting for good). The software keyboard is hle/swkbd.c's.
+static void library_applet_accessor(Service *s, IpcReq *req, IpcResp *resp) {
+    uint32_t id = (uint32_t)(uintptr_t)s->state;
+    switch (req->cmd) {
+    case 0: {  // GetAppletStateChangedEvent: already signalled (the applet has ended)
+        uint32_t w, r;
+        KEvent *e = kernel_create_event_pair(&w, &r);
+        pthread_mutex_lock(&g_klock);
+        kernel_signal(e);
+        pthread_mutex_unlock(&g_klock);
+        resp->copy_handles[resp->ncopy++] = r;
+        break;
+    }
+    case 1: OUT(uint8_t, 0) = 1; resp_size(resp, 1); break;  // IsCompleted
+    case 10: LOG("[am] library applet %#x started: not emulated, ends at once\n", id); break;  // Start
+    case 20: case 25: break;  // RequestExit, Terminate
+    case 30: break;  // GetResult: ok (as when the player closes it; an error result is fatal to Z-A's eShop link)
+    case 100: case 103: break;  // PushInData, PushInteractiveInData
+    case 101: case 104: resp->result = AM_NO_DATA; break;  // PopOutData, PopInteractiveOutData
+    case 105: case 106: resp->copy_handles[resp->ncopy++] = new_event(); break;  // Get(Pop..)DataEvent
+    default: UNHANDLED("ILibraryAppletAccessor");
+    }
+}
+
+static void library_applet_creator(Service *s, IpcReq *req, IpcResp *resp) {
+    (void)s;
+    switch (req->cmd) {
+    case 0: {  // CreateLibraryApplet(applet id, mode)
+        uint32_t id = IN(uint32_t, 0);
+        ipc_return_object(resp, service_new("ILibraryAppletAccessor", library_applet_accessor, (void *)(uintptr_t)id));
+        break;
+    }
+    case 10: case 11: {  // CreateStorage(size), CreateTransferMemoryStorage
+        uint64_t size = req->cmd == 10 ? IN(uint64_t, 0) : IN(uint64_t, 8);
+        ipc_return_object(resp, new_am_storage(NULL, size < (64u << 20) ? size : 0));
+        break;
+    }
+    default: UNHANDLED("ILibraryAppletCreator");
+    }
+}
+
 static void application_proxy(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;
     static const struct { int cmd; const char *name; ServiceHandler h; } subs[] = {
@@ -178,7 +229,7 @@ static void application_proxy(Service *s, IpcReq *req, IpcResp *resp) {
         {3, "IAudioController", generic_ok},
         {4, "IDisplayController", generic_ok},
         {10, "IProcessWindingController", generic_ok},
-        {11, "ILibraryAppletCreator", generic_ok},
+        {11, "ILibraryAppletCreator", library_applet_creator},
         {20, "IApplicationFunctions", application_functions},
         {1000, "IDebugFunctions", generic_ok},
     };

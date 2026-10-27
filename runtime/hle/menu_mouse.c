@@ -61,9 +61,13 @@ static _Atomic uint64_t g_seq;
 static uint64_t g_list[NPANE];
 static int g_nlist;
 
+// (a game's own look at each pane as it is worked out - Z-A: za_options.c hides the title screen's eShop banner)
+void (*g_menu_pane_cb)(uint64_t pane);
+
 static int pane_calc_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     uint64_t p = c->x[0], f = renderer_game_frame();
+    if (g_menu_pane_cb) g_menu_pane_cb(p);
     uint32_t h = (uint32_t)((p >> 4) * 0x9E3779B1u) & (NSEEN - 1);
     for (int k = 0; k < 64; k++, h = (h + 1) & (NSEEN - 1)) {
         uint64_t cur = atomic_load(&g_seen[h].pane);

@@ -445,10 +445,31 @@ static void ctl_set(Cpu *c, bool on) {
     guest(c, OPT_TAB_REFRESH, g_page, 0, 0, 0, 0);
 }
 
+// The title screen's banner (N_banner_00 under N_inout_00, in the layout with the logo's P_t_logo_01): "Downloadable
+// Content Available" with MINUS, a link to the eShop (not emulated - the game stops). Hidden, and MINUS kept from the
+// game while the logo is up (menu_mouse.c's pane hook). With the DLC, "Downloadable content ready" is another pane: left.
+static _Atomic uint64_t g_title_frame;
+static bool pane_named(uint64_t p, const char *name) {
+    return p >= 0x7000000000ull && p < 0x8000000000ull && !strncmp((const char *)(uintptr_t)(p + 0xb0), name, 24);
+}
+static void title_pane(uint64_t p) {
+    extern uint64_t renderer_game_frame(void);
+    uint64_t f = renderer_game_frame();
+    if (pane_named(p, "P_t_logo_01")) { atomic_store(&g_title_frame, f); return; }
+    uint64_t tf = atomic_load(&g_title_frame);
+    if (tf && f - tf < 3 && pane_named(p, "N_banner_00") && pane_named(*(uint64_t *)(uintptr_t)(p + 0x18), "N_inout_00"))
+        *(uint8_t *)(uintptr_t)(p + 0x58) &= (uint8_t)~1;  // (flag bit 0: visible)
+}
+
 uint64_t settings_screen_buttons(Cpu *c, uint64_t b) {
     enum { A = 1 << 0, B = 1 << 1, X = 1 << 2, L = 1 << 6, R = 1 << 7 };
     static uint64_t prev, kept;
     static int serial0 = -1;
+    {
+        extern uint64_t renderer_game_frame(void);
+        uint64_t tf = atomic_load(&g_title_frame);
+        if (tf && renderer_game_frame() - tf < 10) b &= ~(1ull << 11);  // (the title screen: no MINUS - the eShop banner's)
+    }
     uint64_t edge = b & ~prev;
     prev = b;
     kept &= b;
@@ -576,6 +597,7 @@ void za_options_present(void) {
 }
 
 void za_options_configure(void) {
+    { extern void (*g_menu_pane_cb)(uint64_t); g_menu_pane_cb = title_pane; }
     const char *e = getenv("LARECOMP_ZA_OPTIONS");
     if (!(e && atoi(e) == 0)) {
         g_label = make_label("msg_ui_option_01");

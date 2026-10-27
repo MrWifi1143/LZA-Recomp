@@ -907,6 +907,11 @@ static void *thread_dump_main(void *arg) {
                 }
                 LOG("[threads]     name \"%s\" mask %x core %d arg %llx tpidr %llx (id %llx)\n", nm, t->core_mask, t->core, (unsigned long long)t->arg, (unsigned long long)t->cpu.tpidr, (unsigned long long)((t->cpu.tpidr >> 13) & 0x7f));
             }
+            if (t->cur_svc == 0x18 && t->cur_svc_args[1] >= GUEST_LO && t->cur_svc_args[1] < GUEST_HI) {  // (the handles waited on)
+                LOG("[threads]     waits on:");
+                for (uint64_t k = 0; k < t->cur_svc_args[2] && k < 8; k++) LOG(" %x", ((uint32_t *)(uintptr_t)t->cur_svc_args[1])[k]);
+                LOG("\n");
+            }
             // guest call stack: the AArch64 frame record chain {fp, lr} from x29
             uint64_t fp = t->cpu.x[29];
             LOG("[threads]     stack:");

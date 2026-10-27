@@ -10,6 +10,7 @@
 
 #include "../hle.h"
 #include "../mods.h"
+#include "../romfs_build.h"
 #include "../ipc.h"
 
 #define FS_PATH_NOT_FOUND MAKE_RESULT(2, 1)
@@ -399,6 +400,9 @@ static void rom_index(int fd) {
     LOG("[fs] romfs index: %d files\n", rom_nfiles);
 }
 
+// (a game's look at each RomFS read once it is in guest memory: hle/za_fixes.c's draw distance)
+void (*g_romfs_read_hook)(uint8_t *data, uint64_t size);
+
 // Virtual RomFS image read: original bytes, with the patched file table and appended replacement files.
 static ssize_t romfs_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
     pagewatch_prewrite((uint64_t)(uintptr_t)dst, size);  // (the kernel writes there: no fault for a watched page)
@@ -465,6 +469,7 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
         if (size > b->size) size = b->size;
         ssize_t n = romfs_read(st->fd, (uint8_t *)(uintptr_t)b->addr, size, off);
         if (n < 0) LOG("[fs] storage read failed at %llx: %s\n", off, strerror(errno));
+        if (n > 0 && g_romfs_read_hook) g_romfs_read_hook((uint8_t *)(uintptr_t)b->addr, (uint64_t)n);
         {
             const char *path = romfs_file_at(off);
             static const char *last;
@@ -737,6 +742,52 @@ static Service *open_host_fs(const char *sub) {
     return service_new("IFileSystem", filesystem, fs);
 }
 
+// ------------------------------------------------------------------ add-on content
+// The game folder's dlc.bin (a RomFS image) or dlc/ (the add-on's RomFS files, made into dlc.bin the first time) is the
+// add-on aoc:u reports (services/misc.c): Z-A's Mega Dimension, data id 0100F43008C45002 - a licence whose RomFS holds
+// only an empty keyfile.dat (what it unlocks is in the update). Read as it is (none of the RomFS patches above).
+#define ZA_AOC_DATA_ID 0x0100F43008C45002ull
+static int aoc_fd = -2;
+bool fs_aoc_present(void) {
+    if (aoc_fd != -2) return aoc_fd >= 0;
+    aoc_fd = -1;
+    if (getenv("LARECOMP_AOC") && atoi(getenv("LARECOMP_AOC")) == 0) return false;  // (=0: as without it)
+    char dir[1024], img[1100];
+    const char *sl = g_romfs_dir ? strrchr(g_romfs_dir, '/') : NULL;
+    if (sl) snprintf(dir, sizeof dir, "%.*s/dlc", (int)(sl - g_romfs_dir), g_romfs_dir);
+    else snprintf(dir, sizeof dir, "dlc");
+    snprintf(img, sizeof img, "%s.bin", dir);
+    struct stat sb;
+    char inner[1100];
+    snprintf(inner, sizeof inner, "%s/romfs", dir);  // (dlc/romfs/: extracted as a whole title)
+    if (stat(inner, &sb) == 0 && S_ISDIR(sb.st_mode)) snprintf(dir, sizeof dir, "%.1023s", inner);
+    if (stat(img, &sb) != 0 && stat(dir, &sb) == 0 && S_ISDIR(sb.st_mode)) {
+        char why[256] = "";
+        if (romfs_build(dir, img, NULL, why, sizeof why)) LOG("[fs] add-on content: %s made from %s\n", img, dir);
+        else LOG("[fs] add-on content: %s not made: %s\n", img, why);
+    }
+    aoc_fd = open(img, O_RDONLY);
+    LOG("[fs] add-on content: %s\n", aoc_fd >= 0 ? img : "none (no dlc/ or dlc.bin beside romfs)");
+    return aoc_fd >= 0;
+}
+
+static void plain_storage(Service *s, IpcReq *req, IpcResp *resp) {
+    Storage *st = s->state;
+    switch (req->cmd) {
+    case 0: {  // Read(offset, size) -> B buffer
+        uint64_t off = IN(uint64_t, 0), size = IN(uint64_t, 8);
+        IpcBuf *b = out_buf(req, 0);
+        if (!b) { resp->result = MAKE_RESULT(2, 6001); break; }
+        if (size > b->size) size = b->size;
+        ssize_t n = off < st->size ? pread(st->fd, (void *)(uintptr_t)b->addr, size, (off_t)off) : 0;
+        if (n < (ssize_t)size) memset((uint8_t *)(uintptr_t)b->addr + (n > 0 ? n : 0), 0, size - (n > 0 ? n : 0));
+        break;
+    }
+    case 4: OUT(uint64_t, 0) = st->size; resp_size(resp, 8); break;  // GetSize
+    default: LOG("[fs] IStorage(aoc) cmd %u (ok)\n", req->cmd);
+    }
+}
+
 // ------------------------------------------------------------------ fsp-srv
 SERVICE("fsp-srv", fsp_srv) {
     (void)s;
@@ -752,10 +803,20 @@ SERVICE("fsp-srv", fsp_srv) {
         break;
     }
     case 200: ipc_return_object(resp, open_romfs_storage()); break;  // OpenDataStorageByCurrentProcess
-    case 202:  // OpenDataStorageByDataId (system data archives)
-        LOG("[fs] OpenDataStorageByDataId %llx (not available)\n", IN(uint64_t, 8));
+    case 202: {  // OpenDataStorageByDataId (system data archives; the add-on's data)
+        uint64_t id = IN(uint64_t, 8);
+        if (id == ZA_AOC_DATA_ID && fs_aoc_present()) {
+            Storage *st = calloc(1, sizeof *st);
+            struct stat sb;
+            st->fd = aoc_fd, st->size = fstat(aoc_fd, &sb) == 0 ? (uint64_t)sb.st_size : 0;
+            LOG("[fs] OpenDataStorageByDataId %llx: the add-on (%llu bytes)\n", (unsigned long long)id, (unsigned long long)st->size);
+            ipc_return_object(resp, service_new("IStorage(aoc)", plain_storage, st));
+            break;
+        }
+        LOG("[fs] OpenDataStorageByDataId %llx (not available)\n", (unsigned long long)id);
         resp->result = MAKE_RESULT(2, 1001);
         break;
+    }
     case 1005: OUT(uint32_t, 0) = 0; resp_size(resp, 4); break;  // GetGlobalAccessLogMode
     case 1003: case 1004: case 1006: break;
     case 1011: memset(resp->data, 0, 0x10); resp_size(resp, 0x10); break;

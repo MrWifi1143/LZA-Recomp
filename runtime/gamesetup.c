@@ -244,6 +244,21 @@ static void *setup_thread(void *arg) {
         ok = romfs_build(f.romfs, ROOT "/romfs.bin", copy_progress, why, sizeof why);
         if (!ok) LOG("[setup] romfs image: %s\n", why);
     }
+    if (ok) {  // (optional: a dlc folder beside exefs - Z-A's Mega Dimension RomFS, services/fs.c)
+        char dlc[1100];
+        const char *sl = strrchr(f.exefs, '/');
+        snprintf(dlc, sizeof dlc, "%.*s/dlc", sl ? (int)(sl - f.exefs) : 0, f.exefs);
+        if (!sl) snprintf(dlc, sizeof dlc, "dlc");
+        struct stat sb;
+        char inner[1200];
+        snprintf(inner, sizeof inner, "%s/romfs", dlc);  // (dlc/romfs/: extracted as a whole title)
+        if (stat(inner, &sb) == 0 && S_ISDIR(sb.st_mode)) snprintf(dlc, sizeof dlc, "%s", inner);
+        if (stat(dlc, &sb) == 0 && S_ISDIR(sb.st_mode)) {
+            char why[256] = "";
+            if (romfs_build(dlc, ROOT "/dlc.bin", NULL, why, sizeof why)) LOG("[setup] add-on content: %s\n", dlc);
+            else LOG("[setup] add-on content %s skipped: %s\n", dlc, why);
+        }
+    }
     if (!ok) g_state = SETUP_FAIL_COPY;
     else if (build_code()) g_state = setup_ready() ? SETUP_DONE : SETUP_FAIL_BUILD;
     LOG("[setup] %s\n", g_state == SETUP_DONE ? "ready" : "failed");

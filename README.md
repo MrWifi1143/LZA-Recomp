@@ -82,6 +82,12 @@ is a patch on top of the base game's RomFS, which plain `hactool` can't apply. U
    0x180) - the base game's and the update's each have one.
 3. Pick the `game` folder on the start screen.
 
+**Mega Dimension (the DLC, optional).** Not needed to play. If you own it, extract its RomFS from your DLC `.nsp`
+(its only file is an empty `keyfile.dat`; what it unlocks ships in the update) into a `dlc` folder beside `exefs`
+and `romfs` (`game/dlc/keyfile.dat`, or `game/dlc/romfs/keyfile.dat`), e.g.
+`hac2l -k prod.keys --titlekeys=title.keys --romfsdir=game/dlc <DLC data>.nca`. The start screen copies it with the
+game files; the game then sees the DLC as on a Switch that owns it. Without it, the game runs as without the DLC.
+
 Which update is a dump? The update `.nsp`'s `.cnmt.xml` (or its unpacked `.cnmt.nca` metadata) has the patch
 version: `<Version>393216</Version>` (patch v6) is **2.0.2**; 262144 (v4) is 2.0.0. The update's `control.nacp`
 also holds the display version ("2.0.2"). The extracted `exefs/main` of 2.0.2 has the build id `B1F12FD919EAE86A`

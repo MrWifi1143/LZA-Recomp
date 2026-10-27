@@ -174,6 +174,11 @@ int ipc_handle_request(Cpu *c, uint32_t handle) {
             if (!target) { LOG("[ipc] domain object %u missing\n", req.domain_obj); return 0xE401; }
         }
         target->handler(target, &req, &resp);
+        {   // (LARECOMP_LOG_HANDLES=1: which service and command gave out each copied handle - what a hung thread waits on)
+            static int lh = -1;
+            if (lh < 0) lh = getenv("LARECOMP_LOG_HANDLES") != NULL;
+            for (int i = 0; lh && i < resp.ncopy; i++) LOG("[ipc] handle %x from %s cmd %u\n", resp.copy_handles[i], target->name, req.cmd);
+        }
     } else if (req.type == 5 || req.type == 7) {  // control
         req.cmd = *(uint32_t *)(payload + 8);
         LOG("[ipc] control %u on %s (handle %x)\n", req.cmd, sess->svc->name, handle);
