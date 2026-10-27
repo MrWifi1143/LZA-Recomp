@@ -86,18 +86,43 @@ static void to_calendar(int64_t t, IpcResp *resp, int utc) {
     resp_size(resp, 0x20);
 }
 
+// A rule LoadTimeZoneRule hands out: no tz data, the location's name marked - its conversions are the host's local
+// time for the device's own location (GetDeviceLocationName's "UTC": the host's zone, whatever its name), UTC for any
+// other (Z-A loads "GMT" and formats the save screen's clock from ToPosixTime(GMT rule) of the local calendar)
+#ifdef _WIN32
+#define timegm _mkgmtime
+#endif
+static const char k_rule_tag[8] = "LRTZRUL";
+static int rule_is_utc(const IpcReq *req) {
+    const IpcBuf *b = req->na ? &req->a[0] : req->nx ? &req->x[0] : NULL;
+    if (!b || b->size < 8 + 0x24) return 0;
+    const char *r = (const char *)(uintptr_t)b->addr;
+    return !memcmp(r, k_rule_tag, 8) && strncmp(r + 8, "UTC", 0x24) != 0;
+}
+
 static void timezone_service(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;
     switch (req->cmd) {
     case 0: memcpy(resp->data, "UTC", 4); resp_size(resp, 0x24); break;  // GetDeviceLocationName
-    case 100: to_calendar(IN(int64_t, 0), resp, 1); break;  // ToCalendarTime(rule buffer)
+    case 4:  // LoadTimeZoneRule(location name) -> rule buffer
+        if (req->nb && req->b[0].size >= 8 + 0x24) {
+            char *r = (char *)(uintptr_t)req->b[0].addr;
+            memset(r, 0, 8 + 0x24);
+            memcpy(r, k_rule_tag, 8);
+            memcpy(r + 8, req->data, 0x24);
+            r[8 + 0x23] = 0;
+        }
+        resp_size(resp, 0);
+        break;
+    case 100: to_calendar(IN(int64_t, 0), resp, rule_is_utc(req)); break;  // ToCalendarTime(rule buffer)
     case 101: to_calendar(IN(int64_t, 0), resp, 0); break;  // ToCalendarTimeWithMyRule
-    case 201: {  // ToPosixTimeWithMyRule -> count + buffer of posix times
+    case 201:    // ToPosixTime(rule buffer) -> count + buffer of posix times
+    case 202: {  // ToPosixTimeWithMyRule
         const uint8_t *in = req->data;
         struct tm tm = {0};
         tm.tm_year = *(uint16_t *)in - 1900; tm.tm_mon = in[2] - 1; tm.tm_mday = in[3];
         tm.tm_hour = in[4]; tm.tm_min = in[5]; tm.tm_sec = in[6]; tm.tm_isdst = -1;
-        int64_t t = mktime(&tm);
+        int64_t t = req->cmd == 201 && rule_is_utc(req) ? (int64_t)timegm(&tm) : (int64_t)mktime(&tm);
         if (req->nc) *(int64_t *)(uintptr_t)req->c[0].addr = t;
         else if (req->nb) *(int64_t *)(uintptr_t)req->b[0].addr = t;
         OUT(uint32_t, 0) = 1;

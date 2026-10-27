@@ -8,6 +8,8 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Arceus:
 
+- Time zone service: ToPosixTime(rule) and ToPosixTimeWithMyRule were mixed up (Z-A's save screen showed UTC); rules
+  a game loads are now kept apart from the device's own.
 - Screenshots: F12 (or a controller's capture / share button) saves the game image, without the overlay, as a PNG in
   the data folder's `screenshots` (`PLA_<date>_<time>.png`); a notice in the corner says so.
 - Settings > In Background: keep playing, mute, or pause while the game's window isn't focused.
