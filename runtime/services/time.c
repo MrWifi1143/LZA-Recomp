@@ -86,18 +86,20 @@ static void to_calendar(int64_t t, IpcResp *resp, int utc) {
     resp_size(resp, 0x20);
 }
 
-// A rule LoadTimeZoneRule hands out: no tz data, the location's name marked - its conversions are the host's local
-// time for the device's own location (GetDeviceLocationName's "UTC": the host's zone, whatever its name), UTC for any
-// other (Z-A loads "GMT" and formats the save screen's clock from ToPosixTime(GMT rule) of the local calendar)
+// The rules LoadTimeZoneRule hands out hold no tz data and are left as they are (the game reads them itself: a mark
+// written into one slowed Z-A's train scene down); their location names are kept by buffer address instead. Their
+// conversions are the host's local time for the device's own location (GetDeviceLocationName's "UTC": the host's zone,
+// whatever its name), UTC for any other (Z-A loads "GMT" and formats the save screen's clock from ToPosixTime(GMT rule)
+// of the local calendar)
 #ifdef _WIN32
 #define timegm _mkgmtime
 #endif
-static const char k_rule_tag[8] = "LRTZRUL";
+static struct { uint64_t addr; int utc; } g_rules[16];
+static int g_nrule;
 static int rule_is_utc(const IpcReq *req) {
     const IpcBuf *b = req->na ? &req->a[0] : req->nx ? &req->x[0] : NULL;
-    if (!b || b->size < 8 + 0x24) return 0;
-    const char *r = (const char *)(uintptr_t)b->addr;
-    return !memcmp(r, k_rule_tag, 8) && strncmp(r + 8, "UTC", 0x24) != 0;
+    for (int i = 0; b && i < g_nrule; i++) if (g_rules[i].addr == b->addr) return g_rules[i].utc;
+    return 0;
 }
 
 static void timezone_service(Service *s, IpcReq *req, IpcResp *resp) {
@@ -105,12 +107,14 @@ static void timezone_service(Service *s, IpcReq *req, IpcResp *resp) {
     switch (req->cmd) {
     case 0: memcpy(resp->data, "UTC", 4); resp_size(resp, 0x24); break;  // GetDeviceLocationName
     case 4:  // LoadTimeZoneRule(location name) -> rule buffer
-        if (req->nb && req->b[0].size >= 8 + 0x24) {
-            char *r = (char *)(uintptr_t)req->b[0].addr;
-            memset(r, 0, 8 + 0x24);
-            memcpy(r, k_rule_tag, 8);
-            memcpy(r + 8, req->data, 0x24);
-            r[8 + 0x23] = 0;
+        if (req->nb) {
+            char name[0x25];
+            memcpy(name, req->data, 0x24);
+            name[0x24] = 0;
+            int i = 0;
+            while (i < g_nrule && g_rules[i].addr != req->b[0].addr) i++;
+            if (i == g_nrule && g_nrule < 16) g_nrule++;
+            if (i < 16) g_rules[i].addr = req->b[0].addr, g_rules[i].utc = strcmp(name, "UTC") != 0;
         }
         resp_size(resp, 0);
         break;
@@ -134,7 +138,7 @@ static void timezone_service(Service *s, IpcReq *req, IpcResp *resp) {
 }
 
 static uint32_t g_shmem_handle;
-RT_ON_RESET(time_reset) { g_shmem_handle = 0; }
+RT_ON_RESET(time_reset) { g_shmem_handle = 0; g_nrule = 0; }
 
 static void static_service(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;
