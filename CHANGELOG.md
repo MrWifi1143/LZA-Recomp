@@ -7,7 +7,11 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
-- Draw distance for people: Settings > Gameplay > Draw Distance (People): Switch / 2x / 4x / Max. The game draws at
+- Settings reorganised: the Camera tab is now Graphics and holds Frame Rate, Resolution, Screen Mode, Anti-Aliasing,
+  Draw Distance (People) and FPS Counter (below the game's own three camera rows, which can't move); Gameplay holds
+  the controls, mouse, In Background and Start Screen rows.
+
+- Draw distance for people: Settings > Graphics > Draw Distance (People): Switch / 2x / 4x / Max. The game draws at
   most 20 characters (people and their Pokémon) in full at once, nearest first; the rest stay invisible until a
   place frees up. That's why people at the far end of the station platform (a kid with a Staryu, a man with a
   Fletchling) appear only as you walk closer, on the Switch too. The setting raises that number (x2, x4, x10).
@@ -15,7 +19,7 @@ Z-A:
 - Screenshots: F12 (or a controller's capture / share button) saves the game image, without the overlay, as a PNG in
   the data folder's `screenshots` (`ZA_<date>_<time>.png`); a notice in the corner says so.
 - Settings > Gameplay > In Background: keep playing, mute, or pause while the game's window isn't focused.
-- Settings > Camera > Mouse Vertical / Mouse Horizontal: the mouse camera inverted. The game's own Vertical /
+- Settings > Gameplay > Mouse Vertical / Mouse Horizontal: the mouse camera inverted. The game's own Vertical /
   Horizontal Camera Controls apply to the stick only.
 - Controller rumble: the game's vibration (its Wwise "VIB" events, e.g. the player being hit) now reaches the
   controller through SDL - before, it went nowhere. The game's own Controller Rumble option switches it.

@@ -60,7 +60,7 @@ void menu_apply_fullscreen(void);  // runtime/ui/menu.mm
 
 enum { CHOICE, BAR5, BAR10 };
 typedef struct {
-    int tab;  // 0 Gameplay, 1 Camera, 2 Sound
+    int tab;  // 0 Gameplay, 1 Graphics (the game's Camera tab, renamed: its three camera rows stay first), 2 Sound
     const char *name, *info;
     int kind, n;  // CHOICE: n choices
     const char *choice[5];
@@ -117,34 +117,34 @@ static void set_crowd(int i) { g_settings.crowd = i; }
 static int get_vol(void) { return clampi((int)(g_settings.volume * 10 + 0.5f), 0, 10); }
 static void set_vol(int v) { g_settings.volume = (float)v / 10; }
 
-static const Row k_rows[] = {
+static const Row k_rows[] = {  // (per tab in this order; Gameplay's first is the Controls list: settings_screen_buttons)
     {0, "Controls", "Press A to see and change the key and the controller button for each action.", CHOICE, 2,
      {"Keyboard", "Controller"}, ctl_col, ctl_open},
-    {0, "Frame Rate", "Choose how many frames are drawn a second.",
-     CHOICE, 4, {"30 fps", "60 fps", "120 fps", "144 fps"}, get_fps, set_fps},
-    {0, "Resolution (Next Start)", "Choose the resolution the game is drawn at. It applies the next time you start the game.",
-     CHOICE, 5, {"Auto", "720p", "1080p", "1440p", "4K"}, get_res, set_res},
-    {0, "Screen Mode", "Choose whether the game fills the screen or plays in a window.", CHOICE, 2, {"Window", "Fullscreen"},
-     get_full, set_full},
-    {0, "Anti-Aliasing", "Choose whether to smooth jagged edges (SMAA).", CHOICE, 2, {"On", "Off"}, get_aa, set_aa},
     {0, "Button Prompts", "Choose which buttons prompts show. Auto shows the ones you are playing with.", CHOICE, 5,
      {"Auto", "Switch", "Xbox", "PlayStation", "Keyboard"}, get_prompts, set_prompts},
-    {0, "Start Screen", "Choose whether the start screen shows when the game starts. Holding Shift while starting shows it.",
-     CHOICE, 2, {"Show", "Skip"}, get_skip, set_skip},
-    {0, "FPS Counter", "Choose whether to show the frame rate in the corner of the screen.", CHOICE, 2, {"Show", "Hide"},
-     get_fpsc, set_fpsc},
-    {0, "Draw Distance (People)", "Choose how many people and Pokémon are drawn at once. More shows crowds farther away "
-     "but costs performance.", CHOICE, 4, {"Switch", "2x", "4x", "Max"}, get_crowd, set_crowd},
+    {0, "Stick Dead Zone", "Choose how far a controller's sticks must move before they count.", BAR10, 0, {0}, get_dz, set_dz},
+    {0, "Mouse Camera", "Choose whether a click in the game lets the mouse turn the camera. Esc lets it go.",
+     CHOICE, 2, {"On", "Off"}, get_mcam, set_mcam},
+    {0, "Mouse Sensitivity", "Choose how far the camera turns when you move the mouse.", BAR10, 0, {0}, get_msens, set_msens},
+    {0, "Mouse Vertical", "Choose which way the camera turns when you move the mouse up and down.", CHOICE, 2,
+     {"Regular", "Inverted"}, get_minvy, set_minvy},
+    {0, "Mouse Horizontal", "Choose which way the camera turns when you move the mouse left and right.", CHOICE, 2,
+     {"Regular", "Inverted"}, get_minvx, set_minvx},
     {0, "In Background", "Choose what the game does while you are in another window: keep playing, mute its sound, or pause.",
      CHOICE, 3, {"Keep Playing", "Mute", "Pause"}, get_bg, set_bg},
-    {1, "Mouse Camera", "Choose whether a click in the game lets the mouse turn the camera. Esc lets it go.",
-     CHOICE, 2, {"On", "Off"}, get_mcam, set_mcam},
-    {1, "Mouse Sensitivity", "Choose how far the camera turns when you move the mouse.", BAR10, 0, {0}, get_msens, set_msens},
-    {1, "Mouse Vertical", "Choose which way the camera turns when you move the mouse up and down.", CHOICE, 2,
-     {"Regular", "Inverted"}, get_minvy, set_minvy},
-    {1, "Mouse Horizontal", "Choose which way the camera turns when you move the mouse left and right.", CHOICE, 2,
-     {"Regular", "Inverted"}, get_minvx, set_minvx},
-    {1, "Stick Dead Zone", "Choose how far a controller's sticks must move before they count.", BAR10, 0, {0}, get_dz, set_dz},
+    {0, "Start Screen", "Choose whether the start screen shows when the game starts. Holding Shift while starting shows it.",
+     CHOICE, 2, {"Show", "Skip"}, get_skip, set_skip},
+    {1, "Frame Rate", "Choose how many frames are drawn a second.",
+     CHOICE, 4, {"30 fps", "60 fps", "120 fps", "144 fps"}, get_fps, set_fps},
+    {1, "Resolution (Next Start)", "Choose the resolution the game is drawn at. It applies the next time you start the game.",
+     CHOICE, 5, {"Auto", "720p", "1080p", "1440p", "4K"}, get_res, set_res},
+    {1, "Screen Mode", "Choose whether the game fills the screen or plays in a window.", CHOICE, 2, {"Window", "Fullscreen"},
+     get_full, set_full},
+    {1, "Anti-Aliasing", "Choose whether to smooth jagged edges (SMAA).", CHOICE, 2, {"On", "Off"}, get_aa, set_aa},
+    {1, "Draw Distance (People)", "Choose how many people and Pokémon are drawn at once. More shows crowds farther away "
+     "but costs performance.", CHOICE, 4, {"Switch", "2x", "4x", "Max"}, get_crowd, set_crowd},
+    {1, "FPS Counter", "Choose whether to show the frame rate in the corner of the screen.", CHOICE, 2, {"Show", "Hide"},
+     get_fpsc, set_fpsc},
     {2, "Master Volume", "Adjust the volume of all of the game's sound.", BAR10, 0, {0}, get_vol, set_vol},
 };
 #define NROWS (int)(sizeof k_rows / sizeof *k_rows)
@@ -277,15 +277,33 @@ static int msg_tags_log(Cpu *c, uint64_t addr) {  // (research, LARECOMP_ZA_MSGT
     return 1;
 }
 
+static void set_text(uint8_t *obj, const char *s);
 static int msg_lookup_hook(Cpu *c, uint64_t addr) {
     static int tags = -1;
     if (tags < 0) tags = getenv("LARECOMP_ZA_MSGTAGS") != NULL;
+    {   // the Settings screen's Camera tab is Graphics here (the frame rate, resolution... rows are on it)
+        static const char tab[] = "msg_option_setting_tab_02";
+        const Label *l = (const Label *)(uintptr_t)c->x[2];
+        if (l && l->str && l->len == sizeof tab - 1 && !memcmp(l->str, tab, sizeof tab - 1)) {
+            uint64_t res = c->x[8];
+            rt_call_original(c, addr);
+            uint8_t *obj = (uint8_t *)(uintptr_t)*(const uint64_t *)(uintptr_t)res;
+            if (obj && *(const uint64_t *)obj == ZA_MSG_TEXT_VTABLE) set_text(obj, "Graphics");
+            return 1;
+        }
+    }
     if (t_next >= t_ntext) return tags ? msg_tags_log(c, addr) : 0;
     uint64_t res = c->x[8];
     rt_call_original(c, addr);
     const char *s = t_text[t_next++];
     uint8_t *obj = (uint8_t *)(uintptr_t)*(const uint64_t *)(uintptr_t)res;
     if (!obj || *(const uint64_t *)obj != ZA_MSG_TEXT_VTABLE) return 1;
+    set_text(obj, s);
+    return 1;
+}
+
+// a text object's text replaced (UTF-8 in, the game's UTF-16 out; "{Name}": a button icon)
+static void set_text(uint8_t *obj, const char *s) {
     uint16_t *buf = *(uint16_t **)(obj + 0x30);
     uint64_t cap = *(const uint64_t *)(obj + 0x40);
     size_t n = 0, col = 0;
@@ -310,7 +328,6 @@ static int msg_lookup_hook(Cpu *c, uint64_t addr) {
     }
     buf[n] = 0;
     *(uint16_t *)(obj + 0x52) = (uint16_t)n;
-    return 1;
 }
 
 // the game's function fn(x0..x4) with the texts its lookups give
