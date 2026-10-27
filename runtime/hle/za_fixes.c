@@ -462,9 +462,11 @@ void za_fixes_present(void) {  // (each present: za_options_present)
 
 // Draw distance for people. The game draws at most 20 characters (people and their Pokemon) in full at once: the
 // pass 0x70002ffeb0 (x0 -> {.., +8 &config, +0x10 &count}) walks them nearest first and lets through as many as the
-// config's +0xf8 says; the rest wait for a free place (at the station's far end a kid with a Staryu, people near the
-// railing - they appear, or swap with others, on the way). Found 2026-10-27 from the model swap (the timed behaviour
-// 0x7000d58b20 its result creates). Settings.crowd multiplies the game's own number: x1 (the Switch), x2, x4, x10.
+// config's +0xf8 says; the rest wait for a free place (people near the station's railing appear, or swap with others,
+// on the way). Found 2026-10-27 from the model swap (the timed behaviour 0x7000d58b20 its result creates). The pass
+// also only takes characters on a ready list (config +0xd8 -> object, sorted handles at +0x258, count +0x260), which
+// 0x70000b27f0 rebuilds each frame with at most the object's +0x310 (25) nearest: the station's kid with a Staryu is
+// 26th from the start spot. Settings.crowd multiplies both of the game's own numbers: x1 (the Switch), x2, x4, x10.
 #define ZA_CHAR_DETAIL_PASS 0x70002ffeb0ull
 static int crowd_hook(Cpu *c, uint64_t addr) {
     (void)addr;
@@ -476,13 +478,19 @@ static int crowd_hook(Cpu *c, uint64_t addr) {
     uint64_t cfg = *(uint64_t *)(uintptr_t)pc;
     if (cfg < 0x7000000000ull || cfg >= 0x8000000000ull) return 0;
     int32_t *budget = (int32_t *)(uintptr_t)(cfg + 0xf8);
-    static struct { uint64_t cfg; int32_t own; } seen[8];  // (each config's own number, before ours)
-    int k = 0;
-    while (k < 8 && seen[k].cfg && seen[k].cfg != cfg) k++;
+    uint64_t ready = *(uint64_t *)(uintptr_t)(cfg + 0xd8);
+    int32_t *rcap = ready >= 0x7000000000ull && ready < 0x8000000000ull ? (int32_t *)(uintptr_t)(ready + 0x310) : NULL;
+    static struct { uint64_t at; int32_t own; } seen[8], rseen[8];  // (each config's / ready list's own number, before ours)
+    int k = 0, r = 0;
+    while (k < 8 && seen[k].at && seen[k].at != cfg) k++;
     if (k == 8) return 0;
-    if (!seen[k].cfg) seen[k].cfg = cfg, seen[k].own = *budget, LOG("[za] characters in full: %d at once (the game's)\n", *budget);
+    if (!seen[k].at) seen[k].at = cfg, seen[k].own = *budget, LOG("[za] characters in full: %d at once (the game's)\n", *budget);
+    while (rcap && r < 8 && rseen[r].at && rseen[r].at != ready) r++;
+    if (r == 8) rcap = NULL;
+    if (rcap && !rseen[r].at) rseen[r].at = ready, rseen[r].own = *rcap, LOG("[za] characters ready: %d at once (the game's)\n", *rcap);
     int m = g_settings.crowd >= 0 && g_settings.crowd <= 3 ? k_mul[g_settings.crowd] : 1;
     *budget = seen[k].own * m;
+    if (rcap && rseen[r].own > 0 && rseen[r].own < 1000) *rcap = rseen[r].own * m;
     return 0;
 }
 

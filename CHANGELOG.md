@@ -14,10 +14,11 @@ Z-A:
   Draw Distance (People) and FPS Counter (below the game's own three camera rows, which can't move); Gameplay holds
   the controls, mouse, In Background and Start Screen rows.
 
-- Draw distance for people: Settings > Graphics > Draw Distance (People): Switch / 2x / 4x / Max. The game draws at
-  most 20 characters (people and their Pokémon) in full at once, nearest first; the rest stay invisible until a
-  place frees up. That's why people at the far end of the station platform (a kid with a Staryu, a man with a
-  Fletchling) appear only as you walk closer, on the Switch too. The setting raises that number (x2, x4, x10).
+- Draw distance for people: Settings > Graphics > Draw Distance (People): Switch / 2x / 4x / Max. The game keeps
+  the full models of at most 25 characters (people and their Pokémon) ready and draws at most 20 of them in full,
+  nearest first; the rest stay invisible until a place frees up. That's why people at the far end of the station
+  platform (a kid with a Staryu, a man with a Fletchling) appear only as you walk closer, on the Switch too. The
+  setting raises both numbers (x2, x4, x10).
 
 - Screenshots: F12 (or a controller's capture / share button) saves the game image, without the overlay, as a PNG in
   the data folder's `screenshots` (`ZA_<date>_<time>.png`); a notice in the corner says so.
