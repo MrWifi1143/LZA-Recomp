@@ -7,6 +7,10 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- Network: the game's request for a local network (what it asks for before local play) is now granted, like a
+  console with Wi-Fi on; internet requests still get "no connection", so nothing tries Nintendo's servers. Local
+  wireless itself isn't emulated yet, so Link Play's Nearby Players still finds no one.
+
 - The save screen's Current Time (and Last Saved) showed UTC instead of your local time. The time zone service had
   ToPosixTime(rule) and ToPosixTimeWithMyRule mixed up; rules the game loads are now kept apart from the device's own.
 
