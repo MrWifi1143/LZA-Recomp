@@ -66,6 +66,7 @@ typedef struct {
     const char *choice[5];
     int (*get)(void);
     void (*set)(int);
+    void (*act)(int);  // (A on the row: runs it for the choice shown)
 } Row;
 
 static const int k_fps[] = {30, 60, 120, 144}, k_lines[] = {0, 720, 1080, 1440, 2160};
@@ -116,6 +117,11 @@ static int get_crowd(void) { return g_settings.crowd >= 0 && g_settings.crowd <=
 static void set_crowd(int i) { g_settings.crowd = i; }
 static int get_shadows(void) { return g_settings.shadows >= 0 && g_settings.shadows <= 2 ? g_settings.shadows : 0; }
 static void set_shadows(int i) { g_settings.shadows = i; }
+void pkm_link_apply(void);  // (hle/pkm_link.c)
+int pkm_files_get(void);
+void pkm_files_set(int v), pkm_files_run(int v);
+static int get_pklink(void) { return g_settings.pkhex_link >= 0 && g_settings.pkhex_link <= 2 ? g_settings.pkhex_link : 0; }
+static void set_pklink(int i) { g_settings.pkhex_link = i; pkm_link_apply(); }
 static int get_vol(void) { return clampi((int)(g_settings.volume * 10 + 0.5f), 0, 10); }
 static void set_vol(int v) { g_settings.volume = (float)v / 10; }
 
@@ -136,6 +142,10 @@ static const Row k_rows[] = {  // (per tab in this order; Gameplay's first is th
      CHOICE, 3, {"Keep Playing", "Mute", "Pause"}, get_bg, set_bg},
     {0, "Start Screen", "Choose whether the start screen shows when the game starts. Holding Shift while starting shows it.",
      CHOICE, 2, {"Show", "Skip"}, get_skip, set_skip},
+    {0, "PKHeX Link", "Let PKHeX's LiveHeX plugin see and edit your boxes while you play, from this PC or your network.",
+     CHOICE, 3, {"Off", "This PC", "Network"}, get_pklink, set_pklink},
+    {0, "Pokémon Files", "Press A to save your boxed Pokémon as PKHeX files, or to add the ones in pokemon/import.",
+     CHOICE, 2, {"Export", "Import"}, pkm_files_get, pkm_files_set, pkm_files_run},
     {1, "Frame Rate", "Choose how many frames are drawn a second.",
      CHOICE, 4, {"30 fps", "60 fps", "120 fps", "144 fps"}, get_fps, set_fps},
     {1, "Resolution (Next Start)", "Choose the resolution the game is drawn at. It applies the next time you start the game.",
@@ -146,7 +156,7 @@ static const Row k_rows[] = {  // (per tab in this order; Gameplay's first is th
     {1, "Draw Distance (People)", "Choose how many people and Pokémon are drawn at once. More shows crowds farther away "
      "but costs performance.", CHOICE, 4, {"Switch", "2x", "4x", "Max"}, get_crowd, set_crowd},
     {1, "Shadows (Next Start)", "Choose how detailed shadows are. Higher shows the shapes of people and Pokémon in their "
-     "shadows. It applies the next time you start the game.", CHOICE, 3, {"Switch", "High", "Ultra"}, get_shadows, set_shadows},
+     "shadows.", CHOICE, 3, {"Switch", "High", "Ultra"}, get_shadows, set_shadows},
     {1, "FPS Counter", "Choose whether to show the frame rate in the corner of the screen.", CHOICE, 2, {"Show", "Hide"},
      get_fpsc, set_fpsc},
     {2, "Master Volume", "Adjust the volume of all of the game's sound.", BAR10, 0, {0}, get_vol, set_vol},
@@ -538,6 +548,10 @@ uint64_t settings_screen_buttons(Cpu *c, uint64_t b) {
     }
     if (!g_ctl) {
         if (tab == 0 && row_index(0, row) == 0 && ((edge & A) || pending >= 100)) kept |= edge & A, ctl_set(c, true);  // (Controls)
+        else if ((edge & A) && row_index(tab, row) >= 0 && k_rows[row_index(tab, row)].act) {  // (Pokémon Files)
+            const Row *r = &k_rows[row_index(tab, row)];
+            kept |= A, r->act(r->get());
+        }
     } else if (pending >= 0 && pending < 2 && row >= 0 && row < NBINDS) {  // (a click on a cell)
         if (!(pending && k_binds[row].slot >= BIND_PAD_COUNT)) {
             bind_capture_begin(pending ? BIND_DEV_PAD : BIND_DEV_KEY, k_binds[row].slot);

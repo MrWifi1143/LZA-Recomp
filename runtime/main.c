@@ -141,6 +141,7 @@ static void boot(const char *root) {
     if (g_extract_shaders) { extern void extract_shaders_install(const char *exefs, const char *romfs); extract_shaders_install(exefs, romfs); }
     { extern void libcfast_configure(void); libcfast_configure(); }  // (runtime/hle/libcfast.c)
     { extern void settings_load(void); settings_load(); }
+    if (!g_oodle_server && !g_extract_shaders) { extern void pkm_link_apply(void); pkm_link_apply(); }  // (PKHeX Link, if on: hle/pkm_link.c)
     kernel_init();
     dispatch_init();
 

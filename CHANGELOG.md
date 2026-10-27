@@ -7,6 +7,11 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- PKHeX: Settings > Gameplay > PKHeX Link (Off / This PC / Network) answers PKHeX's LiveHeX plugin like sys-botbase on
+  a Switch (port 6000): it detects Z-A 2.0.2 and reads and writes the boxes while you play. Settings > Gameplay >
+  Pokémon Files: A on Export saves every Pokémon in your boxes as a PKHeX .pa9 file (pokemon/export/<date>/), A on
+  Import puts the .pa9 files in pokemon/import/ into the first empty box slots. Save in the game to keep them.
+
 - Network: the game's request for a local network (what it asks for before local play) is now granted, like a
   console with Wi-Fi on; internet requests still get "no connection", so nothing tries Nintendo's servers. Local
   wireless itself isn't emulated yet, so Link Play's Nearby Players still finds no one.
