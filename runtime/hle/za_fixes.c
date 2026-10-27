@@ -460,6 +460,32 @@ void za_fixes_present(void) {  // (each present: za_options_present)
     }
 }
 
+// Draw distance for people. The game draws at most 20 characters (people and their Pokemon) in full at once: the
+// pass 0x70002ffeb0 (x0 -> {.., +8 &config, +0x10 &count}) walks them nearest first and lets through as many as the
+// config's +0xf8 says; the rest wait for a free place (at the station's far end a kid with a Staryu, people near the
+// railing - they appear, or swap with others, on the way). Found 2026-10-27 from the model swap (the timed behaviour
+// 0x7000d58b20 its result creates). Settings.crowd multiplies the game's own number: x1 (the Switch), x2, x4, x10.
+#define ZA_CHAR_DETAIL_PASS 0x70002ffeb0ull
+static int crowd_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    static const int k_mul[4] = {1, 2, 4, 10};
+    uint64_t a = c->x[0];
+    if (a < 0x7000000000ull || a >= 0x8000000000ull) return 0;
+    uint64_t pc = *(uint64_t *)(uintptr_t)(a + 8);
+    if (pc < 0x7000000000ull || pc >= 0x8000000000ull) return 0;
+    uint64_t cfg = *(uint64_t *)(uintptr_t)pc;
+    if (cfg < 0x7000000000ull || cfg >= 0x8000000000ull) return 0;
+    int32_t *budget = (int32_t *)(uintptr_t)(cfg + 0xf8);
+    static struct { uint64_t cfg; int32_t own; } seen[8];  // (each config's own number, before ours)
+    int k = 0;
+    while (k < 8 && seen[k].cfg && seen[k].cfg != cfg) k++;
+    if (k == 8) return 0;
+    if (!seen[k].cfg) seen[k].cfg = cfg, seen[k].own = *budget, LOG("[za] characters in full: %d at once (the game's)\n", *budget);
+    int m = g_settings.crowd >= 0 && g_settings.crowd <= 3 ? k_mul[g_settings.crowd] : 1;
+    *budget = seen[k].own * m;
+    return 0;
+}
+
 void za_fixes_configure(const char *exefs) {
     static const uint8_t ZA_MAIN[8] = {0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a};  // 2.0.2 (any other build: none of this)
     static bool done;
@@ -516,6 +542,7 @@ void za_fixes_configure(const char *exefs) {
         const char *cs = getenv("LARECOMP_ZA_CUTSCENE_SPEED");
         if (!(cs && atoi(cs) == 0)) rt_register_fnhook_at(ZA_TIMELINE_SET_TIME, timeline_step);
     }
+    rt_register_fnhook_at(ZA_CHAR_DETAIL_PASS, crowd_hook);
     {
         const char *m = getenv("LARECOMP_ZA_SCENE60");
         if (!(m && atoi(m) == 0)) rt_register_fnhook_at(ZA_SCRIPT_OBJ, scene60_hook), rt_register_fnhook_at(ZA_MOVE_TO, scene60_hook);

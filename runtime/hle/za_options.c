@@ -112,6 +112,8 @@ static int get_minvx(void) { return g_settings.mouse_invert_x ? 1 : 0; }
 static void set_minvx(int i) { g_settings.mouse_invert_x = i == 1; }
 static int get_bg(void) { return g_settings.background >= BG_KEEP && g_settings.background <= BG_PAUSE ? g_settings.background : BG_KEEP; }
 static void set_bg(int i) { g_settings.background = i; }
+static int get_crowd(void) { return g_settings.crowd >= 0 && g_settings.crowd <= 3 ? g_settings.crowd : 0; }
+static void set_crowd(int i) { g_settings.crowd = i; }
 static int get_vol(void) { return clampi((int)(g_settings.volume * 10 + 0.5f), 0, 10); }
 static void set_vol(int v) { g_settings.volume = (float)v / 10; }
 
@@ -131,6 +133,8 @@ static const Row k_rows[] = {
      CHOICE, 2, {"Show", "Skip"}, get_skip, set_skip},
     {0, "FPS Counter", "Choose whether to show the frame rate in the corner of the screen.", CHOICE, 2, {"Show", "Hide"},
      get_fpsc, set_fpsc},
+    {0, "Draw Distance (People)", "Choose how many people and Pokémon are drawn at once. More shows crowds farther away "
+     "but costs performance.", CHOICE, 4, {"Switch", "2x", "4x", "Max"}, get_crowd, set_crowd},
     {0, "In Background", "Choose what the game does while you are in another window: keep playing, mute its sound, or pause.",
      CHOICE, 3, {"Keep Playing", "Mute", "Pause"}, get_bg, set_bg},
     {1, "Mouse Camera", "Choose whether a click in the game lets the mouse turn the camera. Esc lets it go.",
