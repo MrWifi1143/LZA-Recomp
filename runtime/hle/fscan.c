@@ -3,7 +3,9 @@
 // the same step on both frames - an integer stepping 1 or 2, a float stepping 1, 0.5, 2, 1/30 or 1/60 - logged as
 // "[fscan]" (frame-counting timers: what runs too fast above 30 fps). LARECOMP_FSCAN_WATCH=<addr>[,<addr>...] then puts
 // hardware watchpoints on those words (hwwatch.c) to name their writers; =auto: on what was found (frame-stepped
-// floats first, then integers). LARECOMP_FSCAN_MAX=<MB>: the most memory compared (default 8192).
+// floats first, then integers). LARECOMP_FSCAN_MAX=<MB>: the most memory compared (default 8192). LARECOMP_FSCAN_GAP=<n>:
+// the three copies <n> presents apart (a counter stepping once every n frames: a play time's seconds), integers then
+// also stepping by one in another byte (packed hours / minutes / seconds).
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,10 +40,14 @@ void fscan_present(uint64_t frame) {
     static long at = -2;
     if (at == -2) at = getenv("LARECOMP_FSCAN") ? atol(getenv("LARECOMP_FSCAN")) : -1;
     static bool started;
+    static uint64_t gap;
+    if (!gap) gap = getenv("LARECOMP_FSCAN_GAP") && atol(getenv("LARECOMP_FSCAN_GAP")) > 0 ? (uint64_t)atol(getenv("LARECOMP_FSCAN_GAP")) : 1;
     if (at < 0 || frame < (uint64_t)at) return;
     if (!started) started = true, at = (long)frame;  // (the first present at or after it: the count can skip one)
-    if (frame > (uint64_t)at + 3) return;
+    if (frame > (uint64_t)at + 2 * gap + 1) return;
     uint64_t k = frame - (uint64_t)at;
+    if (k % gap && k != 2 * gap + 1) return;
+    k = k == 2 * gap + 1 ? 3 : k / gap;
     if (k == 0) {
         uint64_t budget = (getenv("LARECOMP_FSCAN_MAX") ? strtoull(getenv("LARECOMP_FSCAN_MAX"), NULL, 0) : 8192) << 20;
         extern uint64_t g_stdheap_used;  // (heaps.c: the StandardAllocators' window above the kernel heap)
@@ -100,7 +106,7 @@ void fscan_present(uint64_t frame) {
                 uint32_t ci = mem[i];
                 uint64_t addr = g_lo[r] + i * 4;
                 uint32_t d = b0 - a0;
-                if ((d == 1 || d == 2) && ci - b0 == d && a0 < 10000000) {  // (an integer frame counter)
+                if ((d == 1 || d == 2 || (gap > 1 && (d == 1u << 8 || d == 1u << 16 || d == 1u << 24))) && ci - b0 == d && (a0 < 10000000 || d > 2)) {  // (an integer frame counter)
                     if (ints < 600) LOG("[fscan] %llx: int %u %u %u (step %u)\n", (unsigned long long)addr, a0, b0, ci, d);
                     ints++;
                     // (auto: the counters that started a while ago, not with the game: what a scene counts its frames with)

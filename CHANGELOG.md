@@ -7,6 +7,9 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- The save screen's Current Time (and Last Saved) showed UTC instead of your local time. The time zone service had
+  ToPosixTime(rule) and ToPosixTimeWithMyRule mixed up; rules the game loads are now kept apart from the device's own.
+
 - Settings reorganised: the Camera tab is now Graphics and holds Frame Rate, Resolution, Screen Mode, Anti-Aliasing,
   Draw Distance (People) and FPS Counter (below the game's own three camera rows, which can't move); Gameplay holds
   the controls, mouse, In Background and Start Screen rows.
