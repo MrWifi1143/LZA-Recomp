@@ -431,6 +431,35 @@ static int mouse_look_hook(Cpu *c, uint64_t addr) {
     return 0;
 }
 
+// Hotel Z room 202 lock above 60 fps: at 144 fps (sometimes 120) Ev_m01_0210 - the player teleported into room 202,
+// then walked in by FObj_Move_To_PosXYZ, which the event waits for - leaves the player turning on the spot, the walk
+// never done and the event never over; at 60 it works. What goes wrong happens at the event's start (a cap from the
+// walk's own call is too late; from the event's first native call it works), the cause itself isn't found. So scripted
+// scenes run at 60 fps when the frame rate is above it: the game's script natives are hardly ever called in free roam
+// (3 in a minute's walk), and the object lookup 0x7001517e30 (fB51E7F78) opens almost every scene that moves someone.
+// From its first call (or a scripted walk's, 0x7000ae3cb0) to 4 s after the last. LARECOMP_ZA_SCENE60=0: off.
+#define ZA_SCRIPT_OBJ 0x7001517e30ull
+#define ZA_MOVE_TO 0x7000ae3cb0ull
+bool legends_set_fps(int fps);  // runtime/hle/fps60.c
+static int g_move_fps;          // the frame rate to come back to (0: not lowered)
+static _Atomic uint64_t g_move_until;  // (plat_now_ns)
+static int scene60_hook(Cpu *c, uint64_t addr) {
+    (void)c, (void)addr;
+    if (g_settings.fps <= 60) return 0;
+    static uint64_t hold = 0;  // (LARECOMP_ZA_SCENE60_S=<seconds>: research)
+    if (!hold) hold = getenv("LARECOMP_ZA_SCENE60_S") ? (uint64_t)atoi(getenv("LARECOMP_ZA_SCENE60_S")) * 1000000000ull : 4000000000ull;
+    atomic_store(&g_move_until, plat_now_ns() + hold);
+    if (!g_move_fps && legends_set_fps(60)) g_move_fps = g_settings.fps, LOG("[za] scripted scene: 60 fps for now\n");
+    return 0;
+}
+void za_fixes_present(void) {  // (each present: za_options_present)
+    if (g_move_fps && plat_now_ns() > atomic_load(&g_move_until)) {
+        int f = g_move_fps;
+        g_move_fps = 0;
+        if (g_settings.fps == f) legends_set_fps(f);  // (unless the player changed it meanwhile)
+    }
+}
+
 void za_fixes_configure(const char *exefs) {
     static const uint8_t ZA_MAIN[8] = {0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a};  // 2.0.2 (any other build: none of this)
     static bool done;
@@ -486,6 +515,10 @@ void za_fixes_configure(const char *exefs) {
     {
         const char *cs = getenv("LARECOMP_ZA_CUTSCENE_SPEED");
         if (!(cs && atoi(cs) == 0)) rt_register_fnhook_at(ZA_TIMELINE_SET_TIME, timeline_step);
+    }
+    {
+        const char *m = getenv("LARECOMP_ZA_SCENE60");
+        if (!(m && atoi(m) == 0)) rt_register_fnhook_at(ZA_SCRIPT_OBJ, scene60_hook), rt_register_fnhook_at(ZA_MOVE_TO, scene60_hook);
     }
     const char *lod = getenv("LARECOMP_ZA_NPC_LOD");
     if (!(lod && atoi(lod))) {

@@ -1405,6 +1405,7 @@ typedef struct {
     ShaderInfo *vi, *fi;
     uint64_t code[2], cmax[2];  // translation inputs (copied: translated on the translator thread)
     uint64_t cst[2], ncst[2];   // (and the compiler constants: BRX jump tables)
+    uint64_t fs_len;            // (the warm-up's copy of the fragment stage: its bytes; 0 = the game's memory)
     ShaderKey vkey, fkey;
     VkShaderModule vs, fs;
     VkBindingInfo binds[MAX_BIND];
@@ -1636,8 +1637,8 @@ static void translate_program(void *arg) {
             snprintf(path, sizeof path, "%s/%llx_fs.glsl", ENV("LARECOMP_GLSL_OVERRIDE_DIR"), (unsigned long long)p->code[1]);
             f = fopen(path, "rb");
             if (!f && p->code[1]) {  // or h<fs hash>_fs.glsl: the hash the draw logs print, stable between runs
-                extern uint64_t vk_fs_hash(uint64_t fs);
-                snprintf(path, sizeof path, "%s/h%016llx_fs.glsl", ENV("LARECOMP_GLSL_OVERRIDE_DIR"), (unsigned long long)vk_fs_hash(p->code[1]));
+                extern uint64_t vk_prog_fs_hash(uint64_t fs, size_t len);
+                snprintf(path, sizeof path, "%s/h%016llx_fs.glsl", ENV("LARECOMP_GLSL_OVERRIDE_DIR"), (unsigned long long)vk_prog_fs_hash(p->code[1], p->fs_len));
                 f = fopen(path, "rb");
             }
             if (f) {
@@ -1658,10 +1659,10 @@ static void translate_program(void *arg) {
     // among them. The read is moved a quarter of a full-res texel up-left, inside the top-left texel - the
     // half-res depth then matches Eden's texel for texel. LARECOMP_ZA_DEPTH_DS_FIX=0: as translated.
     if (p->code[1] && !(ENV("LARECOMP_ZA_DEPTH_DS_FIX") && atoi(ENV("LARECOMP_ZA_DEPTH_DS_FIX")) == 0)) {
-        extern uint64_t vk_fs_hash(uint64_t fs);
+        extern uint64_t vk_prog_fs_hash(uint64_t fs, size_t len);
         static const char old[] = "texture(t0, vec2(", fix[] = "texture(t0, vec2(-0.25) / vec2(textureSize(t0, 0)) + vec2(";
         const char *at;
-        if (vk_fs_hash(p->code[1]) == 0x6023c3a85ef7d692ull && (at = strstr(p->fi->msl, old)) && !strstr(at + 1, old)) {
+        if (vk_prog_fs_hash(p->code[1], p->fs_len) == 0x6023c3a85ef7d692ull && (at = strstr(p->fi->msl, old)) && !strstr(at + 1, old)) {
             size_t len = strlen(p->fi->msl), pre = (size_t)(at - p->fi->msl);
             char *s = malloc(len + sizeof fix);
             memcpy(s, p->fi->msl, pre);
@@ -1677,9 +1678,9 @@ static void translate_program(void *arg) {
     save_glsl(p->vi->msl, p->code[0], "vs");
     save_glsl(p->fi->msl, p->code[1], "fs");
     if (ENV("LARECOMP_SAVE_MSL") && p->code[1]) {  // (and by the stable hash: build/glsl/h<hash>_fs.glsl, what overrides match)
-        extern uint64_t vk_fs_hash(uint64_t fs);
+        extern uint64_t vk_prog_fs_hash(uint64_t fs, size_t len);
         char path[96];
-        snprintf(path, sizeof path, "build/glsl/h%016llx_fs.glsl", (unsigned long long)vk_fs_hash(p->code[1]));
+        snprintf(path, sizeof path, "build/glsl/h%016llx_fs.glsl", (unsigned long long)vk_prog_fs_hash(p->code[1], p->fs_len));
         FILE *f = fopen(path, "w");
         if (f) { fputs(p->fi->msl, f); fclose(f); }
     }
@@ -2040,6 +2041,9 @@ static uint64_t hmix(uint64_t h, const void *p, size_t n) {
     return h;
 }
 uint64_t vk_fs_hash(uint64_t fs) { return hmix(1469598103934665603ull, (const void *)(uintptr_t)(fs + 0x30), 0x200); }
+// The same for a program's fragment shader, 0 when its code is shorter than what the hash reads: the warm-up's programs
+// (warmup.c) are copies of each stage, len bytes from its header (0: the game's memory): reading past one crashed at boot.
+uint64_t vk_prog_fs_hash(uint64_t fs, size_t len) { return fs && (!len || len >= 0x230) ? vk_fs_hash(fs) : 0; }
 
 static VkPrimitiveTopology topo_class_base(uint8_t c) {
     return c == 0 ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST : c == 1 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -2180,8 +2184,9 @@ static void build_pipeline(void *arg) {
 // state and released, for the driver's shader cache. That only partly helps the draws' own pipelines later (NVIDIA, fresh
 // shader cache, PLA walk test: pipeline creation 10.3 -> 6.0 s) for a long wait (8427 programs: 98 s on 23 threads
 // instead of 17), so the warm-up asks for it only with LARECOMP_WARMUP_PIPELINES=1. false: failed.
-bool vk_warm_program(const uint8_t *vs, size_t vmax, size_t vcn, const uint8_t *fs, size_t fmax, size_t fcn, bool pipeline) {
+bool vk_warm_program(const uint8_t *vs, size_t vmax, size_t vcn, const uint8_t *fs, size_t fmax, size_t fcn, size_t flen, bool pipeline) {
     Prog *p = calloc(1, sizeof *p);
+    p->fs_len = fs ? (flen ? flen : 1) : 0;
     p->code[0] = (uint64_t)(uintptr_t)vs, p->cmax[0] = vmax;
     p->code[1] = (uint64_t)(uintptr_t)fs, p->cmax[1] = fs ? fmax : 0;
     if (vcn) p->cst[0] = (uint64_t)(uintptr_t)(vs + vmax), p->ncst[0] = vcn;

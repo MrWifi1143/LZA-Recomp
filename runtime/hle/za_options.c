@@ -583,6 +583,7 @@ static int trace_hook(Cpu *c, uint64_t addr) {
 
 // (each present: the live dir's "opttrace" file turns tracing on; a new one - removed and made again - restarts the counts)
 void za_options_present(void) {
+    { extern void za_fixes_present(void); za_fixes_present(); }
     static const char *dir;
     static bool init;
     if (!init) init = true, dir = getenv("LARECOMP_ZA_OPTTRACE") ? getenv("LARECOMP_LIVE") : NULL;

@@ -17,6 +17,13 @@ Z-A:
   hidden banner.)
 - Debug aids: `LARECOMP_LOG_HANDLES=1` names the service behind each handle; the thread dump shows the handles a
   thread waits on. `LARECOMP_AOC=0` runs as without the DLC.
+- Crash at startup (now and then, since 0.5.0): the shadow fix's check of one fragment shader read 0x200 bytes past
+  shaders the start-up warm-up had copied - past the end of one, the game stopped with "stopped because of an error".
+  It now reads only what the copy holds (the fix still applies: compared at boot).
+- Hotel Z room 202 (120 / 144 fps): after the "Here's room 202" scene the player could only turn on the spot - the
+  scene's scripted walk into the room never happened, so the scene never ended. Scripted scenes now run at 60 fps when
+  the frame rate is set above 60 (free roam keeps the chosen rate); `LARECOMP_ZA_SCENE60=0` turns
+  that off. The cause itself (something at the scene's start that goes wrong above ~100 fps) isn't found yet.
 
 ## 2026-10-26: LegendsZA-v0.5.0-alpha
 
