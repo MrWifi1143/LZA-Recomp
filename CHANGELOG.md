@@ -3,6 +3,19 @@
 Releases are tagged per game: `LegendsA-v*` (PL:A Recomp, branch `LegendsA`) and `LegendsZA-v*` (PL:Z-A Recomp,
 branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
+## Unreleased (branch `LegendsZA`)
+
+Z-A:
+
+- Screenshots: F12 (or a controller's capture / share button) saves the game image, without the overlay, as a PNG in
+  the data folder's `screenshots` (`ZA_<date>_<time>.png`); a notice in the corner says so.
+- Settings > Gameplay > In Background: keep playing, mute, or pause while the game's window isn't focused.
+- Settings > Camera > Mouse Vertical / Mouse Horizontal: the mouse camera inverted. The game's own Vertical /
+  Horizontal Camera Controls apply to the stick only.
+- Controller rumble: the game's vibration (its Wwise "VIB" events, e.g. the player being hit) now reaches the
+  controller through SDL - before, it went nowhere. The game's own Controller Rumble option switches it.
+  `LARECOMP_RUMBLE=0` turns it off. (Not felt yet: no hit happened in the tests.)
+
 ## 2026-10-27: LegendsZA-v0.5.1-alpha
 
 Z-A:

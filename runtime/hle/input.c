@@ -131,6 +131,29 @@ static void mouse_release(void) {
     recompute_keyboard();
 }
 
+// The game window's focus (its events here), for Settings.background: muted (services/audio.c) or paused at the next
+// present (nvn/objects.c) while another window has it. LARECOMP_LIVE's dir file "unfocused" (0 / 1) stands in (tests).
+static _Atomic int g_unfocused;
+static bool background_now(void) {
+    static const char *live = (const char *)1;
+    if (live == (const char *)1) live = getenv("LARECOMP_LIVE");
+    if (live) {
+        static uint64_t last;
+        uint64_t now = SDL_GetTicks();
+        if (now - last > 200) {
+            last = now;
+            char p[1100];
+            snprintf(p, sizeof p, "%s/unfocused", live);
+            FILE *f = fopen(p, "r");
+            int v = 0;
+            if (f) { if (fscanf(f, "%d", &v) != 1) v = 0; fclose(f); remove(p); atomic_store(&g_unfocused, v); }
+        }
+    }
+    return atomic_load(&g_unfocused) != 0;
+}
+bool input_background_muted(void) { return g_settings.background >= BG_MUTE && background_now(); }
+bool input_background_paused(void) { return g_settings.background == BG_PAUSE && background_now(); }
+
 // Mouse look (input_mouse_camera_take): a game hook asks each frame for the held mouse's motion as camera angles and
 // adds them to the camera's own (the game's camera hook: hle/za_fixes.c / hle/fps60.c) - while it does, the mouse isn't the
 // camera stick (mouse_stick).
@@ -138,6 +161,8 @@ static _Atomic uint64_t mouse_look_ns;  // when it last asked
 bool input_mouse_camera_take(float *dyaw, float *dpitch) {
     if (!mouse_win || gyro_aiming) return false;
     double ax = (double)atomic_exchange(&cam_acc_x, 0) / 1000, ay = (double)atomic_exchange(&cam_acc_y, 0) / 1000;
+    if (g_settings.mouse_invert_x) ax = -ax;
+    if (g_settings.mouse_invert_y) ay = -ay;
     double k = g_settings.mouse_sens * M_PI / 180;  // (the sensitivity: degrees per pixel, as the gyro's)
     *dyaw = (float)(-ax * k), *dpitch = (float)(ay * k);  // (right: the camera turns right; up: it looks up, as the stick)
     atomic_store(&mouse_look_ns, SDL_GetTicksNS());
@@ -155,6 +180,8 @@ static void mouse_stick(int32_t *rx, int32_t *ry) {
     last = now;
     if (now - atomic_load(&mouse_look_ns) < 100000000ull) { vx = vy = 0; return; }
     double ax = (double)atomic_exchange(&cam_acc_x, 0) / 1000, ay = (double)atomic_exchange(&cam_acc_y, 0) / 1000;
+    if (g_settings.mouse_invert_x) ax = -ax;
+    if (g_settings.mouse_invert_y) ay = -ay;
     if (dt <= 0 || dt > 0.25 || !mouse_win) { vx = vy = 0; return; }
     double a = dt / 0.035 > 1 ? 1 : dt / 0.035;
     vx += (ax / dt - vx) * a, vy += (ay / dt - vy) * a;
@@ -204,6 +231,9 @@ void input_reset(void) {
 }
 
 volatile int g_debug_frame_request;  // F9: dump the next frame's passes (build/pass_*.png) + draw log
+// F12, or a controller's capture / share button (SDL's MISC1): a screenshot of the game image at the next present
+// (runtime/nvn/vulkan/device.c), into <data folder>/screenshots/
+volatile int g_screenshot_request;
 
 // Events a test pushes (LARECOMP_HOST_INPUT type: / sdlkey: / sdlpad:) carry this device id: they go the whole way, menu first.
 #define TEST_DEVICE 0x7E57u
@@ -343,6 +373,7 @@ void input_handle_event(const SDL_Event *e) {
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP:
         if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_F9 && !e->key.repeat) g_debug_frame_request = 1;
+        if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_F12 && !e->key.repeat) g_screenshot_request = 1;
         // research (broken map after a capture): F5 marks all guest memory written (every texture re-checks its data), F6 reads
         // all vertex and index data in place from now on
         if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat && getenv("LARECOMP_HEAL_KEYS")) {
@@ -404,7 +435,9 @@ void input_handle_event(const SDL_Event *e) {
     }
     case SDL_EVENT_WINDOW_FOCUS_LOST:
         mouse_release();
+        atomic_store(&g_unfocused, 1);
         break;
+    case SDL_EVENT_WINDOW_FOCUS_GAINED: atomic_store(&g_unfocused, 0); break;
     case SDL_EVENT_GAMEPAD_ADDED:
         if (!pad) { pad = SDL_OpenGamepad(e->gdevice.which); LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad)); note_family(); }
         break;
@@ -415,6 +448,7 @@ void input_handle_event(const SDL_Event *e) {
     case SDL_EVENT_GAMEPAD_AXIS_MOTION: case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
         if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && abs(e->gaxis.value) > 20000))
             last_kbm = 0;
+        if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && e->gbutton.button == SDL_GAMEPAD_BUTTON_MISC1) g_screenshot_request = 1;
         recompute_pad();
         break;
     }
@@ -1171,8 +1205,36 @@ HLE_FUNC("_ZN2nn3hid16GetGestureStatesEPNS0_12GestureStateEi", hid_gesture_state
     c->x[0] = (uint64_t)n;
 }
 
-// Vibration devices: accepted but inert (the SDK's vibration node graph stays recompiled).
+// Vibration devices. The game's values (nn::hid::SendVibrationValue: a motor's {low band amplitude, frequency, high
+// band amplitude, frequency}; the device handle's bit 0: left / right Joy-Con) reach the controller's motors through
+// SDL_RumbleGamepad, the stronger of the two sides for each band: low -> the big (low frequency) motor, high -> the
+// small one. The game's own "Controller Rumble" option decides whether it sends any. A value lasts 250 ms unless the
+// next one replaces it (the game keeps sending while it vibrates, and zeros when it stops). LARECOMP_RUMBLE=0: off.
 HLE_FUNC("_ZN2nn3hid25InitializeVibrationDeviceERKNS0_21VibrationDeviceHandleE", hid_init_vibration) { (void)c; }
+static float g_vib[2][2];  // [left / right][low, high band amplitude]
+// (also the hid service's SendVibrationValue(s), runtime/services/hid_set.c: the SDK's vibration player sends that way)
+void input_rumble(uint32_t h, const float *v) {
+    static int off = -1;
+    if (off < 0) off = getenv("LARECOMP_RUMBLE") && atoi(getenv("LARECOMP_RUMBLE")) == 0;
+    if (off || !v) return;
+    static int nall;
+    if (getenv("LARECOMP_RUMBLE_LOG") && nall < 40) nall++, LOG("[input] vibration %x: %g %g %g %g\n", h, v[0], v[1], v[2], v[3]);
+    int m = (int)(h & 1);
+    g_vib[m][0] = v[0] > 0 ? (v[0] < 1 ? v[0] : 1) : 0, g_vib[m][1] = v[2] > 0 ? (v[2] < 1 ? v[2] : 1) : 0;
+    float lo = g_vib[0][0] > g_vib[1][0] ? g_vib[0][0] : g_vib[1][0], hi = g_vib[0][1] > g_vib[1][1] ? g_vib[0][1] : g_vib[1][1];
+    uint16_t l16 = (uint16_t)(lo * 65535.0f), h16 = (uint16_t)(hi * 65535.0f);
+    static uint16_t last_l = 1, last_h = 1;
+    static uint64_t last_t;
+    uint64_t now = SDL_GetTicks();
+    if (l16 == last_l && h16 == last_h && now - last_t < 150) return;  // (the same again: refreshed now and then)
+    last_l = l16, last_h = h16, last_t = now;
+    static int logged;
+    if ((l16 || h16) && logged < 5) logged++, LOG("[input] rumble low %.2f high %.2f\n", lo, hi);
+    if (pad) SDL_RumbleGamepad(pad, l16, h16, 250);
+}
+HLE_FUNC("_ZN2nn3hid18SendVibrationValueERKNS0_21VibrationDeviceHandleERKNS0_14VibrationValueE", hid_send_vibration) {
+    if (c->x[0] && c->x[1]) input_rumble(*(const uint32_t *)(uintptr_t)c->x[0], (const float *)(uintptr_t)c->x[1]);
+}
 // Six-axis (motion) sensor. Let's Go aims Poke Ball throws with the gyro in handheld mode; with no sensor behind it
 // the SDK read garbage and the aim went into the sky. The rest pose is a controller lying level (identity orientation,
 // gravity -z), which keeps the aim centred. The mouse turns this virtual controller (yaw / pitch, input_handle_event
@@ -1308,6 +1370,7 @@ HLE_FUNC("_ZN2nn3hid25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiRK
     uint32_t id = *(uint32_t *)(uintptr_t)c->x[2];
     for (int i = 0; i < n; i++) out[i] = (id & 0xFF) << 8 | (uint32_t)i | 0x03000000u;  // type, player, position
     c->x[0] = (uint64_t)n;
+    if (getenv("LARECOMP_RUMBLE_LOG")) LOG("[input] vibration handles for %x: %d\n", id, n);
 }
 HLE_FUNC("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_21VibrationDeviceHandleE", hid_vibration_info) {
     uint32_t *info = (uint32_t *)(uintptr_t)c->x[0];

@@ -56,6 +56,9 @@ static void parse_line(const char *line) {
     else if (!strcmp(key, "show_fps")) g_settings.show_fps = atoi(val) != 0;
     else if (!strcmp(key, "skip_start_screen")) g_settings.skip_start = atoi(val) != 0;
     else if (!strcmp(key, "mouse_camera")) g_settings.mouse_camera = atoi(val) != 0;
+    else if (!strcmp(key, "mouse_invert_x")) g_settings.mouse_invert_x = atoi(val) != 0;
+    else if (!strcmp(key, "mouse_invert_y")) g_settings.mouse_invert_y = atoi(val) != 0;
+    else if (!strcmp(key, "background")) g_settings.background = atoi(val) >= BG_KEEP && atoi(val) <= BG_PAUSE ? atoi(val) : BG_KEEP;
     else if (!strcmp(key, "resolution")) {
         int n = atoi(val);
         g_settings.res_mode = !strcmp(val, "dynamic") ? RES_DYNAMIC : (!strcmp(val, "75%") || !strcmp(val, "67%")) ? RES_Q75 :
@@ -124,6 +127,8 @@ void settings_save(void) {
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
     fprintf(f, "skip_start_screen = %d\n", g_settings.skip_start);
     fprintf(f, "mouse_camera = %d\n", g_settings.mouse_camera);
+    fprintf(f, "mouse_invert_x = %d\nmouse_invert_y = %d\n", g_settings.mouse_invert_x, g_settings.mouse_invert_y);
+    fprintf(f, "background = %d\n", g_settings.background);
     fprintf(f, "upscaler = %s\n", g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");
     if (g_settings.res_mode == RES_DYNAMIC) fprintf(f, "resolution = dynamic\n");
     else if (g_settings.res_mode == RES_Q75) fprintf(f, "resolution = 75%%\n");

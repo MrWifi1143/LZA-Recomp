@@ -37,7 +37,22 @@ SERVICE("hid", hid) {
     case 101: OUT(uint32_t, 0) = g_npad_supported_styles; resp_size(resp, 4); break;  // GetSupportedNpadStyleSet
     case 121: OUT(int64_t, 0) = 0; resp_size(resp, 8); break;      // GetNpadJoyHoldType
     case 129: OUT(int64_t, 0) = 0; resp_size(resp, 8); break;      // GetNpadHandheldActivationMode
-    case 201: case 202: case 203: case 206: case 207: case 208: case 209: break;  // vibration
+    case 201: {  // SendVibrationValue(handle, value {4 floats}, aruid): to the controller (runtime/hle/input.c)
+        extern void input_rumble(uint32_t h, const float *v);
+        float v[4];
+        memcpy(v, req->data + 4, sizeof v);
+        input_rumble(IN(uint32_t, 0), v);
+        break;
+    }
+    case 206: {  // SendVibrationValues(aruid; buffers: handles, values)
+        extern void input_rumble(uint32_t h, const float *v);
+        IpcBuf *hb = in_buf(req, 0), *vb = in_buf(req, 1);
+        if (hb && vb)
+            for (uint64_t i = 0; i < hb->size / 4 && i < vb->size / 16; i++)
+                input_rumble(((const uint32_t *)(uintptr_t)hb->addr)[i], (const float *)(uintptr_t)(vb->addr + 16 * i));
+        break;
+    }
+    case 202: case 203: case 207: case 208: case 209: break;  // vibration (other)
     case 200: memset(resp->data, 0, 0x10); OUT(uint32_t, 0) = 1; resp_size(resp, 0x10); break;
     default: break;  // Activate*/Set*: accept
     }

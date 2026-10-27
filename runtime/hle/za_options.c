@@ -76,7 +76,7 @@ static int find(const int *v, int n, int x) {
 static int get_fps(void) { return find(k_fps, 4, g_settings.next_fps ? g_settings.next_fps : g_settings.fps); }
 // (120 / 144: the game's own logic was made for 30 and some of it counts frames; the row's description says so while
 // one of them is chosen - shown again right after the change, settings_screen_buttons)
-static const char *const k_fps_warning = "Experimental: scripted scenes can stall at this rate. If you get stuck, set 60 or 30 fps.";
+static const char *const k_fps_warning = "Experimental: scripted scenes play at 60 fps at this rate. If you get stuck, set 60 or 30 fps.";
 static int g_info_pending = -1;  // (a row whose description is to be drawn again)
 bool legends_set_fps(int fps);  // runtime/hle/fps60.c: at once
 static void set_fps(int i) {
@@ -106,6 +106,12 @@ static int get_msens(void) { return clampi((int)(g_settings.mouse_sens / 0.025f 
 static void set_msens(int v) { g_settings.mouse_sens = 0.025f * (float)(v + 1); }
 static int get_dz(void) { return clampi((int)(g_settings.stick_deadzone / 0.04f + 0.5f), 0, 10); }
 static void set_dz(int v) { g_settings.stick_deadzone = 0.04f * (float)v; }
+static int get_minvy(void) { return g_settings.mouse_invert_y ? 1 : 0; }
+static void set_minvy(int i) { g_settings.mouse_invert_y = i == 1; }
+static int get_minvx(void) { return g_settings.mouse_invert_x ? 1 : 0; }
+static void set_minvx(int i) { g_settings.mouse_invert_x = i == 1; }
+static int get_bg(void) { return g_settings.background >= BG_KEEP && g_settings.background <= BG_PAUSE ? g_settings.background : BG_KEEP; }
+static void set_bg(int i) { g_settings.background = i; }
 static int get_vol(void) { return clampi((int)(g_settings.volume * 10 + 0.5f), 0, 10); }
 static void set_vol(int v) { g_settings.volume = (float)v / 10; }
 
@@ -125,9 +131,15 @@ static const Row k_rows[] = {
      CHOICE, 2, {"Show", "Skip"}, get_skip, set_skip},
     {0, "FPS Counter", "Choose whether to show the frame rate in the corner of the screen.", CHOICE, 2, {"Show", "Hide"},
      get_fpsc, set_fpsc},
+    {0, "In Background", "Choose what the game does while you are in another window: keep playing, mute its sound, or pause.",
+     CHOICE, 3, {"Keep Playing", "Mute", "Pause"}, get_bg, set_bg},
     {1, "Mouse Camera", "Choose whether a click in the game lets the mouse turn the camera. Esc lets it go.",
      CHOICE, 2, {"On", "Off"}, get_mcam, set_mcam},
     {1, "Mouse Sensitivity", "Choose how far the camera turns when you move the mouse.", BAR10, 0, {0}, get_msens, set_msens},
+    {1, "Mouse Vertical", "Choose which way the camera turns when you move the mouse up and down.", CHOICE, 2,
+     {"Regular", "Inverted"}, get_minvy, set_minvy},
+    {1, "Mouse Horizontal", "Choose which way the camera turns when you move the mouse left and right.", CHOICE, 2,
+     {"Regular", "Inverted"}, get_minvx, set_minvx},
     {1, "Stick Dead Zone", "Choose how far a controller's sticks must move before they count.", BAR10, 0, {0}, get_dz, set_dz},
     {2, "Master Volume", "Adjust the volume of all of the game's sound.", BAR10, 0, {0}, get_vol, set_vol},
 };

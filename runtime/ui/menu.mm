@@ -423,11 +423,20 @@ static void quit_draw(ImGuiIO &io, float scale) {
     ImGui::End();
 }
 
+// A short notice in the corner for a few seconds (the screenshot key: runtime/nvn/vulkan/device.c). Any thread.
+static char g_notice[128];
+static std::atomic<uint64_t> g_notice_until{0};
+extern "C" void menu_notice(const char *text) {
+    snprintf(g_notice, sizeof g_notice, "%s", text);
+    g_notice_until.store(SDL_GetTicks() + 2500);
+}
+
 void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool open = g_open.load(), kbd = g_kbd.load() == 1;
     float fx, fy;
     bool fdown, finger = !open && input_finger_cursor(&fx, &fy, &fdown);
-    if (!open && !kbd && !g_settings.show_fps && !finger) {
+    bool notice = SDL_GetTicks() < g_notice_until.load();
+    if (!open && !kbd && !g_settings.show_fps && !finger && !notice) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
@@ -456,6 +465,14 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
 
+    if (notice) {
+        ImGui::SetNextWindowPos(ImVec2(16 * scale, io.DisplaySize.y - 16 * scale), 0, ImVec2(0, 1));
+        ImGui::SetNextWindowBgAlpha(0.6f);
+        ImGui::Begin("##notice", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                           ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+        ImGui::TextUnformatted(g_notice);
+        ImGui::End();
+    }
     if (g_settings.show_fps) {
         ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 16 * scale, 16 * scale), 0, ImVec2(1, 0));
         ImGui::SetNextWindowBgAlpha(0.5f);

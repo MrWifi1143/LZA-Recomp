@@ -8,6 +8,7 @@ enum { UPSCALE_BILINEAR = 0, UPSCALE_FSR1 = 2 /* AMD FSR 1 */ };
 #define UPSCALE_SHARP UPSCALE_FSR1  // the non-bilinear upscaler (the default)
 enum { AA_OFF = 0, AA_SMAA = 1 };
 enum { VREAD_AUTO = 0, VREAD_COPY = 1, VREAD_DIRECT = 2 };
+enum { BG_KEEP = 0, BG_MUTE = 1, BG_PAUSE = 2 };  // (Settings.background)
 enum { PROMPTS_AUTO, PROMPTS_SWITCH, PROMPTS_XBOX, PROMPTS_PLAYSTATION, PROMPTS_KEYBOARD };  // (auto: what was used last)
 
 typedef struct {
@@ -20,6 +21,8 @@ typedef struct {
     float volume;        // master volume, 1 = 100%
     float mouse_sens;    // mouse aim (the virtual gyro, runtime/hle/input.c): degrees per pixel; the mouse camera's speed
     bool mouse_camera;   // a click in the game window takes the mouse: it turns the camera (runtime/hle/input.c)
+    bool mouse_invert_x, mouse_invert_y;  // the mouse camera turned the other way (runtime/hle/input.c)
+    int background;      // BG_*: what the game does while its window isn't focused
     float stick_deadzone;  // a controller's sticks: the share of their travel read as rest (runtime/hle/input.c)
     bool reverb;         // room reverb effect
     bool movie_audio;
