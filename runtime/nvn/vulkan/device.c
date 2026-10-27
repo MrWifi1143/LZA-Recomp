@@ -1059,6 +1059,8 @@ void backend_present(NvnTexture *t) {
                     rename(path, done);
                 }
             }
+            snprintf(path, sizeof path, "%s/f12", dir);  // (tests: as if F12 was pressed - the screenshot below)
+            if (access(path, F_OK) == 0) { remove(path); extern volatile int g_screenshot_request; g_screenshot_request = 1; }
             if (left && (long)total_frames >= next_at) {
                 snprintf(path, sizeof path, "%s/live_%06llu.png", dir, (unsigned long long)total_frames);
                 renderer_save_texture_tex(b, path);
@@ -1080,6 +1082,27 @@ void backend_present(NvnTexture *t) {
                 renderer_save_texture_tex(b, path);
             }
             if (*p == ',') p++;
+        }
+    }
+    {   // F12 / a controller's capture button (hle/input.c): the game image, without the overlay, as a PNG
+        extern volatile int g_screenshot_request;
+        if (g_screenshot_request) {
+            g_screenshot_request = 0;
+            char dir[1100], path[1200];
+            snprintf(dir, sizeof dir, "%s/screenshots", rt_data_root());
+            mkdir(dir, 0755);
+            SDL_Time now = 0;
+            SDL_DateTime dt = {0};
+            SDL_GetCurrentTime(&now);
+            SDL_TimeToDateTime(now, &dt, true);
+            snprintf(path, sizeof path, "%s/%s_%04d-%02d-%02d_%02d-%02d-%02d.png", dir, RT_SHOT_PREFIX, dt.year, dt.month, dt.day,
+                     dt.hour, dt.minute, dt.second);
+            for (int k = 2; access(path, F_OK) == 0 && k < 100; k++)  // (two in one second)
+                snprintf(path + strlen(path) - 4, 16, "_%d.png", k);
+            renderer_save_texture_tex(b, path);
+            LOG("[shot] %s\n", path);
+            extern void menu_notice(const char *text);
+            menu_notice("Screenshot saved (screenshots folder)");
         }
     }
     static long shot_from = -1;

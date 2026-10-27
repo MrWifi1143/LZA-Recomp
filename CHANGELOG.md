@@ -8,10 +8,19 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Arceus:
 
+- Screenshots: F12 (or a controller's capture / share button) saves the game image, without the overlay, as a PNG in
+  the data folder's `screenshots` (`PLA_<date>_<time>.png`); a notice in the corner says so.
+- Settings > In Background: keep playing, mute, or pause while the game's window isn't focused.
+- Settings > Mouse Vertical / Mouse Horizontal: the mouse camera inverted (the game's own camera options act on the
+  stick only).
+- Controller rumble: the game's vibration values reach the controller through SDL (`LARECOMP_RUMBLE=0`: off). Not felt
+  in tests yet.
+
 - Shaders: condition-code branches (`FSET.CC` + `BRA` on a condition) are translated, as in Z-A 0.5.0 (there, the
   blotchy face and hair shadows). The intro looks the same as before (compared shot by shot).
 - `R8_UINT` (and other unsigned integer) textures are read through an integer sampler: a float sampler on a UINT
   view is undefined in Vulkan. `LARECOMP_VK_UINT_TEX_FLOAT=1`: the old float sampler.
+
 ## 2026-10-26: LegendsA-v0.5.3-alpha
 
 Arceus:

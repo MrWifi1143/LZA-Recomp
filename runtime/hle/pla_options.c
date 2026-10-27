@@ -101,6 +101,12 @@ static int get_msens(void) { return clampi((int)(g_settings.mouse_sens / 0.025f 
 static void set_msens(int v) { g_settings.mouse_sens = 0.025f * (float)(v + 1); }
 static int get_dz(void) { return clampi((int)(g_settings.stick_deadzone / 0.04f + 0.5f), 0, 10); }
 static void set_dz(int v) { g_settings.stick_deadzone = 0.04f * (float)v; }
+static int get_minvy(void) { return g_settings.mouse_invert_y ? 1 : 0; }
+static void set_minvy(int i) { g_settings.mouse_invert_y = i == 1; }
+static int get_minvx(void) { return g_settings.mouse_invert_x ? 1 : 0; }
+static void set_minvx(int i) { g_settings.mouse_invert_x = i == 1; }
+static int get_bg(void) { return g_settings.background >= BG_KEEP && g_settings.background <= BG_PAUSE ? g_settings.background : BG_KEEP; }
+static void set_bg(int i) { g_settings.background = i; }
 static int get_vol(void) { return clampi((int)(g_settings.volume * 10 + 0.5f), 0, 10); }
 static void set_vol(int v) { g_settings.volume = (float)v / 10; }
 
@@ -120,9 +126,15 @@ static const Row k_rows[] = {
      get_fpsc, set_fpsc},
     {"Start Screen", "Choose whether the start screen shows when the game starts. Holding Shift while starting shows it.",
      CHOICE, 2, {"Show", "Skip"}, get_skip, set_skip},
+    {"In Background", "Choose whether the game keeps playing, mutes or pauses while it is in the background.",
+     CHOICE, 3, {"Keep Playing", "Mute", "Pause"}, get_bg, set_bg},
     {"Mouse Camera", "Choose whether a click in the game lets the mouse turn the camera. Esc lets it go.", CHOICE, 2,
      {"Enabled", "Disabled"}, get_mcam, set_mcam},
     {"Mouse Sensitivity", "Choose how far the camera turns when you move the mouse.", BAR10, 0, {0}, get_msens, set_msens},
+    {"Mouse Vertical", "Choose which way the camera turns when you move the mouse up and down.", CHOICE, 2,
+     {"Regular", "Inverted"}, get_minvy, set_minvy},
+    {"Mouse Horizontal", "Choose which way the camera turns when you move the mouse left and right.", CHOICE, 2,
+     {"Regular", "Inverted"}, get_minvx, set_minvx},
     {"Stick Dead Zone", "Choose how far a controller's sticks must move before they count.", BAR10, 0, {0}, get_dz, set_dz},
     {"Master Volume", "Adjust the volume of all of the game's sound.", BAR10, 0, {0}, get_vol, set_vol},
 };

@@ -775,6 +775,17 @@ NVN(nvnQueueAcquireTexture) {
 static void present_pace(int interval) {
     static int fps = -1;
     static uint64_t next;
+    {   // Settings.background = pause: the game waits here while its window isn't focused (runtime/hle/input.c)
+        extern bool input_background_paused(void);
+        if (input_background_paused()) {
+            LOG("[nvn] paused (the window isn't focused)\n");
+            kernel_block_begin();
+            while (input_background_paused()) plat_sleep_until_ns(plat_now_ns() + 50000000ull);
+            kernel_block_end();
+            LOG("[nvn] resumed\n");
+            next = 0;  // (pacing starts over)
+        }
+    }
     if (fps < 0) {
         const char *e = getenv("LARECOMP_FPS");
         fps = e ? atoi(e) : -2;  // -2: the game's own interval

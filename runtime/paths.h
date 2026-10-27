@@ -23,6 +23,7 @@ extern "C" {
 #define RT_BUNDLE_ID "com.plarecomp"            // (data folder on macOS)
 #define RT_APP_NAME "PL:A Recomp"             // window title, messages, the launcher
 #define RT_APP_VERSION "0.5.3-alpha"             // the release (the GitHub release: LegendsA-v<version>)
+#define RT_SHOT_PREFIX "PLA"                   // screenshots' file names (F12)
 
 void rt_paths_init(void);         // first thing in main(), after plat_init
 const char *rt_data_root(void);   // absolute
