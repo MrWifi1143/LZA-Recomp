@@ -1805,15 +1805,23 @@ static void image_kinds(int stage, uint8_t kind[8]) {
     }
 }
 
-// The texture slots of a stage bound to a depth-stencil texture in stencil mode (ShaderKey.tex_stencil: usampler)
+// The texture slots of a stage bound to a depth-stencil texture in stencil mode, or to an unsigned integer color
+// format (ShaderKey.tex_stencil: usampler). A float sampler on a UINT view is undefined in Vulkan: Z-A's shadow
+// filter reads its R8_UINT object-id map (which taps are the object's own, not self-shadowing) through one.
+// LARECOMP_VK_UINT_TEX_FLOAT=1: the old float sampler for those.
 static uint32_t stencil_slots(int stage) {
+    static int uint_float = -1;
+    if (uint_float < 0) uint_float = ENV("LARECOMP_VK_UINT_TEX_FLOAT") != NULL;
     uint32_t m = 0;
     for (int i = 0; i < 32; i++) {
         uint64_t h = st.tex[stage][i];
         uint32_t tic = h & 0xFFFFF;
         if (!h || !st.tpool || tic >= (uint32_t)st.tpool->count) continue;
         NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
-        if (!e->tex || !renderer_format_is_depth(e->tex->format)) continue;
+        if (!e->tex) continue;
+        uint32_t f = e->has_view && (e->view.setmask & 4) ? e->view.format : e->tex->format;
+        if (!uint_float && !renderer_format_is_depth(e->tex->format) && rt_kind(f) == 2) { m |= 1u << i; continue; }
+        if (!renderer_format_is_depth(e->tex->format)) continue;
         uint32_t dsm = e->has_view && (e->view.setmask & 16) ? e->view.ds_mode : e->tex->ds_mode;
         if (dsm == 1) m |= 1u << i;
     }

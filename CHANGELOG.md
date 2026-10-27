@@ -3,6 +3,15 @@
 Releases are tagged per game: `LegendsA-v*` (PL:A Recomp, branch `LegendsA`) and `LegendsZA-v*` (PL:Z-A Recomp,
 branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
+
+## Unreleased (branch `LegendsA`)
+
+Arceus:
+
+- Shaders: condition-code branches (`FSET.CC` + `BRA` on a condition) are translated, as in Z-A 0.5.0 (there, the
+  blotchy face and hair shadows). The intro looks the same as before (compared shot by shot).
+- `R8_UINT` (and other unsigned integer) textures are read through an integer sampler: a float sampler on a UINT
+  view is undefined in Vulkan. `LARECOMP_VK_UINT_TEX_FLOAT=1`: the old float sampler.
 ## 2026-10-26: LegendsA-v0.5.3-alpha
 
 Arceus:
