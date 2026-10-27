@@ -14,6 +14,11 @@ Z-A:
   Draw Distance (People) and FPS Counter (below the game's own three camera rows, which can't move); Gameplay holds
   the controls, mouse, In Background and Start Screen rows.
 
+- Shadows: Settings > Graphics > Shadows (Next Start): Switch / High / Ultra. The game draws its shadows from
+  1024x1024 shadow maps, so people's and Pokémon's shadows come out as soft blobs; High (2048) shows the shapes of
+  legs and arms in them, Ultra (4096) is sharper still. The game itself makes the bigger maps (its own
+  "ShadowResolution" value), so everything that reads them follows. It applies the next time you start the game.
+
 - Draw distance for people: Settings > Graphics > Draw Distance (People): Switch / 2x / 4x / Max. The game keeps
   the full models of at most 25 characters (people and their Pokémon) ready and draws at most 20 of them in full,
   nearest first; the rest stay invisible until a place frees up. That's why people at the far end of the station

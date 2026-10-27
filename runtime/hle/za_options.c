@@ -114,6 +114,8 @@ static int get_bg(void) { return g_settings.background >= BG_KEEP && g_settings.
 static void set_bg(int i) { g_settings.background = i; }
 static int get_crowd(void) { return g_settings.crowd >= 0 && g_settings.crowd <= 3 ? g_settings.crowd : 0; }
 static void set_crowd(int i) { g_settings.crowd = i; }
+static int get_shadows(void) { return g_settings.shadows >= 0 && g_settings.shadows <= 2 ? g_settings.shadows : 0; }
+static void set_shadows(int i) { g_settings.shadows = i; }
 static int get_vol(void) { return clampi((int)(g_settings.volume * 10 + 0.5f), 0, 10); }
 static void set_vol(int v) { g_settings.volume = (float)v / 10; }
 
@@ -143,6 +145,8 @@ static const Row k_rows[] = {  // (per tab in this order; Gameplay's first is th
     {1, "Anti-Aliasing", "Choose whether to smooth jagged edges (SMAA).", CHOICE, 2, {"On", "Off"}, get_aa, set_aa},
     {1, "Draw Distance (People)", "Choose how many people and Pokémon are drawn at once. More shows crowds farther away "
      "but costs performance.", CHOICE, 4, {"Switch", "2x", "4x", "Max"}, get_crowd, set_crowd},
+    {1, "Shadows (Next Start)", "Choose how detailed shadows are. Higher shows the shapes of people and Pokémon in their "
+     "shadows. It applies the next time you start the game.", CHOICE, 3, {"Switch", "High", "Ultra"}, get_shadows, set_shadows},
     {1, "FPS Counter", "Choose whether to show the frame rate in the corner of the screen.", CHOICE, 2, {"Show", "Hide"},
      get_fpsc, set_fpsc},
     {2, "Master Volume", "Adjust the volume of all of the game's sound.", BAR10, 0, {0}, get_vol, set_vol},

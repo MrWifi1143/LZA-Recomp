@@ -467,6 +467,47 @@ void za_fixes_present(void) {  // (each present: za_options_present)
 // also only takes characters on a ready list (config +0xd8 -> object, sorted handles at +0x258, count +0x260), which
 // 0x70000b27f0 rebuilds each frame with at most the object's +0x310 (25) nearest: the station's kid with a Staryu is
 // 26th from the start spot. Settings.crowd multiplies both of the game's own numbers: x1 (the Switch), x2, x4, x10.
+// Shadows: the shadow renderer's setup (0x7000f11dd0) reads the config value "ShadowResolution" (1024: three cascades
+// of 1024x1024 depth plus an R8 id map, which the shadow mask shader reads by their size) through the config object's
+// getter (vtable +0x58: key {FNV-1a hash, name}, out). Settings.shadows asks for 2048 or 4096 instead and the game sizes
+// the maps, their viewports and its filter offsets by it - people's and Pokemon's shadows show their shapes instead of
+// blobs. Read once, at the start (the setup's first run looks the getter up the way the setup does).
+void guest_call(Cpu *c, uint64_t addr);
+static int shadow_res_getter(Cpu *c, uint64_t addr) {
+    static uint64_t key;
+    if (!key) key = fnv1a("ShadowResolution");
+    uint64_t k = c->x[1], out = c->x[2];
+    if (k < 0x7000000000ull || k >= 0x8000000000ull || *(uint64_t *)(uintptr_t)k != key) return 0;
+    rt_call_original(c, addr);
+    static const int k_size[3] = {0, 2048, 4096};
+    int n = g_settings.shadows >= 1 && g_settings.shadows <= 2 ? k_size[g_settings.shadows] : 0;
+    int32_t *v = (int32_t *)(uintptr_t)out;
+    if (n && *v > 0 && *v < n) LOG("[za] shadow maps %d (the game's %d)\n", n, *v), *v = n;
+    return 1;
+}
+static int shadow_setup_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    static bool hooked;
+    if (hooked) return 0;
+    uint64_t sx[32], snzcv = c->nzcv;
+    __uint128_t sv[32];
+    memcpy(sx, c->x, sizeof sx), memcpy(sv, c->v, sizeof sv);
+    guest_call(c, 0x70001134e4ull);  // (as the setup does: the config object)
+    uint64_t o = c->x[0] ? *(uint64_t *)(uintptr_t)c->x[0] : 0;
+    if (o) {
+        c->x[0] = o + 0x30;
+        guest_call(c, *(uint64_t *)(uintptr_t)(*(uint64_t *)(uintptr_t)(o + 0x30) + 0x40));
+        uint64_t cfg = c->x[0];
+        if (cfg) {
+            uint64_t get = *(uint64_t *)(uintptr_t)(*(uint64_t *)(uintptr_t)cfg + 0x58);
+            rt_register_fnhook_at(get, shadow_res_getter);
+            hooked = true;
+        }
+    }
+    memcpy(c->x, sx, sizeof sx), memcpy(c->v, sv, sizeof sv), c->nzcv = snzcv;
+    return 0;
+}
+
 #define ZA_CHAR_DETAIL_PASS 0x70002ffeb0ull
 static int crowd_hook(Cpu *c, uint64_t addr) {
     (void)addr;
@@ -537,6 +578,8 @@ void za_fixes_configure(const char *exefs) {
         if (e) g_stdheap_size = strtoull(e, NULL, 0) << 20;
         else if (sh > 2160) g_stdheap_size = HEAP_MAX;  // (capped to the window by heaps.c)
         else if (sh > 1440) g_stdheap_size = 0x120000000ull;  // 4.5 GB (4K's route ran in 4 GB, not in 2.75)
+        if (!e && g_settings.shadows > 0)  // (bigger shadow maps come out of it too: 2048 +60 MB, 4096 +240 MB)
+            g_stdheap_size += g_settings.shadows == 2 ? 0x10000000ull : 0x4000000ull;
         if (g_stdheap_size != STDHEAP_SIZE) LOG("[za] screen %llux%llu: %llu MB for the game's allocator\n", (unsigned long long)sw,
                                                 (unsigned long long)sh, (unsigned long long)(g_stdheap_size >> 20));
     }
@@ -551,6 +594,7 @@ void za_fixes_configure(const char *exefs) {
         if (!(cs && atoi(cs) == 0)) rt_register_fnhook_at(ZA_TIMELINE_SET_TIME, timeline_step);
     }
     rt_register_fnhook_at(ZA_CHAR_DETAIL_PASS, crowd_hook);
+    if (g_settings.shadows > 0) rt_register_fnhook_at(0x7000f11dd0ull, shadow_setup_hook);
     {
         const char *m = getenv("LARECOMP_ZA_SCENE60");
         if (!(m && atoi(m) == 0)) rt_register_fnhook_at(ZA_SCRIPT_OBJ, scene60_hook), rt_register_fnhook_at(ZA_MOVE_TO, scene60_hook);
