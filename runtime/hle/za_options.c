@@ -142,7 +142,7 @@ static const Row k_rows[] = {  // (per tab in this order; Gameplay's first is th
      CHOICE, 3, {"Keep Playing", "Mute", "Pause"}, get_bg, set_bg},
     {0, "Start Screen", "Choose whether the start screen shows when the game starts. Holding Shift while starting shows it.",
      CHOICE, 2, {"Show", "Skip"}, get_skip, set_skip},
-    {0, "PKHeX Link", "Let PKHeX's LiveHeX plugin see and edit your boxes while you play, from this PC or your network.",
+    {0, "PKHeX Link", "Let PKHeX's LiveHeX plugin see and edit your boxes as you play: on this PC or your network.",
      CHOICE, 3, {"Off", "This PC", "Network"}, get_pklink, set_pklink},
     {0, "Pokémon Files", "Press A to save your boxed Pokémon as PKHeX files, or to add the ones in pokemon/import.",
      CHOICE, 2, {"Export", "Import"}, pkm_files_get, pkm_files_set, pkm_files_run},
