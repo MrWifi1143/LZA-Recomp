@@ -8,6 +8,11 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Arceus:
 
+- Shaders with branches are translated as plain structured code (from Z-A): their blocks in order, loops as loops,
+  jump tables as a switch, instead of one `switch (pc)` state machine in a loop around the whole program - the GPU's
+  compiler can keep values in registers across branches and see the loops (on NVIDIA, Z-A's fragment shaders came out
+  10% smaller with 3% fewer registers; AMD / Intel / mobile compilers should gain more). All of the game's ~8,600
+  translated shaders; the intro's pictures identical. `LARECOMP_XLAT_NO_FWD=1`: as before. (One more shader warm-up.)
 - Shaders reach the game's memory through its 64-bit GPU address (from Z-A: Vulkan buffer device address) instead of
   one storage buffer, which stops at 4 GB - and is smaller on some GPUs (ARM, integrated). The intro checked.
 - Resolution: 540p (the settings and the start screen), for weak GPUs: about half the GPU time of 1080p.
