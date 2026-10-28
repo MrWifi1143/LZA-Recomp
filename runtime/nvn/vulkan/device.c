@@ -166,6 +166,20 @@ static void create_device(void) {
     if (g_vk.host_import) ext[n_ext++] = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;
     g_vk.xfb = has_ext(ep, ne, VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME);
     if (g_vk.xfb) ext[n_ext++] = VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME;
+    // pipelines linked from separately built parts (exec.c gpl_link); LARECOMP_VK_GPL=0: whole pipelines as before
+    bool gpl = has_ext(ep, ne, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME) && has_ext(ep, ne, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) &&
+               !(ENV("LARECOMP_VK_GPL") && !atoi(ENV("LARECOMP_VK_GPL")));
+    if (gpl) {
+        VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT};
+        VkPhysicalDeviceFeatures2 hf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &gf};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &hf);
+        VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT gp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT};
+        VkPhysicalDeviceProperties2 hp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &gp};
+        vkGetPhysicalDeviceProperties2(g_vk.phys, &hp);
+        gpl = gf.graphicsPipelineLibrary && gp.graphicsPipelineLibraryFastLinking;
+    }
+    if (gpl) ext[n_ext++] = VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME, ext[n_ext++] = VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME;
+    LOG("[vk] pipeline libraries: %s\n", gpl ? "yes (pipelines linked from parts)" : "no (whole pipelines)");
     bool fault = has_ext(ep, ne, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);  // device-lost diagnostics (vk_device_fault_report)
     if (fault) ext[n_ext++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
     // LARECOMP_PIPE_STATS: what the driver says about each compiled shader (registers, spills, ...), exec.c pipe_exec_report
@@ -215,6 +229,10 @@ static void create_device(void) {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR, .pipelineExecutableInfo = VK_TRUE,
         .pNext = f.pNext};
     if (g_pipe_exec_stats) f.pNext = &pe;
+    VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gplf = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT, .graphicsPipelineLibrary = VK_TRUE, .pNext = f.pNext};
+    if (gpl) f.pNext = &gplf;
+    g_vk.gpl = gpl;
     {   // subgroup size control (vk_sg32): only where 32 is possible but not the only size
         VkPhysicalDeviceVulkan13Features h13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
         VkPhysicalDeviceFeatures2 hf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &h13};
@@ -559,12 +577,42 @@ static bool shot_raw(const char *path, const uint8_t *rgba, uint32_t w, uint32_t
     return true;
 }
 
+// The PNG is encoded and written on a thread of its own (a copy of the pixels): encoding 1080p took ~250 ms on the
+// render thread - every F12 screenshot (and each of the test routes' shots) was a quarter-second hitch. Written to
+// <path>.tmp and renamed, so no one reads a half-written file.
+typedef struct { char path[1024]; uint8_t *px; uint32_t w, h; } PngJob;
+static _Atomic int png_pending;
+static void png_wait(void) {  // (atexit: a screenshot just asked for is written before the process ends)
+    for (int i = 0; i < 400 && atomic_load(&png_pending) > 0; i++) SDL_Delay(5);
+}
+static void *png_thread(void *arg) {
+    PngJob *j = arg;
+    char tmp[1100];
+    snprintf(tmp, sizeof tmp, "%s.tmp", j->path);
+    SDL_Surface *s = SDL_CreateSurfaceFrom((int)j->w, (int)j->h, SDL_PIXELFORMAT_ABGR8888, j->px, (int)j->w * 4);
+    if (!s || !SDL_SavePNG(s, tmp) || rename(tmp, j->path) != 0) LOG("[vk] saving %s failed: %s\n", j->path, SDL_GetError()), remove(tmp);
+    else LOG("[vk] saved %s (%ux%u)\n", j->path, j->w, j->h);
+    SDL_DestroySurface(s);
+    free(j->px);
+    free(j);
+    atomic_fetch_sub(&png_pending, 1);
+    return NULL;
+}
+
 void vk_save_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h) {
     if (shot_raw(path, rgba, w, h)) return;
-    SDL_Surface *s = SDL_CreateSurfaceFrom((int)w, (int)h, SDL_PIXELFORMAT_ABGR8888, (void *)rgba, (int)w * 4);
-    if (!s || !SDL_SavePNG(s, path)) LOG("[vk] saving %s failed: %s\n", path, SDL_GetError());
-    else LOG("[vk] saved %s (%ux%u)\n", path, w, h);
-    SDL_DestroySurface(s);
+    PngJob *j = malloc(sizeof *j);
+    j->px = j ? malloc((size_t)w * h * 4) : NULL;
+    if (!j || !j->px) { free(j); LOG("[vk] saving %s failed: out of memory\n", path); return; }
+    snprintf(j->path, sizeof j->path, "%s", path);
+    memcpy(j->px, rgba, (size_t)w * h * 4);
+    j->w = w, j->h = h;
+    static bool hooked;
+    if (!hooked) hooked = true, atexit(png_wait);
+    atomic_fetch_add(&png_pending, 1);
+    pthread_t t;
+    if (pthread_create(&t, NULL, png_thread, j) == 0) pthread_detach(t);
+    else png_thread(j);
 }
 
 // ================================================================== game presentation (metal.m backend_present)

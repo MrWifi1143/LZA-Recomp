@@ -38,6 +38,7 @@ typedef struct {
     bool custom_border, divisor, host_import;
     bool xfb;  // VK_EXT_transform_feedback (NVN transform feedback: PLA skins its characters with it)
     bool depth_clamp;  // depthClamp feature (NVN SetDepthClamp)
+    bool gpl;          // VK_EXT_graphics_pipeline_library with fast linking (exec.c: pipelines from parts)
     VkShaderStageFlags sg32;  // stages that get a required subgroup size of 32 (the Maxwell warp: vk_sg32)
     PFN_vkCmdBindTransformFeedbackBuffersEXT bind_xfb;
     PFN_vkCmdBeginTransformFeedbackEXT begin_xfb;

@@ -2808,6 +2808,7 @@ static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, const ui
 // ground). A changed translator starts a new cache: its version is a hash of its source (Makefile XLAT_SRC_HASH; the build
 // time where that isn't given), and each version has its folder, cache/xlat/<tag> (older ones are deleted, warmup.c).
 // Off with LARECOMP_NO_XLAT_CACHE=1 and while a switch that changes the output is set.
+#include <pthread.h>
 #include <sys/stat.h>
 #ifdef _WIN32
 #include <direct.h>
@@ -2855,6 +2856,76 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     return maxwell_translate_consts(blob, max_size, NULL, 0, stage, key);
 }
 
+// What of the key a shader's translation reads, by its code (cache/xlat/<tag>/u<code hash>.bin, and in memory): the
+// key describes what the draw has BOUND - integer images, depth-stencil textures, render target and vertex formats -
+// and the translation reads only the slots the shader itself uses. Keyed on the full key, the warm-up's translations
+// (made with an empty key) matched 1 fragment program in 192 in play: Z-A always has an integer image bound in image
+// slot 1 and depth-stencil textures in texture slots 24 and 28, used or not. The cache files are named by the key
+// with the unused parts cleared (key_used), so a translation serves every binding state that differs only there.
+// LARECOMP_XLAT_VERIFY_MASK=1 (research): each cached lookup also translated with the full key, the two compared.
+typedef struct { uint32_t tex, attr; uint8_t img, rt, all_tex, valid; } XUse;
+#define XUSE_TAB 32768
+static struct { uint64_t code; XUse use; } xuse_tab[XUSE_TAB];
+static pthread_mutex_t xuse_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static XUse xuse_of(const ShaderInfo *info, int stage) {
+    XUse u = {.valid = 1};
+    for (int i = 0; i < info->ntex && i < 64; i++) {
+        const ShaderTexture *t = &info->tex[i];
+        int nslot = ((int)t->handle_offset - 0x20) / 8;
+        if (t->bindless || nslot < 0 || nslot >= 32) u.all_tex = 1;
+        else u.tex |= 1u << nslot;
+    }
+    for (int i = 0; i < info->nimg && i < 8; i++) if (info->img[i].slot < 8) u.img |= (uint8_t)(1u << info->img[i].slot);
+    if (stage == STAGE_VERTEX) u.attr = info->attr_mask;
+    if (stage == STAGE_FRAGMENT)
+        for (int rt = 0; rt < 8; rt++) if ((info->out_mask >> (rt * 4)) & 0xF) u.rt |= (uint8_t)(1u << rt);
+    return u;
+}
+
+static ShaderKey key_used(const ShaderKey *k, const XUse *u) {
+    ShaderKey m = *k;
+    if (!u->all_tex) m.tex_stencil &= u->tex;
+    for (int i = 0; i < 8; i++) if (!((u->img >> i) & 1)) m.img_kind[i] = 0;
+    for (int i = 0; i < 8; i++) if (!((u->rt >> i) & 1)) m.rt_kind[i] = 0;
+    for (int i = 0; i < 32; i++) if (!((u->attr >> i) & 1)) m.attr_kind[i] = 0;
+    return m;
+}
+
+static bool xuse_get(uint64_t code, XUse *u) {
+    uint32_t sl = (uint32_t)(code ^ (code >> 31)) & (XUSE_TAB - 1);
+    pthread_mutex_lock(&xuse_lock);
+    for (int i = 0; i < 64; i++, sl = (sl + 1) & (XUSE_TAB - 1)) {
+        if (!xuse_tab[sl].code) break;
+        if (xuse_tab[sl].code == code) { *u = xuse_tab[sl].use; pthread_mutex_unlock(&xuse_lock); return true; }
+    }
+    pthread_mutex_unlock(&xuse_lock);
+    char path[96];
+    snprintf(path, sizeof path, "cache/xlat/%s/u%016llx.bin", maxwell_cache_tag(), (unsigned long long)code);
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    bool ok = fread(u, sizeof *u, 1, f) == 1 && u->valid == 1;
+    fclose(f);
+    return ok;
+}
+
+static void xuse_put(uint64_t code, const XUse *u, bool file) {
+    uint32_t sl = (uint32_t)(code ^ (code >> 31)) & (XUSE_TAB - 1);
+    pthread_mutex_lock(&xuse_lock);
+    for (int i = 0; i < 64; i++, sl = (sl + 1) & (XUSE_TAB - 1))
+        if (!xuse_tab[sl].code || xuse_tab[sl].code == code) { xuse_tab[sl].code = code, xuse_tab[sl].use = *u; break; }
+    pthread_mutex_unlock(&xuse_lock);
+    if (!file) return;
+    char path[96], tmp[128];
+    snprintf(path, sizeof path, "cache/xlat/%s/u%016llx.bin", maxwell_cache_tag(), (unsigned long long)code);
+    snprintf(tmp, sizeof tmp, "%s.%llx", path, (unsigned long long)(uintptr_t)u);
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return;
+    bool ok = fwrite(u, sizeof *u, 1, f) == 1;
+    fclose(f);
+    if (!ok || rename(tmp, path) != 0) remove(tmp);
+}
+
 ShaderInfo *maxwell_translate_consts(const uint8_t *blob, size_t max_size, const uint8_t *consts, size_t nconsts, int stage,
                                      const ShaderKey *key) {
     if (nconsts > 0x10000) nconsts = 0x10000;
@@ -2864,13 +2935,17 @@ ShaderInfo *maxwell_translate_consts(const uint8_t *blob, size_t max_size, const
               getenv("LARECOMP_VK_PRECISE") || getenv("LARECOMP_SAVE_MSL") || getenv("LARECOMP_DUMP_FAILED_SHADERS") ||
               getenv("LARECOMP_XLAT_FLOW_DYN");
     if (off || maxwell_dbg_code || !key) return translate_impl(blob, max_size, consts, nconsts, stage, key);
+    uint64_t code = xfnv(blob, program_len(blob, max_size, stage), 0xcbf29ce484222325ull ^ (uint64_t)stage);
+    if (consts) code = xfnv(consts, nconsts, code ^ 0xc1);  // (BRX targets come from them)
+    if (!code) code = 1;
+    XUse use;
+    bool known = xuse_get(code, &use);
+    ShaderKey used = known ? key_used(key, &use) : *key;
     uint64_t h = xfnv(k_xlat_build, sizeof k_xlat_build, 0xcbf29ce484222325ull ^ (uint64_t)stage);
-    h = xfnv(key, sizeof *key, h);
-    h = xfnv(blob, program_len(blob, max_size, stage), h);
-    if (consts) h = xfnv(consts, nconsts, h ^ 0xc1);  // (BRX targets come from them)
+    h = xfnv(&used, sizeof used, h) ^ code;
     char path[96];
     snprintf(path, sizeof path, "cache/xlat/%s/%016llx.bin", maxwell_cache_tag(), (unsigned long long)h);
-    FILE *f = fopen(path, "rb");
+    FILE *f = known ? fopen(path, "rb") : NULL;
     if (f) {
         uint32_t hdr[2] = {0}, len = 0;
         ShaderInfo *info = malloc(sizeof *info);
@@ -2879,6 +2954,16 @@ ShaderInfo *maxwell_translate_consts(const uint8_t *blob, size_t max_size, const
         if (ok && (info->msl = malloc(len + 1)) && fread(info->msl, 1, len, f) == len) {
             info->msl[len] = 0;
             fclose(f);
+            static int verify = -1;
+            if (verify < 0) verify = getenv("LARECOMP_XLAT_VERIFY_MASK") != NULL;
+            if (verify) {
+                static _Atomic int nv, nbad;
+                ShaderInfo *full = translate_impl(blob, max_size, consts, nconsts, stage, key);
+                bool same = full && full->msl && !strcmp(full->msl, info->msl);
+                int v = ++nv, b = nbad += !same;
+                if (!same || !(v & 255)) fprintf(stderr, "[xlat] verify: %d cached translations checked, %d differ%s\n", v, b, same ? "" : " (this one)");
+                maxwell_free(full);
+            }
             return info;
         }
         if (ok) free(info->msl);
@@ -2886,6 +2971,13 @@ ShaderInfo *maxwell_translate_consts(const uint8_t *blob, size_t max_size, const
         fclose(f);
     }
     ShaderInfo *info = translate_impl(blob, max_size, consts, nconsts, stage, key);
+    if (info && info->msl && !known) {  // (what it read: the file below is named by the key's used parts)
+        use = xuse_of(info, stage);
+        used = key_used(key, &use);
+        h = xfnv(k_xlat_build, sizeof k_xlat_build, 0xcbf29ce484222325ull ^ (uint64_t)stage);
+        h = xfnv(&used, sizeof used, h) ^ code;
+        snprintf(path, sizeof path, "cache/xlat/%s/%016llx.bin", maxwell_cache_tag(), (unsigned long long)h);
+    }
     if (info && info->msl) {
         static int made;
         if (!made) {
@@ -2904,6 +2996,7 @@ ShaderInfo *maxwell_translate_consts(const uint8_t *blob, size_t max_size, const
             fclose(f);
             if (!ok || rename(tmp, path) != 0) remove(tmp);
         }
+        if (!known) xuse_put(code, &use, true);
     }
     return info;
 }

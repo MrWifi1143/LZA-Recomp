@@ -8,6 +8,12 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Arceus:
 
+- Stutter (from Z-A): pipelines are linked from parts (Vulkan graphics pipeline libraries): each program's shaders are
+  built once and every pipeline that uses them is a quick link. The intro with warm caches: 1 two-second span with a
+  frame over 100 ms instead of 14. `LARECOMP_VK_GPL=0`: whole pipelines as before.
+- The shader warm-up's translations are found in play (filed by what a shader reads, not by everything bound; 13,500
+  translations checked identical). The new translator means one more warm-up at the next start.
+- Screenshots are encoded on a thread of their own (each was a ~250 ms hitch).
 - PKHeX (from Z-A, the same runtime/hle/pkm_link.c): Settings > PKHeX Link (Off / This PC / Network) answers PKHeX's
   LiveHeX plugin like sys-botbase on a Switch (port 6000): it detects Arceus 1.1.1 and reads and writes the boxes
   while you play. Settings > Pokémon Files: A on Export saves every Pokémon in your boxes as a PKHeX .pa8 file
