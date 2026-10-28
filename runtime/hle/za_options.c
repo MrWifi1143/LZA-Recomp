@@ -63,13 +63,13 @@ typedef struct {
     int tab;  // 0 Gameplay, 1 Graphics (the game's Camera tab, renamed: its three camera rows stay first), 2 Sound
     const char *name, *info;
     int kind, n;  // CHOICE: n choices
-    const char *choice[5];
+    const char *choice[6];
     int (*get)(void);
     void (*set)(int);
     void (*act)(int);  // (A on the row: runs it for the choice shown)
 } Row;
 
-static const int k_fps[] = {30, 60, 120, 144}, k_lines[] = {0, 720, 1080, 1440, 2160};
+static const int k_fps[] = {30, 60, 120, 144}, k_lines[] = {0, 540, 720, 1080, 1440, 2160};  // (540p: weak GPUs, ~half 1080p's GPU time)
 static int find(const int *v, int n, int x) {
     for (int i = 0; i < n; i++) if (v[i] == x) return i;
     return 0;
@@ -84,7 +84,7 @@ static void set_fps(int i) {
     if (legends_set_fps(k_fps[i])) g_settings.fps = k_fps[i], g_settings.next_fps = 0;
     else g_settings.next_fps = k_fps[i] == g_settings.fps ? 0 : k_fps[i];
 }
-static int get_res(void) { return find(k_lines, 5, g_settings.next_res_height ? g_settings.next_res_height - 1 : g_settings.res_height); }
+static int get_res(void) { return find(k_lines, 6, g_settings.next_res_height ? g_settings.next_res_height - 1 : g_settings.res_height); }
 static void set_res(int i) { g_settings.next_res_height = k_lines[i] == g_settings.res_height ? 0 : k_lines[i] + 1; }
 static int get_full(void) { return g_settings.fullscreen ? 1 : 0; }
 static void set_full(int i) { g_settings.fullscreen = i == 1, menu_apply_fullscreen(); }
@@ -151,7 +151,7 @@ static const Row k_rows[] = {  // (per tab in this order; Gameplay's first is th
     {1, "Frame Rate", "Choose how many frames are drawn a second.",
      CHOICE, 4, {"30 fps", "60 fps", "120 fps", "144 fps"}, get_fps, set_fps},
     {1, "Resolution (Next Start)", "Choose the resolution the game is drawn at, from the next time you start it.",
-     CHOICE, 5, {"Auto", "720p", "1080p", "1440p", "4K"}, get_res, set_res},
+     CHOICE, 6, {"Auto", "540p", "720p", "1080p", "1440p", "4K"}, get_res, set_res},
     {1, "Screen Mode", "Choose whether the game fills the screen or plays in a window.", CHOICE, 2, {"Window", "Fullscreen"},
      get_full, set_full},
     {1, "Anti-Aliasing", "Choose whether to smooth jagged edges (SMAA).", CHOICE, 2, {"On", "Off"}, get_aa, set_aa},

@@ -7,6 +7,7 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- Resolution: 540p (the settings and the start screen), for weak GPUs: about half the GPU time of 1080p.
 - Stutter: pipelines are now linked from parts (Vulkan graphics pipeline libraries, where the driver has them): each
   program's vertex and fragment shader is built once, on its own, and every pipeline that uses it is a quick link of
   those parts (~0.1 ms with a warm cache). A first play of the intro on a cold cache: 19 two-second spans with a frame
