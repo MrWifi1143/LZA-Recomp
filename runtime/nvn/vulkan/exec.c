@@ -35,7 +35,8 @@ static uint64_t stat_upload_bytes;
 // sets = descriptor sets incl. cbuf copies, vtx = index scan + vertex copies, submit = vkQueueSubmit2)
 static int prof = -1;
 static uint64_t prof_exec, prof_draw, prof_sets, prof_vtx, prof_submit, prof_pre, prof_key, prof_dyn, prof_tex, prof_up, prof_gpu;
-static VkQueryPool prof_qp;
+static VkQueryPool prof_qp;  // (two timestamps per submission slot: the GPU time of each submission, gpu_busy_ns)
+static _Atomic uint64_t gpu_busy_ns;  // GPU time of the finished submissions so far, start to end of each (idle between excluded)
 static uint64_t cum_exec, cum_wait, cum_draws, cum_submits;  // (profiling) never reset: hitch log
 static uint32_t prof_end_line[4096];  // passes ended, by the exec.c line that ended them (0: submit / present)
 uint64_t prof_views_created;  // textures.c vk_image_view cache misses
@@ -102,10 +103,13 @@ static Sub *sub(void) {
     Sub *s = &subs[cur_sub];
     if (s->seq != submit_seq + 1) {  // slot reused: its previous submission must be done
         vk_wait_seq(s->seq);
-        if (s->ts) {  // (profiling) GPU time of that submission
+        if (s->ts) {  // GPU time of that submission
             uint64_t t[2];
-            if (vkGetQueryPoolResults(g_vk.dev, prof_qp, (uint32_t)cur_sub * 2, 2, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && t[1] > t[0])
-                prof_gpu += (uint64_t)((double)(t[1] - t[0]) * g_vk.props.limits.timestampPeriod);
+            if (vkGetQueryPoolResults(g_vk.dev, prof_qp, (uint32_t)cur_sub * 2, 2, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && t[1] > t[0]) {
+                uint64_t ns = (uint64_t)((double)(t[1] - t[0]) * g_vk.props.limits.timestampPeriod);
+                prof_gpu += ns;
+                atomic_fetch_add(&gpu_busy_ns, ns);
+            }
             s->ts = false;
         }
         for (int i = 0; i < s->npools; i++) vkResetDescriptorPool(g_vk.dev, s->pools[i], 0);
@@ -139,7 +143,7 @@ VkCommandBuffer vk_cmd(void) {
     if (!s->main_begun) {
         begin_cb(&s->main, &s->main_begun);
         gp_mark(s->main, "(submission start; includes GPU idle before it)");
-        if (prof && prof_qp) {
+        if (prof_qp) {
             vkCmdResetQueryPool(s->main, prof_qp, (uint32_t)cur_sub * 2, 2);
             vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_NONE, prof_qp, (uint32_t)cur_sub * 2);
             s->ts = true;
@@ -797,6 +801,10 @@ const char *renderer_stats(void) {
              atomic_exchange(&stat_compiles, 0), atomic_exchange(&stat_translate_ns, 0) / 1e6, atomic_exchange(&stat_spirv_ns, 0) / 1e6, atomic_exchange(&stat_pipe_ns, 0) / 1e6,
              stat_shader_wait_ns / 1e6,
              (unsigned long long)stat_feedback_copies, (double)stat_upload_bytes / 1048576.0);
+    if (vk_gpu_ms() >= 0) {
+        size_t n = strlen(stats_text);
+        snprintf(stats_text + n, sizeof stats_text - n, " [gpu %.2f ms/frame]", vk_gpu_ms());
+    }
     if (atomic_load(&stat_ready_n)) {
         size_t n = strlen(stats_text);
         uint64_t rn = atomic_exchange(&stat_ready_n, 0);
@@ -889,8 +897,9 @@ static void st_defaults(void) {
 
 void vk_exec_init(void) {
     prof = getenv("LARECOMP_VK_PROF") != NULL;
-    if (prof) {
-        prof_up_ns = 0;
+    if (prof) prof_up_ns = 0;
+    // GPU time per frame (the FPS counter, dynamic resolution, the stats line): always, unless LARECOMP_VK_NO_GPUTIME=1
+    if ((prof || !getenv("LARECOMP_VK_NO_GPUTIME")) && g_vk.props.limits.timestampPeriod > 0 && g_vk.props.limits.timestampComputeAndGraphics) {
         VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = SUBS * 2};
         if (vkCreateQueryPool(g_vk.dev, &qi, NULL, &prof_qp) != VK_SUCCESS) prof_qp = VK_NULL_HANDLE;
     }
@@ -2256,6 +2265,30 @@ bool vk_warm_program(const uint8_t *vs, size_t vmax, size_t vcn, const uint8_t *
     else if (p->fi) { free(p->fi->msl); free(p->fi); }
     free(p);
     return ok;
+}
+
+// GPU time per presented frame, averaged over the last half second (-1: not measured yet). Called once per present
+// (device.c); the FPS counter and the stats line read the last value (vk_gpu_ms).
+static _Atomic uint64_t gpu_ms_bits = 0xBFF0000000000000ull;  // (-1.0)
+double vk_gpu_frame_update(void) {
+    static uint64_t t0, busy0, n0;
+    extern uint64_t renderer_present_count(void);
+    uint64_t now = SDL_GetTicksNS(), f = renderer_present_count(), b = atomic_load(&gpu_busy_ns);
+    if (!t0 || f < n0) t0 = now, busy0 = b, n0 = f;
+    else if (now - t0 >= 500000000ull && f > n0) {
+        double ms = (double)(b - busy0) / 1e6 / (double)(f - n0);
+        uint64_t bits;
+        memcpy(&bits, &ms, 8);
+        atomic_store(&gpu_ms_bits, bits);
+        t0 = now, busy0 = b, n0 = f;
+    }
+    return vk_gpu_ms();
+}
+double vk_gpu_ms(void) {
+    uint64_t bits = atomic_load(&gpu_ms_bits);
+    double ms;
+    memcpy(&ms, &bits, 8);
+    return ms;
 }
 
 // ================================================================== feedback snapshots (renderer.m resolve_feedback)
