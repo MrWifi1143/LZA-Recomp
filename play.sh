@@ -6,4 +6,6 @@ cd "$(dirname "$0")"
 if command -v hyprctl >/dev/null 2>&1 && [ -n "$HYPRLAND_INSTANCE_SIGNATURE" ]; then
     hyprctl eval "hl.window_rule({ name = \"zarecomp\", match = { title = \"^(PL:Z-A Recomp)\$\" }, monitor = \"${PLA_MONITOR:-HDMI-A-1}\", float = true, no_initial_focus = true })" >/dev/null
 fi
-exec ./build/lasrecomp extracted "$@"
+# The game's log (frame times, errors, crash reports) also goes to play.log; the run before is kept in play-prev.log
+[ -f play.log ] && mv -f play.log play-prev.log
+./build/lasrecomp extracted "$@" 2>&1 | tee play.log

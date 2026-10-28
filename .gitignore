@@ -35,3 +35,5 @@ fonts/*.bfttf
 fonts/*.ttf
 
 __pycache__/
+play.log
+play-prev.log
