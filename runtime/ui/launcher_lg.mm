@@ -117,6 +117,8 @@ static void keys_section(void) {
     ImGui::Checkbox(T("Mouse camera (click the game to take the mouse, Esc lets it go)",
                       "Câmera no mouse (clique no jogo para prender o mouse, Esc solta)"), &g_settings.mouse_camera);
     ImGui::SliderFloat(T("Mouse sensitivity", "Sensibilidade do mouse"), &g_settings.mouse_sens, 0.02f, 0.30f, "%.2f");
+    ImGui::Checkbox(T("Invert mouse vertical", "Inverter mouse na vertical"), &g_settings.mouse_invert_y);
+    ImGui::Checkbox(T("Invert mouse horizontal", "Inverter mouse na horizontal"), &g_settings.mouse_invert_x);
     ImGui::PopItemWidth();
 }
 
@@ -373,6 +375,10 @@ extern "C" void launcher_lg_run(const char *root) {
     bool full = g_settings.fullscreen, smaa = g_settings.antialias == AA_SMAA, wildb = g_settings.wild_battle, showfps = g_settings.show_fps;
     int fps_i = g_settings.fps == 144 ? 3 : g_settings.fps == 120 ? 2 : g_settings.fps == 60 ? 1 : 0;
     int prompts_i = g_settings.button_prompts >= 0 && g_settings.button_prompts <= 4 ? g_settings.button_prompts : 0;
+    int crowd_i = g_settings.crowd >= 0 && g_settings.crowd <= 3 ? g_settings.crowd : 0;
+    int shadows_i = g_settings.shadows >= 0 && g_settings.shadows <= 2 ? g_settings.shadows : 0;
+    int bg_i = g_settings.background >= 0 && g_settings.background <= 2 ? g_settings.background : 0;
+    int pk_i = g_settings.pkhex_link >= 0 && g_settings.pkhex_link <= 2 ? g_settings.pkhex_link : 0;
     // Translation: the folders under mods/ (runtime/mods.h); 0 = none (the game's own English)
     static char mods[MODS_MAX][128];
     int nmods = mods_list(mods, MODS_MAX), mod = 0;
@@ -445,6 +451,15 @@ extern "C" void launcher_lg_run(const char *root) {
                                  "(uma cena que leva você a algum lugar pode nunca soltar o controle). Se acontecer,\n"
                                  "escolha 60 ou 30 fps nas configurações do jogo e entre na cena de novo."));
         ImGui::Checkbox(T("Show FPS counter", "Mostrar contador de FPS"), &showfps);
+        // (the game's Settings rows of the same names: runtime/hle/za_options.c)
+        const char *const crowd_names[] = {"Switch", "2x", "4x", "Max"};
+        ImGui::Combo(T("Draw distance (people)", "Distância de desenho (pessoas)"), &crowd_i, crowd_names, 4);
+        const char *const shadow_names[] = {"Switch (1024)", T("High (2048)", "Alta (2048)"), T("Ultra (4096)", "Ultra (4096)")};
+        ImGui::Combo(T("Shadows", "Sombras"), &shadows_i, shadow_names, 3);
+        const char *const bg_names[] = {T("Keep playing", "Continuar jogando"), T("Mute", "Silenciar"), T("Pause", "Pausar")};
+        ImGui::Combo(T("In background", "Em segundo plano"), &bg_i, bg_names, 3);
+        const char *const pk_names[] = {T("Off", "Desligado"), T("This PC", "Este PC"), T("Network", "Rede")};
+        ImGui::Combo(T("PKHeX Link (LiveHeX, port 6000)", "PKHeX Link (LiveHeX, porta 6000)"), &pk_i, pk_names, 3);
         // (runtime/nvn/glyphs.c: the game's button icons redrawn for the controller in use)
         const char *const prompt_names[] = {T("Auto (what you play with)", "Automático (o que você usa)"), "Nintendo Switch", "Xbox",
                                             "PlayStation", T("Keyboard and mouse", "Teclado e mouse")};
@@ -504,8 +519,13 @@ extern "C" void launcher_lg_run(const char *root) {
     g_settings.show_fps = showfps;
     g_settings.skip_start = skipstart;
     g_settings.button_prompts = prompts_i;
+    g_settings.crowd = crowd_i;
+    g_settings.shadows = shadows_i;
+    g_settings.background = bg_i;
+    g_settings.pkhex_link = pk_i;
     snprintf(g_settings.mod, sizeof g_settings.mod, "%s", mod ? mods[mod - 1] : "");
     settings_save();
+    { extern void pkm_link_apply(void); pkm_link_apply(); }  // (PKHeX Link as just chosen: hle/pkm_link.c)
     if (warmup_needed(root)) {  // first start, or the first after an update: every shader of the game, once (warmup.c)
         warmup_start();
         float shown = 0;
