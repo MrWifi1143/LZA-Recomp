@@ -41,6 +41,7 @@ typedef struct {
 } Settings;
 
 extern Settings g_settings;
+extern bool g_settings_fresh;  // no larecomp.ini yet (a first start): the start screen applies the recommended settings
 
 void settings_load(void);
 void settings_save(void);

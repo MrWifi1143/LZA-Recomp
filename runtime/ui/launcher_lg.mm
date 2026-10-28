@@ -17,6 +17,7 @@
 #include "imgui_impl_vulkan.h"
 #include "imgui_impl_sdl3.h"
 
+extern "C" void vk_describe_gpu(char *name, size_t n, int *vram_gb, bool *integrated);  // nvn/vulkan/device.c
 extern "C" {
 #include "gamesetup.h"
 #include "input_bind.h"
@@ -367,7 +368,28 @@ extern "C" void launcher_lg_run(const char *root) {
     bool full = g_settings.fullscreen, smaa = g_settings.antialias == AA_SMAA, wildb = g_settings.wild_battle, showfps = g_settings.show_fps;
     int fps_i = g_settings.fps == 144 ? 3 : g_settings.fps == 120 ? 2 : g_settings.fps == 60 ? 1 : 0;
     int prompts_i = g_settings.button_prompts >= 0 && g_settings.button_prompts <= 4 ? g_settings.button_prompts : 0;
+    // Recommended settings for this PC (from Z-A's start screen; by the GPU, the CPU threads and the RAM): shown with an
+    // Apply button, and applied at once on a first start (no larecomp.ini yet)
+    struct Rec { int res, fps, nowait; char text[120]; } rec;
+    char pc[200];
+    {
+        char gpu[128];
+        int vram_gb;
+        bool igpu;
+        vk_describe_gpu(gpu, sizeof gpu, &vram_gb, &igpu);
+        int threads = SDL_GetNumLogicalCPUCores(), ram_gb = (SDL_GetSystemRAM() + 512) / 1024;  // (not plat_cpu_count: cpupin narrows it)
+        // resolution index into res_lines: 0 Auto, 1 540p, 2 720p, 3 1080p, 4 1440p, 5 4K; fps index: 0 30, 1 60
+        if (igpu || vram_gb < 4) rec = {2, 0, threads <= 8, ""};
+        else if (vram_gb < 12) rec = {3, 1, threads <= 8, ""};
+        else rec = {4, 1, threads <= 8, ""};
+        static const char *const rn[] = {"Auto", "540p", "720p", "1080p", "1440p", "4K"};
+        snprintf(rec.text, sizeof rec.text, "%s, %s fps%s", rn[rec.res], rec.fps ? "60" : "30", rec.nowait ? ", shader loading: don't wait" : "");
+        snprintf(pc, sizeof pc, "%s (%s%d GB), %d CPU threads, %d GB RAM", gpu, igpu ? "integrated, " : "", vram_gb, threads, ram_gb);
+        fprintf(stderr, "[launcher] this PC: %s; recommended: %s%s\n", pc, rec.text, g_settings_fresh ? " (first start: applied)" : "");
+    }
     int shl_i = g_settings.shader_nowait ? 1 : 0;
+    auto apply_rec = [&]() { res = rec.res, fps_i = rec.fps, shl_i = rec.nowait; };
+    if (g_settings_fresh) apply_rec();
     int bg_i = g_settings.background >= 0 && g_settings.background <= 2 ? g_settings.background : 0;
     int pk_i = g_settings.pkhex_link >= 0 && g_settings.pkhex_link <= 2 ? g_settings.pkhex_link : 0;
     // Translation: the folders under mods/ (runtime/mods.h); 0 = none (the game's own English)
@@ -481,6 +503,10 @@ extern "C" void launcher_lg_run(const char *root) {
         if (keys_test) ImGui::SetNextItemOpen(true, ImGuiCond_Once);
         if (ImGui::CollapsingHeader(T("Keyboard", "Teclado"))) keys_section();
         ImGui::Spacing();
+        ImGui::TextDisabled("%s", pc);  // (this PC, and the settings recommended for it: above, where the Play button keeps the view)
+        ImGui::TextDisabled("%s %s", T("Recommended:", "Recomendado:"), rec.text);
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T("Apply", "Aplicar"))) apply_rec();
         ImGui::BeginDisabled(!ready);
         if (frame == 0 && ready) ImGui::SetKeyboardFocusHere();
         if (ImGui::Button(T("Play", "Jogar"), ImVec2(-FLT_MIN, 0))) play = true;

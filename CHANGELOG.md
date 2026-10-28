@@ -9,6 +9,9 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 Arceus:
 
 - Resolution: 540p (the settings and the start screen), for weak GPUs: about half the GPU time of 1080p.
+- Start screen (from Z-A): this PC (GPU and its VRAM, CPU threads, RAM) and the settings recommended for it, with an
+  Apply button; applied at once on a first start. Integrated GPU or under 4 GB: 720p / 30 fps; under 12 GB 1080p / 60;
+  more 1440p / 60; Shader Loading "Don't Wait" with 8 or fewer CPU threads.
 - Stutter (from Z-A): pipelines are linked from parts (Vulkan graphics pipeline libraries): each program's shaders are
   built once and every pipeline that uses them is a quick link. The intro with warm caches: 1 two-second span with a
   frame over 100 ms instead of 14. `LARECOMP_VK_GPL=0`: whole pipelines as before.
