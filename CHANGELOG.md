@@ -33,8 +33,11 @@ Z-A:
   caches are warm both are the same. ini `shader_loading = wait | nowait`.
 - Draw Distance (People) above Switch now gets extra memory for the characters it lets in (+256 MB / +512 MB /
   +1.25 GB): Max at 1440p with Ultra shadows ran out of memory and crashed opening the menu.
-- The game's memory stays under 4 GB: the GPU reads it as one buffer, and Vulkan buffers stop at 4 GB - past that,
-  every text in the game was blank (4K had this too, with its 4.5 GB).
+- Shaders reach the game's memory through its 64-bit GPU address (Vulkan buffer device address, required by Vulkan 1.3)
+  instead of one storage buffer: storage buffers stop at 4 GB (maxStorageBufferRange), and past that every text in the
+  game was blank - Max draw distance with Ultra shadows at 1440p, and 4K, needed more. The 4 GB cap added for it is
+  gone (Max + Ultra at 1440p: 4352 MB, text checked). Each word's address is made in 64 bits (a uint index into a
+  buffer reference wrapped at 4 GB too). Also the way to GPUs whose storage buffers are smaller (ARM, integrated).
 - Start screen: Draw distance (people), Shadows, In background, PKHeX Link and mouse invert, as in the game's Settings.
 
 - PKHeX: Settings > Gameplay > PKHeX Link (Off / This PC / Network) answers PKHeX's LiveHeX plugin like sys-botbase on

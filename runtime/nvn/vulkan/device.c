@@ -222,6 +222,7 @@ static void create_device(void) {
                                             .uniformAndStorageBuffer8BitAccess = VK_TRUE, .storageBuffer8BitAccess = VK_TRUE,
                                             .scalarBlockLayout = VK_TRUE, .shaderOutputLayer = VK_TRUE,
                                             .hostQueryReset = have12.hostQueryReset, .samplerFilterMinmax = have12.samplerFilterMinmax,
+                                            .bufferDeviceAddress = VK_TRUE,  // (Vulkan 1.3 requires it: the guest heap's address, exec.c gmem_ref_info)
                                             .pNext = &f13};
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
                                             .storageBuffer16BitAccess = VK_TRUE, .shaderDrawParameters = VK_TRUE, .pNext = &f12};

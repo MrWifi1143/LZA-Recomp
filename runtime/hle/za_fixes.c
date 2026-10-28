@@ -583,10 +583,8 @@ void za_fixes_configure(const char *exefs) {
         // (and the characters Draw Distance lets in: Max at 1440p with Ultra shadows ran out opening the menu)
         static const uint64_t k_crowd_mb[4] = {0, 256, 512, 1280};
         if (!e && g_settings.crowd > 0 && g_settings.crowd <= 3) g_stdheap_size += k_crowd_mb[g_settings.crowd] << 20;
-        // The GPU reads the game's memory as one storage buffer from HEAP_BASE (exec.c gmem_import), and Vulkan buffers
-        // reach 4 GB at most (maxStorageBufferRange): past that the shaders read nothing and every text and font is gone
-        uint64_t gpu_max = 0x100000000ull - (STDHEAP_BASE - HEAP_BASE) - 0x10000;
-        if (g_stdheap_size > gpu_max) g_stdheap_size = gpu_max;
+        // (Shaders reach the game's memory through its GPU address since 2026-10-28 - exec.c gmem_ref_info: no 4 GB
+        // limit any more. As a storage buffer it was capped at 4 GB, maxStorageBufferRange: past that every text was gone.)
         if (g_stdheap_size != STDHEAP_SIZE) LOG("[za] screen %llux%llu: %llu MB for the game's allocator\n", (unsigned long long)sw,
                                                 (unsigned long long)sh, (unsigned long long)(g_stdheap_size >> 20));
     }

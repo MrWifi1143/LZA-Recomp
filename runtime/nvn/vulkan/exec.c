@@ -2970,6 +2970,7 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
 // LARECOMP_VK_NO_GMEM=1: no import, reads return zero.
 static VkDeviceMemory gmem_mem;
 static uint64_t gmem_size;
+static VkDeviceAddress gmem_addr;  // (its GPU address: shaders reach the heap through it - gmem_ref_info)
 
 static bool gmem_import(uint64_t size) {
 #ifdef _WIN32
@@ -2986,7 +2987,9 @@ static bool gmem_import(uint64_t size) {
     VkImportMemoryHostPointerInfoEXT imp = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
                                             .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
                                             .pHostPointer = (void *)(uintptr_t)HEAP_BASE};
-    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &imp, .allocationSize = size,
+    VkMemoryAllocateFlagsInfo af = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .pNext = &imp,
+                                    .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
+    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &af, .allocationSize = size,
                                .memoryTypeIndex = (uint32_t)__builtin_ctz(mp.memoryTypeBits)};
     VkDeviceMemory mem;
     VkResult ar = vkAllocateMemory(g_vk.dev, &ai, NULL, &mem);
@@ -2998,6 +3001,7 @@ static bool gmem_import(uint64_t size) {
                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                                       VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |  // (uniforms read in place: cbuf_info)
                                       VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |  // (indirect draws: arguments the game's compute writes)
+                                      VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |  // (shader global memory: gmem_ref_info)
                                       (g_vk.xfb ? VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT : 0)};  // (CMD_XFB_*)
     VkBuffer buf;
     if (vkCreateBuffer(g_vk.dev, &bi, NULL, &buf) != VK_SUCCESS) { vkFreeMemory(g_vk.dev, mem, NULL); return false; }
@@ -3010,11 +3014,25 @@ static bool gmem_import(uint64_t size) {
     gmem_buf = buf;
     gmem_mem = mem;
     gmem_size = size;
+    VkBufferDeviceAddressInfo dai = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = buf};
+    gmem_addr = vkGetBufferDeviceAddress(g_vk.dev, &dai);
     LOG("[vk] guest heap imported for shader global memory: %llu MB\n", (unsigned long long)(size >> 20));
     return true;
 }
 
 static uint64_t gmem_tried;  // heap size the import was last attempted for (gmem_info imports / re-imports)
+static VkDescriptorBufferInfo gmem_info(void);
+
+// What shaders read and write the guest heap through (binding GMEM_BUFFER_INDEX): its GPU address and the size imported,
+// a 16-byte uniform. The translator's GLSL turns them into a buffer reference (GL_EXT_buffer_reference): 64-bit
+// addressing, no 4 GB limit - the heap was a storage buffer, and Vulkan storage buffers reach 4 GB at most
+// (maxStorageBufferRange): past that every read returned 0 (Z-A's text was gone with a bigger game heap).
+static VkDescriptorBufferInfo gmem_ref_info(void) {
+    gmem_info();  // (imported, or grown, first)
+    uint64_t v[2] = {gmem_buf ? (uint64_t)gmem_addr : 0, gmem_buf ? gmem_size : 0};
+    VkSpan s = vk_transient_copy(v, sizeof v, g_vk.props.limits.minUniformBufferOffsetAlignment);
+    return (VkDescriptorBufferInfo){s.buf, s.off, sizeof v};
+}
 
 static VkDescriptorBufferInfo gmem_info(void) {
     static int off = -1;
@@ -3446,6 +3464,9 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
             w[n].pImageInfo = &ii[n];
         } else if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && b->binding < 17) {
             bi[n] = cbuf_info(stage, si, (int)b->binding, gx, gy, gz);
+            w[n].pBufferInfo = &bi[n];
+        } else if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && b->binding == 17) {  // (GMEM_BUFFER_INDEX: the heap's address)
+            bi[n] = gmem_ref_info();
             w[n].pBufferInfo = &bi[n];
         } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
             bi[n] = gmem_info();

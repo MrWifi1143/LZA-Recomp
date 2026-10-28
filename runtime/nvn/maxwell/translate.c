@@ -1099,8 +1099,11 @@ static void emit_gatomic(Ctx *c, uint64_t w, bool red) {
     else if (wide) sprintf(addr, "((ulong(%s) << 32 | ulong(%s)) + ulong(%lld))", R(a + 1), R(a), (long long)off);
     else sprintf(addr, "(ulong(%s) + ulong(%lld))", R(a), (long long)off);
     const char *v = R(b);
-    sp(&c->body, "    { ulong ga = %s - 0x%llxul; bool ok = ga < 0x%llxul; uint wi = uint(ga >> 2); uint av = %s, old = 0u;\n", addr,
-       (unsigned long long)maxwell_gmem_base, (unsigned long long)maxwell_gmem_size, v);
+    char lim[32];  // (GLSL: the size imported, from the heap's uniform - past it is no memory at all with an address)
+    if (c->glsl) snprintf(lim, sizeof lim, "gmb_.gsize");
+    else snprintf(lim, sizeof lim, "0x%llxul", (unsigned long long)maxwell_gmem_size);
+    sp(&c->body, "    { ulong ga = %s - 0x%llxul; bool ok = ga < %s; uint wi = uint(ga >> 2); uint av = %s, old = 0u;\n", addr,
+       (unsigned long long)maxwell_gmem_base, lim, v);
     if (s64) {  // 64-bit add: the low word, then the high word plus the carry - the sum is exact (adds commute); the old
                 // value a result would return is the two halves read apart
         sp(&c->body, "      uint avh = %s, oldh = 0u;\n", b == RZ || b + 1 >= RZ ? "0u" : R(b + 1));
@@ -1852,8 +1855,10 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (a == RZ) sprintf(addr, "ulong(%lld)", (long long)off);
         else if (wide) sprintf(addr, "((ulong(%s) << 32 | ulong(%s)) + ulong(%lld))", R(a + 1), R(a), (long long)off);
         else sprintf(addr, "(ulong(%s) + ulong(%lld))", R(a), (long long)off);
-        sp(&c->body, "    { ulong ga = %s - 0x%llxul; bool ok = ga < 0x%llxul;\n", addr,
-           (unsigned long long)maxwell_gmem_base, (unsigned long long)maxwell_gmem_size);
+        char lim[32];  // (GLSL: the size imported, from the heap's uniform)
+        if (c->glsl) snprintf(lim, sizeof lim, "gmb_.gsize");
+        else snprintf(lim, sizeof lim, "0x%llxul", (unsigned long long)maxwell_gmem_size);
+        sp(&c->body, "    { ulong ga = %s - 0x%llxul; bool ok = ga < %s;\n", addr, (unsigned long long)maxwell_gmem_base, lim);
         static const char *const ld_small[] = {"uint(gmem[ga])", "uint(int(char(gmem[ga])))",
                                                "uint(*(device ushort *)(gmem + ga))", "uint(int(*(device short *)(gmem + ga)))"};
         int nw = size == 5 ? 2 : size >= 6 ? 4 : 1;
@@ -2149,9 +2154,42 @@ static void glsl_rewrite(Ctx *c, Str *o, const char *src) {
     }
 }
 
+// The guest heap's words in the GLSL: gmem_.w[<index>] (how the emitters write them, as MSL's device array) becomes
+// GW(<index>).v - a buffer reference to that one word, its address made in 64 bits. Indexing a uint array in a buffer
+// reference wrapped at 4 GB: the game's text, in memory above that, came out blank.
+static char *glsl_gmem_words(char *src) {
+    static const char pat[] = "gmem_.w[";
+    size_t n = strlen(src), cap = n + 64;
+    char *o = malloc(cap);
+    size_t w = 0;
+    for (size_t i = 0; i < n;) {
+        if (!strncmp(src + i, pat, sizeof pat - 1)) {
+            size_t j = i + sizeof pat - 1;
+            int depth = 1;
+            size_t k = j;
+            while (k < n && depth) { if (src[k] == '[') depth++; else if (src[k] == ']') depth--; if (depth) k++; }
+            if (k < n) {
+            size_t need = w + (k - j) + 16;
+            if (need > cap) { cap = need * 2; o = realloc(o, cap); }
+            memcpy(o + w, "GW(", 3), w += 3;
+            memcpy(o + w, src + j, k - j), w += k - j;
+            memcpy(o + w, ").v", 3), w += 3;
+            i = k + 1;
+            continue;
+            }  // (unbalanced: copied as it is)
+        }
+        if (w + 2 > cap) { cap *= 2; o = realloc(o, cap); }
+        o[w++] = src[i++];
+    }
+    o[w] = 0;
+    free(src);
+    return o;
+}
+
 static const char glsl_prelude[] =
     "#version 460\n"
     "#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require\n"
+    "#extension GL_EXT_buffer_reference : require\n"
     "#extension GL_KHR_shader_subgroup_basic : require\n"
     "#extension GL_KHR_shader_subgroup_shuffle : require\n"
     "#extension GL_KHR_shader_subgroup_shuffle_relative : require\n"
@@ -2263,9 +2301,14 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         if (!n) n = 1;
         sp(&s, "layout(std140, set = %d, binding = %d) uniform CB%d { uvec4 cb%d[%u]; };\n", set, i, i, i, n);
     }
-    if (info->uses_gmem)
-        sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem { uint w[]; } gmem_;\n", set, GMEM_BUFFER_INDEX,
+    if (info->uses_gmem) {  // the guest heap through its GPU address (runtime: exec.c gmem_ref_info): 64-bit, no 4 GB limit
+        // (each word's address made in 64 bits - glsl_gmem_words: a uint index into a runtime array wrapped at 4 GB)
+        sp(&s, "layout(buffer_reference, std430, buffer_reference_align = 4) %sbuffer GWord { uint v; };\n",
            c->uses_gmem_store ? "" : "readonly ");
+        sp(&s, "layout(std140, set = %d, binding = %d) uniform GMemBase { uint64_t gbase; uint64_t gsize; } gmb_;\n", set,
+           GMEM_BUFFER_INDEX);
+        sp(&s, "#define GW(i) GWord(gmb_.gbase + uint64_t(i) * 4ul)\n");
+    }
     if (c->uses_rscale && stage != STAGE_VERTEX) {
         sp(&s, "layout(std140, set = %d, binding = 18) uniform RScale { vec4 rscale[65]; };\n", set);
         info->uses_rscale = true;
@@ -2382,7 +2425,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         }
     }
     sp(&s, "}\n");
-    info->msl = s.buf;
+    info->msl = info->uses_gmem ? glsl_gmem_words(s.buf) : s.buf;
     info->attr_mask = c->in_attr_mask;
     info->out_mask = stage == STAGE_FRAGMENT ? c->omap_target : c->out_attr_mask;
     free(c->body.buf);
