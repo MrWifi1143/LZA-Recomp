@@ -8,6 +8,8 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Arceus:
 
+- Shaders reach the game's memory through its 64-bit GPU address (from Z-A: Vulkan buffer device address) instead of
+  one storage buffer, which stops at 4 GB - and is smaller on some GPUs (ARM, integrated). The intro checked.
 - Resolution: 540p (the settings and the start screen), for weak GPUs: about half the GPU time of 1080p.
 - Start screen (from Z-A): this PC (GPU and its VRAM, CPU threads, RAM) and the settings recommended for it, with an
   Apply button; applied at once on a first start. Integrated GPU or under 4 GB: 720p / 30 fps; under 12 GB 1080p / 60;
