@@ -1,7 +1,9 @@
 #include <ctype.h>
 // Executes recorded NVN command lists with Vulkan (port of renderer.m; same structure, same behaviour).
 #include <SDL3/SDL_cpuinfo.h>
+#if defined(__x86_64__)
 #include <immintrin.h>
+#endif
 #include <SDL3/SDL_timer.h>
 #include <float.h>
 #include <math.h>
@@ -312,7 +314,11 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
         dl_note("submit %llu", (unsigned long long)submit_seq + 1);
         extern void vk_queue_lock(void), vk_queue_unlock(void);
         vk_queue_lock();
+#if defined(__x86_64__)
         _mm_sfence();  // (copy_stream's stores, before the GPU reads them)
+#else
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+#endif
         VkResult sr = vkQueueSubmit2(g_vk.queue, 1, &si, VK_NULL_HANDLE);
         vk_queue_unlock();
         if (sr == VK_ERROR_DEVICE_LOST) vk_devlost_dump();
@@ -407,6 +413,7 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
 // ================================================================== transient memory ring
 // The largest index of a draw (bounds the vertex data copied for it), ignoring the restart value: AVX2 where the CPU has it (the
 // game code needs it too), a plain loop elsewhere. A draw scans a few thousand indices: ~1.4 us scalar, ~0.15 us here.
+#if defined(__x86_64__)
 __attribute__((target("avx2"))) static uint32_t scan_max16_avx2(const uint16_t *q, uint32_t n, uint16_t restart) {
     __m256i acc = _mm256_setzero_si256(), rs = _mm256_set1_epi16((short)restart);
     uint32_t i = 0;
@@ -435,16 +442,23 @@ __attribute__((target("avx2"))) static uint32_t scan_max32_avx2(const uint32_t *
     for (; i < n; i++) if (q[i] != restart && q[i] > m) m = q[i];
     return m;
 }
+#endif
 static uint32_t scan_max_index(const void *src, uint32_t isz, uint32_t n, uint32_t restart) {
+#if defined(__x86_64__)
     static int avx2 = -1;
     if (avx2 < 0) avx2 = plat_cpu_x86_v3();
+#endif
     uint32_t m = 0;
     if (isz == 2) {
+#if defined(__x86_64__)
         if (avx2) return scan_max16_avx2(src, n, (uint16_t)restart);
+#endif
         const uint16_t *q = src;
         for (uint32_t i = 0; i < n; i++) if (q[i] > m && q[i] != (uint16_t)restart) m = q[i];
     } else {
+#if defined(__x86_64__)
         if (avx2) return scan_max32_avx2(src, n, restart);
+#endif
         const uint32_t *q = src;
         for (uint32_t i = 0; i < n; i++) if (q[i] > m && q[i] != restart) m = q[i];
     }
@@ -589,14 +603,18 @@ static void copy_stream(void *dst, const void *src, uint64_t n) {
     uint8_t *d = dst;
     const uint8_t *q = src;
     uint64_t i = 0;
+#if defined(__x86_64__)
     for (; i + 64 <= n; i += 64) {
         __m128i a = _mm_loadu_si128((const __m128i *)(q + i)), b = _mm_loadu_si128((const __m128i *)(q + i + 16)),
                 c = _mm_loadu_si128((const __m128i *)(q + i + 32)), e = _mm_loadu_si128((const __m128i *)(q + i + 48));
         _mm_stream_si128((__m128i *)(d + i), a), _mm_stream_si128((__m128i *)(d + i + 16), b);
         _mm_stream_si128((__m128i *)(d + i + 32), c), _mm_stream_si128((__m128i *)(d + i + 48), e);
     }
+#endif
     if (i < n) memcpy(d + i, q + i, n - i);
+#if defined(__x86_64__)
     if (!rt_on_render_thread()) _mm_sfence();  // (another thread's copy: ordered here, before it hands the span over)
+#endif
 }
 
 VkSpan vk_transient_copy(const void *data, uint64_t size, uint64_t align) {

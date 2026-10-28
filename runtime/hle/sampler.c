@@ -39,7 +39,11 @@ static void on_prof(int sig, siginfo_t *si, void *ctx) {
     struct timespec ts;  // (pad: microseconds since the start, for timelines - build/sample/presents.txt has the presents)
     clock_gettime(CLOCK_MONOTONIC, &ts);
     g_buf[i].pad = (uint32_t)(((uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec - g_t0) / 1000);
+#if defined(__aarch64__)
+    g_buf[i].pc = (uint64_t)((ucontext_t *)ctx)->uc_mcontext.pc;
+#else
     g_buf[i].pc = (uint64_t)((ucontext_t *)ctx)->uc_mcontext.gregs[REG_RIP];
+#endif
 }
 
 static uint64_t now_ns(void) {
