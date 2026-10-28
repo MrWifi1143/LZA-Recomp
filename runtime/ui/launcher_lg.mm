@@ -359,11 +359,11 @@ extern "C" void launcher_lg_run(const char *root) {
     ImGui_ImplSDL3_InitForVulkan(win);
     vk_imgui_backend_init();
 
-    static const char *const res_en[] = {"Automatic (window size)", "720p", "1080p", "1440p", "4K"};
-    static const char *const res_pt[] = {"Automática (tamanho da janela)", "720p", "1080p", "1440p", "4K"};
-    static const int res_lines[] = {0, 720, 1080, 1440, 2160};
+    static const char *const res_en[] = {"Automatic (window size)", "540p", "720p", "1080p", "1440p", "4K"};
+    static const char *const res_pt[] = {"Automática (tamanho da janela)", "540p", "720p", "1080p", "1440p", "4K"};
+    static const int res_lines[] = {0, 540, 720, 1080, 1440, 2160};
     int res = 0;
-    for (int i = 0; i < 5; i++) if (res_lines[i] == g_settings.res_height) res = i;
+    for (int i = 0; i < 6; i++) if (res_lines[i] == g_settings.res_height) res = i;
     bool full = g_settings.fullscreen, smaa = g_settings.antialias == AA_SMAA, wildb = g_settings.wild_battle, showfps = g_settings.show_fps;
     int fps_i = g_settings.fps == 144 ? 3 : g_settings.fps == 120 ? 2 : g_settings.fps == 60 ? 1 : 0;
     int prompts_i = g_settings.button_prompts >= 0 && g_settings.button_prompts <= 4 ? g_settings.button_prompts : 0;
@@ -428,7 +428,7 @@ extern "C" void launcher_lg_run(const char *root) {
         game_files_section(win);
         ImGui::SeparatorText(T("Settings", "Configurações"));
         ImGui::PushItemWidth(420);
-        ImGui::Combo(T("Resolution", "Resolução"), &res, g_pt ? res_pt : res_en, 5);
+        ImGui::Combo(T("Resolution", "Resolução"), &res, g_pt ? res_pt : res_en, 6);
         if (ImGui::Checkbox(T("Fullscreen", "Tela cheia"), &full)) SDL_SetWindowFullscreen(win, full);
         ImGui::Checkbox(T("Anti-aliasing (SMAA)", "Suavizar serrilhado (SMAA)"), &smaa);
         static const char *const fps_names[] = {"30 fps", "60 fps", "120 fps", "144 fps"};  // (above 30: experimental)
