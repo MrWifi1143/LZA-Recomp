@@ -9,6 +9,8 @@ Z-A:
 
 - Draw Distance (People) above Switch now gets extra memory for the characters it lets in (+256 MB / +512 MB /
   +1.25 GB): Max at 1440p with Ultra shadows ran out of memory and crashed opening the menu.
+- The game's memory stays under 4 GB: the GPU reads it as one buffer, and Vulkan buffers stop at 4 GB - past that,
+  every text in the game was blank (4K had this too, with its 4.5 GB).
 - Start screen: Draw distance (people), Shadows, In background, PKHeX Link and mouse invert, as in the game's Settings.
 
 - PKHeX: Settings > Gameplay > PKHeX Link (Off / This PC / Network) answers PKHeX's LiveHeX plugin like sys-botbase on
