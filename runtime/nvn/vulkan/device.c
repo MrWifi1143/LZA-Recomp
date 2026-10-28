@@ -1335,6 +1335,7 @@ static void quick_exit_handler(void) {
 #endif
 }
 
+static _Atomic bool g_vk_ready;
 void ui_window_init(void) {
     if (window) return;
     atexit(quick_exit_handler);
@@ -1358,7 +1359,13 @@ void ui_window_init(void) {
     create_swapchain();
     vk_exec_init();
     vk_shaders_init();
+    atomic_store(&g_vk_ready, true);
 }
+
+// The device and everything made with it are set up (ui_window_init's end): g_vk.dev alone is set by vkCreateDevice,
+// before the allocator, pipeline cache and exec.c's objects - the shader warm-up's threads (warmup.c), started before
+// the window, compiled into a device still being made (Arceus under Wine: a crash in its first vkCreateShaderModule)
+bool vk_ready(void) { return atomic_load(&g_vk_ready); }
 
 SDL_Window *ui_window(void) { return window; }
 

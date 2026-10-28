@@ -46,6 +46,7 @@
 #include "../maxwell/shader.h"
 #include "shaders.h"
 
+bool vk_ready(void);  // device.c: the device fully set up
 bool vk_warm_program(const uint8_t *vs, size_t vmax, size_t vcn, const uint8_t *fs, size_t fmax, size_t fcn, size_t flen, bool pipeline);  // exec.c
 
 static uint64_t fnv(const uint8_t *p, size_t n, uint64_t h) {
@@ -195,7 +196,7 @@ static bool container_at(const uint8_t *p, size_t avail, uint32_t *size) {
 static void compile(const WStage *v, const WStage *f) {
     static int pipes = -1;
     if (pipes < 0) pipes = getenv("LARECOMP_WARMUP_PIPELINES") && atoi(getenv("LARECOMP_WARMUP_PIPELINES")) != 0;
-    if (g_vk.dev) { vk_warm_program(v->code, v->max, v->cn, f ? f->code : NULL, f ? f->max : 0, f ? f->cn : 0, f ? f->len : 0, pipes); return; }
+    if (vk_ready()) { vk_warm_program(v->code, v->max, v->cn, f ? f->code : NULL, f ? f->max : 0, f ? f->cn : 0, f ? f->len : 0, pipes); return; }
     ShaderKey vk = {0}, fk = {0};
     vk.glsl = fk.glsl = 1;  // (flip_y and depth_minus_one 0: window origin and depth mode 1 in both Legends games)
     ShaderInfo *vi = maxwell_translate_consts(v->code, v->max, v->cn ? v->code + v->max : NULL, v->cn, STAGE_VERTEX, &vk);
