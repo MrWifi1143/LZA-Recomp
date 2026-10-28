@@ -126,7 +126,7 @@ static const Row k_rows[] = {
     {"Screen Mode", "Choose whether the game fills the screen or plays in a window.", CHOICE, 2, {"Window", "Fullscreen"},
      get_full, set_full},
     {"Anti-Aliasing", "Choose whether to smooth jagged edges (SMAA).", CHOICE, 2, {"Enabled", "Disabled"}, get_aa, set_aa},
-    {"Button Prompts", "Choose which buttons prompts show. Auto shows the ones you are playing with.", CHOICE, 5,
+    {"Button Prompts", "Choose which button prompts show. Auto shows the ones you are playing with.", CHOICE, 5,
      {"Auto", "Switch", "Xbox", "PlayStation", "Keyboard"}, get_prompts, set_prompts},
     {"FPS Counter", "Choose whether to show the frame rate in the corner of the screen.", CHOICE, 2, {"Show", "Hide"},
      get_fpsc, set_fpsc},
@@ -143,9 +143,9 @@ static const Row k_rows[] = {
      {"Regular", "Inverted"}, get_minvx, set_minvx},
     {"Stick Dead Zone", "Choose how far a controller's sticks must move before they count.", BAR10, 0, {0}, get_dz, set_dz},
     {"Master Volume", "Adjust the volume of all of the game's sound.", BAR10, 0, {0}, get_vol, set_vol},
-    {"PKHeX Link", "Let PKHeX's LiveHeX plugin see and edit your boxes as you play: on this PC or your network.",
+    {"PKHeX Link", "Let PKHeX's LiveHeX plugin edit your boxes as you play, from this PC or your network.",
      CHOICE, 3, {"Off", "This PC", "Network"}, get_pklink, set_pklink},
-    {"Pokémon Files", "Press A to save your boxed Pokémon as PKHeX files, or to add the ones in pokemon/import.",
+    {"Pokémon Files", "Press A to save your boxed Pokémon as PKHeX files, or add the ones in pokemon/import.",
      CHOICE, 2, {"Export", "Import"}, pkm_files_get, pkm_files_set, pkm_files_run},
 };
 #define NROWS (int)(sizeof k_rows / sizeof *k_rows)
