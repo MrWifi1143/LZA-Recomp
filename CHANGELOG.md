@@ -7,6 +7,14 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- GPU: the barrier before each render pass now waits only for what that pass needs: which images every pass
+  rendered to and every draw sampled since the last barrier are tracked, a pass that touches none of them starts
+  without one, and one that does waits only for the earlier passes' render-target writes (its vertex work can overlap
+  them) instead of draining the whole GPU ~60 times a frame. Anything else written on the GPU (copies, compute, storage
+  images, stores to guest memory) still makes the next pass wait for everything. Z-A at 4K on an RTX 4090: ~6% less
+  GPU time per frame (removing every barrier, which isn't safe, would give ~12%); AMD / Intel drivers act on these
+  stage masks more finely. Pictures identical (intro routes of both games, Lumiose). `LARECOMP_VK_PASS_BARRIER=1`:
+  a full barrier before every pass, as before.
 - Fixed: the background shader warm-up could start using the GPU device while it was still being set up (it checked
   only that the device existed). Arceus under Wine crashed in its first shader on every start after a translator
   change; it now waits for the renderer to be ready (anything it reaches before that is translated without the GPU).

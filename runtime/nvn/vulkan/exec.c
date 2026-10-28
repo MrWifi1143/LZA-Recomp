@@ -175,7 +175,34 @@ VkCommandBuffer vk_upload_cmd(void) {
     return s->upload;
 }
 
+// ---- The barrier before a render pass, only where one is needed (begin_pass, draw_). Every image stays in GENERAL,
+// so between passes only the order of memory accesses matters: a pass rendering to, or a draw sampling, an image a pass
+// rendered to since the last barrier (read / write after write), or a pass rendering to one a draw sampled (write
+// after read). Those are tracked per backing image; every other GPU write (copies, compute, storage images, stores to
+// guest memory, transform feedback) is not, and makes the next pass wait for everything as before - each of those
+// goes through vk_full_barrier, which marks it. A full barrier before every pass cost ~12% of Z-A's GPU time (4K,
+// RTX 4090): it drains the GPU ~60 times a frame. LARECOMP_VK_PASS_BARRIER=1: before every pass, as before.
+#define HZ_MAX 48
+static TexBackend *hz_w[HZ_MAX], *hz_r[HZ_MAX];  // rendered to / sampled since the last barrier
+static int hz_nw, hz_nr;
+static bool hz_all = true;  // something untracked was written since: the next pass waits for everything
+static bool hz_force;       // a draw needs what its pass's predecessors wrote: the next pass begins with the barrier
+// Passes (by their attachments) a draw had to end for the barrier: next time (frames repeat) they begin with it - a
+// pass ended early is begun again, which costs a tiled GPU a store and a load of its attachments
+static uint64_t hz_learned[1024], hz_pass_key;
+static uint64_t stat_pass_barriers, stat_pass_nobarrier;
+static bool hz_has(TexBackend *const *set, int n, const TexBackend *b) {
+    for (int i = 0; i < n; i++) if (set[i] == b) return true;
+    return false;
+}
+static void hz_add(TexBackend **set, int *n, TexBackend *b) {
+    if (!b || hz_has(set, *n, b)) return;
+    if (*n == HZ_MAX) hz_all = true;
+    else set[(*n)++] = b;
+}
+
 void vk_full_barrier(VkCommandBuffer cb) {
+    hz_all = true;  // (the work after it: not tracked)
     VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                            .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                            .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
@@ -862,6 +889,12 @@ const char *renderer_stats(void) {
         size_t n = strlen(stats_text);
         snprintf(stats_text + n, sizeof stats_text - n, " [gpu %.2f ms/frame]", vk_gpu_ms());
     }
+    if (stat_pass_barriers + stat_pass_nobarrier) {
+        size_t n = strlen(stats_text);
+        snprintf(stats_text + n, sizeof stats_text - n, " [barriers before %llu of %llu passes]", (unsigned long long)stat_pass_barriers,
+                 (unsigned long long)(stat_pass_barriers + stat_pass_nobarrier));
+        stat_pass_barriers = stat_pass_nobarrier = 0;
+    }
     if (atomic_load(&stat_ready_n)) {
         size_t n = strlen(stats_text);
         uint64_t rn = atomic_exchange(&stat_ready_n, 0);
@@ -1088,6 +1121,7 @@ static void vk_end_pass_at(int line) {
     oq_copy_out();  // (the occlusion query results of this pass, into the game's report words)
     if (g_storage_written) {  // the next passes sample (or keep accumulating into) what the shaders stored
         g_storage_written = false;
+        hz_all = true;
         VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
                               .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT};
         vkCmdPipelineBarrier(vk_cmd(), VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
@@ -1146,7 +1180,6 @@ static void begin_pass(void) {
         }
     }
     VkCommandBuffer cb = vk_cmd();
-    vk_full_barrier(cb);  // passes, copies and dispatches see each other's results
     {
         NvnTexture *t0n = st.rt.ncolor ? st.rt.color[0] : NULL;
         dl_note("pass %d color %ux%u fmt %#x depth %p", st.rt.ncolor, t0n ? t0n->width : 0, t0n ? t0n->height : 0, t0n ? t0n->format : 0,
@@ -1234,6 +1267,48 @@ static void begin_pass(void) {
         LOG("[pass] depth %p %ux%u layers %u view set %#x layer %u+%u level %u | layers %u, colors %u\n", (void *)st.rt.depth,
             st.rt.depth->width, st.rt.depth->height, ((TexBackend *)st.rt.depth->backend)->layers, st.rt.has_dview ? st.rt.dview.setmask : 0,
             st.rt.dview.min_layer, st.rt.dview.num_layers, st.rt.dview.base_level, layers, pass_ncolor);
+    {   // passes, copies and dispatches see each other's results: the barrier, where this pass needs one (hz_w, above)
+        static int always = -1;
+        if (always < 0) always = ENV("LARECOMP_VK_PASS_BARRIER") && atoi(ENV("LARECOMP_VK_PASS_BARRIER"));
+        TexBackend *att[9];
+        int natt = 0;
+        for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i] && st.rt.color[i]->backend) att[natt++] = st.rt.color[i]->backend;
+        if (st.rt.depth && st.rt.depth->backend) att[natt++] = st.rt.depth->backend;
+        uint64_t key = 0x9e3779b97f4a7c15ull;
+        for (int i = 0; i < natt; i++) key = (key ^ (uint64_t)(uintptr_t)att[i]) * 0x100000001b3ull;
+        hz_pass_key = key;
+        if (hz_learned[key & 1023] == key && (hz_nw || hz_all)) hz_force = true;  // (its draws will sample what came before)
+        bool need = always || hz_all || hz_force;
+        for (int i = 0; i < natt && !need; i++) need = hz_has(hz_w, hz_nw, att[i]) || hz_has(hz_r, hz_nr, att[i]);
+        if (need && !always && !hz_all) {
+            // only passes since the last barrier: their attachment writes and shader reads, before this pass's
+            // attachment accesses (write after write / read) and - a draw samples what they rendered - shader reads.
+            // The GPU can start this pass's work up to that point (vertex shading of a pass whose draws only render to
+            // what came before) instead of draining first: ~6% of Z-A's GPU time on the RTX 4090 (4K)
+            VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                                   .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                                                   VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+                                                   VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+                                   .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                                   .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                                                   VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
+                                                   (hz_force ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT : 0),
+                                   .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+                                                    VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+                                                    (hz_force ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_READ_BIT : 0)};
+            VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+            vkCmdPipelineBarrier2(cb, &di);
+            hz_nw = hz_nr = 0;
+            hz_force = false;
+            stat_pass_barriers++;
+        } else if (need) {
+            vk_full_barrier(cb);
+            hz_nw = hz_nr = 0;
+            hz_all = hz_force = false;
+            stat_pass_barriers++;
+        } else stat_pass_nobarrier++;
+        for (int i = 0; i < natt; i++) hz_add(hz_w, &hz_nw, att[i]);
+    }
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = layers,
                           .colorAttachmentCount = pass_ncolor, .pColorAttachments = ca,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
@@ -2560,6 +2635,43 @@ static bool is_attachment(NvnTexture *t) {
     if (t == st.rt.depth) return true;
     for (int i = 0; i < st.rt.ncolor; i++) if (t == st.rt.color[i]) return true;
     return false;
+}
+
+// A draw's part in the pass barriers (begin_pass). Before its pass begins (!after): a texture it samples that a pass
+// rendered to since the last barrier, or storage images it reads, need one - the running pass ends and the next begins
+// with it (the pass's own attachments: feedback, resolve_feedback; their earlier writes made the pass begin with it).
+// After: what it samples is recorded (write after read), and stores to guest memory or transform feedback make the
+// next pass wait for everything.
+static void hz_draw(Prog *pr, bool after) {
+    ShaderInfo *infos[2] = {pr->vi, pr->fi};
+    bool need = false;
+    for (int sg = 0; sg < 2; sg++) {
+        ShaderInfo *si = infos[sg];
+        if (!si || (sg == 1 && !pr->code[1])) continue;
+        if (after && si->gmem_stores) hz_all = true;
+        if (si->nimg && !after) {  // (storage images: any image another pass rendered to since)
+            for (int k = 0; k < hz_nw && !need; k++) {
+                bool own = st.rt.depth && st.rt.depth->backend == hz_w[k];
+                for (int c = 0; c < st.rt.ncolor; c++) own |= st.rt.color[c] && st.rt.color[c]->backend == hz_w[k];
+                need = !own;
+            }
+        }
+        for (int i = 0; i < si->ntex; i++) {
+            NvnTexture *t = shader_texture_object(sg, &si->tex[i]);
+            if (!t || !t->backend || is_attachment(t)) continue;
+            if (after) hz_add(hz_r, &hz_nr, t->backend);
+            else need |= hz_has(hz_w, hz_nw, t->backend);
+        }
+    }
+    if (after) {
+        if (st.xfb_active) hz_all = true;
+        return;
+    }
+    if (need && !hz_force) {
+        if (in_pass) hz_learned[hz_pass_key & 1023] = hz_pass_key;
+        vk_end_pass();
+        hz_force = true;
+    }
 }
 // The mip level t is rendered to in this pass (an attachment's view picks one; else level 0)
 static uint32_t attachment_level(NvnTexture *t) {
@@ -4002,12 +4114,14 @@ static void draw_(CmdRec *r, bool indexed) {
         }
     }
     resolve_feedback(pr);
+    hz_draw(pr, false);  // (a texture rendered to since the last barrier: this pass ends, the next begins with one)
     snap_reason = "draw-depthwrite";
     if (st.rt.depth && st.ds[0] && st.ds[1]) snapshots_invalidate(st.rt.depth);
     snap_reason = "draw-colorwrite";
     for (int i = 0; i < st.rt.ncolor; i++)
         if (st.rt.color[i] && ((st.channel_mask >> (i * 4)) & 0xF)) snapshots_invalidate(st.rt.color[i]);
     begin_pass();
+    hz_draw(pr, true);
     VkCommandBuffer cb = vk_cmd();
 
     uint32_t mode = (uint32_t)r->x[0];
