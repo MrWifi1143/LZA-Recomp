@@ -226,12 +226,15 @@ static const char *fneg_abs(const char *e, bool neg, bool abs_, char *buf) {
 }
 #define NA(e, n, a) fneg_abs((e), (n), (a), alloca(600))
 
-static const char *fresult(const char *e, bool sat, char *buf) {
-    if (sat) sprintf(buf, "as_type<uint>(saturate(%s))", e);
-    else sprintf(buf, "as_type<uint>(%s)", e);
+// A float result's bits (every caller passes a float expression): in GLSL the built-in floatBitsToUint - the as_u
+// overload is a real call in the SPIR-V at -O0, for the driver to inline (uint_arg)
+static const char *fresult(const char *e, bool sat, bool glsl, char *buf) {
+    const char *cast = glsl ? "floatBitsToUint" : "as_type<uint>";
+    if (sat) sprintf(buf, "%s(saturate(%s))", cast, e);
+    else sprintf(buf, "%s(%s)", cast, e);
     return buf;
 }
-#define FRES(e, sat) fresult((e), (sat), alloca(700))
+#define FRES(e, sat) fresult((e), (sat), c->glsl, alloca(700))
 
 static const char *cmp_op(int op) {
     static const char *const ops[] = {"false", "<", "==", "<=", ">", "!=", ">=", "num", "nan",

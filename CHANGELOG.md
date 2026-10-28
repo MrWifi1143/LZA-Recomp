@@ -7,10 +7,10 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
-- Shader compiles on a first play ~22% quicker: a register's bits as a float are now GLSL's own uintBitsToFloat instead
-  of an overloaded helper, which became a real function call in every shader's SPIR-V for the driver to inline (most
-  of a shader's casts). SPIR-V 28% smaller (Z-A's shader cache on disk: 1.5 GB -> 1.1 GB); Z-A's whole warm-up with
-  the driver's pipeline parts: 222 s instead of 284 s.
+- Shader compiles on a first play ~33% quicker: a register's bits as a float, and a float result's bits, are now
+  GLSL's own uintBitsToFloat / floatBitsToUint instead of overloaded helpers, which became real function calls in
+  every shader's SPIR-V for the driver to inline (most of a shader's casts). SPIR-V 39% smaller (Z-A's shader cache on
+  disk: 1.5 GB -> 0.94 GB); Z-A's whole warm-up with the driver's pipeline parts: 190 s instead of 284 s.
 - Shaders with branches are translated as plain structured code: their blocks in order, loops as loops, jump tables as
   a switch - instead of one state machine (`switch (pc)` in a loop) around the whole program, which 86% of Z-A's
   shaders were. The GPU's compiler can now keep values in registers across branches and see (and unroll) the loops.
