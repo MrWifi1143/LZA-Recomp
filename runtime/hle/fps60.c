@@ -433,7 +433,7 @@ static const struct { uint8_t id[8]; uint64_t entry; const char *name; uint64_t 
 static uint64_t g_pla60_entry;  // the interval-2 frame time of the running build (0: off)
 static uint64_t g_pla60_build;  // (that entry of the running build, also at 30)
 static bool g_pla60_patched;
-static uint64_t g_pla60_ns = 16666667;  // the frame time: 60 fps, or LARECOMP_LEGENDS_FPS=<n> (experimental: 90, 120, 144...)
+static uint64_t g_pla60_ns = 16666667;  // the frame time: 60 fps, 120, 144, FPS_UNLIMITED's, or LARECOMP_LEGENDS_FPS=<n>
 bool pla60_enabled(void) { return g_pla60_entry != 0; }
 uint64_t pla60_period_ns(void) { return g_pla60_ns; }
 
@@ -556,6 +556,18 @@ bool legends_set_fps(int fps) {
     return true;
 }
 
+// A real-time step (pla60_present) from the time since the last present: at least half the frame rate's period (two
+// presents close together), the time a short step took for granted taken off the next ones - the world's time adds up
+// to the real time exactly (clamped to the period, the paced presents' jitter ran the game a few % fast) - and at most
+// 33.3 ms, the game's own step at 30 fps: a longer stall (a loading hitch) is not made up.
+static uint64_t real_step(uint64_t real) {
+    static uint64_t ahead;  // (the world's time ahead of the real time)
+    uint64_t lo = g_pla60_ns / 2, dt = real > ahead ? real - ahead : 0;
+    ahead = dt < lo ? lo - dt : 0;
+    if (dt < lo) dt = lo;
+    return dt > 33333334u ? 33333334u : dt;
+}
+
 // each present: the table entry, once the game is loaded (read-only data: the page made writable first)
 void pla60_present(void) {
     {   // (research: LARECOMP_LIVE=<dir> with <dir>/fps holding a number: that frame rate from now on, the file removed)
@@ -573,7 +585,32 @@ void pla60_present(void) {
     { extern void fscan_present(uint64_t frame); extern uint64_t renderer_present_count(void); fscan_present(renderer_present_count()); }
     { extern void za_options_present(void); za_options_present(); }
     { extern void menu_mouse_present(void); menu_mouse_present(); }
-    if (!g_pla60_entry || g_pla60_patched) return;
+    if (g_pla60_entry && g_pla60_patched) {
+        // Real-time steps (Settings Frame Timing, the default; Unlimited always): the world steps by the time that
+        // really passed since the last present, not the frame rate's fixed period - a slow frame (a hitch, a dip below
+        // the frame rate) no longer slows the game down (walking, NPCs, animations). real_step: never more than 33.3 ms,
+        // the game's own step at 30 fps, the most it was made for. The menus' animations follow. LARECOMP_DYN_DT=0/1
+        // overrides the setting.
+        static int env = -2;
+        if (env == -2) env = getenv("LARECOMP_DYN_DT") ? atoi(getenv("LARECOMP_DYN_DT")) != 0 : -1;
+        bool dyn = env >= 0 ? env : !g_settings.fixed_steps || g_settings.fps >= FPS_UNLIMITED;
+        static bool was_dyn;
+        static uint64_t last;
+        uint64_t now = plat_now_ns();
+        volatile uint64_t *ft = (volatile uint64_t *)(uintptr_t)g_pla60_entry;
+        if (dyn && last) {
+            uint64_t dt = real_step(now - last);
+            *ft = dt;
+            g_ui_scale = (float)((double)dt / 33333334.0);
+        } else if (was_dyn) {  // (switched to Fixed in game: the period again)
+            *ft = g_pla60_ns;
+            g_ui_scale = (float)((double)g_pla60_ns / 33333334.0);
+        }
+        was_dyn = dyn;
+        last = now;
+        return;
+    }
+    if (!g_pla60_entry) return;
     volatile uint64_t *ft = (volatile uint64_t *)(uintptr_t)g_pla60_entry;
     if (*ft != 33333334u) return;
     plat_protect(g_pla60_entry & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);

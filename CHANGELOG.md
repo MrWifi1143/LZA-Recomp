@@ -7,6 +7,12 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- Frame rate: an Unlimited choice (Settings > Graphics and the start screen): as fast as the PC goes, paced at 360
+  at most. New Frame Timing row, Real Time by default: above 30 fps the world now steps by the time each frame really
+  took instead of the frame rate's fixed period, so a dip (a hitch, a busy street) no longer slows the game down -
+  walking, people, animations and the menus keep their speed. A step is never longer than 33.3 ms (the game's own at
+  30 fps). Fixed: the old way, each frame a fixed step. Unlimited always uses Real Time. Lumiose at 1440p with High
+  shadows and 4x people on an RTX 4090: ~150-160 fps unlimited. `LARECOMP_DYN_DT=0/1` overrides the setting.
 - GPU: the barrier before each render pass now waits only for what that pass needs: which images every pass
   rendered to and every draw sampled since the last barrier are tracked, a pass that touches none of them starts
   without one, and one that does waits only for the earlier passes' render-target writes (its vertex work can overlap

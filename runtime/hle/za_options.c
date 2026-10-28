@@ -69,12 +69,12 @@ typedef struct {
     void (*act)(int);  // (A on the row: runs it for the choice shown)
 } Row;
 
-static const int k_fps[] = {30, 60, 120, 144}, k_lines[] = {0, 540, 720, 1080, 1440, 2160};  // (540p: weak GPUs, ~half 1080p's GPU time)
+static const int k_fps[] = {30, 60, 120, 144, FPS_UNLIMITED}, k_lines[] = {0, 540, 720, 1080, 1440, 2160};  // (540p: weak GPUs, ~half 1080p's GPU time)
 static int find(const int *v, int n, int x) {
     for (int i = 0; i < n; i++) if (v[i] == x) return i;
     return 0;
 }
-static int get_fps(void) { return find(k_fps, 4, g_settings.next_fps ? g_settings.next_fps : g_settings.fps); }
+static int get_fps(void) { return find(k_fps, 5, g_settings.next_fps ? g_settings.next_fps : g_settings.fps); }
 // (120 / 144: the game's own logic was made for 30 and some of it counts frames; the row's description says so while
 // one of them is chosen - shown again right after the change, settings_screen_buttons)
 static const char *const k_fps_warning = "Experimental: scripted scenes play at 60 fps. If you get stuck, set 60 or 30 fps.";
@@ -84,6 +84,8 @@ static void set_fps(int i) {
     if (legends_set_fps(k_fps[i])) g_settings.fps = k_fps[i], g_settings.next_fps = 0;
     else g_settings.next_fps = k_fps[i] == g_settings.fps ? 0 : k_fps[i];
 }
+static int get_steps(void) { return g_settings.fixed_steps ? 1 : 0; }
+static void set_steps(int i) { g_settings.fixed_steps = i == 1; }
 static int get_res(void) { return find(k_lines, 6, g_settings.next_res_height ? g_settings.next_res_height - 1 : g_settings.res_height); }
 static void set_res(int i) { g_settings.next_res_height = k_lines[i] == g_settings.res_height ? 0 : k_lines[i] + 1; }
 static int get_full(void) { return g_settings.fullscreen ? 1 : 0; }
@@ -149,7 +151,9 @@ static const Row k_rows[] = {  // (per tab in this order; Gameplay's first is th
     {0, "Pokémon Files", "Press A to save your boxed Pokémon as PKHeX files, or add the ones in pokemon/import.",
      CHOICE, 2, {"Export", "Import"}, pkm_files_get, pkm_files_set, pkm_files_run},
     {1, "Frame Rate", "Choose how many frames are drawn a second.",
-     CHOICE, 4, {"30 fps", "60 fps", "120 fps", "144 fps"}, get_fps, set_fps},
+     CHOICE, 5, {"30 fps", "60 fps", "120 fps", "144 fps", "Unlimited"}, get_fps, set_fps},
+    {1, "Frame Timing", "Choose whether the game keeps full speed when the frame rate dips (Real Time) or slows down with it.",
+     CHOICE, 2, {"Real Time", "Fixed"}, get_steps, set_steps},
     {1, "Resolution (Next Start)", "Choose the resolution the game is drawn at, from the next time you start it.",
      CHOICE, 6, {"Auto", "540p", "720p", "1080p", "1440p", "4K"}, get_res, set_res},
     {1, "Screen Mode", "Choose whether the game fills the screen or plays in a window.", CHOICE, 2, {"Window", "Fullscreen"},
