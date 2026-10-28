@@ -77,7 +77,7 @@ static int find(const int *v, int n, int x) {
 static int get_fps(void) { return find(k_fps, 4, g_settings.next_fps ? g_settings.next_fps : g_settings.fps); }
 // (120 / 144: the game's own logic was made for 30 and some of it counts frames; the row's description says so while
 // one of them is chosen - shown again right after the change, settings_screen_buttons)
-static const char *const k_fps_warning = "Experimental: scripted scenes play at 60 fps at this rate. If you get stuck, set 60 or 30 fps.";
+static const char *const k_fps_warning = "Experimental: scripted scenes play at 60 fps. If you get stuck, set 60 or 30 fps.";
 static int g_info_pending = -1;  // (a row whose description is to be drawn again)
 bool legends_set_fps(int fps);  // runtime/hle/fps60.c: at once
 static void set_fps(int i) {
@@ -128,7 +128,7 @@ static void set_vol(int v) { g_settings.volume = (float)v / 10; }
 static const Row k_rows[] = {  // (per tab in this order; Gameplay's first is the Controls list: settings_screen_buttons)
     {0, "Controls", "Press A to see and change the key and the controller button for each action.", CHOICE, 2,
      {"Keyboard", "Controller"}, ctl_col, ctl_open},
-    {0, "Button Prompts", "Choose which buttons prompts show. Auto shows the ones you are playing with.", CHOICE, 5,
+    {0, "Button Prompts", "Choose which button prompts show. Auto shows the ones you are playing with.", CHOICE, 5,
      {"Auto", "Switch", "Xbox", "PlayStation", "Keyboard"}, get_prompts, set_prompts},
     {0, "Stick Dead Zone", "Choose how far a controller's sticks must move before they count.", BAR10, 0, {0}, get_dz, set_dz},
     {0, "Mouse Camera", "Choose whether a click in the game lets the mouse turn the camera. Esc lets it go.",
@@ -138,25 +138,23 @@ static const Row k_rows[] = {  // (per tab in this order; Gameplay's first is th
      {"Regular", "Inverted"}, get_minvy, set_minvy},
     {0, "Mouse Horizontal", "Choose which way the camera turns when you move the mouse left and right.", CHOICE, 2,
      {"Regular", "Inverted"}, get_minvx, set_minvx},
-    {0, "In Background", "Choose what the game does while you are in another window: keep playing, mute its sound, or pause.",
+    {0, "In Background", "Choose what the game does while you are in another window.",
      CHOICE, 3, {"Keep Playing", "Mute", "Pause"}, get_bg, set_bg},
-    {0, "Start Screen", "Choose whether the start screen shows when the game starts. Holding Shift while starting shows it.",
+    {0, "Start Screen", "Choose whether the start screen shows. Holding Shift as the game starts shows it.",
      CHOICE, 2, {"Show", "Skip"}, get_skip, set_skip},
-    {0, "PKHeX Link", "Let PKHeX's LiveHeX plugin see and edit your boxes as you play: on this PC or your network.",
+    {0, "PKHeX Link", "Let PKHeX's LiveHeX plugin edit your boxes as you play, from this PC or your network.",
      CHOICE, 3, {"Off", "This PC", "Network"}, get_pklink, set_pklink},
-    {0, "Pokémon Files", "Press A to save your boxed Pokémon as PKHeX files, or to add the ones in pokemon/import.",
+    {0, "Pokémon Files", "Press A to save your boxed Pokémon as PKHeX files, or add the ones in pokemon/import.",
      CHOICE, 2, {"Export", "Import"}, pkm_files_get, pkm_files_set, pkm_files_run},
     {1, "Frame Rate", "Choose how many frames are drawn a second.",
      CHOICE, 4, {"30 fps", "60 fps", "120 fps", "144 fps"}, get_fps, set_fps},
-    {1, "Resolution (Next Start)", "Choose the resolution the game is drawn at. It applies the next time you start the game.",
+    {1, "Resolution (Next Start)", "Choose the resolution the game is drawn at, from the next time you start it.",
      CHOICE, 5, {"Auto", "720p", "1080p", "1440p", "4K"}, get_res, set_res},
     {1, "Screen Mode", "Choose whether the game fills the screen or plays in a window.", CHOICE, 2, {"Window", "Fullscreen"},
      get_full, set_full},
     {1, "Anti-Aliasing", "Choose whether to smooth jagged edges (SMAA).", CHOICE, 2, {"On", "Off"}, get_aa, set_aa},
-    {1, "Draw Distance (People)", "Choose how many people and Pokémon are drawn at once. More shows crowds farther away "
-     "but costs performance.", CHOICE, 4, {"Switch", "2x", "4x", "Max"}, get_crowd, set_crowd},
-    {1, "Shadows (Next Start)", "Choose how detailed shadows are. Higher shows the shapes of people and Pokémon in their "
-     "shadows.", CHOICE, 3, {"Switch", "High", "Ultra"}, get_shadows, set_shadows},
+    {1, "Draw Distance (People)", "Choose how many people and Pokémon are drawn at once. More costs performance.", CHOICE, 4, {"Switch", "2x", "4x", "Max"}, get_crowd, set_crowd},
+    {1, "Shadows (Next Start)", "Choose how sharp shadows are. Higher shows the shapes of people and Pokémon.", CHOICE, 3, {"Switch", "High", "Ultra"}, get_shadows, set_shadows},
     {1, "FPS Counter", "Choose whether to show the frame rate in the corner of the screen.", CHOICE, 2, {"Show", "Hide"},
      get_fpsc, set_fpsc},
     {2, "Master Volume", "Adjust the volume of all of the game's sound.", BAR10, 0, {0}, get_vol, set_vol},
