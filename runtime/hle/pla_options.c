@@ -106,6 +106,8 @@ static int get_minvy(void) { return g_settings.mouse_invert_y ? 1 : 0; }
 static void set_minvy(int i) { g_settings.mouse_invert_y = i == 1; }
 static int get_minvx(void) { return g_settings.mouse_invert_x ? 1 : 0; }
 static void set_minvx(int i) { g_settings.mouse_invert_x = i == 1; }
+static int get_shl(void) { return g_settings.shader_nowait ? 1 : 0; }
+static void set_shl(int i) { g_settings.shader_nowait = i; }
 static int get_bg(void) { return g_settings.background >= BG_KEEP && g_settings.background <= BG_PAUSE ? g_settings.background : BG_KEEP; }
 static void set_bg(int i) { g_settings.background = i; }
 void pkm_link_apply(void);  // (hle/pkm_link.c)
@@ -126,6 +128,8 @@ static const Row k_rows[] = {
     {"Screen Mode", "Choose whether the game fills the screen or plays in a window.", CHOICE, 2, {"Window", "Fullscreen"},
      get_full, set_full},
     {"Anti-Aliasing", "Choose whether to smooth jagged edges (SMAA).", CHOICE, 2, {"Enabled", "Disabled"}, get_aa, set_aa},
+    {"Shader Loading", "Wait for new things to load (may stutter), or show them a moment later.", CHOICE, 2,
+     {"Wait", "Don't Wait"}, get_shl, set_shl},
     {"Button Prompts", "Choose which button prompts show. Auto shows the ones you are playing with.", CHOICE, 5,
      {"Auto", "Switch", "Xbox", "PlayStation", "Keyboard"}, get_prompts, set_prompts},
     {"FPS Counter", "Choose whether to show the frame rate in the corner of the screen.", CHOICE, 2, {"Show", "Hide"},

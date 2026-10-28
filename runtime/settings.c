@@ -57,6 +57,7 @@ static void parse_line(const char *line) {
     else if (!strcmp(key, "mouse_camera")) g_settings.mouse_camera = atoi(val) != 0;
     else if (!strcmp(key, "mouse_invert_x")) g_settings.mouse_invert_x = atoi(val) != 0;
     else if (!strcmp(key, "mouse_invert_y")) g_settings.mouse_invert_y = atoi(val) != 0;
+    else if (!strcmp(key, "shader_loading")) g_settings.shader_nowait = !strcmp(val, "nowait") || !strcmp(val, "1");
     else if (!strcmp(key, "pkhex_link")) g_settings.pkhex_link = atoi(val) >= 0 && atoi(val) <= 2 ? atoi(val) : 0;
     else if (!strcmp(key, "background")) g_settings.background = atoi(val) >= BG_KEEP && atoi(val) <= BG_PAUSE ? atoi(val) : BG_KEEP;
     else if (!strcmp(key, "resolution")) {
@@ -126,6 +127,7 @@ void settings_save(void) {
     fprintf(f, "skip_start_screen = %d\n", g_settings.skip_start);
     fprintf(f, "mouse_camera = %d\n", g_settings.mouse_camera);
     fprintf(f, "mouse_invert_x = %d\nmouse_invert_y = %d\n", g_settings.mouse_invert_x, g_settings.mouse_invert_y);
+    fprintf(f, "shader_loading = %s\n", g_settings.shader_nowait ? "nowait" : "wait");
     fprintf(f, "pkhex_link = %d\n", g_settings.pkhex_link);
     fprintf(f, "background = %d\n", g_settings.background);
     fprintf(f, "upscaler = %s\n", g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");

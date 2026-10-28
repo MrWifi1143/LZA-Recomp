@@ -14,6 +14,9 @@ Arceus:
 - The shader warm-up's translations are found in play (filed by what a shader reads, not by everything bound; 13,500
   translations checked identical). The new translator means one more warm-up at the next start.
 - Screenshots are encoded on a thread of their own (each was a ~250 ms hitch).
+- Settings > Shader Loading: Wait / Don't Wait (from Z-A; also on the start screen): Don't Wait draws on while a
+  shader is built the first time and shows it a moment later, instead of a stutter. ini `shader_loading`.
+- Start screen: In background, PKHeX Link and mouse invert, as in the game's Settings.
 - PKHeX (from Z-A, the same runtime/hle/pkm_link.c): Settings > PKHeX Link (Off / This PC / Network) answers PKHeX's
   LiveHeX plugin like sys-botbase on a Switch (port 6000): it detects Arceus 1.1.1 and reads and writes the boxes
   while you play. Settings > Pokémon Files: A on Export saves every Pokémon in your boxes as a PKHeX .pa8 file

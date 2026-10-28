@@ -3285,10 +3285,11 @@ static void draw(CmdRec *r, bool indexed) {
 // programs at once when a scene starts (its pipelines ~6 ms each): at 20 ms its characters popped in piece by piece
 // even warm; 100 ms (a hitch at the cut, where the game loads anyway) took the skipped draws from 267 to 41 on its
 // opening without more frames over 50 ms. A cold cache still skips what is left. LARECOMP_SHADER_WAIT_MS=<ms> (0: never).
+// Settings' Shader Loading "Don't Wait" (g_settings.shader_nowait) is 0: draws go on and show what they wait for a moment
+// later (Z-A's intro on cold caches: 5 two-second spans with a frame over 100 ms instead of 19).
 static bool wait_built(_Atomic int *state) {
     if (atomic_load(state) != 0) return true;
-    static int64_t budget = -1;
-    if (budget < 0) budget = (getenv("LARECOMP_SHADER_WAIT_MS") ? atoi(getenv("LARECOMP_SHADER_WAIT_MS")) : 100) * 1000000ll;
+    int64_t budget = (getenv("LARECOMP_SHADER_WAIT_MS") ? atoi(getenv("LARECOMP_SHADER_WAIT_MS")) : g_settings.shader_nowait ? 0 : 100) * 1000000ll;
     if (sync_shaders()) return true;  // (built already)
     extern uint64_t vk_frame_counter(void);
     static uint64_t frame;
