@@ -34,7 +34,11 @@ static void on_prof(int sig, siginfo_t *si, void *ctx) {
     uint32_t i = atomic_fetch_add_explicit(&g_n, 1, memory_order_relaxed);
     if (i >= CAP) return;
     g_buf[i].tid = (uint32_t)syscall(SYS_gettid);
+#if defined(__aarch64__)
+    g_buf[i].pc = (uint64_t)((ucontext_t *)ctx)->uc_mcontext.pc;
+#else
     g_buf[i].pc = (uint64_t)((ucontext_t *)ctx)->uc_mcontext.gregs[REG_RIP];
+#endif
 }
 
 static uint64_t now_ns(void) {

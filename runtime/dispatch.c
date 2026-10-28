@@ -187,6 +187,29 @@ __attribute__((naked, noreturn)) void rt_sj_long(void **buf, int v) {
         "movdqu 192(%rcx), %xmm13\n\t" "movdqu 208(%rcx), %xmm14\n\t" "movdqu 224(%rcx), %xmm15\n\t"
         "movq 64(%rcx), %rsp\n\t" "jmpq *72(%rcx)\n\t");
 }
+#elif defined(__aarch64__)
+typedef struct { uint64_t ret, sp; void *buf[30]; } JmpPoint;  // (rt_sj_set below: x19-x30, sp, d8-d15)
+// AArch64 setjmp / longjmp without unwinding (cpu.h: LLVM has no __builtin_longjmp on this target): the callee-saved
+// registers x19-x28, the frame pointer and the return address (x29, x30), sp, and d8-d15 (AAPCS64)
+__attribute__((naked, returns_twice)) int rt_sj_set(void **buf) {
+    __asm__ volatile(
+        "stp x19, x20, [x0, #0]\n\t" "stp x21, x22, [x0, #16]\n\t" "stp x23, x24, [x0, #32]\n\t"
+        "stp x25, x26, [x0, #48]\n\t" "stp x27, x28, [x0, #64]\n\t" "stp x29, x30, [x0, #80]\n\t"
+        "mov x2, sp\n\t" "str x2, [x0, #96]\n\t"
+        "stp d8, d9, [x0, #104]\n\t" "stp d10, d11, [x0, #120]\n\t" "stp d12, d13, [x0, #136]\n\t"
+        "stp d14, d15, [x0, #152]\n\t"
+        "mov w0, #0\n\t" "ret\n\t");
+}
+__attribute__((naked, noreturn)) void rt_sj_long(void **buf, int v) {
+    __asm__ volatile(
+        "ldp x19, x20, [x0, #0]\n\t" "ldp x21, x22, [x0, #16]\n\t" "ldp x23, x24, [x0, #32]\n\t"
+        "ldp x25, x26, [x0, #48]\n\t" "ldp x27, x28, [x0, #64]\n\t" "ldp x29, x30, [x0, #80]\n\t"
+        "ldr x2, [x0, #96]\n\t" "mov sp, x2\n\t"
+        "ldp d8, d9, [x0, #104]\n\t" "ldp d10, d11, [x0, #120]\n\t" "ldp d12, d13, [x0, #136]\n\t"
+        "ldp d14, d15, [x0, #152]\n\t"
+        "cmp w1, #0\n\t" "csinc w0, w1, wzr, ne\n\t"  // (longjmp(b, 0) returns 1)
+        "br x30\n\t");
+}
 #else
 typedef struct { uint64_t ret, sp; void *buf[5]; } JmpPoint;
 #endif

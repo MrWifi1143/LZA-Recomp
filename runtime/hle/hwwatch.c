@@ -32,7 +32,11 @@ static void on_hit(int sig, siginfo_t *si, void *ctx) {
     (void)sig;
     (void)si;
     ucontext_t *uc = ctx;
+#if defined(__aarch64__)
+    uint64_t pc = (uint64_t)uc->uc_mcontext.pc, off = 0;
+#else
     uint64_t pc = (uint64_t)uc->uc_mcontext.gregs[REG_RIP], off = 0;
+#endif
     const char *nm = rt_host_fn_name(pc, &off);
     static char seen[96][64];
     static int nseen;

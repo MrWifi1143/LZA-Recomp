@@ -1,7 +1,9 @@
 #include <ctype.h>
 // Executes recorded NVN command lists with Vulkan (port of renderer.m; same structure, same behaviour).
 #include <SDL3/SDL_cpuinfo.h>
+#if defined(__x86_64__)
 #include <immintrin.h>
+#endif
 #include <SDL3/SDL_timer.h>
 #include <float.h>
 #include <math.h>
@@ -389,6 +391,7 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
 // ================================================================== transient memory ring
 // The largest index of a draw (bounds the vertex data copied for it), ignoring the restart value: AVX2 where the CPU has it (the
 // game code needs it too), a plain loop elsewhere. A draw scans a few thousand indices: ~1.4 us scalar, ~0.15 us here.
+#if defined(__x86_64__)
 __attribute__((target("avx2"))) static uint32_t scan_max16_avx2(const uint16_t *q, uint32_t n, uint16_t restart) {
     __m256i acc = _mm256_setzero_si256(), rs = _mm256_set1_epi16((short)restart);
     uint32_t i = 0;
@@ -417,16 +420,23 @@ __attribute__((target("avx2"))) static uint32_t scan_max32_avx2(const uint32_t *
     for (; i < n; i++) if (q[i] != restart && q[i] > m) m = q[i];
     return m;
 }
+#endif
 static uint32_t scan_max_index(const void *src, uint32_t isz, uint32_t n, uint32_t restart) {
+#if defined(__x86_64__)
     static int avx2 = -1;
     if (avx2 < 0) avx2 = plat_cpu_x86_v3();
+#endif
     uint32_t m = 0;
     if (isz == 2) {
+#if defined(__x86_64__)
         if (avx2) return scan_max16_avx2(src, n, (uint16_t)restart);
+#endif
         const uint16_t *q = src;
         for (uint32_t i = 0; i < n; i++) if (q[i] > m && q[i] != (uint16_t)restart) m = q[i];
     } else {
+#if defined(__x86_64__)
         if (avx2) return scan_max32_avx2(src, n, restart);
+#endif
         const uint32_t *q = src;
         for (uint32_t i = 0; i < n; i++) if (q[i] > m && q[i] != restart) m = q[i];
     }
