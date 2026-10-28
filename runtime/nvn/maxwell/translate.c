@@ -2100,6 +2100,32 @@ static bool is_branch_target_op(uint64_t w) {
 static bool id_start(char ch) { return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_'; }
 static bool id_char(char ch) { return id_start(ch) || (ch >= '0' && ch <= '9'); }
 
+// `(r12)`, `(cb3[283][0])`, `(0x3f800000u)`: a uint for certain - its bits as a float are the built-in
+// uintBitsToFloat, not the as_f overload, which at -O0 is a real call in the SPIR-V (a temporary, a store, a call)
+// that the driver then has to inline: most of a shader's as_f are registers.
+static bool uint_arg(const char *q) {
+    if (*q++ != '(') return false;
+    if (*q == 'r') {
+        q++;
+        if (*q < '0' || *q > '9') return false;
+        while (*q >= '0' && *q <= '9') q++;
+    } else if (q[0] == 'c' && q[1] == 'b') {
+        q += 2;
+        if (*q < '0' || *q > '9') return false;
+        while (*q >= '0' && *q <= '9') q++;
+        for (int k = 0; k < 2; k++) {
+            if (*q++ != '[' || *q < '0' || *q > '9') return false;
+            while (*q >= '0' && *q <= '9') q++;
+            if (*q++ != ']') return false;
+        }
+    } else if (q[0] == '0' && q[1] == 'x') {
+        q += 2;
+        while ((*q >= '0' && *q <= '9') || (*q >= 'a' && *q <= 'f') || (*q >= 'A' && *q <= 'F')) q++;
+        if (*q++ != 'u') return false;
+    } else return false;
+    return *q == ')';
+}
+
 // MSL-spelled instruction body -> GLSL (token-aware; comments and numbers are copied as they are).
 static void glsl_rewrite(Ctx *c, Str *o, const char *src) {
     static const char *const map[][2] = {
@@ -2151,7 +2177,7 @@ static void glsl_rewrite(Ctx *c, Str *o, const char *src) {
             const char *gt = strchr(p, '>');
             if (!gt) { fail(c, "glsl: bad as_type"); return; }
             int tn = (int)(gt - p - 1);
-            if (tn == 5 && !strncmp(p + 1, "float", 5)) sp(o, "as_f");
+            if (tn == 5 && !strncmp(p + 1, "float", 5)) sp(o, uint_arg(gt + 1) ? "uintBitsToFloat" : "as_f");
             else if (tn == 4 && !strncmp(p + 1, "uint", 4)) sp(o, "as_u");
             else if (tn == 3 && !strncmp(p + 1, "int", 3)) sp(o, "as_i");
             else if (tn == 5 && !strncmp(p + 1, "half2", 5)) sp(o, "unpack_h2");
