@@ -81,12 +81,34 @@ typedef struct {
     bool uses_gmem_store;    // STG present: the gmem buffer is not readonly
     uint32_t cbuf_need[18];  // highest constant vec4 index + 1 per cbuf (array size of the GLSL block)
     const uint32_t *flow_to;  // flow_static: where SYNC / BRK / CONT at instruction i go (flow_to[i]); NULL: run-time stacks
+    bool fwd;                 // GLSL: blocks in order with reached flags and loops, not the state machine (translate_impl)
+    Str fwd_decl;             // (its flags' declarations)
+    const size_t *brx_at;     // (c->fwd: each BRX's instruction index and its targets, for its switch)
+    uint32_t *const *brx_to;
+    const int *brx_nto;
+    int nbrx;
 } Ctx;
 
 static uint64_t bits(uint64_t w, int lo, int n) { return (w >> lo) & ((n == 64) ? ~0ull : ((1ull << n) - 1)); }
 static int64_t sbits(uint64_t w, int lo, int n) {
     int64_t v = (int64_t)bits(w, lo, n);
     return (v & (1ll << (n - 1))) ? v - (1ll << n) : v;
+}
+
+// A jump from pc `from` to pc `to` (0: nowhere, the end): the state machine's next case, or (c->fwd) that block's flag
+// set - back to a loop's start: also its loop's flag - and the rest of this block skipped
+static void jump_set(char *set, size_t n, uint32_t to, uint32_t from) {
+    if (!to) snprintf(set, n, "exit_now = true;");
+    else if (to <= from) snprintf(set, n, "b%u = true; l%u = true;", to, to);
+    else snprintf(set, n, "b%u = true;", to);
+}
+static void jump(Ctx *c, const char *cond, uint32_t to, uint32_t from) {
+    if (c->fwd) {
+        char set[64];
+        jump_set(set, sizeof set, to, from);
+        if (cond) sp(&c->body, "    if (%s) { %s break; }\n", cond, set);
+        else sp(&c->body, "    %s break;\n", set);
+    } else sp(&c->body, cond ? "    if (%s) { pc = %uu; continue; }\n" : "%s    pc = %uu; continue;\n", cond ? cond : "", to);
 }
 
 static void fail(Ctx *c, const char *fmt, ...) {
@@ -1167,8 +1189,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         uint32_t cond = (uint32_t)bits(w, 0, 5);
         if (cond != 15 && cond < 16 && cc_test[cond] && c->ccz_modelled) {
             c->uses_cc = true;
-            sp(&c->body, "    if (%s) { pc = %uu; continue; }\n", cc_test[cond], target);
-        } else sp(&c->body, "    pc = %uu; continue;\n", target);  // (T, or flags no modelled instruction set: as before)
+            jump(c, cc_test[cond], target, pc);
+        } else jump(c, NULL, target, pc);  // (T, or flags no modelled instruction set: as before)
     } else if (OPM(0xe290000000000000ull, 0xfff0000000000020ull)) {  // SSY
         c->uses_branches = true;
         if (!c->flow_to) sp(&c->body, "    crs[crs_n & 31u] = %uu; crk[crs_n & 31u] = 0u; crs_n++;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
@@ -1179,13 +1201,13 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         c->uses_branches = true;
         if (!c->flow_to) sp(&c->body, "    crs[crs_n & 31u] = %uu; crk[crs_n & 31u] = 2u; crs_n++;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
     } else if (OPM(0xf0f8000000000000ull, 0xfff8000000000000ull)) {  // SYNC
-        if (c->flow_to) sp(&c->body, "    pc = %uu; continue;\n", c->flow_to[pc / 8]);
+        if (c->flow_to) jump(c, NULL, c->flow_to[pc / 8], pc);
         else sp(&c->body, "    crs_n--; pc = crs[crs_n & 31u]; continue;\n");
     } else if (OPM(0xe340000000000000ull, 0xfff0000000000000ull)) {  // BRK
-        if (c->flow_to) sp(&c->body, "    pc = %uu; continue;\n", c->flow_to[pc / 8]);
+        if (c->flow_to) jump(c, NULL, c->flow_to[pc / 8], pc);
         else sp(&c->body, "    while (crs_n > 1u && crk[(crs_n - 1u) & 31u] != 1u) crs_n--; crs_n--; pc = crs[crs_n & 31u]; continue;\n");
     } else if (OPM(0xe350000000000000ull, 0xfff0000000000000ull)) {  // CONT
-        if (c->flow_to) sp(&c->body, "    pc = %uu; continue;\n", c->flow_to[pc / 8]);
+        if (c->flow_to) jump(c, NULL, c->flow_to[pc / 8], pc);
         else sp(&c->body, "    while (crs_n > 1u && crk[(crs_n - 1u) & 31u] != 2u) crs_n--; pc = crs[(crs_n - 1u) & 31u]; continue;\n");
     } else if (OPM(0xf0f0000000000000ull, 0xfff8000000000000ull) || OPM(0x50b0000000000000ull, 0xfff8000000000000ull) ||
                OPM(0xef98000000000000ull, 0xfff8000000000000ull)) {
@@ -2022,8 +2044,24 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     p2r_done:;
     } else if (OPM(0xe250000000000000ull, 0xfff0000000000020ull)) {  // BRX reg + imm (relative)
         // computed targets can name a scheduling word; execution continues at the next slot (as for BRA)
-        sp(&c->body, "    { uint t = %uu + %s + 0x%08xu; if (((t >> 3) & 3u) == 0u) t += 8u; pc = t; continue; }\n", pc + 8, R(a),
-           (uint32_t)sbits(w, 20, 24));
+        if (c->fwd) {  // (its targets found ahead: translate_impl)
+            int b = 0;
+            while (b < c->nbrx && c->brx_at[b] != pc / 8) b++;
+            sp(&c->body, "    { uint t = %uu + %s + 0x%08xu; if (((t >> 3) & 3u) == 0u) t += 8u;\n      switch (t) {", pc + 8, R(a),
+               (uint32_t)sbits(w, 20, 24));
+            for (int j = 0; b < c->nbrx && j < c->brx_nto[b]; j++) {
+                uint32_t to = c->brx_to[b][j];
+                int k = 0;
+                while (k < j && c->brx_to[b][k] != to) k++;
+                if (k < j) continue;  // (a target twice)
+                char set[64];
+                jump_set(set, sizeof set, to, pc);
+                sp(&c->body, "%s case %uu: %s break;", j % 4 == 3 ? "\n       " : "", to, set);
+            }
+            sp(&c->body, " default: exit_now = true; break; }\n      break; }\n");
+        } else
+            sp(&c->body, "    { uint t = %uu + %s + 0x%08xu; if (((t >> 3) & 3u) == 0u) t += 8u; pc = t; continue; }\n", pc + 8, R(a),
+               (uint32_t)sbits(w, 20, 24));
     } else if (OPM(0x50a0000000000000ull, 0xfff8000000000000ull)) {  // CSETP (zero/sign flags only)
         int test = (int)bits(w, 8, 5);
         const char *cond;
@@ -2285,7 +2323,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (info->cbuf_mask >> 18) fail(c, "cbuf index out of range");
     for (int i = 0; i < info->ntex; i++)
         if (info->tex[i].shadow && info->tex[i].type == TEXTYPE_3D) fail(c, "3d shadow texture");
-    if (c->fail) { free(body.buf); free(c->body.buf); free(c); return info; }
+    if (c->fail) { free(body.buf); free(c->body.buf); free(c->fwd_decl.buf); free(c); return info; }
     int set = stage == STAGE_FRAGMENT ? 1 : 0;
     Str s = {0};
     sp(&s, "%s%s", glsl_prelude, stage == STAGE_FRAGMENT ? glsl_rsc_fragment : glsl_rsc);
@@ -2382,7 +2420,9 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (c->uses_cc) sp(&s, "  uint cc = 0u; bool ccz = false, ccs = false;\n");
     if (c->uses_local) sp(&s, "  uint lmem[%d]; for (int li_ = 0; li_ < %d; li_++) lmem[li_] = 0u;\n", LMEM_WORDS, LMEM_WORDS);
     if (dbg) sp(&s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");
-    if (any_branch) {
+    if (any_branch && c->fwd) {  // (the blocks, the last one closed here: translate_impl)
+        sp(&s, "%s  do {\n%s  } while (false);\n", c->fwd_decl.buf, body.buf ? body.buf : "");
+    } else if (any_branch) {
         sp(&s, "  uint pc = 8u; uint crs[32]; uint crk[32]; uint crs_n = 0u;\n");
         sp(&s, "  bool exit_now = false;\n");
         sp(&s, "  for (uint guard = 0u; guard < 100000u; guard++) {\n  switch (pc) {\n");
@@ -2429,6 +2469,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     info->attr_mask = c->in_attr_mask;
     info->out_mask = stage == STAGE_FRAGMENT ? c->omap_target : c->out_attr_mask;
     free(c->body.buf);
+    free(c->fwd_decl.buf);
     free(c);
     return info;
 }
@@ -2546,6 +2587,18 @@ static bool flow_static(const uint64_t *code, size_t end, const size_t *brx, int
     return ok;
 }
 
+// c->fwd: the loops that end at label i (or the end), the innermost first: again while their jump back set l<pc>, with
+// the flags of the blocks inside cleared
+static void fwd_loops_end(Ctx *c, const uint8_t *label, const size_t *lend, size_t i) {
+    for (size_t h = i; h-- > 0;) {
+        if (lend[h] != i) continue;
+        sp(&c->body, "  if (!l%u) break;\n  l%u = false;", (uint32_t)(h * 8), (uint32_t)(h * 8));
+        for (size_t j = h + 1; j < i; j++)
+            if (label[j] && j % 4) sp(&c->body, " b%u = false;", (uint32_t)(j * 8));
+        sp(&c->body, "\n  }\n  if (exit_now) break;\n");
+    }
+}
+
 static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, const uint8_t *consts, size_t nconsts, int stage,
                                   const ShaderKey *key) {
     ShaderInfo *info = calloc(1, sizeof *info);
@@ -2660,7 +2713,56 @@ static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, const ui
         flow_to = calloc(end + 4, sizeof *flow_to);
         if (!flow_static((const uint64_t *)code, end, brx, nbrx, brx_to, brx_nto, flow_to)) { free(flow_to); flow_to = NULL; }
     }
-    for (int b = 0; b < nbrx; b++) free(brx_to[b]);
+    // GLSL with the stacks worked out ahead: the program as its blocks in address order, each run when the one before
+    // fell into it or a jump set its flag (b<pc>; a jump: the flag, then `break` out of its block's do-while), a jump back
+    // making a loop around the blocks from its target through its own (a for loop that runs again while the jump back
+    // set its flag l<pc>, the flags inside cleared for the next round), instead of the switch (pc) state machine in a
+    // loop - which the GPU's compiler gets as one loop around everything (every block an iteration, nothing kept in a
+    // register across a jump): Z-A, 86% of its programs. Loops that overlap without one inside the other (none seen so
+    // far) keep the state machine. LARECOMP_XLAT_NO_FWD=1: the state machine always.
+    static int no_fwd = -1;
+    if (no_fwd < 0) no_fwd = getenv("LARECOMP_XLAT_NO_FWD") != NULL;
+    c->fwd = c->glsl && flow_to && !no_fwd;
+    size_t *lend = NULL;  // lend[h]: a loop starts at instruction h and ends before the label lend[h] (0: none)
+    if (c->fwd) {
+        lend = calloc(end + 4, sizeof *lend);
+        size_t *last = calloc(end + 4, sizeof *last);  // (the last jump back to h)
+        for (size_t i = 0; i < end; i++) {
+            if (i % 4 == 0) continue;
+            uint64_t w = ((const uint64_t *)code)[i], top12 = w & 0xfff0000000000000ull;
+            uint32_t pc = (uint32_t)(i * 8);
+            if (bits(w, 16, 3) == PT && bits(w, 19, 1) && top12 != 0xe290000000000000ull && top12 != 0xe2a0000000000000ull &&
+                top12 != 0xe2b0000000000000ull && top12 != 0xe270000000000000ull) continue;  // (@!PT: never runs)
+            uint32_t one, *to = NULL;
+            int nto = 0;
+            if ((w & 0xfff0000000000020ull) == 0xe240000000000000ull) one = norm_target((int64_t)pc + 8 + sbits(w, 20, 24)), to = &one, nto = 1;
+            else if ((w & 0xfff8000000000000ull) == 0xf0f8000000000000ull || top12 == 0xe340000000000000ull ||
+                     top12 == 0xe350000000000000ull) one = flow_to[i], to = &one, nto = one != 0;
+            else if (top12 == 0xe250000000000000ull)
+                for (int b = 0; b < nbrx; b++) if (brx[b] == i) to = brx_to[b], nto = brx_nto[b];
+            for (int j = 0; j < nto; j++)
+                if (to[j] <= pc && to[j] / 8 < end) last[to[j] / 8] = i > last[to[j] / 8] ? i : last[to[j] / 8], lend[to[j] / 8] = 1;
+        }
+        for (size_t h = 0; h < end; h++) {
+            if (!lend[h]) continue;
+            size_t e = last[h] + 1;
+            while (e < end && !label[e]) e++;
+            lend[h] = e;
+        }
+        for (size_t h1 = 0; h1 < end && c->fwd; h1++)  // (loops one inside the other, or apart)
+            for (size_t h2 = h1 + 1; lend[h1] && h2 < lend[h1] && c->fwd; h2++)
+                if (lend[h2] > lend[h1]) c->fwd = false;
+        free(last);
+    }
+    if (c->fwd) {
+        sp(&c->fwd_decl, "  bool exit_now = false;\n  bool b8 = true");
+        for (size_t i = 2; i < end; i++)
+            if (label[i] && i % 4) sp(&c->fwd_decl, i % 16 == 0 ? ",\n    b%u = false" : ", b%u = false", (uint32_t)(i * 8));
+        sp(&c->fwd_decl, ";\n");
+        for (size_t h = 0; h < end; h++)
+            if (lend[h]) sp(&c->fwd_decl, "  bool l%u = false;\n", (uint32_t)(h * 8));
+        c->brx_at = brx, c->brx_to = brx_to, c->brx_nto = brx_nto, c->nbrx = nbrx;
+    }
     // translate
     bool dbg = maxwell_dbg_code && blob == maxwell_dbg_code && stage == STAGE_FRAGMENT;
     static int annotate = -1;
@@ -2670,7 +2772,12 @@ static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, const ui
     for (size_t i = 0; i < end && !c->fail; i++) {
         if (i % 4 == 0) continue;
         uint32_t pc = (uint32_t)(i * 8);
-        if (any_branch && label[i]) sp(&c->body, "  case %uu:\n", pc);
+        if (any_branch && label[i] && c->fwd) {  // (the block before falls into this one: its flag)
+            if (i > 1) sp(&c->body, "    b%u = true;\n  } while (false);\n  if (exit_now) break;\n", pc);
+            fwd_loops_end(c, label, lend, i);
+            if (lend[i]) sp(&c->body, "  for (uint g%u = 0u; g%u < 100000u; g%u++) {\n", pc, pc, pc);
+            sp(&c->body, "  do { if (!b%u) break;\n", pc);
+        } else if (any_branch && label[i]) sp(&c->body, "  case %uu:\n", pc);
         if (annotate) sp(&c->body, "    // pc %x: %016llx\n", pc, (unsigned long long)((const uint64_t *)code)[i]);
         emit_insn(c, ((const uint64_t *)code)[i], pc);
         if (dbg && pc == maxwell_dbg_pc) {
@@ -2681,6 +2788,13 @@ static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, const ui
         }
         info->num_insts++;
     }
+    if (c->fwd) {
+        sp(&c->body, "  } while (false);\n  if (exit_now) break;\n");
+        fwd_loops_end(c, label, lend, end);
+    }
+    for (int b = 0; b < nbrx; b++) free(brx_to[b]);
+    c->nbrx = 0;
+    free(lend);
     free(label);
     free(flow_to);
     c->flow_to = NULL;
@@ -2696,6 +2810,7 @@ static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, const ui
             if ((f = fopen(path, "wb"))) { fwrite(blob, 1, max_size < 0x400 ? max_size : 0x400, f); fclose(f); }
         }
         free(c->body.buf);
+        free(c->fwd_decl.buf);
         free(c);
         return info;
     }
@@ -2846,6 +2961,7 @@ static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, const ui
     info->attr_mask = c->in_attr_mask;
     info->out_mask = stage == STAGE_FRAGMENT ? c->omap_target : c->out_attr_mask;
     free(c->body.buf);
+    free(c->fwd_decl.buf);
     free(c);
     return info;
 }

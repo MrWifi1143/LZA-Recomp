@@ -7,6 +7,13 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- Shaders with branches are translated as plain structured code: their blocks in order, loops as loops, jump tables as
+  a switch - instead of one state machine (`switch (pc)` in a loop) around the whole program, which 86% of Z-A's
+  shaders were. The GPU's compiler can now keep values in registers across branches and see (and unroll) the loops.
+  NVIDIA's own statistics for the shaders of a Lumiose street: fragment shaders 10% smaller and 3% fewer registers;
+  AMD / Intel / mobile compilers (Mesa's NIR: every register a loop variable before) should gain more. All but 10 of
+  the game's ~8,000 branching shaders; pictures identical (intro route, Lumiose). `LARECOMP_XLAT_NO_FWD=1`: the state
+  machine as before. (A new translator: one more shader warm-up at the next start.)
 - Resolution: 540p (the settings and the start screen), for weak GPUs: about half the GPU time of 1080p.
 - Start screen: this PC (GPU and its VRAM, CPU threads, RAM) and the settings recommended for it, with an Apply button;
   on a first start (no larecomp.ini yet) they are applied at once. By the GPU, since that is what limits weak PCs
