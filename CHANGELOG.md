@@ -18,6 +18,10 @@ Z-A:
   Shader translation during a first play of the intro: 0.4 s in all. (The new translator means one more warm-up at
   the next start.)
 - Screenshots (F12, and the test tools') are encoded on a thread of their own: each was a ~250 ms hitch.
+- Settings > Graphics > Shader Loading: Wait / Don't Wait (also on the start screen). The first time something is
+  drawn, its shaders are built; Wait holds the frame up to 100 ms for them (a stutter), Don't Wait draws on and shows it
+  a moment later. A first play of the intro on cold caches: 5 spans with a frame over 100 ms instead of 19. Once the
+  caches are warm both are the same. ini `shader_loading = wait | nowait`.
 - Draw Distance (People) above Switch now gets extra memory for the characters it lets in (+256 MB / +512 MB /
   +1.25 GB): Max at 1440p with Ultra shadows ran out of memory and crashed opening the menu.
 - The game's memory stays under 4 GB: the GPU reads it as one buffer, and Vulkan buffers stop at 4 GB - past that,

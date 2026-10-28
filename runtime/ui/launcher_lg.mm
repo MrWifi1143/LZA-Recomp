@@ -379,6 +379,7 @@ extern "C" void launcher_lg_run(const char *root) {
     int shadows_i = g_settings.shadows >= 0 && g_settings.shadows <= 2 ? g_settings.shadows : 0;
     int bg_i = g_settings.background >= 0 && g_settings.background <= 2 ? g_settings.background : 0;
     int pk_i = g_settings.pkhex_link >= 0 && g_settings.pkhex_link <= 2 ? g_settings.pkhex_link : 0;
+    int shl_i = g_settings.shader_nowait ? 1 : 0;
     // Translation: the folders under mods/ (runtime/mods.h); 0 = none (the game's own English)
     static char mods[MODS_MAX][128];
     int nmods = mods_list(mods, MODS_MAX), mod = 0;
@@ -456,6 +457,9 @@ extern "C" void launcher_lg_run(const char *root) {
         ImGui::Combo(T("Draw distance (people)", "Distância de desenho (pessoas)"), &crowd_i, crowd_names, 4);
         const char *const shadow_names[] = {"Switch (1024)", T("High (2048)", "Alta (2048)"), T("Ultra (4096)", "Ultra (4096)")};
         ImGui::Combo(T("Shadows", "Sombras"), &shadows_i, shadow_names, 3);
+        const char *const shl_names[] = {T("Wait (may stutter the first time)", "Esperar (pode travar na primeira vez)"),
+                                         T("Don't wait (may show late the first time)", "Não esperar (pode aparecer atrasado na primeira vez)")};
+        ImGui::Combo(T("Shader loading", "Carregamento de shaders"), &shl_i, shl_names, 2);
         const char *const bg_names[] = {T("Keep playing", "Continuar jogando"), T("Mute", "Silenciar"), T("Pause", "Pausar")};
         ImGui::Combo(T("In background", "Em segundo plano"), &bg_i, bg_names, 3);
         const char *const pk_names[] = {T("Off", "Desligado"), T("This PC", "Este PC"), T("Network", "Rede")};
@@ -523,6 +527,7 @@ extern "C" void launcher_lg_run(const char *root) {
     g_settings.shadows = shadows_i;
     g_settings.background = bg_i;
     g_settings.pkhex_link = pk_i;
+    g_settings.shader_nowait = shl_i;
     snprintf(g_settings.mod, sizeof g_settings.mod, "%s", mod ? mods[mod - 1] : "");
     settings_save();
     { extern void pkm_link_apply(void); pkm_link_apply(); }  // (PKHeX Link as just chosen: hle/pkm_link.c)

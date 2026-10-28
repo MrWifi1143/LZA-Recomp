@@ -111,6 +111,8 @@ static int get_minvy(void) { return g_settings.mouse_invert_y ? 1 : 0; }
 static void set_minvy(int i) { g_settings.mouse_invert_y = i == 1; }
 static int get_minvx(void) { return g_settings.mouse_invert_x ? 1 : 0; }
 static void set_minvx(int i) { g_settings.mouse_invert_x = i == 1; }
+static int get_shl(void) { return g_settings.shader_nowait ? 1 : 0; }
+static void set_shl(int i) { g_settings.shader_nowait = i; }
 static int get_bg(void) { return g_settings.background >= BG_KEEP && g_settings.background <= BG_PAUSE ? g_settings.background : BG_KEEP; }
 static void set_bg(int i) { g_settings.background = i; }
 static int get_crowd(void) { return g_settings.crowd >= 0 && g_settings.crowd <= 3 ? g_settings.crowd : 0; }
@@ -155,6 +157,8 @@ static const Row k_rows[] = {  // (per tab in this order; Gameplay's first is th
     {1, "Anti-Aliasing", "Choose whether to smooth jagged edges (SMAA).", CHOICE, 2, {"On", "Off"}, get_aa, set_aa},
     {1, "Draw Distance (People)", "Choose how many people and Pokémon are drawn at once. More costs performance.", CHOICE, 4, {"Switch", "2x", "4x", "Max"}, get_crowd, set_crowd},
     {1, "Shadows (Next Start)", "Choose how sharp shadows are. Higher shows the shapes of people and Pokémon.", CHOICE, 3, {"Switch", "High", "Ultra"}, get_shadows, set_shadows},
+    {1, "Shader Loading", "Wait for new things to load (may stutter), or show them a moment later.",
+     CHOICE, 2, {"Wait", "Don't Wait"}, get_shl, set_shl},
     {1, "FPS Counter", "Choose whether to show the frame rate in the corner of the screen.", CHOICE, 2, {"Show", "Hide"},
      get_fpsc, set_fpsc},
     {2, "Master Volume", "Adjust the volume of all of the game's sound.", BAR10, 0, {0}, get_vol, set_vol},
