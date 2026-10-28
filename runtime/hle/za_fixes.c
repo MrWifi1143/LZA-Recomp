@@ -580,6 +580,9 @@ void za_fixes_configure(const char *exefs) {
         else if (sh > 1440) g_stdheap_size = 0x120000000ull;  // 4.5 GB (4K's route ran in 4 GB, not in 2.75)
         if (!e && g_settings.shadows > 0)  // (bigger shadow maps come out of it too: 2048 +60 MB, 4096 +240 MB)
             g_stdheap_size += g_settings.shadows == 2 ? 0x10000000ull : 0x4000000ull;
+        // (and the characters Draw Distance lets in: Max at 1440p with Ultra shadows ran out opening the menu)
+        static const uint64_t k_crowd_mb[4] = {0, 256, 512, 1280};
+        if (!e && g_settings.crowd > 0 && g_settings.crowd <= 3) g_stdheap_size += k_crowd_mb[g_settings.crowd] << 20;
         if (g_stdheap_size != STDHEAP_SIZE) LOG("[za] screen %llux%llu: %llu MB for the game's allocator\n", (unsigned long long)sw,
                                                 (unsigned long long)sh, (unsigned long long)(g_stdheap_size >> 20));
     }

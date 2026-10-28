@@ -7,6 +7,10 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- Draw Distance (People) above Switch now gets extra memory for the characters it lets in (+256 MB / +512 MB /
+  +1.25 GB): Max at 1440p with Ultra shadows ran out of memory and crashed opening the menu.
+- Start screen: Draw distance (people), Shadows, In background, PKHeX Link and mouse invert, as in the game's Settings.
+
 - PKHeX: Settings > Gameplay > PKHeX Link (Off / This PC / Network) answers PKHeX's LiveHeX plugin like sys-botbase on
   a Switch (port 6000): it detects Z-A 2.0.2 and reads and writes the boxes while you play. Settings > Gameplay >
   Pokémon Files: A on Export saves every Pokémon in your boxes as a PKHeX .pa9 file (pokemon/export/<date>/), A on
