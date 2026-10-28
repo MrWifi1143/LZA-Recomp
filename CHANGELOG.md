@@ -17,7 +17,9 @@ Z-A:
   program's vertex and fragment shader is built once, on its own, and every pipeline that uses it is a quick link of
   those parts (~0.1 ms with a warm cache). A first play of the intro on a cold cache: 19 two-second spans with a frame
   over 100 ms instead of 24, 14 s of draws waiting instead of 18. With the caches warm, the intro has 1. `LARECOMP_VK_GPL=0`:
-  whole pipelines as before.
+  whole pipelines as before. On AMD (the Steam Deck's RADV) and Intel, where a fast link runs slower shaders, each
+  pipeline is also linked with link-time optimization on a worker and replaces the fast one when ready (as DXVK does;
+  NVIDIA compiles each part fully, so it is off there; `LARECOMP_VK_GPL_LTO=0/1`).
 - The first-start shader warm-up now helps the fragment shaders too: translations were filed by everything the draw
   had bound, and Z-A always binds a few textures and an image most shaders never read - 1 fragment shader in 192 found
   the warm-up's translation. They are filed by what the shader reads now (checked: 47,000 translations identical).

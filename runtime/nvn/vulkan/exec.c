@@ -52,7 +52,7 @@ static _Atomic int stat_compiles;
 static _Atomic uint64_t stat_translate_ns, stat_spirv_ns, stat_pipe_ns;  // CPU time translating / compiling programs
 static uint64_t stat_shader_wait_ns;  // draws waiting for their program / pipeline (wait_built)
 static _Atomic int new_pipes;  // pipelines created since the pipeline cache was last saved
-static _Atomic uint64_t stat_lib_ns, stat_link_ns, stat_libs, stat_links;  // (g_vk.gpl: pipeline parts built, pipelines linked)
+static _Atomic uint64_t stat_lib_ns, stat_link_ns, stat_libs, stat_links, stat_opt_ns, stat_opts;  // (g_vk.gpl: pipeline parts built, pipelines linked)
 static _Atomic uint64_t stat_ready_ns, stat_ready_max_ns, stat_ready_n;  // first draw asking for a pipeline -> it is ready
 static uint64_t op_counts[CMD_COUNT];
 static uint64_t stat_vtx_copied, stat_vtx_direct;  // vertex / index ranges of the draws: copied to VRAM / read in place
@@ -872,8 +872,10 @@ const char *renderer_stats(void) {
         size_t n = strlen(stats_text);
         uint64_t nl = atomic_exchange(&stat_libs, 0), nk = atomic_exchange(&stat_links, 0);
         double tl = atomic_exchange(&stat_lib_ns, 0) / 1e6, tk = atomic_exchange(&stat_link_ns, 0) / 1e6;
-        if (nl || nk) snprintf(stats_text + n, sizeof stats_text - n, " [gpl: %llu parts %.0fms, %llu links %.0fms]", (unsigned long long)nl, tl,
-                               (unsigned long long)nk, tk);
+        uint64_t no = atomic_exchange(&stat_opts, 0);
+        double to = atomic_exchange(&stat_opt_ns, 0) / 1e6;
+        if (nl || nk || no) snprintf(stats_text + n, sizeof stats_text - n, " [gpl: %llu parts %.0fms, %llu links %.0fms, %llu optimized %.0fms]",
+                                     (unsigned long long)nl, tl, (unsigned long long)nk, tk, (unsigned long long)no, to);
     }
     {
         size_t n = strlen(stats_text);
@@ -2055,7 +2057,15 @@ typedef struct {
     uint8_t depth_clamp, pad_[3];
 } PipeKey;
 
-typedef struct { PipeKey k; uint64_t hash; VkPipeline pipe; _Atomic int state; uint64_t t_asked; } Pipe;  // state: 0 building, 1 ready, 2 failed
+typedef struct {
+    PipeKey k;
+    uint64_t hash;
+    VkPipeline pipe;
+    _Atomic int state;  // 0 building, 1 ready, 2 failed
+    uint64_t t_asked;
+    VkPipeline parts[4];             // (g_vk.gpl: the libraries it was linked from)
+    _Atomic(VkPipeline) optimized;   // (gpl_optimize: the same, link-time optimized - swapped in by the next draw)
+} Pipe;
 // draw_'s inputs to a PipeKey, and the pipeline of the last draw that had these (vk_exec_reset forgets it)
 typedef struct {
     Prog *pr;
@@ -2242,11 +2252,22 @@ static struct { uint64_t key; Lib *lib; } lib_tab[LIB_TAB];
 static int lib_count;
 static pthread_mutex_t lib_lock = PTHREAD_MUTEX_INITIALIZER;
 
+// Fast-linked pipelines run as fast as whole ones on NVIDIA (each library is compiled fully); on AMD (RADV, the Steam
+// Deck) and Intel the fast link skips the cross-stage optimizations and their shaders run slower. There each pipeline is
+// also linked again with link-time optimization on a worker (gpl_optimize) and replaces the fast one when done, as DXVK
+// does. LARECOMP_VK_GPL_LTO=0/1 forces it off / on.
+static bool gpl_lto(void) {
+    static int on = -1;
+    if (on < 0) on = ENV("LARECOMP_VK_GPL_LTO") ? atoi(ENV("LARECOMP_VK_GPL_LTO")) != 0 : g_vk.props.vendorID != 0x10DE;
+    return on;
+}
+
 static void lib_create(Lib *l, VkGraphicsPipelineCreateInfo *pi, VkGraphicsPipelineLibraryFlagsEXT part) {
     VkGraphicsPipelineLibraryCreateInfoEXT li = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT,
                                                  .pNext = (void *)pi->pNext, .flags = part};
     pi->pNext = &li;
     pi->flags |= VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
+    if (gpl_lto()) pi->flags |= VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT;
     uint64_t t0 = SDL_GetTicksNS();
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, pi, NULL, &l->pipe);
     atomic_fetch_add(&stat_lib_ns, SDL_GetTicksNS() - t0);
@@ -2337,6 +2358,7 @@ static uint64_t key_output(const PipeKey *k) {
 }
 
 // The four parts linked (fast: no optimization across them). false: a part failed - the caller builds it whole.
+static void gpl_optimize(void *arg);
 static bool gpl_link(Pipe *pp) {
     const PipeKey *k = &pp->k;
     VkPipeline parts[4] = {
@@ -2345,6 +2367,7 @@ static bool gpl_link(Pipe *pp) {
         lib_get(key_fragment_shader(k), VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT, k),
         lib_get(key_output(k), VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT, k)};
     for (int i = 0; i < 4; i++) if (!parts[i]) return false;
+    memcpy(pp->parts, parts, sizeof parts);
     VkPipelineLibraryCreateInfoKHR li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR, .libraryCount = 4, .pLibraries = parts};
     VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &li, .layout = k->prog->layout};
     uint64_t t0 = SDL_GetTicksNS();
@@ -2357,7 +2380,23 @@ static bool gpl_link(Pipe *pp) {
         pp->pipe = VK_NULL_HANDLE;
         return false;
     }
+    if (gpl_lto()) run_job(gpl_optimize, pp);
     return true;
+}
+
+static void gpl_optimize(void *arg) {  // (gpl_lto: the pipeline linked again, optimized; draw_ swaps it in)
+    Pipe *pp = arg;
+    VkPipelineLibraryCreateInfoKHR li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR, .libraryCount = 4, .pLibraries = pp->parts};
+    VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &li,
+                                       .flags = VK_PIPELINE_CREATE_LINK_TIME_OPTIMIZATION_BIT_EXT, .layout = pp->k.prog->layout};
+    uint64_t t0 = SDL_GetTicksNS();
+    VkPipeline p = VK_NULL_HANDLE;
+    if (vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p) == VK_SUCCESS) {
+        atomic_fetch_add(&new_pipes, 1);
+        atomic_store(&pp->optimized, p);
+    }
+    atomic_fetch_add(&stat_opt_ns, SDL_GetTicksNS() - t0);
+    atomic_fetch_add(&stat_opts, 1);
 }
 
 // A compiled program's shader parts, started at once and side by side (one job each: a cold part is ~40-80 ms on
@@ -4064,6 +4103,12 @@ static void draw_(CmdRec *r, bool indexed) {
     const PipeKey *kp = &pp->k;  // (the key it was built for: this draw's)
     dc_begin(cb);
     uint64_t pp_ = prof ? SDL_GetTicksNS() : 0;
+    if (atomic_load_explicit(&pp->optimized, memory_order_relaxed)) {  // (gpl_optimize: the optimized link replaces the fast one)
+        VkPipeline o = atomic_exchange(&pp->optimized, VK_NULL_HANDLE);
+        extern void vk_defer_pipeline(VkPipeline p);  // (textures.c: destroyed once the GPU is past the work that used it)
+        vk_defer_pipeline(pp->pipe);
+        pp->pipe = o;
+    }
     if (dc.pipe != pp->pipe) dc.pipe = pp->pipe, vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe);
     if (prof) prof_bindpipe += SDL_GetTicksNS() - pp_;
     DC_SET(rdisc, st.raster_discard, vkCmdSetRasterizerDiscardEnable(cb, st.raster_discard));
