@@ -45,7 +45,8 @@ static void parse_line(const char *line) {
         return;
     }
     if (!strcmp(key, "fullscreen")) g_settings.fullscreen = atoi(val) != 0;
-    else if (!strcmp(key, "fps")) { int f = atoi(val); g_settings.fps = f == 60 || f == 120 || f == 144 ? f : 30; }
+    else if (!strcmp(key, "fps")) { int f = atoi(val); g_settings.fps = f == 60 || f == 120 || f == 144 || f == FPS_UNLIMITED ? f : 30; }
+    else if (!strcmp(key, "frame_timing")) g_settings.fixed_steps = !strcmp(val, "fixed");
     else if (!strcmp(key, "render_height")) g_settings.res_height = atoi(val) >= 360 && atoi(val) <= 4320 ? atoi(val) : 0;
     else if (!strcmp(key, "volume")) g_settings.volume = (float)atof(val);
     else if (!strcmp(key, "mouse_sens")) g_settings.mouse_sens = (float)atof(val);
@@ -117,6 +118,7 @@ void settings_save(void) {
     fprintf(f, "# " RT_APP_NAME " settings (set on the start screen)\n");
     fprintf(f, "fullscreen = %d\n", g_settings.fullscreen);
     fprintf(f, "fps = %d\n", g_settings.next_fps ? g_settings.next_fps : g_settings.fps);
+    fprintf(f, "frame_timing = %s\n", g_settings.fixed_steps ? "fixed" : "real_time");
     fprintf(f, "render_height = %d\n", g_settings.next_res_height ? g_settings.next_res_height - 1 : g_settings.res_height);
     fprintf(f, "smaa = %d\n", g_settings.antialias == AA_SMAA);
     fprintf(f, "mod = %s\n", g_settings.mod);

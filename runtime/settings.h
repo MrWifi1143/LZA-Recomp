@@ -8,12 +8,15 @@ enum { UPSCALE_BILINEAR = 0, UPSCALE_FSR1 = 2 /* AMD FSR 1 */ };
 #define UPSCALE_SHARP UPSCALE_FSR1  // the non-bilinear upscaler (the default)
 enum { AA_OFF = 0, AA_SMAA = 1 };
 enum { VREAD_AUTO = 0, VREAD_COPY = 1, VREAD_DIRECT = 2 };
+#define FPS_UNLIMITED 360  // Settings.fps "Unlimited": as fast as the PC goes, paced at 360 at most
 enum { BG_KEEP = 0, BG_MUTE = 1, BG_PAUSE = 2 };  // (Settings.background)
 enum { PROMPTS_AUTO, PROMPTS_SWITCH, PROMPTS_XBOX, PROMPTS_PLAYSTATION, PROMPTS_KEYBOARD };  // (auto: what was used last)
 
 typedef struct {
     bool fullscreen;
-    int fps;  // 30 (the game's own), 60 (Let's Go: interpolated, exec.c), or 60 / 120 / 144 (the Legends: hle/fps60.c)
+    int fps;  // 30 (the game's own), 60 (Let's Go: interpolated, exec.c), or 60 / 120 / 144 / FPS_UNLIMITED (the Legends: hle/fps60.c)
+    bool fixed_steps;    // the Legends above 30 fps: the world steps the frame rate's period each frame (a dip slows the
+                         // game down), not the time that really passed (the default; FPS_UNLIMITED always: hle/fps60.c)
     int res_mode;        // RES_MATCH, 1..4 (N x the Switch's 1080p), RES_DYNAMIC, RES_Q75/50/25 (share of the display)
     int res_height;      // the launcher's render height in lines (720 / 1080 / 1440 / 2160); 0: res_mode decides
     int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window

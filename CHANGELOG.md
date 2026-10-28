@@ -8,6 +8,12 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Arceus:
 
+- Frame rate: an Unlimited choice (the game's Settings and the start screen): as fast as the PC goes, paced at 360 at
+  most. New Frame Timing row, Real Time by default: above 30 fps the world now steps by the time each frame really
+  took instead of the frame rate's fixed period, so a dip (a hitch, a busy area) no longer slows the game down -
+  walking, people, the camera and the cutscene clocks keep their speed. A step is never longer than 33.3 ms (the
+  game's own at 30 fps). Fixed: the old way, each frame a fixed step. Unlimited always uses Real Time.
+  `LARECOMP_DYN_DT=0/1` overrides the setting.
 - GPU: the barrier before each render pass (from Z-A) now waits only for what that pass needs: which images every pass
   rendered to and every draw sampled since the last barrier are tracked, a pass that touches none of them starts
   without one, and one that does waits only for the earlier passes' render-target writes (its vertex work can overlap

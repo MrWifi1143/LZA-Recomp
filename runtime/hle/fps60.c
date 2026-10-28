@@ -427,7 +427,10 @@ static const struct { uint8_t id[8]; uint64_t entry; const char *name; } k_legen
 static uint64_t g_pla60_entry;  // the interval-2 frame time of the running build (0: off)
 static uint64_t g_pla60_build;  // (that entry of the running build, also at 30)
 static bool g_pla60_patched;
-static uint64_t g_pla60_ns = 16666667;  // the frame time: 60 fps, or LARECOMP_LEGENDS_FPS=<n> (experimental: 90, 120, 144...)
+static uint64_t g_pla60_ns = 16666667;  // the frame time: 60 fps, 120, 144, FPS_UNLIMITED's, or LARECOMP_LEGENDS_FPS=<n>
+// This update's step: the period, or with real-time steps (pla60_present) the time the last frame really took; and the
+// world's time so far in those steps, the last present's and this one's (rt_pla_tick)
+static uint64_t g_pla60_dt = 16666667, g_world_prev, g_world_now;
 bool pla60_enabled(void) { return g_pla60_entry != 0; }
 uint64_t pla60_period_ns(void) { return g_pla60_ns; }
 
@@ -504,11 +507,23 @@ bool legends_set_fps(int fps) {
         plat_protect(g_pla60_build & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);
         *ft = ns;
     }
-    g_pla60_ns = fps > 30 ? ns : 16666667;
+    g_pla60_ns = g_pla60_dt = fps > 30 ? ns : 16666667;
     g_pla60_entry = fps > 30 ? g_pla60_build : 0;
     g_pla60_patched = fps > 30 && loaded;
     LOG("[fps60] %d fps from now on\n", fps);
     return true;
+}
+
+// A real-time step (pla60_present) from the time since the last present: at least half the frame rate's period (two
+// presents close together), the time a short step took for granted taken off the next ones - the world's time adds up
+// to the real time exactly (clamped to the period, the paced presents' jitter ran the game a few % fast) - and at most
+// 33.3 ms, the game's own step at 30 fps: a longer stall (a loading hitch) is not made up.
+static uint64_t real_step(uint64_t real) {
+    static uint64_t ahead;  // (the world's time ahead of the real time)
+    uint64_t lo = g_pla60_ns / 2, dt = real > ahead ? real - ahead : 0;
+    ahead = dt < lo ? lo - dt : 0;
+    if (dt < lo) dt = lo;
+    return dt > 33333334u ? 33333334u : dt;
 }
 
 // each present: the table entry, once the game is loaded (read-only data: the page made writable first)
@@ -516,11 +531,29 @@ void pla60_present(void) {
     { extern void fscan_present(uint64_t frame); extern uint64_t renderer_present_count(void); fscan_present(renderer_present_count()); }
     { extern void pla_options_present(void); pla_options_present(); }
     { void pla_step_stats(void); pla_step_stats(); }
-    if (!g_pla60_entry || g_pla60_patched) return;
+    if (g_pla60_entry && g_pla60_patched) {
+        // Real-time steps (Settings Frame Timing, the default; Unlimited always): the world steps by the time that
+        // really passed since the last present, not the frame rate's fixed period - a slow frame (a hitch, a dip below
+        // the frame rate) no longer slows the game down. real_step: never more than 33.3 ms, the game's own step at 30
+        // fps, the most it was made for. The step sites,
+        // the scaled amounts and the 30 fps ticks below follow. LARECOMP_DYN_DT=0/1 overrides the setting.
+        static int env = -2;
+        if (env == -2) env = getenv("LARECOMP_DYN_DT") ? atoi(getenv("LARECOMP_DYN_DT")) != 0 : -1;
+        bool dyn = env >= 0 ? env : !g_settings.fixed_steps || g_settings.fps >= FPS_UNLIMITED;
+        static uint64_t last;
+        uint64_t now = plat_now_ns(), dt = g_pla60_ns;
+        if (dyn && last) dt = real_step(now - last);
+        if (dt != g_pla60_dt) *(volatile uint64_t *)(uintptr_t)g_pla60_entry = dt, g_pla60_dt = dt;
+        g_world_prev = g_world_now, g_world_now += dt;
+        last = now;
+        return;
+    }
+    if (!g_pla60_entry) return;
     volatile uint64_t *ft = (volatile uint64_t *)(uintptr_t)g_pla60_entry;
     if (*ft != 33333334u) return;
     plat_protect(g_pla60_entry & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);
     *ft = g_pla60_ns;
+    g_pla60_dt = g_pla60_ns;
     g_pla60_patched = true;
 }
 
@@ -584,7 +617,7 @@ uint32_t rt_step_bits(int i) {
     atomic_fetch_add_explicit(&g_step_calls[i], 1, memory_order_relaxed);
     if (!g_pla60_patched || !g_step_on[i]) return 0x3d088889u;  // 1/30
     static uint64_t bits_ns;  // (the frame time it was worked out for: it may change while playing)
-    if (bits_ns != g_pla60_ns) { float f = (float)((double)g_pla60_ns * 1e-9); memcpy(&bits, &f, 4); bits_ns = g_pla60_ns; }
+    if (bits_ns != g_pla60_dt) { float f = (float)((double)g_pla60_dt * 1e-9); memcpy(&bits, &f, 4); bits_ns = g_pla60_dt; }
     return bits;
 }
 
@@ -595,8 +628,7 @@ int rt_pla_tick(int site) {
     if (on < 0) on = getenv("LARECOMP_PLA_TICK") ? atoi(getenv("LARECOMP_PLA_TICK")) : 1;
     (void)site;
     if (!on || !g_pla60_patched) return 1;
-    uint64_t f = renderer_game_frame();
-    return (f * g_pla60_ns) / 33333334u != ((f - 1) * g_pla60_ns) / 33333334u;
+    return g_world_now / 33333334u != g_world_prev / 33333334u;  // (the world's time in this update's steps)
 }
 
 // Research (LARECOMP_DT_PROBE="<addr>[,<addr>...]"): functions shaped like f_700141f208 - this = x0, the clock set = x1:
@@ -643,7 +675,7 @@ uint32_t rt_scale30_f32(uint32_t bits) {
     if (!on || !g_pla60_patched) return bits;
     float f;
     memcpy(&f, &bits, 4);
-    f = (float)((double)f * (double)g_pla60_ns / 33333334.0);
+    f = (float)((double)f * (double)g_pla60_dt / 33333334.0);
     memcpy(&bits, &f, 4);
     return bits;
 }
@@ -684,7 +716,7 @@ uint32_t rt_unscale30_f32(uint32_t bits) {
     if (!on || !g_pla60_patched) return bits;
     float f;
     memcpy(&f, &bits, 4);
-    f = (float)((double)f * 33333334.0 / (double)g_pla60_ns);
+    f = (float)((double)f * 33333334.0 / (double)g_pla60_dt);
     memcpy(&bits, &f, 4);
     return bits;
 }
@@ -711,7 +743,7 @@ void gate_init(void) {
 uint32_t rt_pla_frames60(int site) {
     static double acc[8];
     if (!g_pla60_patched || site < 0 || site >= 8) return 2;
-    acc[site] += 2.0 * (double)g_pla60_ns / 33333334.0;
+    acc[site] += 2.0 * (double)g_pla60_dt / 33333334.0;
     uint32_t n = (uint32_t)acc[site];
     acc[site] -= n;
     return n;
