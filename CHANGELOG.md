@@ -16,7 +16,9 @@ Arceus:
   more 1440p / 60; Shader Loading "Don't Wait" with 8 or fewer CPU threads.
 - Stutter (from Z-A): pipelines are linked from parts (Vulkan graphics pipeline libraries): each program's shaders are
   built once and every pipeline that uses them is a quick link. The intro with warm caches: 1 two-second span with a
-  frame over 100 ms instead of 14. `LARECOMP_VK_GPL=0`: whole pipelines as before.
+  frame over 100 ms instead of 14. `LARECOMP_VK_GPL=0`: whole pipelines as before. On AMD (the Steam Deck) and Intel,
+  each pipeline is also linked with link-time optimization on a worker and replaces the fast one when ready (a fast
+  link runs slower shaders there; off on NVIDIA; `LARECOMP_VK_GPL_LTO=0/1`).
 - The shader warm-up's translations are found in play (filed by what a shader reads, not by everything bound; 13,500
   translations checked identical). The new translator means one more warm-up at the next start.
 - Screenshots are encoded on a thread of their own (each was a ~250 ms hitch).
