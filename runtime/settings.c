@@ -85,12 +85,14 @@ static void parse_line(const char *line) {
     else bind_settings_load(key, val);  // bind_pad_* / bind_key_*: runtime/hle/bindings.c
 }
 
+bool g_settings_fresh;
+
 void settings_load(void) {
     static bool loaded;
     if (loaded) return;
     loaded = true;
     FILE *f = fopen(SETTINGS_FILE, "r");
-    if (!f) return;
+    if (!f) { g_settings_fresh = true; return; }
     char line[256];
     while (fgets(line, sizeof line, f)) {
         // (a file edited by hand may have CRLF: "resolution = dynamic\r" did not match and fell back silently)

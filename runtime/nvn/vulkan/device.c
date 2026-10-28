@@ -1408,3 +1408,16 @@ int ui_run(void) {
         menu_apply_window_requests(window);
     }
 }
+
+// The GPU for the start screen's recommended settings (runtime/ui/launcher_lg.mm): its name, its VRAM (device-local
+// heaps, GB, rounded) and whether it is integrated (shares the system's memory)
+void vk_describe_gpu(char *name, size_t n, int *vram_gb, bool *integrated) {
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
+    uint64_t vram = 0;
+    for (uint32_t i = 0; i < mp.memoryHeapCount; i++)
+        if (mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) vram += mp.memoryHeaps[i].size;
+    snprintf(name, n, "%s", g_vk.props.deviceName);
+    *vram_gb = (int)((vram + (512ull << 20)) >> 30);
+    *integrated = g_vk.props.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+}

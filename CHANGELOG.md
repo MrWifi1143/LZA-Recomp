@@ -8,6 +8,11 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 Z-A:
 
 - Resolution: 540p (the settings and the start screen), for weak GPUs: about half the GPU time of 1080p.
+- Start screen: this PC (GPU and its VRAM, CPU threads, RAM) and the settings recommended for it, with an Apply button;
+  on a first start (no larecomp.ini yet) they are applied at once. By the GPU, since that is what limits weak PCs
+  (Z-A's CPU side held 60 fps on four efficiency cores of an i9-12900K, Steam Deck class): integrated or under 4 GB
+  720p / 30 fps, under 8 GB 1080p / 60, under 12 GB 1080p / 60 with High shadows, more 1440p / 60 with High shadows
+  (and draw distance 2x with 12+ CPU threads and 16+ GB RAM); Shader Loading "Don't Wait" with 8 or fewer CPU threads.
 - Stutter: pipelines are now linked from parts (Vulkan graphics pipeline libraries, where the driver has them): each
   program's vertex and fragment shader is built once, on its own, and every pipeline that uses it is a quick link of
   those parts (~0.1 ms with a warm cache). A first play of the intro on a cold cache: 19 two-second spans with a frame

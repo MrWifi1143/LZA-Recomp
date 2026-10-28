@@ -17,6 +17,7 @@
 #include "imgui_impl_vulkan.h"
 #include "imgui_impl_sdl3.h"
 
+extern "C" void vk_describe_gpu(char *name, size_t n, int *vram_gb, bool *integrated);  // nvn/vulkan/device.c
 extern "C" {
 #include "gamesetup.h"
 #include "input_bind.h"
@@ -374,12 +375,39 @@ extern "C" void launcher_lg_run(const char *root) {
     for (int i = 0; i < 6; i++) if (res_lines[i] == g_settings.res_height) res = i;
     bool full = g_settings.fullscreen, smaa = g_settings.antialias == AA_SMAA, wildb = g_settings.wild_battle, showfps = g_settings.show_fps;
     int fps_i = g_settings.fps == 144 ? 3 : g_settings.fps == 120 ? 2 : g_settings.fps == 60 ? 1 : 0;
+    // Recommended settings for this PC, from the GPU (integrated or not, its VRAM), the CPU threads and the RAM: shown
+    // with an Apply button, and applied at once on a first start (no larecomp.ini yet). Measured 2026-10-28: Z-A's CPU
+    // side holds 60 fps on four efficiency cores of an i9-12900K (Steam Deck class); its GPU side is ~2.4 ms a frame at
+    // 1080p on an RTX 4090 and roughly halves at 540p - weak GPUs are what limit it, so the tiers go by the GPU.
+    struct Rec { int res, fps, shadows, crowd, nowait; char text[160]; } rec;
+    char pc[200];
+    {
+        char gpu[128];
+        int vram_gb;
+        bool igpu;
+        vk_describe_gpu(gpu, sizeof gpu, &vram_gb, &igpu);
+        int threads = SDL_GetNumLogicalCPUCores(), ram_gb = (SDL_GetSystemRAM() + 512) / 1024;  // (not plat_cpu_count: cpupin_init narrowed this thread already)
+        // resolution index into res_lines below: 0 Auto, 1 540p, 2 720p, 3 1080p, 4 1440p, 5 4K; fps index: 0 30, 1 60
+        if (igpu || vram_gb < 4) rec = {2, 0, 0, 0, threads <= 8, ""};
+        else if (vram_gb < 8) rec = {3, 1, 0, 0, threads <= 8, ""};
+        else if (vram_gb < 12) rec = {3, 1, 1, 0, threads <= 8, ""};
+        else rec = {4, 1, 1, ram_gb >= 16 && threads >= 12 ? 1 : 0, threads <= 8, ""};
+        if (ram_gb < 12) rec.shadows = 0, rec.crowd = 0;  // (both take game memory: hle/za_fixes.c)
+        static const char *const rn[] = {"Auto", "540p", "720p", "1080p", "1440p", "4K"}, *const sn[] = {"Switch", "High", "Ultra"},
+                                 *const cn[] = {"Switch", "2x", "4x", "Max"};
+        snprintf(rec.text, sizeof rec.text, "%s, %s fps, shadows %s, draw distance %s%s", rn[rec.res], rec.fps ? "60" : "30",
+                 sn[rec.shadows], cn[rec.crowd], rec.nowait ? ", shader loading: don't wait" : "");
+        snprintf(pc, sizeof pc, "%s (%s%d GB), %d CPU threads, %d GB RAM", gpu, igpu ? "integrated, " : "", vram_gb, threads, ram_gb);
+        fprintf(stderr, "[launcher] this PC: %s; recommended: %s%s\n", pc, rec.text, g_settings_fresh ? " (first start: applied)" : "");
+    }
     int prompts_i = g_settings.button_prompts >= 0 && g_settings.button_prompts <= 4 ? g_settings.button_prompts : 0;
     int crowd_i = g_settings.crowd >= 0 && g_settings.crowd <= 3 ? g_settings.crowd : 0;
     int shadows_i = g_settings.shadows >= 0 && g_settings.shadows <= 2 ? g_settings.shadows : 0;
     int bg_i = g_settings.background >= 0 && g_settings.background <= 2 ? g_settings.background : 0;
     int pk_i = g_settings.pkhex_link >= 0 && g_settings.pkhex_link <= 2 ? g_settings.pkhex_link : 0;
     int shl_i = g_settings.shader_nowait ? 1 : 0;
+    auto apply_rec = [&]() { res = rec.res, fps_i = rec.fps, shadows_i = rec.shadows, crowd_i = rec.crowd, shl_i = rec.nowait; };
+    if (g_settings_fresh) apply_rec();
     // Translation: the folders under mods/ (runtime/mods.h); 0 = none (the game's own English)
     static char mods[MODS_MAX][128];
     int nmods = mods_list(mods, MODS_MAX), mod = 0;
@@ -495,6 +523,10 @@ extern "C" void launcher_lg_run(const char *root) {
         if (keys_test) ImGui::SetNextItemOpen(true, ImGuiCond_Once);
         if (ImGui::CollapsingHeader(T("Keyboard", "Teclado"))) keys_section();
         ImGui::Spacing();
+        ImGui::TextDisabled("%s", pc);  // (this PC, and the settings recommended for it: above, where the Play button keeps the view)
+        ImGui::TextDisabled("%s %s", T("Recommended:", "Recomendado:"), rec.text);
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T("Apply", "Aplicar"))) apply_rec();
         ImGui::BeginDisabled(!ready);
         if (frame == 0 && ready) ImGui::SetKeyboardFocusHere();
         if (ImGui::Button(T("Play", "Jogar"), ImVec2(-FLT_MIN, 0))) play = true;
