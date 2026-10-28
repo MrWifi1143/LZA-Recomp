@@ -695,9 +695,9 @@ void backend_present(NvnTexture *t) {
     if (have) {
         double dw = g_vk.sc_extent.width, dh = g_vk.sc_extent.height;
         // render scale + placement in the window (the game's 16:9 image, fitted): runtime/nvn/output_scale.c;
-        // no GPU timer here (-1): dynamic resolution goes by the frame time
+        // with the GPU time per frame (exec.c, submission timestamps): dynamic resolution raises it again by that
         OutScale os;
-        output_scale(dw, dh, false, SDL_GetTicksNS() / 1e9, -1, &os);
+        output_scale(dw, dh, false, SDL_GetTicksNS() / 1e9, vk_gpu_frame_update(), &os);
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh;
         float crop[4] = {0, 0, 1, 1};  // uv origin and size: the whole image
         {   // where the game image is in the window (pixels): the mouse as a finger on the touch screen (hle/input.c)

@@ -138,3 +138,5 @@ VkShaderModule vk_builtin_shader(const char *name);  // internal shaders (clear,
 
 // ---- device / window (device.c)
 void vk_save_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h);
+double vk_gpu_frame_update(void);  // exec.c: GPU time per presented frame, averaged (-1: not yet); once per present
+double vk_gpu_ms(void);            // (its last value)

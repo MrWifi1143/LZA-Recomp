@@ -15,6 +15,8 @@
 #include "imgui_impl_vulkan.h"
 #include "osk.h"
 extern "C" bool vk_imgui_backend_init(void);  // runtime/nvn/vulkan/imgui_glue.cpp
+extern "C" double vk_gpu_ms(void);            // nvn/vulkan/exec.c: GPU time per frame (the FPS counter: if it is well below
+                                              // the frame time, the GPU isn't what limits the frame rate)
 
 extern "C" {
 #include "../hle.h"
@@ -488,7 +490,9 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
             fps_shown = (float)((double)(f - f0) * 1e9 / (double)(now - t0));
             t0 = now, f0 = f;
         }
-        if (fps_shown > 0) ImGui::Text("%.0f fps  %.1f ms", fps_shown, 1000.0f / fps_shown);
+        double gms = vk_gpu_ms();
+        if (fps_shown > 0 && gms >= 0) ImGui::Text("%.0f fps  %.1f ms  GPU %.1f ms", fps_shown, 1000.0f / fps_shown, gms);
+        else if (fps_shown > 0) ImGui::Text("%.0f fps  %.1f ms", fps_shown, 1000.0f / fps_shown);
         else ImGui::Text("-- fps");
         ImGui::End();
     }

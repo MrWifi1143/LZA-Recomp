@@ -18,6 +18,9 @@ Z-A:
   Shader translation during a first play of the intro: 0.4 s in all. (The new translator means one more warm-up at
   the next start.)
 - Screenshots (F12, and the test tools') are encoded on a thread of their own: each was a ~250 ms hitch.
+- FPS counter: the GPU's time per frame too ("60 fps  16.7 ms  GPU 2.4 ms"): well below the frame time, the GPU isn't
+  what holds the frame rate back. Measured with two timestamps per submission (always on; `LARECOMP_VK_NO_GPUTIME=1`
+  off); also in the log's stats lines, and dynamic resolution (ini `resolution = dynamic`) now has it on Vulkan.
 - Settings > Graphics > Shader Loading: Wait / Don't Wait (also on the start screen). The first time something is
   drawn, its shaders are built; Wait holds the frame up to 100 ms for them (a stutter), Don't Wait draws on and shows it
   a moment later. A first play of the intro on cold caches: 5 spans with a frame over 100 ms instead of 19. Once the
