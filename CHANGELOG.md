@@ -8,6 +8,9 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Arceus:
 
+- Fixed: the background shader warm-up could start using the GPU device while it was still being set up (it checked
+  only that the device existed). Arceus under Wine crashed in its first shader on every start after a translator
+  change; it now waits for the renderer to be ready (anything it reaches before that is translated without the GPU).
 - Shader compiles on a first play ~33% quicker: a register's bits as a float, and a float result's bits, are now
   GLSL's own uintBitsToFloat / floatBitsToUint instead of overloaded helpers, which became real function calls in
   every shader's SPIR-V for the driver to inline (most of a shader's casts). SPIR-V 39% smaller (Z-A's shader cache on
