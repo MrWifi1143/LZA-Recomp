@@ -420,6 +420,7 @@ __attribute__((constructor)) static void probe_init(void) {
 // and presents paced at 60 (nvn/objects.c present_pace) the world runs at its own speed - a 10 s walk from the save
 // ends at the same spot at 30 and at 60 fps. The launcher's 60 fps option, or LARECOMP_PLA_60FPS=1 (0: off).
 #include "../platform.h"
+#include <pthread.h>
 // The menus, text boxes and loading screens are nn::ui2d layouts, whose animations advance a fixed step per update
 // (Animator::UpdateFrame(progress): frame += speed * progress) - 4.8 times too fast at 144 fps. Both UpdateFrame
 // implementations (Animator, shared by GroupAnimator / GroupArrayAnimator, and AnimatorEx: their vtable slot 3) get
@@ -506,6 +507,52 @@ static int ch1_reader(Cpu *c, uint64_t addr) {
     return 1;
 }
 
+// (research) LARECOMP_ZA_BTLOG=1: the per-object updaters (behaviour trees: 0x7001e682b8 reads a rolling time window,
+// index [ctx+0x10], of the time channel and calls 0x7001e66080(obj, seconds)): per window index, once a real second,
+// the calls, distinct objects and the seconds handed over per object - vs the real time that passed
+static __thread int g_bt_win = -1;
+static struct { uint64_t obj; uint64_t calls; double secs; int win; } g_bto[2048];
+static int g_nbto;
+static int bt_window(Cpu *c, uint64_t addr) {
+    (void)addr;
+    g_bt_win = (int)*(const uint32_t *)(uintptr_t)(c->x[1] + 0x10);
+    return 0;
+}
+static int bt_cmp(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return x < y ? -1 : x > y; }
+static int bt_update(Cpu *c, uint64_t addr) {
+    (void)addr;
+    int w = g_bt_win;
+    g_bt_win = -1;
+    if (w != 1) return 0;  // (window 1: the AI's per-update time; the others hand over ~0)
+    float sec;
+    uint32_t b = (uint32_t)c->v[0];
+    memcpy(&sec, &b, 4);
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&mu);
+    int i = 0;
+    while (i < g_nbto && g_bto[i].obj != c->x[0]) i++;
+    if (i == g_nbto && i < 2048) g_bto[g_nbto].obj = c->x[0], g_bto[g_nbto].calls = 0, g_bto[g_nbto].secs = 0, g_nbto++;
+    if (i < 2048) g_bto[i].calls++, g_bto[i].secs += sec;
+    static uint64_t since, frames0;
+    extern uint64_t renderer_present_count(void);
+    uint64_t now = plat_now_ns();
+    if (!since) since = now, frames0 = renderer_present_count();
+    if (now - since >= 2000000000ull) {
+        double real = (double)(now - since) / 1e9, r[2048], cpf[2048];
+        uint64_t fr = renderer_present_count() - frames0;
+        int n = 0;
+        for (int k = 0; k < g_nbto; k++)
+            if (g_bto[k].calls > 2) r[n] = g_bto[k].secs / real, cpf[n] = (double)g_bto[k].calls / (double)(fr ? fr : 1), n++;
+        qsort(r, n, sizeof *r, bt_cmp), qsort(cpf, n, sizeof *cpf, bt_cmp);
+        if (n) LOG("[bt] %d objects over %.2f s (%llu frames): game time per real time min %.2f p10 %.2f median %.2f max %.2f; "
+                   "updates per frame p10 %.2f median %.2f max %.2f\n", n, real, (unsigned long long)fr, r[0], r[n / 10], r[n / 2],
+                   r[n - 1], cpf[n / 10], cpf[n / 2], cpf[n - 1]);
+        g_nbto = 0, since = now, frames0 = renderer_present_count();
+    }
+    pthread_mutex_unlock(&mu);
+    return 0;
+}
+
 void pla60_configure(const char *exefs) {
     char p[1100];
     snprintf(p, sizeof p, "%s/main", exefs);
@@ -538,6 +585,8 @@ void pla60_configure(const char *exefs) {
                 const char *r1 = getenv("LARECOMP_CH1_READERS");
                 if (!dth && r1) rt_register_fnhook_at(0x70029f4214ull, timers_seen);
                 else if (!dth && getenv("LARECOMP_ZA_CHLOG")) rt_register_fnhook_at(0x70029f4214ull, timers_log);
+                if (!dth && getenv("LARECOMP_ZA_BTLOG"))
+                    rt_register_fnhook_at(0x7001e682b8ull, bt_window), rt_register_fnhook_at(0x7001e66080ull, bt_update);
                 for (const char *q = r1; !dth && q && *q;) {
                     uint64_t fa = strtoull(q, (char **)&q, 16);
                     if (fa) rt_register_fnhook_at(fa, ch1_reader);
