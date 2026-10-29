@@ -2,6 +2,8 @@
 // exefs/ is the folder with main and main.npdm, the RomFS either a romfs.bin image or the folder with bin/message (arc/data.trpfs in Z-A).
 // exefs/ is copied into <data root>/extracted (hard links where the file system allows), the RomFS image is copied
 // or built (runtime/romfs_build.c), then the game code is recompiled from exefs/ (runtime/gamebuild.c).
+// No extracted files but .nsp / .xci: read out of those instead (runtime/nxpkg.c), the update picked that makes a
+// supported build (2.0.2 for Z-A), the exefs checked before the old game files are replaced.
 #include "gamesetup.h"
 
 #include <SDL3/SDL.h>
@@ -17,6 +19,7 @@
 #include "gamebuild.h"
 #include "gamelib.h"
 #include "hle.h"
+#include "nxpkg.h"
 #include "paths.h"
 #include "platform.h"
 #include "romfs_build.h"
@@ -179,6 +182,63 @@ static void build_progress(double f, const char *step) {
                                                                                            : SETUP_COMPILING;
 }
 
+// From the player's packages: the exefs of each update found (newest first, then the base game alone) is unpacked
+// into a scratch folder until one is a supported build; then the old game files go and that exefs, the RomFS image
+// (base + that update) and the add-on content are written into extracted/.
+#define UNPACK_TMP "extracted.unpack"
+static bool from_packages(void) {
+    static const uint64_t titles[] = {TITLE_ZA, TITLE_PLA, TITLE_EEVEE, TITLE_PIKACHU, 0};
+    int err;
+    char why[512] = "";
+    g_state = SETUP_UNPACKING;
+    NxPkg *p = nxpkg_open(g_folder, titles, &err, why, sizeof why);
+    if (!p) {
+        LOG("[setup] packages in %s: %s\n", g_folder, why);
+        g_state = err == NXPKG_NO_KEYS ? SETUP_FAIL_KEYS : err == NXPKG_KEY_MISSING ? SETUP_FAIL_KEYS_OLD
+                : err == NXPKG_ONLY_UPDATE ? SETUP_FAIL_NO_BASE : err == NXPKG_COMPRESSED ? SETUP_FAIL_PACKAGE
+                : err == NXPKG_NO_GAME ? SETUP_FAIL_VERSION : SETUP_FAIL_UNPACK;
+        return false;
+    }
+    int pick = -1, n = nxpkg_update_count(p), order[17], no = 0;
+    bool za = nxpkg_title(p) == TITLE_ZA;
+    for (int u = 1; u <= n && no < 16; u++) order[no++] = u;
+    order[no++] = 0;
+    for (int i = 0; pick < 0 && i < no; i++) {
+        int u = order[i];
+        plat_remove_tree(UNPACK_TMP);
+        mkdir(UNPACK_TMP, 0755);
+        if (!nxpkg_write_exefs(p, u, UNPACK_TMP "/exefs", why, sizeof why)) {
+            LOG("[setup] exefs: %s\n", why);
+            g_state = SETUP_FAIL_UNPACK;
+            break;
+        }
+        bool good = game_ok(UNPACK_TMP "/exefs") && !game_za_unsupported(UNPACK_TMP "/exefs");
+        LOG("[setup] %s v%u: %s\n", u ? "update" : "base game", nxpkg_update_version(p, u), good ? "supported" : "not this build");
+        if (good) pick = u;
+    }
+    if (pick < 0) {
+        if (g_state == SETUP_UNPACKING) g_state = za ? SETUP_FAIL_ZA_VERSION : SETUP_FAIL_VERSION;
+        plat_remove_tree(UNPACK_TMP);
+        nxpkg_close(p);
+        return false;
+    }
+    rt_remove_game_files(ROOT);  // (an earlier or interrupted setup's)
+    mkdir(ROOT, 0755);
+    bool ok = rename(UNPACK_TMP "/exefs", ROOT "/exefs") == 0;
+    plat_remove_tree(UNPACK_TMP);
+    g_phase0 = 0, g_phase1 = 0.15f;
+    why[0] = 0;
+    bool read_err = false;
+    if (ok && !nxpkg_write_romfs(p, pick, ROOT "/romfs.bin", copy_progress, why, sizeof why)) {
+        LOG("[setup] romfs image: %s\n", why);
+        ok = false, read_err = !strstr(why, "can't");  // (else: the image couldn't be written - disk space)
+    }
+    if (ok && nxpkg_write_dlc(p, ROOT "/dlc.bin", why, sizeof why)) LOG("[setup] add-on content written\n");
+    nxpkg_close(p);
+    if (!ok) g_state = read_err ? SETUP_FAIL_UNPACK : SETUP_FAIL_COPY;
+    return ok;
+}
+
 static bool build_code(void) {
     if (!gamebuild_available()) { g_state = SETUP_FAIL_TOOLS; return false; }
     int cores = SDL_GetNumLogicalCPUCores(), ram_gb = SDL_GetSystemRAM() / 1024;
@@ -206,8 +266,15 @@ static void *setup_thread(void *arg) {
     find_game(g_folder, 0, &f);
     LOG("[setup] %s: exefs %s, romfs %s, romfs.bin %s\n", g_folder, f.exefs[0] ? f.exefs : "-", f.romfs[0] ? f.romfs : "-",
         f.romfs_bin[0] ? f.romfs_bin : "-");
-    if (!f.exefs[0] || (!f.romfs[0] && !f.romfs_bin[0])) g_state = f.package ? SETUP_FAIL_PACKAGE : SETUP_FAIL_NOT_FOUND;
-    else if (!game_ok(f.exefs)) g_state = SETUP_FAIL_VERSION;
+    if (!f.exefs[0] || (!f.romfs[0] && !f.romfs_bin[0])) {
+        if (f.package || nxpkg_any(g_folder)) {
+            if (from_packages() && build_code()) g_state = setup_ready() ? SETUP_DONE : SETUP_FAIL_BUILD;
+            LOG("[setup] %s\n", g_state == SETUP_DONE ? "ready" : "failed");
+            g_running = false;
+            return NULL;
+        }
+        g_state = SETUP_FAIL_NOT_FOUND;
+    } else if (!game_ok(f.exefs)) g_state = SETUP_FAIL_VERSION;
     else if (game_za_unsupported(f.exefs)) g_state = SETUP_FAIL_ZA_VERSION;
     else {
         // (the picked folder can't be our own copy: setting up again deletes that first)

@@ -7,6 +7,11 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- The start screen reads your dumped `.nsp` / `.xci` files directly, like the emulators: pick the folder with the base
+  game and the update (and the Mega Dimension DLC, if you own it) and the recomp applies the update over the base game
+  itself, with your `prod.keys` (looked for beside the files, in `~/.switch` and in the emulators' key folders). No
+  hac2l / hactoolnet step any more; extracted `exefs` / `romfs` folders still work. Written out: the game code, one
+  RomFS image and the DLC's data - checked byte for byte against hac2l's output (every file of both games).
 - Smoother 144 fps on Linux: each emulated core's threads may now run on both hyperthreads of its physical core
   (before: one CPU each). The game's main loop and job workers share their core with its RenderWorker, audio and
   helper threads; a thread woken there used to preempt the core's owner or wait out its time slice, and the frame

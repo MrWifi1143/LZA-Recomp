@@ -1,5 +1,6 @@
-// Game file setup on the start screen (runtime/gamesetup.c): the player picks the folder with their own extracted
-// Pokémon Legends: Z-A 2.0.2 (exefs/ and romfs/, or a romfs.bin image), it is checked, set up in
+// Game file setup on the start screen (runtime/gamesetup.c): the player picks the folder with their own
+// Pokémon Legends: Z-A 2.0.2 - the dumped .nsp / .xci of the base game and the update (read with their prod.keys,
+// runtime/nxpkg.c), or extracted files (exefs/ and romfs/, or a romfs.bin image) -, it is checked, set up in
 // <data root>/extracted (exefs copied, the RomFS image built) and the game code is recompiled there from it
 // (runtime/gamebuild.c). Runs on a background thread; the launcher polls its state.
 #pragma once
@@ -12,6 +13,7 @@ extern "C" {
 enum {
     SETUP_IDLE,         // nothing running
     SETUP_LOOKING,      // looking for the game files in the picked folder
+    SETUP_UNPACKING,    // reading them out of the .nsp / .xci (the RomFS image with the update applied)
     SETUP_COPYING,      // copying exefs / the RomFS image
     SETUP_IMAGE,        // building the RomFS image from romfs/
     SETUP_READING,      // generator: translating the game code
@@ -20,12 +22,16 @@ enum {
     SETUP_DONE,         // ready to play
     // failures (setup_state)
     SETUP_FAIL_NOT_FOUND,   // no exefs/main + romfs in that folder
-    SETUP_FAIL_PACKAGE,     // .xci / .nsp found instead of extracted files
+    SETUP_FAIL_PACKAGE,     // compressed packages (.nsz / .xcz)
     SETUP_FAIL_VERSION,     // not Let's Go, Eevee! / Pikachu! (main.npdm's program id)
     SETUP_FAIL_COPY,        // disk full / unreadable files
     SETUP_FAIL_BUILD,       // the game code didn't build
     SETUP_FAIL_TOOLS,       // the generator / compiler are missing from this copy
     SETUP_FAIL_ZA_VERSION,  // Legends Z-A, but not 2.0.2 (game_za_unsupported)
+    SETUP_FAIL_KEYS,        // packages, but no prod.keys found
+    SETUP_FAIL_KEYS_OLD,    // the keys can't open them (older than the game, or no ticket / title key)
+    SETUP_FAIL_NO_BASE,     // the update's package without the base game's
+    SETUP_FAIL_UNPACK,      // a package couldn't be read (damaged, or a layout runtime/nxpkg.c doesn't read)
 };
 
 // The game files in <data root>/extracted: ready to play (exefs, romfs.bin and game code built for this version).

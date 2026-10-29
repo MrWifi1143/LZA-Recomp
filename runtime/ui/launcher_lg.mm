@@ -283,13 +283,13 @@ static void game_files_section(SDL_Window *win) {
     ImGui::SeparatorText(T("Game files", "Arquivos do jogo"));
     int st = setup_state();
     if (setup_running()) {
-        static const char *const en[] = {"", "Looking for the game files...", "Copying the game files...",
+        static const char *const en[] = {"", "Looking for the game files...", "Reading the game files out of the packages...", "Copying the game files...",
                                          "Building the game data image...", "Reading the game code...",
                                          "Recompiling the game code...", "Finishing..."};
-        static const char *const pt[] = {"", "Procurando os arquivos do jogo...", "Copiando os arquivos do jogo...",
+        static const char *const pt[] = {"", "Procurando os arquivos do jogo...", "Lendo os arquivos do jogo dos pacotes...", "Copiando os arquivos do jogo...",
                                          "Montando a imagem de dados do jogo...", "Lendo o código do jogo...",
                                          "Recompilando o código do jogo...", "Finalizando..."};
-        ImGui::TextUnformatted(st >= 1 && st <= 6 ? T(en[st], pt[st]) : "...");
+        ImGui::TextUnformatted(st >= 1 && st <= 7 ? T(en[st], pt[st]) : "...");
         ImGui::ProgressBar(setup_progress(), ImVec2(-FLT_MIN, 0));
         ImGui::TextDisabled("%s", T("This takes a while (10-30 minutes), only once. The game can be played when it's done.",
                                     "Isso demora (de 10 a 30 minutos), só uma vez. O jogo fica liberado quando terminar."));
@@ -302,27 +302,41 @@ static void game_files_section(SDL_Window *win) {
                            name ? name : "Legends: Z-A");
         ImGui::SameLine();
         if (ImGui::SmallButton(T("Change...", "Trocar..."))) SDL_ShowOpenFolderDialog(picked_game, NULL, win, NULL, false);
-        return;
+        if (st < SETUP_FAIL_NOT_FOUND) return;  // (a failed change: why, below - the game files set up before still play)
     }
     // (game files set up by an earlier release from another Z-A version: asked for again, as a failed setup would)
-    if (st < SETUP_FAIL_NOT_FOUND && game_za_unsupported("extracted/exefs")) st = SETUP_FAIL_ZA_VERSION;
+    if (!ready && st < SETUP_FAIL_NOT_FOUND && game_za_unsupported("extracted/exefs")) st = SETUP_FAIL_ZA_VERSION;
     if (st >= SETUP_FAIL_NOT_FOUND) {
-        static const char *const en[] = {"No game files found in that folder.", "Those are packed game files (.xci / .nsp).",
+        static const char *const en[] = {"No game files found in that folder.", "Those are compressed game files (.nsz / .xcz).",
                                          "That's not a supported game (Pokémon Legends: Z-A).", "The files couldn't be copied.",
                                          "The game code didn't build.", "The game code builder is missing from this copy.",
-                                         "This needs Pokémon Legends: Z-A version 2.0.2; those files are another version."};
-        static const char *const pt[] = {"Nenhum arquivo do jogo nessa pasta.", "Esses são arquivos do jogo empacotados (.xci / .nsp).",
+                                         "This needs Pokémon Legends: Z-A version 2.0.2; those files are another version.",
+                                         "No keys found for those game files (prod.keys).", "Your keys can't open those game files.",
+                                         "Only the update was found, not the base game.", "Those game files couldn't be read."};
+        static const char *const pt[] = {"Nenhum arquivo do jogo nessa pasta.", "Esses são arquivos do jogo comprimidos (.nsz / .xcz).",
                                          "Esse não é um jogo suportado (Pokémon Legends: Z-A).", "Os arquivos não puderam ser copiados.",
                                          "O código do jogo não compilou.", "O compilador do código do jogo não está nesta cópia.",
-                                         "É preciso o Pokémon Legends: Z-A versão 2.0.2; esses arquivos são de outra versão."};
-        static const char *const en_h[] = {"Choose the folder that holds exefs and romfs.", "Extract them first (exefs and romfs).",
-                                           "Pick the folder of your own extracted Pokémon Legends: Z-A.", "Check there are about 6 GB free and try again.",
+                                         "É preciso o Pokémon Legends: Z-A versão 2.0.2; esses arquivos são de outra versão.",
+                                         "Nenhuma chave encontrada para esses arquivos (prod.keys).", "As suas chaves não abrem esses arquivos.",
+                                         "Só a atualização foi encontrada, não o jogo base.", "Esses arquivos do jogo não puderam ser lidos."};
+        static const char *const en_h[] = {"Choose the folder with your .nsp / .xci files, or the one that holds exefs and romfs.",
+                                           "Decompress them first (nsz -D), or dump them as .nsp / .xci.",
+                                           "Pick the folder of your own Pokémon Legends: Z-A.", "Check there are about 6 GB free and try again.",
                                            "Check there are about 2 GB free and try again; details in lasrecomp.log.", "Download the release again.",
-                                           "Update the game to 2.0.2 on your Switch, dump the base game and the update, extract them together (README)."};
-        static const char *const pt_h[] = {"Escolha a pasta que tem exefs e romfs.", "Extraia antes (exefs e romfs).",
-                                           "Escolha a pasta do seu Pokémon Legends: Z-A extraído.", "Confira se há uns 6 GB livres e tente de novo.",
+                                           "Update the game to 2.0.2 on your Switch, dump the base game and the update, and put both in one folder (README).",
+                                           "Dump prod.keys from your own Switch and put it next to the game files (or in .switch in your home folder).",
+                                           "Dump prod.keys again from your Switch on its current system version; details in lasrecomp.log.",
+                                           "Put the base game's .nsp / .xci in the same folder as the update.",
+                                           "The dump may be damaged; details in lasrecomp.log."};
+        static const char *const pt_h[] = {"Escolha a pasta com os seus arquivos .nsp / .xci, ou a que tem exefs e romfs.",
+                                           "Descomprima antes (nsz -D), ou faça o dump como .nsp / .xci.",
+                                           "Escolha a pasta do seu Pokémon Legends: Z-A.", "Confira se há uns 6 GB livres e tente de novo.",
                                            "Confira se há uns 2 GB livres e tente de novo; detalhes no lasrecomp.log.", "Baixe a release de novo.",
-                                           "Atualize o jogo para a 2.0.2 no Switch, faça o dump do jogo base e da atualização e extraia os dois juntos (README)."};
+                                           "Atualize o jogo para a 2.0.2 no Switch, faça o dump do jogo base e da atualização e coloque os dois numa pasta (README).",
+                                           "Faça o dump do prod.keys do seu próprio Switch e coloque junto dos arquivos do jogo (ou em .switch na sua pasta pessoal).",
+                                           "Faça o dump do prod.keys de novo no Switch com a versão atual do sistema; detalhes no lasrecomp.log.",
+                                           "Coloque o .nsp / .xci do jogo base na mesma pasta da atualização.",
+                                           "O dump pode estar danificado; detalhes no lasrecomp.log."};
         int k = st - SETUP_FAIL_NOT_FOUND;
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 900);
         ImGui::TextColored(k_red, "%s", T(en[k], pt[k]));
@@ -330,11 +344,13 @@ static void game_files_section(SDL_Window *win) {
         ImGui::PopTextWrapPos();
     } else {
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 900);
-        ImGui::TextUnformatted(T("Select the folder with your own extracted Pokémon Legends: Z-A (exefs and romfs).",
-                                 "Selecione a pasta com o seu Pokémon Legends: Z-A extraído (exefs e romfs)."));
+        ImGui::TextUnformatted(T("Select the folder with your own Pokémon Legends: Z-A: the dumped base game and 2.0.2 update "
+                                 "(.nsp / .xci, with your prod.keys), or the extracted exefs and romfs.",
+                                 "Selecione a pasta com o seu Pokémon Legends: Z-A: o dump do jogo base e da atualização 2.0.2 "
+                                 "(.nsp / .xci, com o seu prod.keys), ou o exefs e o romfs extraídos."));
         ImGui::PopTextWrapPos();
     }
-    if (ImGui::Button(T("Select game folder...", "Selecionar pasta do jogo..."), ImVec2(-FLT_MIN, 0)))
+    if (!ready && ImGui::Button(T("Select game folder...", "Selecionar pasta do jogo..."), ImVec2(-FLT_MIN, 0)))
         SDL_ShowOpenFolderDialog(picked_game, NULL, win, NULL, false);
 }
 
