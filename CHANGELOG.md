@@ -7,6 +7,11 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- A launcher, like an older PC game's (Fallout: New Vegas style), instead of the one-window start screen: the banner
+  (a night city around a lattice tower, drawn by the program: no game art), Play, and pages for Options (Display /
+  Graphics / Game tabs, with this PC's recommended settings), Controls (controller and keyboard), Game Files and Mods.
+  It opens in a window; the game goes fullscreen (or stays a window) after Play. The old start screen is kept for
+  console ports: `LARECOMP_START_SCREEN=classic`, or built with `-DRT_CLASSIC_START_SCREEN=1`.
 - The start screen reads your dumped `.nsp` / `.xci` files directly, like the emulators: pick the folder with the base
   game and the update (and the Mega Dimension DLC, if you own it) and the recomp applies the update over the base game
   itself, with your `prod.keys` (looked for beside the files, in `~/.switch` and in the emulators' key folders). No

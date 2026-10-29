@@ -18,15 +18,15 @@ LZ&A Recomp has one branch per game:
 
 > This project was made largely with AI (Anthropic's Claude, through Claude Code), directed and tested by a human.
 
-![The start screen](docs/launcher.png)
+![The launcher](docs/launcher.png)
 
 ## Playing on Windows
 
 1. Download `LZA-Recomp-ZA-windows.zip` from the [releases](../../releases) and unzip it somewhere you can write to
    (not Program Files).
 2. Put your dumped game files in one folder: the base game and the 2.0.2 update (`.nsp` / `.xci`, below).
-3. Run `ZARecomp.exe` (not code-signed: "More info" -> "Run anyway" if Windows asks), click **Select game folder...**
-   and pick that folder.
+3. Run `ZARecomp.exe` (not code-signed: "More info" -> "Run anyway" if Windows asks), click **Set up game** ->
+   **Select game folder...** and pick that folder.
 4. Wait while the game files are read and the game code is generated and compiled for your PC. This happens once,
    and takes from several minutes on a big CPU to much longer on a small one.
 5. Click **Play**. The first start also prepares the shaders once (a progress bar).
@@ -44,7 +44,7 @@ program and starts it.
 git clone -b LegendsZA https://github.com/MrWifi1143/LZA-Recomp.git PLZA-Recomp && cd PLZA-Recomp && ./tools/linux/install.sh && ./play.sh
 ```
 
-On the start screen click **Select game folder...** and pick the folder with your dumped `.nsp` / `.xci` files
+In the launcher click **Set up game** -> **Select game folder...** and pick the folder with your dumped `.nsp` / `.xci` files
 (below); the game code is built for your PC once. Later, start it again with `./play.sh` in that folder. To update:
 `git pull && ./tools/linux/install.sh`.
 
@@ -60,14 +60,14 @@ What you need, all from your own Switch:
 - `prod.keys` (dumped with Lockpick_RCM)
 - optional: the Mega Dimension DLC `.nsp`, if you own it
 
-Put the `.nsp` / `.xci` files in one folder and pick it on the start screen. The recomp reads them itself, like the
+Put the `.nsp` / `.xci` files in one folder and pick it in the launcher (**Game Files**). The recomp reads them itself, like the
 emulators do: it applies the 2.0.2 update over the base game, writes only what it needs (the game code, one RomFS
 image, the DLC's data) and never changes your dumps. It looks for `prod.keys` in that folder first, then in `.switch`
 in your home folder and in the emulators' key folders (Eden, Yuzu and its forks, Ryujinx). Title keys come from the
 tickets inside the `.nsp` files, or from a `title.keys` beside `prod.keys`.
 
 Compressed dumps (`.nsz` / `.xcz`) aren't read: decompress them first (`nsz -D`). If several updates are in the
-folder, the newest one that is 2.0.2 is used; the base game alone or another update won't work (the start screen
+folder, the newest one that is 2.0.2 is used; the base game alone or another update won't work (the launcher
 says "This needs Pokémon Legends: Z-A version 2.0.2").
 
 **Mega Dimension (the DLC, optional).** Not needed to play. If its `.nsp` is in the folder, the game sees the DLC as
@@ -84,7 +84,7 @@ Which update is a dump? `lasrecomp.log` lists the packages found with their vers
 also holds the display version ("2.0.2"). The extracted `exefs/main` of 2.0.2 has the build id `B1F12FD919EAE86A`
 (bytes 0x40..0x47 of the file).
 
-Set up with other files before (2.0.0, say): the start screen shows the version message; pick the folder with the
+Set up with other files before (2.0.0, say): the launcher shows the version message; pick the folder with the
 2.0.2 files with **Select game folder...** and the game code is built again for it. Saves stay where they are (2.0.2
 loads saves made with 2.0.0).
 
@@ -99,13 +99,15 @@ Tested on Linux with an RTX 4090; the Windows build is tested under Wine.
   SMAA. Resolution the game's own way: the Internal resolution option sets the screen size Z-A renders for (1440p,
   4K...: its scene at 0.65 of it, upscaled by its own upscaler, every pass at the new size); 1080p is the Switch's.
 - NPCs animate every frame (the game's own animation level of detail is bypassed).
-- Start screen: resolution, fullscreen, anti-aliasing, frame rate, FPS counter, button prompts, mods, controller test
-  and remapping, keyboard remapping. "Don't show this screen at start" goes straight to the game from then on (hold
-  Shift while starting to see it again, or set Start Screen in the game's Settings).
-- The game's own Settings screen (Menu -> Help & Settings -> Settings) has the start screen's settings too, as rows
+- Launcher, like an older PC game's: **Play**, **Options** (display, graphics, game: resolution, fullscreen,
+  anti-aliasing, frame rate, FPS counter, button prompts... with this PC's recommended settings), **Controls**
+  (controller test and remapping, keyboard remapping), **Game Files**, **Mods**. "Skip the launcher" goes straight
+  to the game from then on (hold Shift while starting to see it again, or set Start Screen in the game's Settings).
+  The older one-window start screen is kept for console ports: `LARECOMP_START_SCREEN=classic`.
+- The game's own Settings screen (Menu -> Help & Settings -> Settings) has the launcher's settings too, as rows
   like the game's: frame rate, resolution, screen mode, anti-aliasing, button prompts and FPS counter on Gameplay,
   mouse camera, mouse sensitivity and stick dead zone on Camera, master volume on Sound. They apply at once (frame
-  rate and resolution: from the next start) and are saved with the start screen's. Its Controls row opens the key
+  rate and resolution: from the next start) and are saved with the launcher's. Its Controls row opens the key
   bindings there: each action with its key and its controller button (the controller's own button icon); select one
   and press the new key on the keyboard or the new button on the controller (or click the key / the button).
 - Button prompts for what you play with: the bound keys and mouse buttons, Xbox letters or PlayStation shapes instead
@@ -140,7 +142,7 @@ What the script does, step by step. Requirements: clang + lld, SDL 3, FFmpeg, sh
 ```sh
 python3 -m venv .venv && .venv/bin/pip install lz4 capstone unicorn
 make -j$(nproc) all SHADERC=-lshaderc_shared  # build/lasrecomp (Debian / Ubuntu: SHADERC=-lshaderc)
-mkdir -p extracted && ./play.sh               # the start screen sets up your game files and builds the game code
+mkdir -p extracted && ./play.sh               # the launcher sets up your game files and builds the game code
 ```
 
 For development, with the game code built by the Makefile instead: your own Z-A 2.0.2 files in extracted/exefs
@@ -151,7 +153,7 @@ make gen                                      # translate the game code into gen
 make -j$(nproc) all SHADERC=-lshaderc_shared  # build/lasrecomp + build/lasgame.so
 cc -O2 -Iruntime tools/romfs/mkromfs.c runtime/romfs_build.c -o build/mkromfs
 ./build/mkromfs extracted/romfs extracted/romfs.bin
-./play.sh                                     # start screen, then the game (--play skips it)
+./play.sh                                     # launcher, then the game (--play skips it)
 ```
 
 `SHADERC=-lshaderc_shared` is for distributions that ship only the shared shaderc library, such as Arch.

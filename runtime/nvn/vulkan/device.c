@@ -1339,6 +1339,11 @@ static void quick_exit_handler(void) {
 }
 
 static _Atomic bool g_vk_ready;
+// The first size of the window, from the launcher (runtime/ui/launcher_lg.mm: its own fixed size, the game's after
+// Play). A size asked for later isn't always given: Wayland compositors may keep a window at the size they chose.
+static int g_hint_w, g_hint_h;
+void ui_window_size_hint(int w, int h) { g_hint_w = w, g_hint_h = h; }
+
 void ui_window_init(void) {
     if (window) return;
     atexit(quick_exit_handler);
@@ -1348,13 +1353,14 @@ void ui_window_init(void) {
     input_load_user_mappings();
     int win_w = 1280, win_h = 720;
     if (ENV("LARECOMP_WINDOW")) sscanf(ENV("LARECOMP_WINDOW"), "%dx%d", &win_w, &win_h);
+    else if (g_hint_w > 0) win_w = g_hint_w, win_h = g_hint_h;
     SDL_WindowFlags wflags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (ENV("LARECOMP_HIDDEN")) wflags |= SDL_WINDOW_HIDDEN;
     window = SDL_CreateWindow(RT_APP_NAME, win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     rt_window_icon(window);
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
-    if (g_settings.fullscreen && !ENV("LARECOMP_WINDOW") && !ENV("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
+    if (g_settings.fullscreen && !g_hint_w && !ENV("LARECOMP_WINDOW") && !ENV("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
     create_instance();
     if (!SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
     pick_device();
