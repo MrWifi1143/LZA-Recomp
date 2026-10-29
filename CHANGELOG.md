@@ -8,6 +8,8 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Arceus:
 
+- Button icons for Xbox / PlayStation / keyboard prompts are drawn once and kept on disk (cache/glyphs/): each redraw
+  cost ~1.8 ms of the render thread (measured in Legends Z-A).
 - Fewer hitches when new models appear: the VRAM vertex cache kept each stream's partial edge pages by reading them back
   from the write-combined upload buffer (~30 us a stream; 4.4 ms of one frame in Legends Z-A); they are taken from the
   game's memory now.
