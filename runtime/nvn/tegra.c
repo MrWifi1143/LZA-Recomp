@@ -97,18 +97,46 @@ static inline uint64_t gob_offset(uint32_t xb, uint32_t y, uint32_t z, uint32_t 
     return off;
 }
 
+// One whole GOB (64 bytes x 8 rows): linear row yi is the four 16-byte sectors at ((yi >> 1) << 6 | (yi & 1) << 4) +
+// 0, 32, 256, 288 (gob_offset with xi = 0, 16, 32, 48) - fixed copies, no address math per sector.
+static inline void copy_gob(const uint8_t *gob, uint8_t *lin, uint32_t row_bytes, bool to_linear, uint8_t *gob_w,
+                            const uint8_t *lin_r) {
+    for (uint32_t yi = 0; yi < 8; yi++) {
+        uint32_t b = (yi >> 1) << 6 | (yi & 1) << 4;
+        if (to_linear) {
+            uint8_t *l = lin + (uint64_t)yi * row_bytes;
+            memcpy(l, gob + b, 16), memcpy(l + 16, gob + b + 32, 16), memcpy(l + 32, gob + b + 256, 16), memcpy(l + 48, gob + b + 288, 16);
+        } else {
+            const uint8_t *l = lin_r + (uint64_t)yi * row_bytes;
+            memcpy(gob_w + b, l, 16), memcpy(gob_w + b + 32, l + 16, 16), memcpy(gob_w + b + 256, l + 32, 16), memcpy(gob_w + b + 288, l + 48, 16);
+        }
+    }
+}
+
 static void copy_surface(const uint8_t *src, uint8_t *dst, uint32_t wb, uint32_t hb, uint32_t d, uint32_t bpb,
                          uint32_t bh_log2, uint32_t bd_log2, bool to_linear) {
     uint32_t row_bytes = wb * bpb;
     uint32_t width_gobs = (row_bytes + 63) / 64;
     uint32_t gob_rows = 8u << bh_log2;
     uint64_t blocks_rows = (hb + gob_rows - 1) / gob_rows;
+    // Whole GOBs first (each 8 rows tall and 64 bytes wide inside the surface), one address computation each; the
+    // rest - a partial GOB at the right edge, the last rows when hb isn't a multiple of 8 - sector by sector below.
+    // (Texture uploads in Lumiose: 8-13 MB deswizzled in one frame took the render thread 2-4 ms sector by sector.)
+    uint32_t full_gx = row_bytes / 64, full_y = hb & ~7u;
+    for (uint32_t z = 0; z < d; z++)
+        for (uint32_t y = 0; y < full_y; y += 8)
+            for (uint32_t gx = 0; gx < full_gx; gx++) {
+                uint64_t o = gob_offset(gx * 64, y, z, width_gobs, bh_log2, bd_log2, blocks_rows);
+                uint64_t lo = ((uint64_t)z * hb + y) * row_bytes + (uint64_t)gx * 64;
+                copy_gob(src + o, dst + lo, row_bytes, to_linear, dst + o, src + lo);
+            }
     for (uint32_t z = 0; z < d; z++) {
         for (uint32_t y = 0; y < hb; y++) {
+            if (y < full_y && full_gx * 64 == row_bytes) continue;  // (all whole GOBs: done above)
             uint8_t *lin = dst + ((uint64_t)z * hb + y) * row_bytes;
             const uint8_t *lin_src = src + ((uint64_t)z * hb + y) * row_bytes;
             // 16-byte runs are contiguous in both layouts
-            for (uint32_t x = 0; x < row_bytes; x += 16) {
+            for (uint32_t x = y < full_y ? full_gx * 64 : 0; x < row_bytes; x += 16) {
                 uint32_t n = row_bytes - x < 16 ? row_bytes - x : 16;
                 uint64_t o = gob_offset(x, y, z, width_gobs, bh_log2, bd_log2, blocks_rows);
                 if (to_linear) memcpy(lin + x, src + o, n);

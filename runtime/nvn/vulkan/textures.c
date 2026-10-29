@@ -547,7 +547,11 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
             bool expand = (mf.expand_rgb == 1 && fi->bpb == 3) || (mf.expand_rgb >= 2 && fi->bpb == 2);
             uint32_t out_row = expand ? l.wb * 4 : row;
             VkSpan s = vk_transient((uint64_t)out_row * l.hb * l.d, 16);
-            uint8_t *lin = expand ? malloc(sz) : s.ptr;
+            // (a possible button icon is put together in normal memory: the staging buffer is write-combined, and
+            // reading it back to hash the icon - glyphs_patch below - cost ~0.1-0.3 ms per small texture: up to 3.7 ms
+            // of a frame where Legends Z-A brought in a batch of small BC4 / BC5 textures)
+            bool glyph_cand = lv == 0 && layer == 0 && l.d == 1 && l.w <= 128 && l.h <= 128 && (t->format == 0x49 || t->format == 0x4B);
+            uint8_t *lin = expand || glyph_cand ? malloc(sz) : s.ptr;
             const uint8_t *src = (const uint8_t *)(uintptr_t)t->addr + layer * layer_size + l.offset;
             if (linear) {
                 for (uint32_t y = 0; y < l.hb; y++) memcpy(lin + (uint64_t)y * row, src + (uint64_t)y * t->stride, row);
@@ -589,7 +593,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 }
             }
             // a button icon: its symbol for the controller in use (BC4 / BC5: lin is the upload buffer itself)
-            if (lv == 0 && layer == 0 && l.d == 1 && l.w <= 128 && l.h <= 128 && (t->format == 0x49 || t->format == 0x4B)) {
+            if (glyph_cand) {
                 int g = glyphs_patch(hash_full(lin, (uint64_t)row * l.hb) | 1, t->format, l.w, l.h, lin);
                 if (g) b->glyph = true, b->glyph_gen = glyphs_generation();
             }
@@ -610,6 +614,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                     }
                 free(lin);
             }
+            if (glyph_cand && !expand) memcpy(s.ptr, lin, sz), free(lin);
             uint32_t w = l.w, hh = l.h, d = l.d;
             // the copy stays inside the image's level: a texture allocated at the internal resolution (16:9, render
             // target sized) can still be filled from the CPU - the save slots' screenshots on the title screen. Its

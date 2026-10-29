@@ -380,6 +380,12 @@ static const Icon *find(uint64_t h) {
     return NULL;
 }
 
+// Redrawn icons, by their content and the generation: the game uploads the same prompt textures again and again as its
+// HUD changes, and each redraw supersamples the font. (Render thread only: textures.c upload_texture.)
+#define GCACHE 64
+static struct { uint64_t hash; uint32_t gen, format, w, h; size_t size; uint8_t *data; } g_gcache[GCACHE];
+static int g_gcache_next;
+
 int glyphs_patch(uint64_t hash, uint32_t format, uint32_t w, uint32_t h, uint8_t *lin) {
     const Icon *ic = find(hash);
     if (!ic) return 0;
@@ -391,6 +397,14 @@ int glyphs_patch(uint64_t hash, uint32_t format, uint32_t w, uint32_t h, uint8_t
     if (want.sym == orig.sym && (want.sym != SYM_TEXT || !strcmp(want.text, orig.text))) return 1;  // (the game's own)
     if (want.sym == SYM_TEXT && !font_ready()) return 1;
     int wb = (int)(w + 3) / 4, hb = (int)(h + 3) / 4, pw = wb * 4, ph = hb * 4, bpb = bc5 ? 16 : 8;
+    uint32_t gen = glyphs_generation();
+    size_t size = (size_t)wb * hb * bpb;
+    for (int i = 0; i < GCACHE; i++)
+        if (g_gcache[i].data && g_gcache[i].hash == hash && g_gcache[i].gen == gen && g_gcache[i].format == format &&
+            g_gcache[i].w == w && g_gcache[i].h == h && g_gcache[i].size == size) {
+            memcpy(lin, g_gcache[i].data, size);
+            return 2;
+        }
     uint8_t *sym = malloc((size_t)pw * ph), *shape = bc5 ? malloc((size_t)pw * ph) : NULL;
     plane_get(lin, bpb, 0, wb, hb, sym);
     if (bc5) plane_get(lin, bpb, 1, wb, hb, shape);
@@ -425,5 +439,12 @@ int glyphs_patch(uint64_t hash, uint32_t format, uint32_t w, uint32_t h, uint8_t
         }
     plane_put(lin, bpb, 0, wb, hb, sym);
     free(cv.c), free(sym), free(shape);
+    int c = g_gcache_next++ % GCACHE;
+    uint8_t *keep = realloc(g_gcache[c].data, size);
+    if (keep) {
+        memcpy(keep, lin, size);
+        g_gcache[c].data = keep, g_gcache[c].hash = hash, g_gcache[c].gen = gen, g_gcache[c].format = format;
+        g_gcache[c].w = w, g_gcache[c].h = h, g_gcache[c].size = size;
+    }
     return 2;
 }

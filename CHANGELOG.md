@@ -8,6 +8,10 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Arceus:
 
+- Fewer hitches when new things appear (the render thread): a possible button icon (a small BC4 / BC5 texture) is put
+  together in normal memory - it was hashed by reading back the write-combined upload buffer, ~0.1-0.3 ms per texture
+  (up to 3.7 ms of a frame in Legends Z-A); redrawn icons are kept; block-linear textures are deswizzled a whole GOB at
+  a time (1.8x faster, byte-identical over 4000 random layouts).
 - Shadow Smoothing (Next Start), the game's Settings and the start screen, Enabled by default: the shadow mask's near
   cascade taps are bilinear - each tap's lit / shadowed test (depth, or the shadow map's object id = the receiver's) is
   made on the 4 texels around it and weighted by where it lies between them - so the edges of people's and Pokémon's
