@@ -128,10 +128,9 @@ Tested on Linux with an RTX 4090; the Windows build is tested under Wine.
 
 Known issues:
 
-- Lumiose free roam (1440p, Draw Distance Max, Ultra shadows; RTX 4090, i9-12900K): about 170 fps uncapped (1% low
-  ~124), and 144 holds with under 1% of frames late. `extra_workers = 3` in larecomp.ini adds three job threads to the
-  game's three - experimental, off by default: a long session with them had props and models breaking apart after
-  10+ minutes.
+- Lumiose free roam (1440p, Draw Distance Max, Ultra shadows; RTX 4090, i9-12900K): about 180 fps uncapped (1% low
+  ~126). On CPUs with 6+ fast cores the game gets up to three job threads more than the Switch's three
+  (`extra_workers = auto`, the default; `0` keeps the Switch's three: about 167 fps there).
 - The Unlimited frame rate is hidden for now: battles were reported slow at it (enemies late to pick a move, a switched
   Pokémon not sent out) and are being retested; 30-144 fps are not affected.
 - On a fresh install, shaders and pipelines compile the first time they are seen (short stutters).

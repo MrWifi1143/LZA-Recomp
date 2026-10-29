@@ -7,6 +7,12 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- Faster on CPUs with 6+ fast cores: `extra_workers = auto` (the default) now gives the game up to three job threads
+  more than the Switch's three (one per fast physical core past five: 8 performance cores -> 3). Lumiose walk uncapped
+  (1440p, Max people, Ultra shadows, i9-12900K, 3 runs each): 167 -> 179 fps, 1% low 120 -> 126, frames over 6.94 ms
+  6-8% -> 4%. Auto had meant none since 2026-10-22, when a long session with them showed props and models breaking
+  apart - the vertex cache's list overflow fixed two days later; a 99,000-frame walk with them is clean.
+  `extra_workers = 0` keeps the Switch's three.
 - Foot IK is the game's own again: feet are placed on the ground (slopes, steps, kerbs) as on a Switch. It had been
   off since 2026-10-19 because running stretched the legs back to where the run began; on this build the run, the stop
   and standing are right with it at 30, 60 and 144 fps (the Lumiose walk too, at the same frame rate), so a fix since
