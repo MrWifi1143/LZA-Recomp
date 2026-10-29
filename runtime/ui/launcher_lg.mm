@@ -455,36 +455,37 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
             }
         };
         // the crown, as on the Prism Tower card: the shaft flares into flat fins with slanted tops (the red lights on
-        // their outer corners), a rounded notch between each fin and the stepped block in the middle that carries the
-        // needle; a second pair of fins stands behind (drawn first, dimmer)
+        // their outer corners); between them the tower body goes on up as a wide middle column, the fins split off it
+        // by narrow slits with rounded floors, the column stepping in to the needle; a second pair of fins stands
+        // behind (drawn first, dimmer)
         float o = cup0, fin = o + 0.040f * H;  // (the shaft's half width where the crown starts; the fins' outer corners)
-        for (int k = -1; k <= 1; k += 2) {  // (from under the notch's floor, behind the middle block and the front fin: only
-                                            // the notch shows them, and their tops below the front fins')
+        for (int k = -1; k <= 1; k += 2) {  // (behind the column and the front fin: their tops show above the column's
+                                            // first step, a little below the front fins' outer corners)
             ImVec2 q[4] = {ImVec2(cx + k * 0.020f * H, Y(0.84f)), ImVec2(cx + k * 0.088f * H, Y(0.84f)),
-                           ImVec2(cx + k * 0.088f * H, Y(0.958f)), ImVec2(cx + k * 0.030f * H, Y(0.946f))};
+                           ImVec2(cx + k * 0.088f * H, Y(0.972f)), ImVec2(cx + k * 0.034f * H, Y(0.962f))};
             d->AddQuadFilled(q[0], q[1], q[2], q[3], fill);
             d->AddPolyline(q, 4, IM_COL32(150, 210, 85, 190), ImDrawFlags_Closed, 1.8f);
-            d->AddLine(ImVec2(cx + k * 0.046f * H, Y(0.86f)), ImVec2(cx + k * 0.048f * H, Y(0.948f)), dim, 1.0f);  // (its face's edge)
-            back_lights[k > 0] = ImVec2(cx + k * 0.062f * H, Y(0.952f));  // (on the top edge, where the front fin doesn't hide it)
+            d->AddLine(ImVec2(cx + k * 0.046f * H, Y(0.86f)), ImVec2(cx + k * 0.048f * H, Y(0.962f)), dim, 1.0f);  // (its face's edge)
+            back_lights[k > 0] = ImVec2(cx + k * 0.046f * H, Y(0.965f));  // (on the top edge, above the column's step)
         }
-        // left half: up the shaft, out along the fin's outer edge, across its slanted top, down its inner edge, along
-        // the opening's far rim, up the middle pole's step and shoulder to the needle
+        // left half: up the shaft, out along the fin's outer edge, across its slanted top, down its inner edge into
+        // the slit, round its floor, up the middle column's side and its steps to the needle
         for (int i = 0; i < 80; i++) {  // the shaft (an hourglass), from the deck up
             float f = 0.258f + 0.542f * i / 80;
             P[n++] = ImVec2(cx - shw(f), Y(f));
         }
         bez(ImVec2(cx - o, Y(0.80f)), ImVec2(cx - o - 0.020f * H, Y(0.875f)), ImVec2(cx - fin, Y(0.970f)), 24, true);  // (keeps the shaft's slope)
         P[n++] = ImVec2(cx - o + 0.004f * H, Y(0.958f));                                  // the slanted top's inner corner
-        // the fin's inner edge down to the crown's opening, then its far rim over to the pole (an ellipse's upper half)
-        float mcy = Y(0.895f), mrx = o - 0.006f * H, mry = 0.014f * H, pw = 0.024f * H;
-        for (int i = 0; i <= 10; i++) {
-            float x = -mrx + (mrx - pw) * i / 10.0f;
-            P[n++] = ImVec2(cx + x, mcy - mry * sqrtf(fmaxf(0.0f, 1 - x * x / (mrx * mrx))));
-        }
-        P[n++] = ImVec2(cx - 0.024f * H, Y(0.958f));                                      // the middle block
-        P[n++] = ImVec2(cx - 0.013f * H, Y(0.968f));
-        P[n++] = ImVec2(cx - 0.013f * H, Y(0.990f));                                      // its upper step
-        P[n++] = ImVec2(cx - 0.005f * H, Y(0.997f));
+        float fi = o - 0.006f * H, col = 0.052f * H;                                      // (the fin's inner edge, the column's side)
+        P[n++] = ImVec2(cx - fi, Y(0.910f));                                              // the fin's inner edge, down into the slit
+        bez(ImVec2(cx - fi, Y(0.910f)), ImVec2(cx - fi, Y(0.896f)), ImVec2(cx - (fi + col) / 2, Y(0.896f)), 5, false);
+        bez(ImVec2(cx - (fi + col) / 2, Y(0.896f)), ImVec2(cx - col, Y(0.896f)), ImVec2(cx - col, Y(0.910f)), 5, false);  // its floor
+        P[n++] = ImVec2(cx - col, Y(0.950f));                                             // the middle column
+        P[n++] = ImVec2(cx - 0.032f * H, Y(0.958f));                                      // its first step
+        P[n++] = ImVec2(cx - 0.032f * H, Y(0.978f));
+        P[n++] = ImVec2(cx - 0.016f * H, Y(0.985f));                                      // its second step
+        P[n++] = ImVec2(cx - 0.016f * H, Y(0.996f));
+        P[n++] = ImVec2(cx - 0.005f * H, Y(1.000f));
         P[n++] = ImVec2(cx - 0.004f * H, Y(1.004f));                                      // the needle's foot
         int half = n;
         for (int i = half - 1; i >= 0; i--) P[n++] = ImVec2(2 * cx - P[i].x, P[i].y);  // (the right half, mirrored)
@@ -493,24 +494,6 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
         d->AddConcavePolyFilled(P, n, fill);
         d->Flags = fl;
         d->AddPolyline(P, n, c, 0, 2.5f);  // (open at the deck)
-        {  // the opening in the crown's top: dark inside (either side of the pole), the pole going down into it, the
-           // front rim across in front of the pole's foot
-            float mcy = Y(0.895f), mrx = o - 0.006f * H, mry = 0.014f * H, pw = 0.024f * H;
-            float yb = mcy - mry * sqrtf(1 - pw * pw / (mrx * mrx)), yf = mcy + mry * sqrtf(1 - pw * pw / (mrx * mrx));
-            for (int k = -1; k <= 1; k += 2) {
-                ImVec2 lo(k < 0 ? cx - mrx - 4 : cx + pw, mcy - mry - 4), hi(k < 0 ? cx - pw : cx + mrx + 4, mcy + mry + 4);
-                d->PushClipRect(lo, hi, true);
-                d->AddEllipseFilled(ImVec2(cx, mcy), ImVec2(mrx, mry), IM_COL32(4, 7, 12, 255));
-                d->PopClipRect();
-                d->AddLine(ImVec2(cx + k * pw, yb), ImVec2(cx + k * pw, yf), c, 2.0f);  // (the pole's sides, on down)
-            }
-            ImVec2 fr[25];
-            for (int i = 0; i <= 24; i++) {
-                float th = 3.14159265f * i / 24;
-                fr[i] = ImVec2(cx + cosf(th) * mrx, mcy + sinf(th) * mry);
-            }
-            d->AddPolyline(fr, 25, c, 0, 2.0f);
-        }
         for (int k = -1; k <= 1; k += 2)  // (the fins' faces: a fold line up each)
             d->AddLine(ImVec2(cx + k * (o + 0.004f * H), Y(0.83f)), ImVec2(cx + k * (fin - 0.014f * H), Y(0.962f)), dim, 1.2f);
         tips[0] = ImVec2(cx - fin, Y(0.970f)), tips[1] = ImVec2(cx + fin, Y(0.970f));
@@ -546,8 +529,9 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
         d->AddCircleFilled(p, 2.5f, IM_COL32(255, 90, 80, (int)(230 * blink2)), 12);
     }
     float pulse = 0.5f + 0.5f * sinf(t * 2.2f);
-    d->AddCircleFilled(ImVec2(cx, Y(1.05f)), 5 + 3 * pulse, IM_COL32(220, 255, 140, (int)(120 + 120 * pulse)), 16);
-    d->AddCircleFilled(ImVec2(cx, Y(1.05f)), 2.5f, IM_COL32(255, 255, 230, 255), 12);
+    d->AddCircleFilled(ImVec2(cx, Y(1.05f)), 9 + 5 * pulse, IM_COL32(180, 110, 255, (int)(40 + 50 * pulse)), 20);  // (the beacon: purple)
+    d->AddCircleFilled(ImVec2(cx, Y(1.05f)), 5 + 3 * pulse, IM_COL32(190, 120, 255, (int)(130 + 110 * pulse)), 16);
+    d->AddCircleFilled(ImVec2(cx, Y(1.05f)), 2.5f, IM_COL32(246, 228, 255, 255), 12);
 }
 
 // The launcher's banner: a city at night around Prism Tower, its lights twinkling, and the title
