@@ -13,11 +13,13 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "../hle.h"
 #include "../nvn/nvn.h"
 #include "../nvn/renderer.h"
 #include "../settings.h"
+#include "../platform.h"
 #include "../input_bind.h"
 
 enum {
@@ -671,7 +673,8 @@ void input_frame(uint64_t frame) {
         if (dir == (const char *)1) dir = getenv("LARECOMP_LIVE");
         if (dir) {
             static long off;
-            static struct { long len; char keys[120]; } q[256];
+            static struct { long len; bool ms; char keys[120]; } q[256];  // (len in frames, or "<n>ms": real milliseconds)
+            static uint64_t until_ns;
             static int qh, qt;
             static uint64_t until;
             static bool active;
@@ -683,13 +686,25 @@ void input_frame(uint64_t frame) {
                 while (fgets(line, sizeof line, f) && strchr(line, '\n')) {
                     off = ftell(f);
                     long len;
-                    char keys[120];
-                    if (sscanf(line, "%ld %119s", &len, keys) == 2 && (qt + 1) % 256 != qh) q[qt].len = len, snprintf(q[qt].keys, 120, "%s", keys), qt = (qt + 1) % 256;
+                    char keys[120], unit[8] = "";
+                    bool ms = sscanf(line, "%ld%7[ms] %119s", &len, unit, keys) == 3 && !strcmp(unit, "ms");
+                    if ((ms || sscanf(line, "%ld %119s", &len, keys) == 2) && (qt + 1) % 256 != qh)
+                        q[qt].len = len, q[qt].ms = ms, snprintf(q[qt].keys, 120, "%s", keys), qt = (qt + 1) % 256;
                 }
                 fclose(f);
             }
-            if (active && frame >= until) active = false, qh = (qh + 1) % 256;
-            if (!active && qh != qt) active = true, until = frame + (uint64_t)q[qh].len;
+            if (active && (q[qh].ms ? plat_now_ns() >= until_ns : frame >= until)) active = false, qh = (qh + 1) % 256;
+            if (!active && qh != qt) {
+                active = true, until = frame + (uint64_t)q[qh].len, until_ns = plat_now_ns() + (uint64_t)q[qh].len * 1000000ull;
+                static int lg = -1;  // (LARECOMP_LIVE_LOG=1: each command's start, wall clock - to line up with a screen recording)
+                if (lg < 0) lg = getenv("LARECOMP_LIVE_LOG") != NULL;
+                if (lg) {
+                    struct timespec ts;
+                    clock_gettime(CLOCK_REALTIME, &ts);
+                    LOG("[live] %lld.%06ld frame %llu: %s for %ld%s\n", (long long)ts.tv_sec, ts.tv_nsec / 1000, (unsigned long long)frame,
+                        q[qh].keys, q[qh].len, q[qh].ms ? " ms" : " frames");
+                }
+            }
             uint64_t b = 0;
             int32_t lx = 0, ly = 0, rx = 0, ry = 0;
             static const char *const nm[] = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS",

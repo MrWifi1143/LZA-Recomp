@@ -478,6 +478,23 @@ void rt_call_original(Cpu *c, uint64_t addr);
 // 1/60 s while those functions run
 static volatile uint64_t g_timers;
 static int timers_seen(Cpu *c, uint64_t addr) { g_timers = c->x[0]; return 0; }
+// (research) LARECOMP_ZA_CHLOG=1: each distinct (caller, channel, table index) that fills a time channel, logged once
+static int timers_log(Cpu *c, uint64_t addr) {
+    (void)addr;
+    static struct { uint64_t lr; uint32_t ch, idx; } seen[64];
+    static int n;
+    uint64_t lr = c->x[30];
+    uint32_t ch = (uint32_t)c->x[1], idx = (uint32_t)c->x[2];
+    for (int i = 0; i < n; i++)
+        if (seen[i].lr == lr && seen[i].ch == ch && seen[i].idx == idx) return 0;
+    if (n < 64) {
+        seen[n].lr = lr, seen[n].ch = ch, seen[n].idx = idx, n++;
+        uint64_t v = *(const uint64_t *)(uintptr_t)(0x7003393e20ull + 8ull * (int32_t)idx);
+        LOG("[fps60] time channel %u <- table[%d] = %llu ns (caller %llx, timers %llx)\n", ch, (int)(int32_t)idx,
+            (unsigned long long)v, (unsigned long long)lr, (unsigned long long)c->x[0]);
+    }
+    return 0;
+}
 static int ch1_reader(Cpu *c, uint64_t addr) {
     uint64_t t = g_timers;
     if (!t || !g_pla60_patched) return 0;
@@ -520,6 +537,7 @@ void pla60_configure(const char *exefs) {
                 }
                 const char *r1 = getenv("LARECOMP_CH1_READERS");
                 if (!dth && r1) rt_register_fnhook_at(0x70029f4214ull, timers_seen);
+                else if (!dth && getenv("LARECOMP_ZA_CHLOG")) rt_register_fnhook_at(0x70029f4214ull, timers_log);
                 for (const char *q = r1; !dth && q && *q;) {
                     uint64_t fa = strtoull(q, (char **)&q, 16);
                     if (fa) rt_register_fnhook_at(fa, ch1_reader);
