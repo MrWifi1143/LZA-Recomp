@@ -397,7 +397,7 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
     auto legw = [&](float f) { float u = (f - 0.075f) / 0.165f; return H * (0.070f + 0.085f * (1 - u) * (1 - u)); };
     auto shw = [&](float f) { float u = f - 0.52f; return H * (0.036f + 0.52f * u * u); };
     float cup0 = shw(0.80f);
-    ImVec2 tips[2];  // (the horns' tips: the red lights)
+    ImVec2 tips[2], back_lights[2];  // (the fins' red lights)
     // a body part between heights f0..f1 with half width hw(f): filled dark, its two sides stroked
     auto part = [&](float f0, float f1, int n, auto hw, float thick) {
         ImVec2 L[96], R[96];
@@ -458,12 +458,14 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
         // their outer corners), a rounded notch between each fin and the stepped block in the middle that carries the
         // needle; a second pair of fins stands behind (drawn first, dimmer)
         float o = cup0, fin = o + 0.040f * H;  // (the shaft's half width where the crown starts; the fins' outer corners)
-        for (int k = -1; k <= 1; k += 2) {
-            ImVec2 q[4] = {ImVec2(cx + k * 0.030f * H, Y(0.86f)), ImVec2(cx + k * 0.056f * H, Y(0.86f)),
-                           ImVec2(cx + k * 0.062f * H, Y(0.984f)), ImVec2(cx + k * 0.038f * H, Y(0.976f))};
+        for (int k = -1; k <= 1; k += 2) {  // (from under the notch's floor, behind the middle block and the front fin: only
+                                            // the notch shows them, and their tops below the front fins')
+            ImVec2 q[4] = {ImVec2(cx + k * 0.020f * H, Y(0.84f)), ImVec2(cx + k * 0.088f * H, Y(0.84f)),
+                           ImVec2(cx + k * 0.088f * H, Y(0.958f)), ImVec2(cx + k * 0.030f * H, Y(0.946f))};
             d->AddQuadFilled(q[0], q[1], q[2], q[3], fill);
-            d->AddPolyline(q, 4, dim, ImDrawFlags_Closed, 1.6f);
-            d->AddLine(ImVec2(cx + k * 0.047f * H, Y(0.88f)), ImVec2(cx + k * 0.053f * H, Y(0.968f)), dim, 1.0f);  // (its face's edge)
+            d->AddPolyline(q, 4, IM_COL32(150, 210, 85, 190), ImDrawFlags_Closed, 1.8f);
+            d->AddLine(ImVec2(cx + k * 0.046f * H, Y(0.86f)), ImVec2(cx + k * 0.048f * H, Y(0.948f)), dim, 1.0f);  // (its face's edge)
+            back_lights[k > 0] = ImVec2(cx + k * 0.062f * H, Y(0.952f));  // (on the top edge, where the front fin doesn't hide it)
         }
         // left half: up the shaft, out along the fin's outer edge, across its slanted top, down its inner edge, round
         // the notch, up the middle block's step and shoulder to the needle
@@ -476,11 +478,11 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
         P[n++] = ImVec2(cx - o + 0.006f * H, Y(0.885f));                                  // the fin's inner edge
         bez(ImVec2(cx - o + 0.006f * H, Y(0.885f)), ImVec2(cx - o + 0.006f * H, Y(0.852f)), ImVec2(cx - 0.048f * H, Y(0.852f)), 8, false);
         bez(ImVec2(cx - 0.048f * H, Y(0.852f)), ImVec2(cx - 0.024f * H, Y(0.852f)), ImVec2(cx - 0.024f * H, Y(0.885f)), 8, false);  // the notch
-        P[n++] = ImVec2(cx - 0.024f * H, Y(0.930f));                                      // the middle block
-        P[n++] = ImVec2(cx - 0.013f * H, Y(0.940f));
-        P[n++] = ImVec2(cx - 0.013f * H, Y(0.962f));                                      // its upper step
-        P[n++] = ImVec2(cx - 0.005f * H, Y(0.969f));
-        P[n++] = ImVec2(cx - 0.004f * H, Y(0.976f));                                      // the needle's foot
+        P[n++] = ImVec2(cx - 0.024f * H, Y(0.958f));                                      // the middle block
+        P[n++] = ImVec2(cx - 0.013f * H, Y(0.968f));
+        P[n++] = ImVec2(cx - 0.013f * H, Y(0.990f));                                      // its upper step
+        P[n++] = ImVec2(cx - 0.005f * H, Y(0.997f));
+        P[n++] = ImVec2(cx - 0.004f * H, Y(1.004f));                                      // the needle's foot
         int half = n;
         for (int i = half - 1; i >= 0; i--) P[n++] = ImVec2(2 * cx - P[i].x, P[i].y);  // (the right half, mirrored)
         ImDrawListFlags fl = d->Flags;
@@ -493,9 +495,9 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
         tips[0] = ImVec2(cx - fin, Y(0.970f)), tips[1] = ImVec2(cx + fin, Y(0.970f));
     }
     for (float f = 0.29f; f < 0.80f; f += 0.06f) d->AddLine(ImVec2(cx - shw(f), Y(f)), ImVec2(cx + shw(f), Y(f)), dim, 1.0f);  // rings
-    d->AddLine(ImVec2(cx, Y(0.976f)), ImVec2(cx, Y(1.0f)), c, 2.0f);  // antenna
-    d->AddLine(ImVec2(cx - 0.007f * H, Y(0.984f)), ImVec2(cx + 0.007f * H, Y(0.984f)), c, 1.3f);
-    d->AddLine(ImVec2(cx - 0.004f * H, Y(0.993f)), ImVec2(cx + 0.004f * H, Y(0.993f)), c, 1.3f);
+    d->AddLine(ImVec2(cx, Y(1.004f)), ImVec2(cx, Y(1.05f)), c, 2.0f);  // antenna
+    d->AddLine(ImVec2(cx - 0.007f * H, Y(1.016f)), ImVec2(cx + 0.007f * H, Y(1.016f)), c, 1.3f);
+    d->AddLine(ImVec2(cx - 0.004f * H, Y(1.030f)), ImVec2(cx + 0.004f * H, Y(1.030f)), c, 1.3f);
     // the long window up the shaft: its outline and its X lattice
     const float w0 = 0.30f, w1 = 0.78f;
     auto whw = [&](float f) { float u = (f - w0) / (w1 - w0); return shw(f) * 0.70f * sqrtf(fmaxf(0.0f, sinf(u * 3.14159265f))); };
@@ -517,9 +519,14 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
         d->AddCircleFilled(p, 7, IM_COL32(255, 60, 60, (int)(70 * blink)), 16);
         d->AddCircleFilled(p, 3, IM_COL32(255, 90, 80, (int)(255 * blink)), 12);
     }
+    float blink2 = sinf(t * 3.0f + 1.6f) > 0 ? 0.8f : 0.25f;  // (the back fins' lights, out of step)
+    for (ImVec2 p : back_lights) {
+        d->AddCircleFilled(p, 6, IM_COL32(255, 60, 60, (int)(55 * blink2)), 16);
+        d->AddCircleFilled(p, 2.5f, IM_COL32(255, 90, 80, (int)(230 * blink2)), 12);
+    }
     float pulse = 0.5f + 0.5f * sinf(t * 2.2f);
-    d->AddCircleFilled(ImVec2(cx, Y(1.0f)), 5 + 3 * pulse, IM_COL32(220, 255, 140, (int)(120 + 120 * pulse)), 16);
-    d->AddCircleFilled(ImVec2(cx, Y(1.0f)), 2.5f, IM_COL32(255, 255, 230, 255), 12);
+    d->AddCircleFilled(ImVec2(cx, Y(1.05f)), 5 + 3 * pulse, IM_COL32(220, 255, 140, (int)(120 + 120 * pulse)), 16);
+    d->AddCircleFilled(ImVec2(cx, Y(1.05f)), 2.5f, IM_COL32(255, 255, 230, 255), 12);
 }
 
 // The launcher's banner: a city at night around Prism Tower, its lights twinkling, and the title
