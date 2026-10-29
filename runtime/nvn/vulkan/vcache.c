@@ -83,14 +83,18 @@ static bool edges_changed(VEnt *e, uint64_t hn, uint64_t tn) {
 
 // [a, a + n) of the range to its buffer; the edge bytes in it to the shadow, from the same snapshot
 static void copy_part(VkCommandBuffer cb, VEnt *e, uint64_t a, uint64_t n, uint64_t hn, uint64_t tn) {
-    VkSpan s = vk_transient(n, 16);
-    memcpy(s.ptr, (const void *)(uintptr_t)a, n);
-    VkBufferCopy rg = {s.off, a - e->addr, n};
-    vkCmdCopyBuffer(cb, s.buf, e->buf, 1, &rg);  // (the upload buffer runs before the draws, then a barrier)
-    const uint8_t *p = s.ptr;
+    // The edges' shadow from the game's memory, before the upload copy: read back from the upload buffer (write-combined
+    // memory, ~100 MB/s to read) it cost the render thread ~30 us a new stream - 4.4 ms of the frame where 150 came in
+    // (Legends Z-A, Lumiose). A write in between leaves the shadow older than the copy: the next draw sees the edge
+    // changed, uploads again.
+    const uint8_t *p = (const uint8_t *)(uintptr_t)a;
     uint64_t ts = e->addr + e->len - tn;
     if (hn && a == e->addr) memcpy(e->shadow, p, hn);
     if (tn && a <= ts && a + n >= ts + tn) memcpy(e->shadow + hn, p + (ts - a), tn);
+    VkSpan s = vk_transient(n, 16);
+    memcpy(s.ptr, p, n);
+    VkBufferCopy rg = {s.off, a - e->addr, n};
+    vkCmdCopyBuffer(cb, s.buf, e->buf, 1, &rg);  // (the upload buffer runs before the draws, then a barrier)
 }
 
 // The VRAM copy of a vertex stream or index range, uploaded now if new or written since (false: not cached - volatile, too big,
