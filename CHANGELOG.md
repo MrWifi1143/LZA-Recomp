@@ -7,6 +7,12 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- Shadow Smoothing (Next Start), Settings > Graphics and the start screen, On by default: the shadow mask's 16
+  shadow-map taps are bilinear - each tap's lit / shadowed test is made on the 4 texels around it and weighted by
+  where it lies between them, as a hardware compare sampler would - so shadow edges are smooth instead of stepping
+  along the shadow map's texels (most visible at Switch and High; at Ultra the last small steps go). The game's tap
+  pattern, radius and "same surface" test are kept (its tolerance doubled for the neighbouring texels, else sloping
+  ground went darker). Same GPU time within noise on an RTX 4090.
 - Draw Distance (Detail), Settings > Graphics and the start screen: Switch / 2x / 4x / Max (10x) the distances the
   game keeps its models' levels of detail at (its trinity_ModelLodSetting entries: trees, props and buildings 50 /
   100 / 150 m, people 8 / 15 / 30 m, Pokémon 50 / 100 / 150 m) - trees down the street no longer thin out and fill in

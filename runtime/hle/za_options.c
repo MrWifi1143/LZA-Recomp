@@ -119,6 +119,8 @@ static int get_bg(void) { return g_settings.background >= BG_KEEP && g_settings.
 static void set_bg(int i) { g_settings.background = i; }
 static int get_crowd(void) { return g_settings.crowd >= 0 && g_settings.crowd <= 3 ? g_settings.crowd : 0; }
 static void set_crowd(int i) { g_settings.crowd = i; }
+static int get_smooth(void) { return g_settings.shadow_smooth ? 0 : 1; }
+static void set_smooth(int i) { g_settings.shadow_smooth = i == 0; }
 static int get_detail(void) { return g_settings.detail >= 0 && g_settings.detail <= 3 ? g_settings.detail : 0; }
 void za_set_detail(void);  // hle/za_fixes.c: at once
 static void set_detail(int i) { g_settings.detail = i, za_set_detail(); }
@@ -165,6 +167,7 @@ static const Row k_rows[] = {  // (per tab in this order; Gameplay's first is th
     {1, "Draw Distance (People)", "Choose how many people and Pokémon are drawn at once. More costs performance.", CHOICE, 4, {"Switch", "2x", "4x", "Max"}, get_crowd, set_crowd},
     {1, "Draw Distance (Detail)", "Choose how far away trees, buildings and Pokémon keep their full detail. Farther costs performance.", CHOICE, 4, {"Switch", "2x", "4x", "Max"}, get_detail, set_detail},
     {1, "Shadows (Next Start)", "Choose how sharp shadows are. Higher shows the shapes of people and Pokémon.", CHOICE, 3, {"Switch", "High", "Ultra"}, get_shadows, set_shadows},
+    {1, "Shadow Smoothing (Next Start)", "Choose whether shadow edges are smoothed or show the shadow map's steps.", CHOICE, 2, {"On", "Off"}, get_smooth, set_smooth},
     {1, "Shader Loading", "Wait for new things to load (may stutter), or show them a moment later.",
      CHOICE, 2, {"Wait", "Don't Wait"}, get_shl, set_shl},
     {1, "FPS Counter", "Choose whether to show the frame rate in the corner of the screen.", CHOICE, 2, {"Show", "Hide"},

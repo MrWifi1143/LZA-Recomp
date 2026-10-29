@@ -29,6 +29,7 @@ typedef struct {
     int crowd;           // Z-A: how many characters are drawn in full at once, 0 the Switch's .. 3 (hle/za_fixes.c)
     int detail;          // Z-A: how far away models keep their full detail, 0 the Switch's .. 3 (x1 / x2 / x4 / x10: hle/za_fixes.c)
     int shadows;         // Z-A: the shadow maps' size, 0 the Switch's 1024, 1 2048, 2 4096 (hle/za_fixes.c; at the next start)
+    bool shadow_smooth;  // Z-A: the shadow mask's taps bilinear - smooth shadow edges (nvn/vulkan/exec.c za_soft_shadows; at the next start)
     int shader_nowait;   // 1: draws whose shaders are still being built are skipped, not waited for (nvn/vulkan/exec.c wait_built)
     int pkhex_link;      // PKHeX's LiveHeX on port 6000: 0 off, 1 this PC, 2 the local network too (hle/pkm_link.c)
     float stick_deadzone;  // a controller's sticks: the share of their travel read as rest (runtime/hle/input.c)

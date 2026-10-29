@@ -1558,6 +1558,108 @@ static void save_glsl(const char *src, uint64_t addr, const char *suffix) {
 }
 
 static void gpl_prebuild(void *arg);
+// Legends Z-A's shadow mask takes 16 taps of its shadow maps (t5: depth, t6: an 8-bit id of what is drawn there) and
+// counts a tap lit when the receiver is at least as near the light (r40 >= depth) or the tap is the receiver itself
+// (|r5 - depth| <= r7 with the same id r4: the depth register is zeroed). Each tap reads one texel, so a shadow's edge
+// steps along the map's texels - blocks at 1024, smaller steps at 2048 / 4096. Here each tap's 0 / 1 becomes the same
+// test on the 4 texels around it, weighted by where the tap lies between them (bilinear PCF, what a hardware compare
+// sampler does). The "itself" test gets twice the tolerance for those texels: a neighbour on a sloping surface is a
+// little nearer or farther than the receiver, and at the game's tolerance some of them count as shadow (the ground
+// went darker; a receiver-plane bias from screen-space derivatives instead left specks - derivatives in this
+// shader's branches aren't reliable). The tap's position is saved before its read: the read often lands in the
+// position's own register. Returns the new GLSL, or NULL if the code isn't laid out as expected (16 taps, 16 tests).
+static char *za_soft_shadows(const char *src) {
+    // (the translator reads a register as a float as uintBitsToFloat(r) - as_f(r) before 2026-10-28 - and the id map
+    // is an integer texture or, before, a float one: both forms are matched)
+    bool uid = strstr(src, "usampler2DArray t6;") != NULL;
+    char helper[2048];
+    snprintf(helper, sizeof helper,
+        "float pcf_bilinear(vec3 tap, float ref, float tol, uint myid, int l6, float cmpref) {\n"
+        "  vec2 s5 = vec2(textureSize(t5, 0).xy), s6 = floor(vec2(textureSize(t6, 0).xy) / rscale[7].xy + 0.5f);\n"
+        "  vec2 p = tap.xy * s5 - 0.5f, b = floor(p), w = p - b;\n"
+        "  float r = 0.0f;\n"
+        "  for (int k = 0; k < 4; k++) {\n"
+        "    ivec2 c = clamp(ivec2(b) + ivec2(k & 1, k >> 1), ivec2(0), ivec2(s5) - 1);\n"
+        "    float d = texelFetch(t5, ivec3(c, int(tap.z)), 0).x;\n"
+        "    uint id = %s(texelFetch(t6, ivec3(ivec2(rsc(uvec2((vec2(c) + 0.5f) / s5 * s6), rscale[7])), l6), 0).x);\n"
+        "    float lit = ((abs(ref - d) <= 2.0f * tol && myid == id) || cmpref >= d) ? 1.0f : 0.0f;\n"
+        "    r += lit * ((k & 1) != 0 ? w.x : 1.0f - w.x) * ((k >> 1) != 0 ? w.y : 1.0f - w.y);\n"
+        "  }\n"
+        "  return r;\n"
+        "}\n", uid ? "" : "floatBitsToUint");
+    static const char *const k_tap[2] = {
+        "texture(t5, vec3(vec2(uintBitsToFloat(r%d), uintBitsToFloat(r%d)), float(min(uint(r%d), uint(tsize5(0).z) - 1u))), uintBitsToFloat(r%d));%n",
+        "texture(t5, vec3(vec2(as_f(r%d), as_f(r%d)), float(min(uint(r%d), uint(tsize5(0).z) - 1u))), as_f(r%d));%n"};
+    static const char *const k_lit[2] = {
+        " r%d = ((((uintBitsToFloat(r40) >= uintBitsToFloat(r%d))) && true) ? 0x3f800000u : 0u);%n",
+        " r%d = ((((as_f(r40) >= as_f(r%d))) && true) ? 0x3f800000u : 0u);%n"};
+    static const char *const k_r40[2] = {"    r40 = floatBitsToUint((false ? fmin(as_f(0u), uintBitsToFloat(r5))",
+                                         "    r40 = as_u((false ? fmin(as_f(0u), as_f(r5))"};
+    size_t cap = strlen(src) * 2 + 8192, n = 0;
+    char *out = malloc(cap);
+    int tap_of[256], ntap = 0, nlit = 0;
+    bool captured = false, mained = false;
+    for (int i = 0; i < 256; i++) tap_of[i] = -1;
+#define EMIT(str, len) do { size_t l_ = (len); if (n + l_ + 1 > cap) { cap = (n + l_ + 1) * 2; out = realloc(out, cap); } memcpy(out + n, (str), l_); n += l_; } while (0)
+    for (const char *l = src; *l;) {
+        const char *e = strchr(l, '\n');
+        size_t len = e ? (size_t)(e - l) + 1 : strlen(l);
+        char buf[512];
+        int u, v, ly, bias, a, b, d, end = 0, end2 = 0, f = -1;
+        char c;
+        const char *t = len < 400 ? strstr(l, "texture(t5, vec3(vec2(") : NULL;
+        if (t && t < l + len && ntap < 16 && e)
+            for (int k = 0; k < 2 && f < 0; k++)
+                if (end = 0, sscanf(t, k_tap[k], &u, &v, &ly, &bias, &end) == 4 && end) f = k;
+        if (f >= 0 && sscanf(e + 1, " r%d = as_u(t[0]);%n", &d, &end2) == 1 && end2 && d >= 0 && d < 256) {
+            const char *e2 = strchr(e + 1, '\n');
+            size_t len2 = e2 ? (size_t)(e2 - e) : strlen(e + 1);
+            int m = snprintf(buf, sizeof buf, "    pcf_tap[%d] = vec3(uintBitsToFloat(r%d), uintBitsToFloat(r%d), float(min(uint(r%d), uint(tsize5(0).z) - 1u)));\n",
+                             ntap, u, v, ly);
+            EMIT(buf, (size_t)m);
+            EMIT(l, len);
+            EMIT(e + 1, len2);  // (the read's result: the tap's depth register)
+            tap_of[d] = ntap++, l = e + 1 + len2;
+            continue;
+        }
+        f = -1;
+        if (captured && len < 200)
+            for (int k = 0; k < 2 && f < 0; k++)
+                if (end = 0, sscanf(l, k_lit[k], &a, &b, &end) == 2 && end && a >= 0 && a < 256 && b >= 0 && b < 256 && tap_of[b] >= 0) f = k;
+        if (f >= 0) {
+            int m = snprintf(buf, sizeof buf, "    r%d = floatBitsToUint(pcf_bilinear(pcf_tap[%d], pcf_ref, pcf_tol, pcf_id, pcf_l6, uintBitsToFloat(r40)));\n",
+                             a, tap_of[b]);
+            EMIT(buf, (size_t)m);
+            tap_of[a] = -1, nlit++, l += len;
+            continue;
+        }
+        if (len < 400 && sscanf(l, " r%d = %c", &a, &c) == 2 && a >= 0 && a < 256 && strncmp(strchr(l, '=') + 2, "0u;", 3))
+            tap_of[a] = -1;  // (a register written with anything but the "itself" zero no longer holds its tap's depth)
+        if (!mained && !strncmp(l, "void main() {", 13)) {
+            EMIT(helper, strlen(helper));
+            EMIT(l, len);
+            static const char decl[] = "  vec3 pcf_tap[16]; float pcf_ref = 0.0f, pcf_tol = 0.0f; uint pcf_id = 0u; int pcf_l6 = 0;\n";
+            EMIT(decl, sizeof decl - 1);
+            mained = true, l += len;
+            continue;
+        }
+        EMIT(l, len);
+        for (int k = 0; k < 2 && !captured; k++)
+            if (!strncmp(l, k_r40[k], strlen(k_r40[k]))) {
+                static const char cap_[] = "    pcf_ref = uintBitsToFloat(r5); pcf_tol = uintBitsToFloat(r7); pcf_id = r4; pcf_l6 = int(r6);\n";
+                EMIT(cap_, sizeof cap_ - 1);
+                captured = true;
+            }
+        l += len;
+    }
+#undef EMIT
+    out[n] = 0;
+    if (ntap == 16 && nlit == 16 && captured && mained) return out;
+    LOG("[za] shadow mask: %d taps, %d tests, captured %d - not patched\n", ntap, nlit, captured);
+    free(out);
+    return NULL;
+}
+
 static void compile_program(void *arg) {
     Prog *p = arg;
     size_t nv = 0, nf = 0;
@@ -1793,6 +1895,17 @@ static void translate_program(void *arg) {
             p->fi->msl = s;
             static int logged;
             if (!logged++) LOG("[za] half-resolution depth: reads moved into the top-left texel (fs %llx)\n", (unsigned long long)p->code[1]);
+        }
+    }
+    // Legends Z-A's shadow mask (fs ec1c842f7a98584d), Settings.shadow_smooth: its 16 shadow-map taps are bilinear
+    // (za_soft_shadows) - the edges of the shadows no longer step along the shadow map's texels.
+    if (p->code[1] && g_settings.shadow_smooth) {
+        extern uint64_t vk_prog_fs_hash(uint64_t fs, size_t len);
+        if (vk_prog_fs_hash(p->code[1], p->fs_len) == 0xec1c842f7a98584dull) {
+            char *s = za_soft_shadows(p->fi->msl);
+            static int logged;
+            if (s) p->fi->msl = s;
+            if (!logged++) LOG("[za] shadow mask: %s\n", s ? "bilinear taps (smooth edges)" : "not the expected code, left as it is");
         }
     }
     if (p->vkey.xfb_count[0]) xfb_rewrite(p);

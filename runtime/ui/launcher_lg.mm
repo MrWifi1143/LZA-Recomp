@@ -404,6 +404,7 @@ extern "C" void launcher_lg_run(const char *root) {
     int crowd_i = g_settings.crowd >= 0 && g_settings.crowd <= 3 ? g_settings.crowd : 0;
     int detail_i = g_settings.detail >= 0 && g_settings.detail <= 3 ? g_settings.detail : 0;
     int shadows_i = g_settings.shadows >= 0 && g_settings.shadows <= 2 ? g_settings.shadows : 0;
+    bool smooth_sh = g_settings.shadow_smooth;
     int bg_i = g_settings.background >= 0 && g_settings.background <= 2 ? g_settings.background : 0;
     int pk_i = g_settings.pkhex_link >= 0 && g_settings.pkhex_link <= 2 ? g_settings.pkhex_link : 0;
     int shl_i = g_settings.shader_nowait ? 1 : 0;
@@ -490,6 +491,7 @@ extern "C" void launcher_lg_run(const char *root) {
         ImGui::Combo(T("Draw distance (detail)", "Distância de desenho (detalhes)"), &detail_i, crowd_names, 4);
         const char *const shadow_names[] = {"Switch (1024)", T("High (2048)", "Alta (2048)"), T("Ultra (4096)", "Ultra (4096)")};
         ImGui::Combo(T("Shadows", "Sombras"), &shadows_i, shadow_names, 3);
+        ImGui::Checkbox(T("Smooth shadow edges", "Suavizar as bordas das sombras"), &smooth_sh);
         const char *const shl_names[] = {T("Wait (may stutter the first time)", "Esperar (pode travar na primeira vez)"),
                                          T("Don't wait (may show late the first time)", "Não esperar (pode aparecer atrasado na primeira vez)")};
         ImGui::Combo(T("Shader loading", "Carregamento de shaders"), &shl_i, shl_names, 2);
@@ -564,6 +566,7 @@ extern "C" void launcher_lg_run(const char *root) {
     g_settings.crowd = crowd_i;
     g_settings.detail = detail_i;
     g_settings.shadows = shadows_i;
+    g_settings.shadow_smooth = smooth_sh;
     g_settings.background = bg_i;
     g_settings.pkhex_link = pk_i;
     g_settings.shader_nowait = shl_i;
