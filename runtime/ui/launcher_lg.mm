@@ -1,4 +1,9 @@
-// PL:A / PL:Z-A Recomp start screen (from Let's Go Recomp's): the game files (picked once, set up and recompiled here:
+// PL:A / PL:Z-A Recomp launcher, an old-PC-game launcher (Fallout: New Vegas style): a fixed window with the game's
+// banner (drawn here, no game art), Play, and pages for Options, Controls, Game Files and Mods; the game opens at its
+// own size / fullscreen after Play. The classic start screen (one centered window with everything, made for a TV and
+// a controller) is still here for console ports: LARECOMP_START_SCREEN=classic, or built with
+// -DRT_CLASSIC_START_SCREEN=1 (=launcher picks the launcher there). Both show the same settings (settings_* below).
+// What they hold (from Let's Go Recomp's start screen): the game files (picked once, set up and recompiled here:
 // runtime/gamesetup.c), the resolution, fullscreen, anti-aliasing, a mod (mods/: runtime/mods.c), the controller (what is
 // connected, a live test of every button and stick, remapping) and the keyboard, Play. In English, or in Portuguese when the system's language is (LARECOMP_LANG=en|pt
 // chooses). The choices go to larecomp.ini (settings.c; bind_key_* from runtime/hle/bindings.c).
@@ -6,9 +11,11 @@
 // LARECOMP_LAUNCHER_AUTOPLAY=1 plays as soon as the game files are ready; LARECOMP_SETUP_DIR=<folder> sets them up
 // from that folder at once; LARECOMP_MOD_INSTALL=<file or folder> installs a translation at once;
 // LARECOMP_LAUNCHER_KEYS=1 opens the keyboard section, =<slot> also waits for a new key for that input
-// (runtime/input_bind.h BIND_*), and <slot>:<key name> presses that key for it.
+// (runtime/input_bind.h BIND_*), and <slot>:<key name> presses that key for it; LARECOMP_LAUNCHER_PAGE=options|
+// controls|files|mods opens that launcher page.
 #include <SDL3/SDL.h>
 #include <float.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +33,8 @@ extern "C" {
 #include "settings.h"
 void settings_save(void);
 void ui_window_init(void);
+void ui_window_size_hint(int w, int h);  // (nvn/vulkan/device.c)
+void settings_load(void);
 SDL_Window *ui_window(void);
 void menu_apply_window_requests(void *sdl_window);
 bool vk_frame_begin(const float clear[4]);
@@ -204,7 +213,8 @@ static void controller_section(void) {
     static const int order[] = {BIND_A, BIND_B, BIND_X, BIND_Y, BIND_L, BIND_R, BIND_ZL, BIND_ZR, BIND_PLUS, BIND_MINUS,
                                 BIND_LSTICK, BIND_RSTICK, BIND_UP, BIND_DOWN, BIND_LEFT, BIND_RIGHT};
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 2));
-    if (ImGui::BeginTable("##pad", 6, ImGuiTableFlags_SizingFixedFit)) {
+    int pairs = ImGui::GetContentRegionAvail().x >= 1250 ? 3 : 2;  // (input + button pairs a row: 2 in the launcher's window)
+    if (ImGui::BeginTable("##pad", 2 * pairs, ImGuiTableFlags_SizingFixedFit)) {
         for (size_t i = 0; i < sizeof order / sizeof order[0]; i++) {
             int slot = order[i];
             ImGui::TableNextColumn();
@@ -348,10 +358,106 @@ static void game_files_section(SDL_Window *win) {
         SDL_ShowOpenFolderDialog(picked_game, NULL, win, NULL, false);
 }
 
+// ------------------------------------------------------------------ the launcher's look
+#ifndef RT_CLASSIC_START_SCREEN
+#define RT_CLASSIC_START_SCREEN 0  // (console ports: 1 - a TV, a controller, no separate launcher window)
+#endif
+enum { PAGE_HOME, PAGE_OPTIONS, PAGE_CONTROLS, PAGE_FILES, PAGE_MODS };
+static const int k_launcher_w = 1280, k_launcher_h = 720;  // (the game's own window size: some Wayland compositors
+                                                              // never resize a window for its program)
+static ImFont *g_title_font, *g_button_font;  // (Baloo 2, the font of the game's button icons: runtime/nvn/glyphs.c)
+static const ImU32 k_accent = IM_COL32(240, 196, 92, 255), k_accent_hi = IM_COL32(252, 216, 128, 255),
+                   k_panel = IM_COL32(18, 16, 22, 255);
+
+static uint32_t rnd(uint32_t *s) { return *s = *s * 1664525u + 1013904223u, *s >> 8; }
+
+// Dusk sky and a faint dot grid, shared by the banner and the page headers
+static void banner_sky(ImDrawList *d, ImVec2 a, ImVec2 b) {
+    d->AddRectFilledMultiColor(a, b, IM_COL32(22, 20, 52, 255), IM_COL32(30, 22, 58, 255), IM_COL32(120, 64, 54, 255),
+                               IM_COL32(96, 58, 60, 255));
+    float h = b.y - a.y;
+    for (float y = a.y + 12; y < b.y; y += 24)
+        for (float x = a.x + 12; x < b.x; x += 24)
+            d->AddCircleFilled(ImVec2(x, y), 1.3f, IM_COL32(255, 226, 170, (int)(26 * (1 - (y - a.y) / h) + 4)), 6);
+}
+
+// The launcher's banner: mountain ranges at dusk under a slowly turning golden ring, and the title
+static void banner(ImDrawList *d, ImVec2 a, ImVec2 b, float t) {
+    d->PushClipRect(a, b, true);
+    banner_sky(d, a, b);
+    float w = b.x - a.x, h = b.y - a.y, cx = a.x + w * 0.64f, cy = a.y + h * 0.50f, R = h * 0.30f;
+    for (int i = 40; i > 0; i--)  // (the glow behind the ring)
+        d->AddCircleFilled(ImVec2(cx, cy), R * 0.05f * i, IM_COL32(255, 200, 110, 2), 64);
+    d->AddCircle(ImVec2(cx, cy), R, IM_COL32(244, 200, 100, 230), 96, 5.0f);
+    d->AddCircle(ImVec2(cx, cy), R * 0.86f, IM_COL32(244, 200, 100, 90), 96, 1.5f);
+    for (int i = 0; i < 12; i++) {  // (the ring's jewels, turning)
+        float an = t * 0.08f + i * 3.14159265f / 6;
+        ImVec2 p(cx + cosf(an) * R, cy + sinf(an) * R);
+        d->AddCircleFilled(p, i % 3 ? 4.0f : 7.0f, IM_COL32(255, 236, 170, 255), 16);
+        if (i % 3 == 0) d->AddCircle(p, 11.0f, IM_COL32(255, 220, 140, 120), 16, 1.5f);
+    }
+    uint32_t s = 11;
+    static const ImU32 col[3] = {IM_COL32(70, 46, 70, 255), IM_COL32(42, 30, 52, 255), IM_COL32(20, 16, 30, 255)};
+    ImDrawListFlags fl = d->Flags;
+    d->Flags &= ~ImDrawListFlags_AntiAliasedFill;  // (the strips' soft edges showed as seams)
+    for (int layer = 0; layer < 3; layer++) {  // three ranges, the near one darkest; the far one has the tall peak
+        float base = b.y - h * (0.30f - 0.08f * layer), amp = h * (layer == 0 ? 0.34f : 0.16f - 0.03f * layer);
+        ImVec2 pts[64];
+        int n = 0;
+        pts[n++] = ImVec2(a.x, b.y);
+        for (int i = 0; i <= 60; i++) {
+            float x = a.x + w * i / 60.0f, f = (x - cx) / w;
+            float y = base - amp * (layer == 0 ? expf(-f * f * 18) : 0.35f + 0.65f * (float)(rnd(&s) % 100) / 100.0f * (0.6f + 0.4f * sinf(i * 0.7f + layer)));
+            pts[n++] = ImVec2(x, y);
+        }
+        pts[n++] = ImVec2(b.x, b.y);
+        for (int i = 1; i + 1 < n; i++)  // (a fan of quads down to the bottom: the outline isn't convex)
+            d->AddQuadFilled(pts[i], pts[i + 1], ImVec2(pts[i + 1].x, b.y), ImVec2(pts[i].x, b.y), col[layer]);
+        if (layer == 0) d->AddPolyline(pts + 1, n - 2, IM_COL32(255, 210, 140, 70), 0, 1.5f);
+    }
+    d->Flags = fl;
+    d->AddRectFilledMultiColor(ImVec2(a.x, b.y - h * 0.2f), b, IM_COL32(12, 10, 18, 0), IM_COL32(12, 10, 18, 0), IM_COL32(12, 10, 18, 255),
+                               IM_COL32(12, 10, 18, 255));  // (the valley fades into the status strip)
+    ImFont *tf = g_title_font ? g_title_font : ImGui::GetFont(), *bf = g_button_font ? g_button_font : ImGui::GetFont();
+    d->AddText(tf, 120, ImVec2(a.x + 40, a.y + 28), IM_COL32(255, 248, 236, 255), "PL:A");
+    d->AddText(bf, 34, ImVec2(a.x + 46, a.y + 128), k_accent, "R  E  C  O  M  P");
+    d->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(a.x + 46, a.y + 174), IM_COL32(220, 200, 190, 255),
+               "Pokémon Legends: Arceus, recompiled for PC");
+    d->PopClipRect();
+}
+
+// A launcher button: a wide flat bar with its label in Baloo 2; Play is the filled one
+static bool big_button(const char *label, float w, float h, bool primary, bool enabled) {
+    ImGui::BeginDisabled(!enabled);
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    bool hit = ImGui::InvisibleButton(label, ImVec2(w, h));
+    bool hot = enabled && (ImGui::IsItemHovered() || ImGui::IsItemFocused()), held = hot && ImGui::IsItemActive();
+    ImDrawList *d = ImGui::GetWindowDrawList();
+    ImU32 bg = primary ? (enabled ? (hot ? k_accent_hi : k_accent) : IM_COL32(84, 72, 56, 255))
+                       : (held ? IM_COL32(255, 255, 255, 56) : hot ? IM_COL32(255, 255, 255, 34) : IM_COL32(255, 255, 255, 12));
+    d->AddRectFilled(p, ImVec2(p.x + w, p.y + h), bg, 6);
+    if (hot && !primary) d->AddRectFilled(p, ImVec2(p.x + 6, p.y + h), k_accent, 3);
+    ImFont *f = g_button_font ? g_button_font : ImGui::GetFont();
+    float fs = primary ? 44.0f : 32.0f;
+    const char *end = strstr(label, "##");
+    ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, 0, label, end);
+    ImU32 tc = primary ? IM_COL32(34, 22, 8, enabled ? 255 : 160) : enabled ? IM_COL32(236, 240, 250, 255) : IM_COL32(120, 124, 136, 255);
+    d->AddText(f, fs, ImVec2(p.x + (primary ? (w - ts.x) / 2 : 28), p.y + (h - ts.y) / 2 + 2), tc, label, end);
+    ImGui::EndDisabled();
+    return hit && enabled;
+}
+
 // ------------------------------------------------------------------ the start screen
 extern "C" void launcher_lg_run(const char *root) {
     (void)root;
     pick_language();
+    // the launcher's window is made at its own size (a window resized later isn't always given the size: Wayland)
+    settings_load();
+    const char *mode = getenv("LARECOMP_START_SCREEN");
+    bool classic = mode && *mode ? !strcmp(mode, "classic") : RT_CLASSIC_START_SCREEN;
+    bool skip_now = g_settings.skip_start && !getenv("LARECOMP_LAUNCHER_SHOT");
+    bool sized = !classic && !skip_now;
+    if (sized) ui_window_size_hint(k_launcher_w, k_launcher_h);
     ui_window_init();
     SDL_Window *win = ui_window();
     ImGuiContext *prev_ctx = ImGui::GetCurrentContext();  // (the in-game menu's, when back here after a reboot)
@@ -373,8 +479,38 @@ extern "C" void launcher_lg_run(const char *root) {
         if (font) break;
     }
     if (!font) io.Fonts->AddFontDefault();
+    char baloo[1100];
+    if (rt_resource("Baloo2-SemiBold.ttf", "third_party/fonts/Baloo2/Baloo2-SemiBold.ttf", baloo, sizeof baloo)) {
+        g_button_font = io.Fonts->AddFontFromFileTTF(baloo, 44, NULL, ranges);
+        g_title_font = io.Fonts->AddFontFromFileTTF(baloo, 120, NULL, ranges);
+    }
     ImGui::StyleColorsDark();
     ImGui::GetStyle().ScaleAllSizes(1.5f);
+    if (!classic) {  // (the launcher's colors: the banner's dusk, the accent for what is on)
+        ImGuiStyle &st = ImGui::GetStyle();
+        ImVec4 *c = st.Colors;
+        c[ImGuiCol_WindowBg] = ImVec4(0.07f, 0.06f, 0.09f, 1);
+        c[ImGuiCol_ChildBg] = ImVec4(0, 0, 0, 0);
+        c[ImGuiCol_PopupBg] = ImVec4(0.10f, 0.08f, 0.12f, 0.98f);
+        c[ImGuiCol_FrameBg] = ImVec4(0.18f, 0.14f, 0.20f, 1);
+        c[ImGuiCol_FrameBgHovered] = ImVec4(0.26f, 0.20f, 0.27f, 1);
+        c[ImGuiCol_FrameBgActive] = ImVec4(0.32f, 0.24f, 0.32f, 1);
+        c[ImGuiCol_Button] = ImVec4(0.22f, 0.17f, 0.24f, 1);
+        c[ImGuiCol_ButtonHovered] = ImVec4(0.34f, 0.26f, 0.34f, 1);
+        c[ImGuiCol_ButtonActive] = ImVec4(0.42f, 0.32f, 0.40f, 1);
+        c[ImGuiCol_Header] = ImVec4(0.22f, 0.17f, 0.24f, 1);
+        c[ImGuiCol_HeaderHovered] = ImVec4(0.34f, 0.26f, 0.34f, 1);
+        c[ImGuiCol_HeaderActive] = ImVec4(0.42f, 0.32f, 0.40f, 1);
+        c[ImGuiCol_CheckMark] = ImVec4(0.94f, 0.77f, 0.36f, 1);
+        c[ImGuiCol_SliderGrab] = ImVec4(0.94f, 0.77f, 0.36f, 1);
+        c[ImGuiCol_Tab] = ImVec4(0.18f, 0.14f, 0.20f, 1);
+        c[ImGuiCol_TabHovered] = ImVec4(0.34f, 0.26f, 0.34f, 1);
+        c[ImGuiCol_TabSelected] = ImVec4(0.34f, 0.26f, 0.34f, 1);
+        c[ImGuiCol_TabSelectedOverline] = ImVec4(0.94f, 0.77f, 0.36f, 1);
+        c[ImGuiCol_PlotHistogram] = ImVec4(0.94f, 0.77f, 0.36f, 1);
+        c[ImGuiCol_Separator] = ImVec4(0.36f, 0.28f, 0.34f, 1);
+        st.FrameRounding = st.GrabRounding = st.TabRounding = 6;
+    }
     ImGui_ImplSDL3_InitForVulkan(win);
     vk_imgui_backend_init();
 
@@ -385,7 +521,6 @@ extern "C" void launcher_lg_run(const char *root) {
     for (int i = 0; i < 6; i++) if (res_lines[i] == g_settings.res_height) res = i;
     bool full = g_settings.fullscreen, smaa = g_settings.antialias == AA_SMAA, wildb = g_settings.wild_battle, showfps = g_settings.show_fps, realtime = !g_settings.fixed_steps;
     int fps_i = g_settings.fps == FPS_UNLIMITED ? 4 : g_settings.fps == 144 ? 3 : g_settings.fps == 120 ? 2 : g_settings.fps == 60 ? 1 : 0;
-    int prompts_i = g_settings.button_prompts >= 0 && g_settings.button_prompts <= 4 ? g_settings.button_prompts : 0;
     // Recommended settings for this PC (from Z-A's start screen; by the GPU, the CPU threads and the RAM): shown with an
     // Apply button, and applied at once on a first start (no larecomp.ini yet)
     struct Rec { int res, fps, nowait; char text[120]; } rec;
@@ -411,6 +546,7 @@ extern "C" void launcher_lg_run(const char *root) {
     if (g_settings_fresh) apply_rec();
     int bg_i = g_settings.background >= 0 && g_settings.background <= 2 ? g_settings.background : 0;
     int pk_i = g_settings.pkhex_link >= 0 && g_settings.pkhex_link <= 2 ? g_settings.pkhex_link : 0;
+    int prompts_i = g_settings.button_prompts >= 0 && g_settings.button_prompts <= 4 ? g_settings.button_prompts : 0;
     // Translation: the folders under mods/ (runtime/mods.h); 0 = none (the game's own English)
     static char mods[MODS_MAX][128];
     int nmods = mods_list(mods, MODS_MAX), mod = 0;
@@ -418,14 +554,265 @@ extern "C" void launcher_lg_run(const char *root) {
     long shot_at = getenv("LARECOMP_LAUNCHER_SHOT") ? atol(getenv("LARECOMP_LAUNCHER_SHOT")) : 0, frame = 0;
     bool autoplay = getenv("LARECOMP_LAUNCHER_AUTOPLAY") != NULL, play = false;
     // "Skip this screen": straight to the game once it's ready - unless Shift is held in the first moments
-    bool skipstart = g_settings.skip_start, skip_now = skipstart && !getenv("LARECOMP_LAUNCHER_SHOT"), shift_seen = false;
+    bool skipstart = g_settings.skip_start, shift_seen = false;
     uint64_t opened = SDL_GetTicks();
+    int page = PAGE_HOME;
+    if (const char *pg = getenv("LARECOMP_LAUNCHER_PAGE"))
+        page = !strcmp(pg, "options") ? PAGE_OPTIONS : !strcmp(pg, "controls") ? PAGE_CONTROLS : !strcmp(pg, "files") ? PAGE_FILES
+             : !strcmp(pg, "mods") ? PAGE_MODS : PAGE_HOME;
+    if (getenv("LARECOMP_LAUNCHER_PAD") || getenv("LARECOMP_LAUNCHER_KEYS")) page = PAGE_CONTROLS;
+    // The launcher is a small fixed window; the game gets its own size (or fullscreen) after Play (below). (Made at
+    // that size; resized here when the window was there already - back from the game)
+    if (sized) {
+        SDL_SetWindowFullscreen(win, false);
+        SDL_SetWindowSize(win, k_launcher_w, k_launcher_h);
+        SDL_SetWindowResizable(win, false);  // (after the size: on Wayland it pins min = max = the current size)
+        SDL_SetWindowPosition(win, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    }
     const char *keys_test = getenv("LARECOMP_LAUNCHER_KEYS");
     if (keys_test && atoi(keys_test) > 0) bind_capture_begin(BIND_DEV_KEY, atoi(keys_test));
     if (getenv("LARECOMP_SETUP_DIR")) setup_start(getenv("LARECOMP_SETUP_DIR"));
     if (getenv("LARECOMP_MOD_INSTALL")) mod_install_start(getenv("LARECOMP_MOD_INSTALL"));
     static const float bg[4] = {0.08f, 0.08f, 0.10f, 1};
     static const SDL_DialogFileFilter mod_filters[] = {{"Translation / mod (.zip, .rar, .7z)", "zip;rar;7z"}};
+    int inst = 0;
+    bool ready = false;
+
+    // The settings, shown by both screens: the launcher's Options tabs, or the classic screen's one list
+    auto settings_display = [&]() {
+        ImGui::Combo(T("Resolution", "Resolução"), &res, g_pt ? res_pt : res_en, 6);
+        if (ImGui::Checkbox(T("Fullscreen", "Tela cheia"), &full) && classic) SDL_SetWindowFullscreen(win, full);  // (launcher: at Play)
+        ImGui::Checkbox(T("Anti-aliasing (SMAA)", "Suavizar serrilhado (SMAA)"), &smaa);
+        static const char *const fps_names_en[] = {"30 fps", "60 fps", "120 fps", "144 fps", "Unlimited"};  // (above 30: experimental)
+        static const char *const fps_names_pt[] = {"30 fps", "60 fps", "120 fps", "144 fps", "Ilimitada"};
+        ImGui::Combo(T("Frame rate (experimental above 30)", "Taxa de quadros (experimental acima de 30)"), &fps_i, g_pt ? fps_names_pt : fps_names_en, 5);
+        if (fps_i >= 1 && fps_i <= 3)  // (Unlimited: always real time, hle/fps60.c)
+            ImGui::Checkbox(T("Keep full speed when the frame rate dips", "Manter a velocidade total quando a taxa de quadros cai"), &realtime);
+        if (fps_i >= 2)  // (120 / 144 / Unlimited: the game's own logic was made for 30; some of it counts frames)
+            ImGui::TextColored(k_yellow, "%s",
+                               T("120 fps and above are experimental. Some scripted scenes can stall at these rates\n"
+                                 "(a cutscene that walks you somewhere may never let go of you). If that happens,\n"
+                                 "set 60 or 30 fps in the game's Settings and step into the scene again.",
+                                 "120 fps ou mais são experimentais. Algumas cenas com script podem travar nessas taxas\n"
+                                 "(uma cena que leva você a algum lugar pode nunca soltar o controle). Se acontecer,\n"
+                                 "escolha 60 ou 30 fps nas configurações do jogo e entre na cena de novo."));
+        ImGui::Checkbox(T("Show FPS counter", "Mostrar contador de FPS"), &showfps);
+    };
+    auto settings_graphics = [&]() {  // (the game's Settings rows of the same names: runtime/hle/pla_options.c)
+        ImGui::Checkbox(T("Smooth shadow edges", "Suavizar as bordas das sombras"), &smooth_sh);
+        const char *const shl_names[] = {T("Wait (may stutter the first time)", "Esperar (pode travar na primeira vez)"),
+                                         T("Don't wait (may show late the first time)", "Não esperar (pode aparecer atrasado na primeira vez)")};
+        ImGui::Combo(T("Shader loading", "Carregamento de shaders"), &shl_i, shl_names, 2);
+    };
+    auto settings_game = [&]() {
+        const char *const bg_names[] = {T("Keep playing", "Continuar jogando"), T("Mute", "Silenciar"), T("Pause", "Pausar")};
+        ImGui::Combo(T("In background", "Em segundo plano"), &bg_i, bg_names, 3);
+        const char *const pk_names[] = {T("Off", "Desligado"), T("This PC", "Este PC"), T("Network", "Rede")};
+        ImGui::Combo(T("PKHeX Link (LiveHeX, port 6000)", "PKHeX Link (LiveHeX, porta 6000)"), &pk_i, pk_names, 3);
+        // (runtime/nvn/glyphs.c: the game's button icons redrawn for the controller in use)
+        const char *const prompt_names[] = {T("Auto (what you play with)", "Automático (o que você usa)"), "Nintendo Switch", "Xbox",
+                                            "PlayStation", T("Keyboard and mouse", "Teclado e mouse")};
+        ImGui::Combo(T("Button prompts", "Ícones dos botões"), &prompts_i, prompt_names, 5);
+    };
+    auto settings_mods = [&]() {
+        const char *none = T("None", "Nenhum");
+        if (ImGui::BeginCombo(T("Mod", "Mod"), mod ? mods[mod - 1] : none)) {
+            if (ImGui::Selectable(none, mod == 0)) mod = 0;
+            for (int i = 0; i < nmods; i++)
+                if (ImGui::Selectable(mods[i], mod == i + 1)) mod = i + 1;
+            ImGui::EndCombo();
+        }
+    };
+    auto mod_install_row = [&]() {
+        if (inst == MOD_INSTALL_RUNNING) ImGui::TextDisabled("%s", T("Installing the translation...", "Instalando a tradução..."));
+        else {
+            if (ImGui::SmallButton(T("Install a mod...", "Instalar mod...")))
+                SDL_ShowOpenFileDialog(picked_mod, NULL, win, mod_filters, 1, NULL, false);
+            if (inst == MOD_INSTALL_FAIL_UNPACK || inst == MOD_INSTALL_FAIL_NOT_MOD) {
+                ImGui::SameLine();
+                ImGui::TextColored(k_red, "%s", inst == MOD_INSTALL_FAIL_UNPACK ? T("Couldn't unpack that file.", "Não foi possível abrir esse arquivo.")
+                                                                                : T("No translation for this game in that file.", "Esse arquivo não tem tradução para este jogo."));
+            }
+        }
+    };
+    auto recommended_row = [&]() {  // (this PC, and the settings recommended for it)
+        ImGui::TextDisabled("%s", pc);
+        ImGui::TextDisabled("%s %s", T("Recommended:", "Recomendado:"), rec.text);
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T("Apply", "Aplicar"))) apply_rec();
+    };
+
+    // The classic start screen: everything in one centered window (console ports)
+    auto classic_frame = [&]() {
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x / 2, io.DisplaySize.y / 2), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        ImGui::Begin(RT_APP_NAME, NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove |
+                                            ImGuiWindowFlags_NoSavedSettings);
+        game_files_section(win);
+        ImGui::SeparatorText(T("Settings", "Configurações"));
+        ImGui::PushItemWidth(420);
+        settings_display();
+        settings_graphics();
+        settings_game();
+        settings_mods();
+        ImGui::PopItemWidth();
+        mod_install_row();
+        if (getenv("LARECOMP_LAUNCHER_PAD")) ImGui::SetNextItemOpen(true, ImGuiCond_Once);
+        bool pad_open = ImGui::CollapsingHeader(T("Controller", "Controle"));
+        if (pad_open) controller_section();
+        // (while it is open the controller's buttons are being tested, not driving the menu)
+        if (pad_open) io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
+        else io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+        if (keys_test) ImGui::SetNextItemOpen(true, ImGuiCond_Once);
+        if (ImGui::CollapsingHeader(T("Keyboard", "Teclado"))) keys_section();
+        ImGui::Spacing();
+        recommended_row();  // (above, where the Play button keeps the view)
+        ImGui::BeginDisabled(!ready);
+        if (frame == 0 && ready) ImGui::SetKeyboardFocusHere();
+        if (ImGui::Button(T("Play", "Jogar"), ImVec2(-FLT_MIN, 0))) play = true;
+        ImGui::EndDisabled();
+        ImGui::Checkbox(T("Don't show this screen at start", "Não mostrar esta tela ao iniciar"), &skipstart);
+        if (skipstart)  // (the settings are in the game too: runtime/hle/pla_options.c)
+            ImGui::TextDisabled("%s", T("These settings are also in the game: Menu > Help > Settings.\n"
+                                        "Hold Shift while starting the game to see this screen again.",
+                                        "Estas configurações também estão no jogo: Menu > Help > Settings.\n"
+                                        "Segure Shift ao iniciar o jogo para ver esta tela de novo."));
+        ImGui::TextDisabled("v" RT_APP_VERSION);
+        ImGui::End();
+    };
+
+    // The launcher: the banner and the buttons (home), or a page with a header bar and Back
+    auto launcher_frame = [&]() {
+        float W = io.DisplaySize.x, H = io.DisplaySize.y;
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(ImVec2(W, H));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
+        ImGui::Begin("##launcher", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                                             ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PopStyleVar(2);
+        ImDrawList *d = ImGui::GetWindowDrawList();
+        int st = setup_state();
+        bool running = setup_running();
+        bool pad_page = false;
+        if (page == PAGE_HOME) {
+            float split = floorf(W * 0.64f), strip = 92;
+            banner(d, ImVec2(0, 0), ImVec2(split, H), (float)ImGui::GetTime());
+            d->AddRectFilled(ImVec2(split, 0), ImVec2(W, H), k_panel);
+            d->AddLine(ImVec2(split, 0), ImVec2(split, H), IM_COL32(240, 196, 92, 90), 2);
+            // status strip under the banner: the game files
+            d->AddRectFilled(ImVec2(0, H - strip), ImVec2(split, H), IM_COL32(12, 10, 18, 230));
+            ImGui::SetCursorScreenPos(ImVec2(28, H - strip + 14));
+            ImGui::BeginGroup();
+            ImGui::PushTextWrapPos(split - 28);
+            if (running) {
+                static const char *const en[] = {"", "Looking for the game files...", "Reading the game files out of the packages...",
+                                                 "Copying the game files...", "Building the game data image...", "Reading the game code...",
+                                                 "Recompiling the game code...", "Finishing..."};
+                static const char *const pt[] = {"", "Procurando os arquivos do jogo...", "Lendo os arquivos do jogo dos pacotes...",
+                                                 "Copiando os arquivos do jogo...", "Montando a imagem de dados do jogo...",
+                                                 "Lendo o código do jogo...", "Recompilando o código do jogo...", "Finalizando..."};
+                ImGui::TextUnformatted(st >= 1 && st <= 7 ? T(en[st], pt[st]) : "...");
+                ImGui::ProgressBar(setup_progress(), ImVec2(split - 56, 0));
+            } else if (ready) {
+                const char *name = game_name("extracted/exefs");
+                ImGui::TextColored(k_green, g_pt ? "Pokémon %s - pronto para jogar" : "Pokémon %s - ready to play", name ? name : "Legends: Arceus");
+                ImGui::TextDisabled("%s", pc);
+            } else if (st >= SETUP_FAIL_NOT_FOUND) {
+                ImGui::TextColored(k_red, "%s", T("The game files couldn't be set up.", "Os arquivos do jogo não puderam ser preparados."));
+                ImGui::TextDisabled("%s", T("Open Game Files for why.", "Abra Arquivos do jogo para ver o motivo."));
+            } else {
+                ImGui::TextColored(k_yellow, "%s", T("Game files needed", "Faltam os arquivos do jogo"));
+                ImGui::TextDisabled("%s", T("Your own dumped base game and update (.nsp / .xci) and prod.keys.",
+                                            "O dump do seu jogo base e da atualização (.nsp / .xci) e o prod.keys."));
+            }
+            ImGui::PopTextWrapPos();
+            ImGui::EndGroup();
+            // the buttons
+            float bx = split + 34, bw = W - split - 68, y = 52;
+            ImGui::SetCursorScreenPos(ImVec2(bx, y));
+            if (frame == 0) ImGui::SetKeyboardFocusHere();
+            if (ready) { if (big_button(T("PLAY", "JOGAR"), bw, 88, true, inst != MOD_INSTALL_RUNNING)) play = true; }
+            else if (big_button(running ? T("SETTING UP...", "PREPARANDO...") : T("SET UP GAME", "PREPARAR O JOGO"), bw, 88, true, !running))
+                page = PAGE_FILES;
+            y += 88 + 28;
+            const struct { const char *en, *pt; int to; } rows[] = {
+                {"OPTIONS", "OPÇÕES", PAGE_OPTIONS}, {"CONTROLS", "CONTROLES", PAGE_CONTROLS},
+                {"GAME FILES", "ARQUIVOS DO JOGO", PAGE_FILES}, {"MODS", "MODS", PAGE_MODS}, {"EXIT", "SAIR", -1}};
+            for (const auto &r : rows) {
+                ImGui::SetCursorScreenPos(ImVec2(bx, y));
+                if (big_button(T(r.en, r.pt), bw, 58, false, true)) {
+                    if (r.to < 0) exit(0);
+                    page = r.to;
+                }
+                y += 58 + 10;
+            }
+            ImGui::SetCursorScreenPos(ImVec2(bx, H - 86));
+            ImGui::Checkbox(T("Skip the launcher", "Pular o launcher"), &skipstart);
+            if (skipstart && ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", T("Hold Shift while starting the game to see it again.", "Segure Shift ao iniciar o jogo para ver de novo."));
+            ImGui::SetCursorScreenPos(ImVec2(bx, H - 40));
+            ImGui::TextDisabled("v" RT_APP_VERSION);
+        } else {
+            static const char *const titles_en[] = {"", "Options", "Controls", "Game Files", "Mods"};
+            static const char *const titles_pt[] = {"", "Opções", "Controles", "Arquivos do jogo", "Mods"};
+            float bar = 96;
+            banner_sky(d, ImVec2(0, 0), ImVec2(W, bar));
+            d->AddLine(ImVec2(0, bar), ImVec2(W, bar), IM_COL32(240, 196, 92, 120), 2);
+            ImFont *bf = g_button_font ? g_button_font : ImGui::GetFont();
+            d->AddText(bf, 30, ImVec2(36, 14), k_accent, "PL:A RECOMP");
+            d->AddText(bf, 44, ImVec2(36, 40), IM_COL32(240, 244, 255, 255), T(titles_en[page], titles_pt[page]));
+            ImGui::SetCursorScreenPos(ImVec2(W - 36 - 180, 26));
+            if (ImGui::Button(T("Back", "Voltar"), ImVec2(180, 0))) page = PAGE_HOME;
+            ImGui::SetCursorScreenPos(ImVec2(36, bar + 18));
+            ImGui::BeginChild("##page", ImVec2(W - 72, H - bar - 36));
+            ImGui::PushItemWidth(420);
+            if (page == PAGE_OPTIONS) {
+                if (ImGui::BeginTabBar("##opt")) {
+                    if (ImGui::BeginTabItem(T("Display", "Tela"))) { ImGui::Spacing(); settings_display(); ImGui::EndTabItem(); }
+                    if (ImGui::BeginTabItem(T("Graphics", "Gráficos"))) { ImGui::Spacing(); settings_graphics(); ImGui::EndTabItem(); }
+                    if (ImGui::BeginTabItem(T("Game", "Jogo"))) { ImGui::Spacing(); settings_game(); ImGui::EndTabItem(); }
+                    ImGui::EndTabBar();
+                }
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+                recommended_row();
+                ImGui::TextDisabled("%s", T("These settings are also in the game: Menu > Help > Settings.",
+                                            "Estas configurações também estão no jogo: Menu > Help > Settings."));
+            } else if (page == PAGE_CONTROLS) {
+                if (ImGui::BeginTabBar("##ctl")) {
+                    ImGuiTabItemFlags kf = keys_test && frame < 2 ? ImGuiTabItemFlags_SetSelected : 0;
+                    if (ImGui::BeginTabItem(T("Controller", "Controle"))) { pad_page = true; controller_section(); ImGui::EndTabItem(); }
+                    if (ImGui::BeginTabItem(T("Keyboard", "Teclado"), NULL, kf)) { keys_section(); ImGui::EndTabItem(); }
+                    ImGui::EndTabBar();
+                }
+            } else if (page == PAGE_FILES) {
+                ImGui::TextWrapped("%s", T("Your own Pokémon Legends: Arceus 1.1.1: pick the folder with the dumped base game and update "
+                                           "(.nsp / .xci, with your prod.keys) or the extracted exefs and romfs. They are set up once "
+                                           "and the game code is recompiled for this PC.",
+                                           "O seu Pokémon Legends: Arceus 1.1.1: escolha a pasta com o dump do jogo base e da atualização "
+                                           "(.nsp / .xci, com o seu prod.keys) ou o exefs e o romfs extraídos. Eles são preparados uma vez "
+                                           "e o código do jogo é recompilado para este PC."));
+                ImGui::Spacing();
+                game_files_section(win);
+            } else if (page == PAGE_MODS) {
+                ImGui::TextWrapped("%s", T("Translations and other mods for the game (mods/ in the game's folder). Pick one to play with, "
+                                           "or install one from a .zip / .rar / .7z.",
+                                           "Traduções e outros mods do jogo (mods/ na pasta do jogo). Escolha um para jogar, "
+                                           "ou instale um de um .zip / .rar / .7z."));
+                ImGui::Spacing();
+                settings_mods();
+                mod_install_row();
+            }
+            ImGui::PopItemWidth();
+            ImGui::EndChild();
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape) && !bind_capture_active(NULL, NULL, NULL)) page = PAGE_HOME;
+        }
+        // (while the controller tab is open its buttons are being tested, not driving the launcher)
+        if (pad_page) io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
+        else io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+        ImGui::End();
+    };
 
     while (!play) {
         menu_apply_window_requests(win);
@@ -439,13 +826,13 @@ extern "C" void launcher_lg_run(const char *root) {
         if (take(g_pick_game, path, sizeof path)) setup_start(path);
         if (take(g_pick_mod, path, sizeof path)) mod_install_start(path);
         static int last_install;
-        int inst = mod_install_state();
+        inst = mod_install_state();
         if (inst != last_install && inst == MOD_INSTALL_DONE) {  // a new translation: listed and chosen
             nmods = mods_list(mods, MODS_MAX);
             for (int i = 0; i < nmods; i++) if (!strcmp(mods[i], mod_install_name())) mod = i + 1;
         }
         last_install = inst;
-        bool ready = !setup_running() && setup_ready();
+        ready = !setup_running() && setup_ready();
         if (autoplay && ready && inst != MOD_INSTALL_RUNNING) play = true;
         if (SDL_GetModState() & SDL_KMOD_SHIFT) shift_seen = true;
         if (skip_now && !shift_seen && SDL_GetTicks() - opened >= 400 && ready && inst != MOD_INSTALL_RUNNING) {
@@ -463,85 +850,8 @@ extern "C" void launcher_lg_run(const char *root) {
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
-        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x / 2, io.DisplaySize.y / 2), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-        ImGui::Begin(RT_APP_NAME, NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove |
-                                            ImGuiWindowFlags_NoSavedSettings);
-        game_files_section(win);
-        ImGui::SeparatorText(T("Settings", "Configurações"));
-        ImGui::PushItemWidth(420);
-        ImGui::Combo(T("Resolution", "Resolução"), &res, g_pt ? res_pt : res_en, 6);
-        if (ImGui::Checkbox(T("Fullscreen", "Tela cheia"), &full)) SDL_SetWindowFullscreen(win, full);
-        ImGui::Checkbox(T("Anti-aliasing (SMAA)", "Suavizar serrilhado (SMAA)"), &smaa);
-        static const char *const fps_names_en[] = {"30 fps", "60 fps", "120 fps", "144 fps", "Unlimited"};  // (above 30: experimental)
-        static const char *const fps_names_pt[] = {"30 fps", "60 fps", "120 fps", "144 fps", "Ilimitada"};
-        ImGui::Combo(T("Frame rate (experimental above 30)", "Taxa de quadros (experimental acima de 30)"), &fps_i, g_pt ? fps_names_pt : fps_names_en, 5);
-        if (fps_i >= 1 && fps_i <= 3)  // (Unlimited: always real time, hle/fps60.c)
-            ImGui::Checkbox(T("Keep full speed when the frame rate dips", "Manter a velocidade total quando a taxa de quadros cai"), &realtime);
-        if (fps_i >= 2)  // (120 / 144 / Unlimited: the game's own logic was made for 30; some of it counts frames)
-            ImGui::TextColored(k_yellow, "%s",
-                               T("120 fps and above are experimental. Some scripted scenes can stall at these rates\n"
-                                 "(a cutscene that walks you somewhere may never let go of you). If that happens,\n"
-                                 "set 60 or 30 fps in the game's Settings and step into the scene again.",
-                                 "120 fps ou mais são experimentais. Algumas cenas com script podem travar nessas taxas\n"
-                                 "(uma cena que leva você a algum lugar pode nunca soltar o controle). Se acontecer,\n"
-                                 "escolha 60 ou 30 fps nas configurações do jogo e entre na cena de novo."));
-        ImGui::Checkbox(T("Show FPS counter", "Mostrar contador de FPS"), &showfps);
-        // (the game's Settings rows of the same names: runtime/hle/pla_options.c)
-        const char *const shl_names[] = {T("Wait (may stutter the first time)", "Esperar (pode travar na primeira vez)"),
-                                         T("Don't wait (may show late the first time)", "Não esperar (pode aparecer atrasado na primeira vez)")};
-        ImGui::Checkbox(T("Smooth shadow edges", "Suavizar as bordas das sombras"), &smooth_sh);
-        ImGui::Combo(T("Shader loading", "Carregamento de shaders"), &shl_i, shl_names, 2);
-        const char *const bg_names[] = {T("Keep playing", "Continuar jogando"), T("Mute", "Silenciar"), T("Pause", "Pausar")};
-        ImGui::Combo(T("In background", "Em segundo plano"), &bg_i, bg_names, 3);
-        const char *const pk_names[] = {T("Off", "Desligado"), T("This PC", "Este PC"), T("Network", "Rede")};
-        ImGui::Combo(T("PKHeX Link (LiveHeX, port 6000)", "PKHeX Link (LiveHeX, porta 6000)"), &pk_i, pk_names, 3);
-        // (runtime/nvn/glyphs.c: the game's button icons redrawn for the controller in use)
-        const char *const prompt_names[] = {T("Auto (what you play with)", "Automático (o que você usa)"), "Nintendo Switch", "Xbox",
-                                            "PlayStation", T("Keyboard and mouse", "Teclado e mouse")};
-        ImGui::Combo(T("Button prompts", "Ícones dos botões"), &prompts_i, prompt_names, 5);
-        const char *none = T("None", "Nenhum");
-        if (ImGui::BeginCombo(T("Mod", "Mod"), mod ? mods[mod - 1] : none)) {
-            if (ImGui::Selectable(none, mod == 0)) mod = 0;
-            for (int i = 0; i < nmods; i++)
-                if (ImGui::Selectable(mods[i], mod == i + 1)) mod = i + 1;
-            ImGui::EndCombo();
-        }
-        ImGui::PopItemWidth();
-        if (inst == MOD_INSTALL_RUNNING) ImGui::TextDisabled("%s", T("Installing the translation...", "Instalando a tradução..."));
-        else {
-            if (ImGui::SmallButton(T("Install a mod...", "Instalar mod...")))
-                SDL_ShowOpenFileDialog(picked_mod, NULL, win, mod_filters, 1, NULL, false);
-            if (inst == MOD_INSTALL_FAIL_UNPACK || inst == MOD_INSTALL_FAIL_NOT_MOD) {
-                ImGui::SameLine();
-                ImGui::TextColored(k_red, "%s", inst == MOD_INSTALL_FAIL_UNPACK ? T("Couldn't unpack that file.", "Não foi possível abrir esse arquivo.")
-                                                                                : T("No translation for this game in that file.", "Esse arquivo não tem tradução para este jogo."));
-            }
-        }
-        if (getenv("LARECOMP_LAUNCHER_PAD")) ImGui::SetNextItemOpen(true, ImGuiCond_Once);
-        bool pad_open = ImGui::CollapsingHeader(T("Controller", "Controle"));
-        if (pad_open) controller_section();
-        // (while it is open the controller's buttons are being tested, not driving the menu)
-        if (pad_open) io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
-        else io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
-        if (keys_test) ImGui::SetNextItemOpen(true, ImGuiCond_Once);
-        if (ImGui::CollapsingHeader(T("Keyboard", "Teclado"))) keys_section();
-        ImGui::Spacing();
-        ImGui::TextDisabled("%s", pc);  // (this PC, and the settings recommended for it: above, where the Play button keeps the view)
-        ImGui::TextDisabled("%s %s", T("Recommended:", "Recomendado:"), rec.text);
-        ImGui::SameLine();
-        if (ImGui::SmallButton(T("Apply", "Aplicar"))) apply_rec();
-        ImGui::BeginDisabled(!ready);
-        if (frame == 0 && ready) ImGui::SetKeyboardFocusHere();
-        if (ImGui::Button(T("Play", "Jogar"), ImVec2(-FLT_MIN, 0))) play = true;
-        ImGui::EndDisabled();
-        ImGui::Checkbox(T("Don't show this screen at start", "Não mostrar esta tela ao iniciar"), &skipstart);
-        if (skipstart)  // (the settings are in the game too: runtime/hle/pla_options.c)
-            ImGui::TextDisabled("%s", T("These settings are also in the game: Menu > Help > Settings.\n"
-                                        "Hold Shift while starting the game to see this screen again.",
-                                        "Estas configurações também estão no jogo: Menu > Help > Settings.\n"
-                                        "Segure Shift ao iniciar o jogo para ver esta tela de novo."));
-        ImGui::TextDisabled("v" RT_APP_VERSION);
-        ImGui::End();
+        if (classic) classic_frame();
+        else launcher_frame();
 
         ImGui::Render();
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)vk_frame_cmd());
@@ -559,10 +869,10 @@ extern "C" void launcher_lg_run(const char *root) {
     g_settings.fixed_steps = !realtime;
     g_settings.skip_start = skipstart;
     g_settings.button_prompts = prompts_i;
-    g_settings.shader_nowait = shl_i;
     g_settings.shadow_smooth = smooth_sh;
     g_settings.background = bg_i;
     g_settings.pkhex_link = pk_i;
+    g_settings.shader_nowait = shl_i;
     snprintf(g_settings.mod, sizeof g_settings.mod, "%s", mod ? mods[mod - 1] : "");
     settings_save();
     { extern void pkm_link_apply(void); pkm_link_apply(); }  // (PKHeX Link as just chosen: hle/pkm_link.c)
@@ -602,6 +912,14 @@ extern "C" void launcher_lg_run(const char *root) {
             ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)vk_frame_cmd());
             vk_frame_end(NULL);
         }
+    }
+    if (sized) {  // the game's window: its usual size, or fullscreen (as runtime/nvn/vulkan/device.c opens it)
+        int w = 1280, h = 720;
+        if (getenv("LARECOMP_WINDOW")) sscanf(getenv("LARECOMP_WINDOW"), "%dx%d", &w, &h);
+        SDL_SetWindowResizable(win, true);
+        SDL_SetWindowSize(win, w, h);
+        SDL_SetWindowPosition(win, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+        if (g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(win, true);
     }
     vk_imgui_backend_shutdown();
     ImGui_ImplSDL3_Shutdown();
