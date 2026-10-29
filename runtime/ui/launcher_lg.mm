@@ -462,11 +462,11 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
         for (int k = -1; k <= 1; k += 2) {  // (behind the column and the front fin: their tops show above the column's
                                             // first step, a little below the front fins' outer corners)
             ImVec2 q[4] = {ImVec2(cx + k * 0.020f * H, Y(0.84f)), ImVec2(cx + k * 0.088f * H, Y(0.84f)),
-                           ImVec2(cx + k * 0.088f * H, Y(0.972f)), ImVec2(cx + k * 0.034f * H, Y(0.962f))};
+                           ImVec2(cx + k * 0.088f * H, Y(0.980f)), ImVec2(cx + k * 0.034f * H, Y(0.962f))};
             d->AddQuadFilled(q[0], q[1], q[2], q[3], fill);
             d->AddPolyline(q, 4, IM_COL32(150, 210, 85, 190), ImDrawFlags_Closed, 1.8f);
             d->AddLine(ImVec2(cx + k * 0.046f * H, Y(0.86f)), ImVec2(cx + k * 0.048f * H, Y(0.962f)), dim, 1.0f);  // (its face's edge)
-            back_lights[k > 0] = ImVec2(cx + k * 0.046f * H, Y(0.965f));  // (on the top edge, above the column's step)
+            back_lights[k > 0] = ImVec2(cx + k * 0.088f * H, Y(0.980f));  // (on the tip: the outer top corner, above the front fin)
         }
         // left half: up the shaft, out along the fin's outer edge, across its slanted top, down its inner edge into
         // the slit, round its floor, up the middle column's side and its steps to the needle
