@@ -7,11 +7,16 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- Draw Distance (Detail), Settings > Graphics and the start screen: Switch / 2x / 4x / Max (10x) the distances the
+  game keeps its models' levels of detail at (its trinity_ModelLodSetting entries: trees, props and buildings 50 /
+  100 / 150 m, people 8 / 15 / 30 m, Pokémon 50 / 100 / 150 m) - trees down the street no longer thin out and fill in
+  with leaves as you walk up to them. Applies at once. Rouge Street on an RTX 4090 at 1440p: ~2.0 ms GPU a frame at
+  Switch, ~2.6 ms at 4x or Max. `LARECOMP_ZA_LODSCALE=<k>` overrides it.
 - Frame rate: an Unlimited choice (Settings > Graphics and the start screen): as fast as the PC goes, paced at 360
   at most. New Frame Timing row, Real Time by default: above 30 fps the world now steps by the time each frame really
   took instead of the frame rate's fixed period, so a dip (a hitch, a busy street) no longer slows the game down -
   walking, people, animations and the menus keep their speed. A step is never longer than 33.3 ms (the game's own at
-  30 fps). Fixed: the old way, each frame a fixed step. Unlimited always uses Real Time. Lumiose at 1440p with High
+  30 fps). Fixed: the old way, each frame a fixed step. Unlimited always uses Real Time. (Unlimited is hidden from the menus for now - in battles the Pokémon ran slow and the trainer behind them twitched; a saved Unlimited loads as 144.) Lumiose at 1440p with High
   shadows and 4x people on an RTX 4090: ~150-160 fps unlimited. `LARECOMP_DYN_DT=0/1` overrides the setting.
 - GPU: the barrier before each render pass now waits only for what that pass needs: which images every pass
   rendered to and every draw sampled since the last barrier are tracked, a pass that touches none of them starts

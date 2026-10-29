@@ -59,6 +59,7 @@ static void parse_line(const char *line) {
     else if (!strcmp(key, "mouse_camera")) g_settings.mouse_camera = atoi(val) != 0;
     else if (!strcmp(key, "mouse_invert_x")) g_settings.mouse_invert_x = atoi(val) != 0;
     else if (!strcmp(key, "mouse_invert_y")) g_settings.mouse_invert_y = atoi(val) != 0;
+    else if (!strcmp(key, "detail_distance")) g_settings.detail = atoi(val) >= 0 && atoi(val) <= 3 ? atoi(val) : 0;
     else if (!strcmp(key, "crowd")) g_settings.crowd = atoi(val) >= 0 && atoi(val) <= 3 ? atoi(val) : 0;
     else if (!strcmp(key, "shadows")) g_settings.shadows = atoi(val) >= 0 && atoi(val) <= 2 ? atoi(val) : 0;
     else if (!strcmp(key, "shader_loading")) g_settings.shader_nowait = !strcmp(val, "nowait") || !strcmp(val, "1");
@@ -138,6 +139,7 @@ void settings_save(void) {
     fprintf(f, "mouse_invert_x = %d\nmouse_invert_y = %d\n", g_settings.mouse_invert_x, g_settings.mouse_invert_y);
     fprintf(f, "background = %d\n", g_settings.background);
     fprintf(f, "crowd = %d\n", g_settings.crowd);
+    fprintf(f, "detail_distance = %d\n", g_settings.detail);
     fprintf(f, "shadows = %d\n", g_settings.shadows);
     fprintf(f, "shader_loading = %s\n", g_settings.shader_nowait ? "nowait" : "wait");
     fprintf(f, "pkhex_link = %d\n", g_settings.pkhex_link);

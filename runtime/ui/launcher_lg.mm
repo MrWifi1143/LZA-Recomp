@@ -402,11 +402,12 @@ extern "C" void launcher_lg_run(const char *root) {
     }
     int prompts_i = g_settings.button_prompts >= 0 && g_settings.button_prompts <= 4 ? g_settings.button_prompts : 0;
     int crowd_i = g_settings.crowd >= 0 && g_settings.crowd <= 3 ? g_settings.crowd : 0;
+    int detail_i = g_settings.detail >= 0 && g_settings.detail <= 3 ? g_settings.detail : 0;
     int shadows_i = g_settings.shadows >= 0 && g_settings.shadows <= 2 ? g_settings.shadows : 0;
     int bg_i = g_settings.background >= 0 && g_settings.background <= 2 ? g_settings.background : 0;
     int pk_i = g_settings.pkhex_link >= 0 && g_settings.pkhex_link <= 2 ? g_settings.pkhex_link : 0;
     int shl_i = g_settings.shader_nowait ? 1 : 0;
-    auto apply_rec = [&]() { res = rec.res, fps_i = rec.fps, shadows_i = rec.shadows, crowd_i = rec.crowd, shl_i = rec.nowait; };
+    auto apply_rec = [&]() { res = rec.res, fps_i = rec.fps, shadows_i = rec.shadows, crowd_i = detail_i = rec.crowd, shl_i = rec.nowait; };
     if (g_settings_fresh) apply_rec();
     // Translation: the folders under mods/ (runtime/mods.h); 0 = none (the game's own English)
     static char mods[MODS_MAX][128];
@@ -486,6 +487,7 @@ extern "C" void launcher_lg_run(const char *root) {
         // (the game's Settings rows of the same names: runtime/hle/za_options.c)
         const char *const crowd_names[] = {"Switch", "2x", "4x", "Max"};
         ImGui::Combo(T("Draw distance (people)", "Distância de desenho (pessoas)"), &crowd_i, crowd_names, 4);
+        ImGui::Combo(T("Draw distance (detail)", "Distância de desenho (detalhes)"), &detail_i, crowd_names, 4);
         const char *const shadow_names[] = {"Switch (1024)", T("High (2048)", "Alta (2048)"), T("Ultra (4096)", "Ultra (4096)")};
         ImGui::Combo(T("Shadows", "Sombras"), &shadows_i, shadow_names, 3);
         const char *const shl_names[] = {T("Wait (may stutter the first time)", "Esperar (pode travar na primeira vez)"),
@@ -560,6 +562,7 @@ extern "C" void launcher_lg_run(const char *root) {
     g_settings.skip_start = skipstart;
     g_settings.button_prompts = prompts_i;
     g_settings.crowd = crowd_i;
+    g_settings.detail = detail_i;
     g_settings.shadows = shadows_i;
     g_settings.background = bg_i;
     g_settings.pkhex_link = pk_i;

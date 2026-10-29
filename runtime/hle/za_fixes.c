@@ -508,6 +508,67 @@ static int shadow_setup_hook(Cpu *c, uint64_t addr) {
     return 0;
 }
 
+// Draw distance (detail), Settings.detail: the scenes' trinity_ModelLodSetting entries ({0 name, 1 path regex,
+// 2 [distances], 3, 4}: "Field" "^field/model/.*?$" - trees, props, buildings - 50 / 100 / 150 m, "chara" 8 / 15 / 30,
+// "pokemon" 50 / 100 / 150) say how far away a model keeps each of its levels of detail (a tree's farther ones have
+// fewer leaves: they fill in as you walk up). Their create callback 0x70010f10f0 hands each to 0x7001091700 (x3 the
+// distances), which copies them into a registry entry (made by 0x7001096050; the distances at +0x58) that the renderer
+// reads every frame: scaled as they are copied, and again in place when the setting changes (za_set_detail).
+// LARECOMP_ZA_LODSCALE=<k>: x k instead.
+#define ZA_LOD_SETTING_ADD 0x7001091700ull
+#define ZA_LOD_ENTRY_MAKE 0x7001096050ull
+static struct { float *v; float orig[3]; uint32_t n; } g_lod[64];
+static float g_lod_k = -1;  // (the factor g_lod's entries hold)
+static uint64_t g_lod_entry;
+static int g_nlod;
+static float detail_k(void) {
+    static const float k_mul[4] = {1, 2, 4, 10};
+    const char *e = getenv("LARECOMP_ZA_LODSCALE");
+    if (e && atof(e) > 0) return (float)atof(e);
+    return g_settings.detail >= 0 && g_settings.detail <= 3 ? k_mul[g_settings.detail] : 1;
+}
+// Rescales the entries that still hold what was written into them (else their scene is gone and the memory reused:
+// dropped, left alone).
+static void lod_rescale(float k) {
+    int m = 0;
+    for (int j = 0; j < g_nlod; j++) {
+        bool ours = true;
+        for (uint32_t i = 0; i < g_lod[j].n; i++) ours = ours && g_lod[j].v[i] == g_lod[j].orig[i] * g_lod_k;
+        if (!ours) continue;
+        for (uint32_t i = 0; i < g_lod[j].n; i++) g_lod[j].v[i] = g_lod[j].orig[i] * k;
+        g_lod[m++] = g_lod[j];
+    }
+    g_nlod = m, g_lod_k = k;
+}
+void za_set_detail(void) {
+    float k = detail_k();
+    if (g_lod_k >= 0 && k != g_lod_k) LOG("[za] model detail distances x%g (%d entries)\n", k, g_nlod), lod_rescale(k);
+}
+static int lod_setting_add(Cpu *c, uint64_t addr) {
+    uint64_t d = c->x[3];
+    if (d < 0x7000000000ull || d >= 0x8000000000ull) return 0;
+    uint32_t n = *(const uint32_t *)(uintptr_t)(d - 4);
+    if (n == 0 || n > 3) return 0;
+    if (g_lod_k < 0) g_lod_k = detail_k();
+    float *v = (float *)(uintptr_t)d, orig[3];
+    memcpy(orig, v, n * 4);
+    for (uint32_t i = 0; i < n; i++) v[i] = orig[i] * g_lod_k;
+    g_lod_entry = 0;
+    rt_call_original(c, addr);
+    memcpy(v, orig, n * 4);  // (the scene's own data as it was, should it be read again)
+    float *e = g_lod_entry ? (float *)(uintptr_t)(g_lod_entry + 0x58) : NULL;
+    for (uint32_t i = 0; e && i < n; i++) if (e[i] != orig[i] * g_lod_k) e = NULL;
+    if (e && g_nlod == 64) lod_rescale(g_lod_k);
+    if (e && g_nlod < 64) g_lod[g_nlod].v = e, g_lod[g_nlod].n = n, memcpy(g_lod[g_nlod].orig, orig, n * 4), g_nlod++;
+    LOG("[za] model detail distances %g %g %g m x%g%s\n", orig[0], n > 1 ? orig[1] : 0, n > 2 ? orig[2] : 0, g_lod_k, e ? "" : " (not found to change later)");
+    return 1;
+}
+static int lod_entry_make(Cpu *c, uint64_t addr) {
+    rt_call_original(c, addr);
+    g_lod_entry = c->x[0];
+    return 1;
+}
+
 #define ZA_CHAR_DETAIL_PASS 0x70002ffeb0ull
 static int crowd_hook(Cpu *c, uint64_t addr) {
     (void)addr;
@@ -599,6 +660,8 @@ void za_fixes_configure(const char *exefs) {
         if (!(cs && atoi(cs) == 0)) rt_register_fnhook_at(ZA_TIMELINE_SET_TIME, timeline_step);
     }
     rt_register_fnhook_at(ZA_CHAR_DETAIL_PASS, crowd_hook);
+    rt_register_fnhook_at(ZA_LOD_SETTING_ADD, lod_setting_add);
+    rt_register_fnhook_at(ZA_LOD_ENTRY_MAKE, lod_entry_make);
     if (g_settings.shadows > 0) rt_register_fnhook_at(0x7000f11dd0ull, shadow_setup_hook);
     {
         const char *m = getenv("LARECOMP_ZA_SCENE60");
