@@ -433,6 +433,7 @@ static uint64_t full_hash_budget, full_hash_budget_frame;
 
 // Four independent lanes (one serial multiply chain ran at ~1.5 bytes/cycle; dynamic textures are hashed every
 // frame). Values are only compared within a run.
+uint64_t prof_up_sample_ns, prof_up_hash_ns, prof_up_swz_ns, prof_up_astc_ns, prof_up_new, prof_up_trans_ns, prof_up_copy_ns, prof_up_cmd_ns, prof_up_glyph_ns, prof_up_expand_ns;  // (LARECOMP_VK_PROF: upload_texture by part)
 static uint64_t hash_full(const uint8_t *p, uint64_t n) {
     uint64_t h0 = 0x9E3779B97F4A7C15ull ^ n, h1 = 0xC2B2AE3D27D4EB4Full, h2 = 0x165667B19E3779F9ull, h3 = 0x27D4EB2F165667C5ull;
     uint64_t i = 0;
@@ -509,21 +510,30 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
         full = true;
         full_hash_budget -= total < full_hash_budget ? total : full_hash_budget;
     }
+    extern uint64_t prof_up_ns;
+    bool pr = prof_up_ns != ~0ull;
+    uint64_t pt = pr ? SDL_GetTicksNS() : 0;
     if (!full) {
         prof_tex_samples++;
         uint64_t sh = fnv_sample(mem, total);
+        if (pr) prof_up_sample_ns += SDL_GetTicksNS() - pt;
         if (sh == b->sample_hash) return;
+        if (pr) pt = SDL_GetTicksNS();
     }
     prof_tex_full++; prof_tex_full_bytes += total; if (b->dynamic) prof_tex_dyn++;
+    if (!b->uploaded) prof_up_new++;
     uint64_t h = hash_full(mem, total);
     b->full_frame = frame;
     b->sample_hash = fnv_sample(mem, total);
+    if (pr) prof_up_hash_ns += SDL_GetTicksNS() - pt;
     if (b->uploaded && h == b->data_hash) return;
     if (b->uploaded && h != b->data_hash) b->dynamic = true;
     b->data_hash = h;
     b->uploaded = true;
     if (b->format != mf.vf && !b->astc_bw) return;  // unsupported format: nothing sensible to copy
+    uint64_t ct = pr ? SDL_GetTicksNS() : 0;
     VkCommandBuffer cb = vk_upload_cmd();
+    if (pr) prof_up_cmd_ns += SDL_GetTicksNS() - ct;
     uint32_t layers = t->layout.layers ? t->layout.layers : 1;
     if (layers > b->layers && b->depth == 1) layers = b->layers;
     uint64_t layer_size = tegra_layer_size(&t->layout);
@@ -538,7 +548,9 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 if (linear) for (uint32_t y = 0; y < l.hb; y++) memcpy(blocks + (uint64_t)y * l.wb * 16, src + (uint64_t)y * t->stride, l.wb * 16);
                 else tegra_deswizzle(src, blocks, l.wb, l.hb, 1, 16, l.block_height_log2, l.block_depth_log2);
                 VkSpan s = vk_transient((uint64_t)l.w * l.h * 4, 16);
+                uint64_t at = pr ? SDL_GetTicksNS() : 0;
                 astc_decode_ldr(blocks, l.w, l.h, b->astc_bw, b->astc_bh, b->astc_srgb, s.ptr);
+                if (pr) prof_up_astc_ns += SDL_GetTicksNS() - at;
                 free(blocks);
                 VkBufferImageCopy rg = {.bufferOffset = s.off, .bufferRowLength = l.w, .bufferImageHeight = l.h,
                                         .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, layer, 1},
@@ -551,13 +563,21 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
             uint64_t sz = (uint64_t)row * l.hb * l.d;
             bool expand = (mf.expand_rgb == 1 && fi->bpb == 3) || (mf.expand_rgb >= 2 && fi->bpb == 2);
             uint32_t out_row = expand ? l.wb * 4 : row;
+            uint64_t tt = pr ? SDL_GetTicksNS() : 0;
             VkSpan s = vk_transient((uint64_t)out_row * l.hb * l.d, 16);
-            uint8_t *lin = expand ? malloc(sz) : s.ptr;
+            if (pr) prof_up_trans_ns += SDL_GetTicksNS() - tt;
+            // (a possible button icon is put together in normal memory: the staging buffer is write-combined, and
+            // reading it back to hash the icon - glyphs_patch below - cost ~0.1-0.3 ms per small texture: up to 3.7 ms
+            // of a frame where the game brought in a batch of small BC4 / BC5 textures)
+            bool glyph_cand = lv == 0 && layer == 0 && l.d == 1 && l.w <= 128 && l.h <= 128 && (t->format == 0x49 || t->format == 0x4B);
+            uint8_t *lin = expand || glyph_cand ? malloc(sz) : s.ptr;
             const uint8_t *src = (const uint8_t *)(uintptr_t)t->addr + layer * layer_size + l.offset;
             if (linear) {
                 for (uint32_t y = 0; y < l.hb; y++) memcpy(lin + (uint64_t)y * row, src + (uint64_t)y * t->stride, row);
             } else {
+                uint64_t st = pr ? SDL_GetTicksNS() : 0;
                 tegra_deswizzle(src, lin, l.wb, l.hb, l.d, fi->bpb, l.block_height_log2, l.block_depth_log2);
+                if (pr) prof_up_swz_ns += SDL_GetTicksNS() - st;
             }
             static int dump_fmt = -2;  // LARECOMP_DUMP_TEX_FMT=<nvn format>: level 0 of those textures, untiled -> build/tex/
             if (dump_fmt == -2) dump_fmt = ENV("LARECOMP_DUMP_TEX_FMT") ? (int)strtol(ENV("LARECOMP_DUMP_TEX_FMT"), NULL, 0) : -1;
@@ -594,10 +614,13 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 }
             }
             // a button icon: its symbol for the controller in use (BC4 / BC5: lin is the upload buffer itself)
-            if (lv == 0 && layer == 0 && l.d == 1 && l.w <= 128 && l.h <= 128 && (t->format == 0x49 || t->format == 0x4B)) {
+            if (glyph_cand) {
+                uint64_t gt = pr ? SDL_GetTicksNS() : 0;
                 int g = glyphs_patch(hash_full(lin, (uint64_t)row * l.hb) | 1, t->format, l.w, l.h, lin);
                 if (g) b->glyph = true, b->glyph_gen = glyphs_generation();
+                if (pr) prof_up_glyph_ns += SDL_GetTicksNS() - gt;
             }
+            uint64_t et = pr && expand ? SDL_GetTicksNS() : 0;
             if (expand) {  // RGB8 / RGBA4 / RGB5A1 -> RGBA8
                 uint8_t *o = s.ptr;
                 uint64_t n = (uint64_t)l.wb * l.hb * l.d;
@@ -615,6 +638,8 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                     }
                 free(lin);
             }
+            if (et) prof_up_expand_ns += SDL_GetTicksNS() - et;
+            if (glyph_cand && !expand) memcpy(s.ptr, lin, sz), free(lin);
             uint32_t w = l.w, hh = l.h, d = l.d;
             // the copy stays inside the image's level: a texture allocated at the internal resolution (16:9, render
             // target sized) can still be filled from the CPU - the save slots' screenshots on the title screen. Its
@@ -628,8 +653,10 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                                     .imageExtent = {w, b->base_type == VK_IMAGE_VIEW_TYPE_1D || b->base_type == VK_IMAGE_VIEW_TYPE_1D_ARRAY ? 1 : hh,
                                                     b->depth > 1 ? d : 1}};
             if (b->aspect == (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) continue;  // packed D/S: no CPU layout
+            uint64_t kt = pr ? SDL_GetTicksNS() : 0;
             vk_dl_note_upload((void *)b->image, rg.imageExtent.width, rg.imageExtent.height, rg.imageSubresource.mipLevel);
                 vkCmdCopyBufferToImage(cb, s.buf, b->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
+            if (pr) prof_up_copy_ns += SDL_GetTicksNS() - kt;
         }
     }
 }

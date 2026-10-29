@@ -13,6 +13,12 @@ Z-A:
   stalled behind it. Lumiose walk capped at 144 (Max people, Ultra shadows, 1440p, i9-12900K, 3 runs each): late
   presents (over 7.6 ms) 2.3% -> 0.8%, hitches over 10.4 ms ~26 -> ~10, 1% low ~117 -> ~134 fps.
   `LARECOMP_PIN_SMT=0`: one CPU per core, as before.
+- Fewer hitches when new things appear (the render thread, Lumiose walk at 144): a possible button icon (a small BC4 /
+  BC5 texture) is put together in normal memory - it was hashed by reading back the write-combined upload buffer,
+  ~0.1-0.3 ms per texture, up to 3.7 ms of one frame; redrawn icons are kept (the game uploads the same prompts
+  again and again); block-linear textures are deswizzled a whole GOB at a time (1.8x faster, byte-identical over 4000
+  random layouts). Research: `LARECOMP_VK_PROF=1 LARECOMP_VK_PROF_SPIKE_MS=<n>` logs each frame whose command lists
+  took over n ms, by category (texture uploads by part).
 - Controllers: nn::hid::GetNpadJoyAssignment answers Dual for every controller - the SDK aborts on a value it doesn't
   expect (seen once while loading stalled under a scheduling experiment).
 - Research: `LARECOMP_TRACE_AT=<present>` starts the frame trace (render thread, game presents, and now the kernel's
