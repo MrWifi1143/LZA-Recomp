@@ -855,18 +855,19 @@ void vk_prof_frame(uint64_t frame, uint64_t present_ns) {
         static double spike = -1;
         if (spike < 0) spike = ENV("LARECOMP_VK_PROF_SPIKE_MS") ? atof(ENV("LARECOMP_VK_PROF_SPIKE_MS")) : 0;
         extern uint64_t prof_tex_full_bytes, prof_up_sample_ns, prof_up_hash_ns, prof_up_swz_ns, prof_up_astc_ns, prof_up_new, prof_up_trans_ns, prof_up_copy_ns, prof_up_cmd_ns, prof_up_glyph_ns, prof_up_expand_ns, prof_vc_new, prof_vc_create_ns, prof_vc_protect_ns, prof_vc_copy_ns, prof_tb_new, prof_tb_dead_ns, prof_tb_create_ns, prof_views_created, prof_tex_samples, prof_tex_checks;
-        enum { NV = 32 };
+        extern uint64_t prof_wprog_n, prof_wprog_ns, prof_wpipe_n, prof_wpipe_ns, prof_new_prog, prof_new_pipe;
+        enum { NV = 38 };
         uint64_t v[NV] = {prof_exec, prof_draw, prof_pre, prof_key, prof_dyn, prof_sets, prof_tex, prof_up_ns, prof_vtx, prof_submit,
-                          prof_tex_full_bytes, stat_upload_bytes, prof_up_sample_ns, prof_up_hash_ns, prof_up_swz_ns, prof_up_astc_ns, prof_up_new, prof_up_trans_ns, prof_up_copy_ns, prof_up_cmd_ns, prof_up_glyph_ns, prof_up_expand_ns, prof_vc_new, prof_vc_create_ns, prof_vc_protect_ns, prof_vc_copy_ns, prof_tb_new, prof_tb_dead_ns, prof_tb_create_ns, prof_views_created, prof_tex_samples, prof_tex_checks};
+                          prof_tex_full_bytes, stat_upload_bytes, prof_up_sample_ns, prof_up_hash_ns, prof_up_swz_ns, prof_up_astc_ns, prof_up_new, prof_up_trans_ns, prof_up_copy_ns, prof_up_cmd_ns, prof_up_glyph_ns, prof_up_expand_ns, prof_vc_new, prof_vc_create_ns, prof_vc_protect_ns, prof_vc_copy_ns, prof_tb_new, prof_tb_dead_ns, prof_tb_create_ns, prof_views_created, prof_tex_samples, prof_tex_checks, prof_wprog_n, prof_wprog_ns, prof_wpipe_n, prof_wpipe_ns, prof_new_prog, prof_new_pipe};
         static uint64_t lv[NV];
         if (spike > 0 && v[0] >= lv[0] && (double)(v[0] - lv[0]) > spike * 1e6) {
             uint64_t d[NV];
             for (int i = 0; i < NV; i++) d[i] = v[i] >= lv[i] ? v[i] - lv[i] : v[i];
             LOG("[spike] frame %llu: exec %.2f ms = draw %.2f (pre %.2f key %.2f dyn %.2f sets %.2f tex %.2f (upload checks %.2f) vtx %.2f) submit %.2f;"
-                " textures hashed %.1f MB, uploaded %.1f MB; upload parts: samples %.2f hash %.2f deswizzle %.2f astc %.2f staging %.2f copy %.2f cmd %.2f glyph %.2f expand %.2f ms, %llu new; vertex copies %llu new: create %.2f protect %.2f copy %.2f ms; textures %llu new: collect %.2f create %.2f ms, views %llu; texture checks %llu, sampled %llu\n",
+                " textures hashed %.1f MB, uploaded %.1f MB; upload parts: samples %.2f hash %.2f deswizzle %.2f astc %.2f staging %.2f copy %.2f cmd %.2f glyph %.2f expand %.2f ms, %llu new; vertex copies %llu new: create %.2f protect %.2f copy %.2f ms; textures %llu new: collect %.2f create %.2f ms, views %llu; texture checks %llu, sampled %llu; new progs %llu pipes %llu, waits prog %llu %.2f ms pipe %llu %.2f ms\n",
                 (unsigned long long)frame, d[0] / 1e6, d[1] / 1e6, d[2] / 1e6, d[3] / 1e6,
                 d[4] / 1e6, d[5] / 1e6, d[6] / 1e6, d[7] / 1e6, d[8] / 1e6, d[9] / 1e6, d[10] / 1048576.0, d[11] / 1048576.0,
-                d[12] / 1e6, d[13] / 1e6, d[14] / 1e6, d[15] / 1e6, d[17] / 1e6, d[18] / 1e6, d[19] / 1e6, d[20] / 1e6, d[21] / 1e6, (unsigned long long)d[16], (unsigned long long)d[22], d[23] / 1e6, d[24] / 1e6, d[25] / 1e6, (unsigned long long)d[26], d[27] / 1e6, d[28] / 1e6, (unsigned long long)d[29], (unsigned long long)d[31], (unsigned long long)d[30]);
+                d[12] / 1e6, d[13] / 1e6, d[14] / 1e6, d[15] / 1e6, d[17] / 1e6, d[18] / 1e6, d[19] / 1e6, d[20] / 1e6, d[21] / 1e6, (unsigned long long)d[16], (unsigned long long)d[22], d[23] / 1e6, d[24] / 1e6, d[25] / 1e6, (unsigned long long)d[26], d[27] / 1e6, d[28] / 1e6, (unsigned long long)d[29], (unsigned long long)d[31], (unsigned long long)d[30], (unsigned long long)d[36], (unsigned long long)d[37], (unsigned long long)d[32], d[33] / 1e6, (unsigned long long)d[34], d[35] / 1e6);
         }
         memcpy(lv, v, sizeof v);
     }
@@ -2037,6 +2038,7 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     }
     p->vkey = *vkey;
     p->fkey = *fkey;
+    { extern uint64_t prof_new_prog; prof_new_prog++; }
     run_job(translate_program, p);
     return p;
 }
@@ -4108,7 +4110,18 @@ static void draw(CmdRec *r, bool indexed) {
 // opening without more frames over 50 ms. A cold cache still skips what is left. LARECOMP_SHADER_WAIT_MS=<ms> (0: never).
 // Settings' Shader Loading "Don't Wait" (g_settings.shader_nowait) is 0: a first play of Z-A's intro on cold caches had
 // 5 two-second spans with a frame over 100 ms instead of 19, and ~5x the skipped draws (things show a moment later).
-static bool wait_built(_Atomic int *state) {
+static bool wait_budget(_Atomic int *state);
+// (and the waits counted for [spike]: kind 0 a program, 1 a pipeline)
+uint64_t prof_wprog_n, prof_wprog_ns, prof_wpipe_n, prof_wpipe_ns, prof_new_prog, prof_new_pipe;
+static bool wait_built(_Atomic int *state, int kind) {
+    if (atomic_load(state) != 0) return true;
+    uint64_t t0 = SDL_GetTicksNS();
+    bool r = wait_budget(state);
+    uint64_t dt = SDL_GetTicksNS() - t0;
+    if (kind) prof_wpipe_n++, prof_wpipe_ns += dt; else prof_wprog_n++, prof_wprog_ns += dt;
+    return r;
+}
+static bool wait_budget(_Atomic int *state) {
     if (atomic_load(state) != 0) return true;
     int64_t budget = (ENV("LARECOMP_SHADER_WAIT_MS") ? atoi(ENV("LARECOMP_SHADER_WAIT_MS")) : g_settings.shader_nowait ? 0 : 100) * 1000000ll;
     if (sync_shaders()) return true;  // (built already)
@@ -4166,7 +4179,7 @@ static void draw_(CmdRec *r, bool indexed) {
     vkey.tex_stencil = stencil_slots(0);
     fkey.tex_stencil = stencil_slots(1);
     Prog *pr = get_program(st.program, &vkey, &fkey);
-    if (pr) wait_built(&pr->state);
+    if (pr) wait_built(&pr->state, 0);
     if (!pr || atomic_load(&pr->state) != 1) {
         if (pr && atomic_load(&pr->state) > 1 && ENV("LARECOMP_LOG_FAILED_DRAWS")) {  // what a failed program draws to
             static void *seen[64];
@@ -4340,9 +4353,10 @@ static void draw_(CmdRec *r, bool indexed) {
         pp->t_asked = SDL_GetTicksNS();
         pipe_tab[pslot].key = ph;
         pipe_tab[pslot].pipe = pp;
+        prof_new_pipe++;
         run_job(build_pipeline, pp);
     }
-    wait_built(&pp->state);
+    wait_built(&pp->state, 1);
     if (atomic_load(&pp->state) != 1) { SKIP(5 + (atomic_load(&pp->state) > 1)); return; }
     g_pipe_memo = pp, g_pipe_memo_in = in;
     }
