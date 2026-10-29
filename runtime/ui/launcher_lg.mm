@@ -448,7 +448,10 @@ static void banner(ImDrawList *d, ImVec2 a, ImVec2 b, float t) {
     float w = b.x - a.x, h = b.y - a.y, cx = a.x + w * 0.66f, peak = a.y + h * 0.32f, foot = b.y - h * 0.10f;
     rift(d, cx, a.y + h * 0.19f, w * 0.17f, t);  // (just above the summit, clear of the title)
     // the cone: near-straight flanks easing out low (half width = summit + spread * u^1.25), the summit broad, broken
-    float sw = w * 0.06f, spread = w * 0.62f;
+    float sw = w * 0.05f, spread = w * 0.63f;
+    // the summit: broad and a little crumbled - small uneven bumps on the rim (in sw / 2, up is negative)
+    static const float jag[9] = {0.0f, -0.12f, 0.06f, -0.22f, -0.08f, -0.18f, 0.04f, -0.10f, 0.0f};
+    auto rim_y = [&](int i) { return peak + jag[i] * sw * 0.5f; };
     auto hw = [&](float y) { float u = (y - peak) / (foot - peak); return sw + spread * powf(u < 0 ? 0 : u, 1.25f); };
     ImVec2 P[160];
     int n = 0;
@@ -456,8 +459,7 @@ static void banner(ImDrawList *d, ImVec2 a, ImVec2 b, float t) {
         float y = foot - (foot - peak) * i / 50.0f;
         P[n++] = ImVec2(cx - hw(y), y);
     }
-    static const float jag[9] = {0.0f, -0.5f, 0.2f, -0.9f, -0.3f, -1.0f, 0.1f, -0.6f, 0.0f};  // (the broken rim, in sw / 2)
-    for (int i = 1; i < 8; i++) P[n++] = ImVec2(cx - sw + 2 * sw * i / 8.0f, peak + jag[i] * sw * 0.5f);
+    for (int i = 1; i < 8; i++) P[n++] = ImVec2(cx - sw + 2 * sw * i / 8.0f, rim_y(i));
     for (int i = 50; i >= 0; i--) {  // right flank, down to the foot
         float y = foot - (foot - peak) * i / 50.0f;
         P[n++] = ImVec2(cx + hw(y), y);
@@ -488,7 +490,10 @@ static void banner(ImDrawList *d, ImVec2 a, ImVec2 b, float t) {
     {  // (the snow above the line: strips from the cone's outline down to the line)
         auto top = [&](float x) {  // (the outline's height above x: hw(y) = |x - cx| solved for y)
             float dx = fabsf(x - cx);
-            return dx <= sw ? peak : peak + (foot - peak) * powf((dx - sw) / spread, 1 / 1.25f);
+            if (dx > sw) return peak + (foot - peak) * powf((dx - sw) / spread, 1 / 1.25f);
+            float f = (x - (cx - sw)) / (2 * sw) * 8;  // (on the summit: the rim, between its points)
+            int i = f < 0 ? 0 : f >= 8 ? 7 : (int)f;
+            return rim_y(i) + (rim_y(i + 1) - rim_y(i)) * (f - i);
         };
         d->Flags &= ~ImDrawListFlags_AntiAliasedFill;
         for (int i = 0; i + 1 < ns; i++)
