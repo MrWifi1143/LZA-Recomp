@@ -549,7 +549,8 @@ static void banner(ImDrawList *d, ImVec2 a, ImVec2 b, float t) {
 static bool big_button(const char *label, float w, float h, bool primary, bool enabled) {
     ImGui::BeginDisabled(!enabled);
     ImVec2 p = ImGui::GetCursorScreenPos();
-    bool hit = ImGui::InvisibleButton(label, ImVec2(w, h));
+    bool hit = ImGui::InvisibleButton(label, ImVec2(w, h), ImGuiButtonFlags_EnableNav);  // (keyboard / controller too:
+                                                                                         // invisible buttons leave nav by default)
     bool hot = enabled && (ImGui::IsItemHovered() || ImGui::IsItemFocused()), held = hot && ImGui::IsItemActive();
     ImDrawList *d = ImGui::GetWindowDrawList();
     ImU32 bg = primary ? (enabled ? (hot ? k_accent_hi : k_accent) : IM_COL32(84, 72, 56, 255))
@@ -628,6 +629,8 @@ extern "C" void launcher_lg_run(const char *root) {
         c[ImGuiCol_TabSelectedOverline] = ImVec4(0.94f, 0.77f, 0.36f, 1);
         c[ImGuiCol_PlotHistogram] = ImVec4(0.94f, 0.77f, 0.36f, 1);
         c[ImGuiCol_Separator] = ImVec4(0.36f, 0.28f, 0.34f, 1);
+        c[ImGuiCol_TitleBg] = c[ImGuiCol_TitleBgActive] = c[ImGuiCol_TitleBgCollapsed] = ImVec4(0.18f, 0.14f, 0.20f, 1);  // (the shader warm-up window)
+        st.WindowRounding = 8;
         st.FrameRounding = st.GrabRounding = st.TabRounding = 6;
     }
     ImGui_ImplSDL3_InitForVulkan(win);
@@ -813,6 +816,9 @@ extern "C" void launcher_lg_run(const char *root) {
         int st = setup_state();
         bool running = setup_running();
         bool pad_page = false;
+        static int last_page = PAGE_HOME;  // (back on the home page: the keyboard / controller focus on the button left from)
+        int came_from = page == PAGE_HOME && last_page != PAGE_HOME ? last_page : -1;
+        last_page = page;
         if (page == PAGE_HOME) {
             float split = floorf(W * 0.64f), strip = 92;
             banner(d, ImVec2(0, 0), ImVec2(split, H), (float)ImGui::GetTime());
@@ -859,6 +865,7 @@ extern "C" void launcher_lg_run(const char *root) {
                 {"GAME FILES", "ARQUIVOS DO JOGO", PAGE_FILES}, {"MODS", "MODS", PAGE_MODS}, {"EXIT", "SAIR", -1}};
             for (const auto &r : rows) {
                 ImGui::SetCursorScreenPos(ImVec2(bx, y));
+                if (came_from >= 0 && r.to == came_from) ImGui::SetKeyboardFocusHere();  // (Exit's -1 isn't a page)
                 if (big_button(T(r.en, r.pt), bw, 58, false, true)) {
                     if (r.to < 0) exit(0);
                     page = r.to;
@@ -933,7 +940,15 @@ extern "C" void launcher_lg_run(const char *root) {
         ImGui::End();
     };
 
+    // (~60 redraws a second: the frames aren't paced by the display here, and spun at ~3000 a second)
+    auto pace = []() {
+        static uint64_t last;
+        uint64_t now = SDL_GetTicksNS();
+        if (last && now - last < 16000000) SDL_DelayNS(16000000 - (now - last));
+        last = SDL_GetTicksNS();
+    };
     while (!play) {
+        pace();
         menu_apply_window_requests(win);
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -953,8 +968,14 @@ extern "C" void launcher_lg_run(const char *root) {
         last_install = inst;
         ready = !setup_running() && setup_ready();
         if (autoplay && ready && inst != MOD_INSTALL_RUNNING) play = true;
-        if (SDL_GetModState() & SDL_KMOD_SHIFT) shift_seen = true;
-        if (skip_now && !shift_seen && SDL_GetTicks() - opened >= 400 && ready && inst != MOD_INSTALL_RUNNING) {
+        // Shift is only seen once the window has the keyboard (a new window can take a while to get it, or never: a
+        // compositor may leave focus where it was): decided a moment after the focus comes, or after 1.5 s without it
+        static uint64_t focused_at;
+        if (!focused_at && (SDL_GetWindowFlags(win) & SDL_WINDOW_INPUT_FOCUS)) focused_at = SDL_GetTicks();
+        const bool *keys = SDL_GetKeyboardState(NULL);
+        if ((SDL_GetModState() & SDL_KMOD_SHIFT) || keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT]) shift_seen = true;
+        bool decide = focused_at ? SDL_GetTicks() - focused_at >= 250 : SDL_GetTicks() - opened >= 1500;
+        if (skip_now && !shift_seen && decide && ready && inst != MOD_INSTALL_RUNNING) {
             fprintf(stderr, "[launcher] start screen skipped (skip_start_screen; Shift at start shows it)\n");
             play = true;
         }
@@ -999,6 +1020,7 @@ extern "C" void launcher_lg_run(const char *root) {
         warmup_start();
         float shown = 0;
         for (int done = 0, total = 0, ph; (ph = warmup_progress(&done, &total)) != 3;) {
+            pace();  // (the warm-up's compile threads get the CPU)
             SDL_Event e;
             while (SDL_PollEvent(&e)) {
                 ImGui_ImplSDL3_ProcessEvent(&e);
