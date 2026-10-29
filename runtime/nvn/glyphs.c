@@ -16,6 +16,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <direct.h>
+#define mkdir(p, m) _mkdir(p)
+#else
+#include <sys/stat.h>
+#endif
+
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_scancode.h>
@@ -381,8 +388,12 @@ static const Icon *find(uint64_t h) {
 }
 
 // Redrawn icons, by their content and the generation: the game uploads the same prompt textures again and again as its
-// HUD changes, and each redraw supersamples the font. (Render thread only: textures.c upload_texture.)
+// HUD changes, and a redraw is slow - the letters are signed distance fields at 4x (stbtt_GetCodepointSDF), ~1.8 ms an
+// icon: 3.6 ms of the frame where two new ones came in (Lumiose, render thread). Kept in memory, and on disk
+// (cache/glyphs/: by content, format, size and what drives each button - g_sig), so each icon is drawn once per binding
+// setup, not once a session. (Render thread only: textures.c upload_texture.)
 #define GCACHE 64
+#define GLYPHS_CACHE_VER 1  // (raise when the drawing changes: older files are not read)
 static struct { uint64_t hash; uint32_t gen, format, w, h; size_t size; uint8_t *data; } g_gcache[GCACHE];
 static int g_gcache_next;
 
@@ -405,6 +416,25 @@ int glyphs_patch(uint64_t hash, uint32_t format, uint32_t w, uint32_t h, uint8_t
             memcpy(lin, g_gcache[i].data, size);
             return 2;
         }
+    char path[160];
+    snprintf(path, sizeof path, "cache/glyphs/v%d_%016llx_%016llx_%x_%ux%u.bin", GLYPHS_CACHE_VER, (unsigned long long)hash,
+             (unsigned long long)g_sig, format, w, h);
+    FILE *cf = fopen(path, "rb");
+    uint8_t *disk = cf ? malloc(size) : NULL;
+    bool from_disk = disk && fread(disk, 1, size, cf) == size;
+    if (cf) fclose(cf);
+    if (from_disk) memcpy(lin, disk, size);
+    free(disk);
+    if (from_disk) {
+        int c = g_gcache_next++ % GCACHE;
+        uint8_t *keep = realloc(g_gcache[c].data, size);
+        if (keep) {
+            memcpy(keep, lin, size);
+            g_gcache[c].data = keep, g_gcache[c].hash = hash, g_gcache[c].gen = gen, g_gcache[c].format = format;
+            g_gcache[c].w = w, g_gcache[c].h = h, g_gcache[c].size = size;
+        }
+        return 2;
+    }
     uint8_t *sym = malloc((size_t)pw * ph), *shape = bc5 ? malloc((size_t)pw * ph) : NULL;
     plane_get(lin, bpb, 0, wb, hb, sym);
     if (bc5) plane_get(lin, bpb, 1, wb, hb, shape);
@@ -446,5 +476,7 @@ int glyphs_patch(uint64_t hash, uint32_t format, uint32_t w, uint32_t h, uint8_t
         g_gcache[c].data = keep, g_gcache[c].hash = hash, g_gcache[c].gen = gen, g_gcache[c].format = format;
         g_gcache[c].w = w, g_gcache[c].h = h, g_gcache[c].size = size;
     }
+    mkdir("cache", 0755), mkdir("cache/glyphs", 0755);
+    if ((cf = fopen(path, "wb"))) fwrite(lin, 1, size, cf), fclose(cf);
     return 2;
 }

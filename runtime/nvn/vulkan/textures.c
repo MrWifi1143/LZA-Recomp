@@ -376,6 +376,7 @@ static void live_remove(TexBackend *b) {
     b->reg = 0;
 }
 
+uint64_t prof_tb_new, prof_tb_dead_ns, prof_tb_create_ns;  // (new texture backends: dead-texture collection, image creation)
 static TexBackend *tex_backend(NvnTexture *t) {
     TexBackend *b = t->backend;
     if (b) {
@@ -385,12 +386,15 @@ static TexBackend *tex_backend(NvnTexture *t) {
         }
         return b;
     }
+    uint64_t t0 = SDL_GetTicksNS();
     vk_collect_dead();
+    uint64_t t1 = SDL_GetTicksNS();
     b = calloc(1, sizeof *b);
     b->scalable = tex_scalable(t);
     create_image(t, b);
     t->backend = b;
     live_add(t, b);
+    prof_tb_new++, prof_tb_dead_ns += t1 - t0, prof_tb_create_ns += SDL_GetTicksNS() - t1;  // (exec.c [spike])
     return b;
 }
 

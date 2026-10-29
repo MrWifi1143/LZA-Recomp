@@ -854,19 +854,19 @@ void vk_prof_frame(uint64_t frame, uint64_t present_ns) {
     {   // (LARECOMP_VK_PROF_SPIKE_MS=<n>: a frame whose command lists took over n ms on the render thread, by category)
         static double spike = -1;
         if (spike < 0) spike = ENV("LARECOMP_VK_PROF_SPIKE_MS") ? atof(ENV("LARECOMP_VK_PROF_SPIKE_MS")) : 0;
-        extern uint64_t prof_tex_full_bytes, prof_up_sample_ns, prof_up_hash_ns, prof_up_swz_ns, prof_up_astc_ns, prof_up_new, prof_up_trans_ns, prof_up_copy_ns, prof_up_cmd_ns, prof_up_glyph_ns, prof_up_expand_ns, prof_vc_new, prof_vc_create_ns, prof_vc_protect_ns, prof_vc_copy_ns;
-        enum { NV = 26 };
+        extern uint64_t prof_tex_full_bytes, prof_up_sample_ns, prof_up_hash_ns, prof_up_swz_ns, prof_up_astc_ns, prof_up_new, prof_up_trans_ns, prof_up_copy_ns, prof_up_cmd_ns, prof_up_glyph_ns, prof_up_expand_ns, prof_vc_new, prof_vc_create_ns, prof_vc_protect_ns, prof_vc_copy_ns, prof_tb_new, prof_tb_dead_ns, prof_tb_create_ns, prof_views_created;
+        enum { NV = 30 };
         uint64_t v[NV] = {prof_exec, prof_draw, prof_pre, prof_key, prof_dyn, prof_sets, prof_tex, prof_up_ns, prof_vtx, prof_submit,
-                          prof_tex_full_bytes, stat_upload_bytes, prof_up_sample_ns, prof_up_hash_ns, prof_up_swz_ns, prof_up_astc_ns, prof_up_new, prof_up_trans_ns, prof_up_copy_ns, prof_up_cmd_ns, prof_up_glyph_ns, prof_up_expand_ns, prof_vc_new, prof_vc_create_ns, prof_vc_protect_ns, prof_vc_copy_ns};
+                          prof_tex_full_bytes, stat_upload_bytes, prof_up_sample_ns, prof_up_hash_ns, prof_up_swz_ns, prof_up_astc_ns, prof_up_new, prof_up_trans_ns, prof_up_copy_ns, prof_up_cmd_ns, prof_up_glyph_ns, prof_up_expand_ns, prof_vc_new, prof_vc_create_ns, prof_vc_protect_ns, prof_vc_copy_ns, prof_tb_new, prof_tb_dead_ns, prof_tb_create_ns, prof_views_created};
         static uint64_t lv[NV];
         if (spike > 0 && v[0] >= lv[0] && (double)(v[0] - lv[0]) > spike * 1e6) {
             uint64_t d[NV];
             for (int i = 0; i < NV; i++) d[i] = v[i] >= lv[i] ? v[i] - lv[i] : v[i];
             LOG("[spike] frame %llu: exec %.2f ms = draw %.2f (pre %.2f key %.2f dyn %.2f sets %.2f tex %.2f (upload checks %.2f) vtx %.2f) submit %.2f;"
-                " textures hashed %.1f MB, uploaded %.1f MB; upload parts: samples %.2f hash %.2f deswizzle %.2f astc %.2f staging %.2f copy %.2f cmd %.2f glyph %.2f expand %.2f ms, %llu new; vertex copies %llu new: create %.2f protect %.2f copy %.2f ms\n",
+                " textures hashed %.1f MB, uploaded %.1f MB; upload parts: samples %.2f hash %.2f deswizzle %.2f astc %.2f staging %.2f copy %.2f cmd %.2f glyph %.2f expand %.2f ms, %llu new; vertex copies %llu new: create %.2f protect %.2f copy %.2f ms; textures %llu new: collect %.2f create %.2f ms, views %llu\n",
                 (unsigned long long)frame, d[0] / 1e6, d[1] / 1e6, d[2] / 1e6, d[3] / 1e6,
                 d[4] / 1e6, d[5] / 1e6, d[6] / 1e6, d[7] / 1e6, d[8] / 1e6, d[9] / 1e6, d[10] / 1048576.0, d[11] / 1048576.0,
-                d[12] / 1e6, d[13] / 1e6, d[14] / 1e6, d[15] / 1e6, d[17] / 1e6, d[18] / 1e6, d[19] / 1e6, d[20] / 1e6, d[21] / 1e6, (unsigned long long)d[16], (unsigned long long)d[22], d[23] / 1e6, d[24] / 1e6, d[25] / 1e6);
+                d[12] / 1e6, d[13] / 1e6, d[14] / 1e6, d[15] / 1e6, d[17] / 1e6, d[18] / 1e6, d[19] / 1e6, d[20] / 1e6, d[21] / 1e6, (unsigned long long)d[16], (unsigned long long)d[22], d[23] / 1e6, d[24] / 1e6, d[25] / 1e6, (unsigned long long)d[26], d[27] / 1e6, d[28] / 1e6, (unsigned long long)d[29]);
         }
         memcpy(lv, v, sizeof v);
     }
