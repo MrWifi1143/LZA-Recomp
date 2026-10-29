@@ -387,109 +387,105 @@ static void banner_sky(ImDrawList *d, ImVec2 a, ImVec2 b) {
             d->AddCircleFilled(ImVec2(x, y), 1.3f, IM_COL32(150, 190, 255, (int)(34 * (1 - (y - a.y) / h) + 6)), 6);
 }
 
-// Lumiose City's Prism Tower at night, drawn: a tiered base with window bands and an arched door, curved legs up to a
-// deck, an hourglass shaft with the long X-lattice window, a crown with two horns curving out and the spire between
-// them; red lights on the tips, a prism shimmer from the top. H: its height to the antenna's tip, from the ground.
-static ImU32 shade(float r, float g, float b, float k, int a = 255) {
-    auto c = [](float v) { return (int)(v < 0 ? 0 : v > 255 ? 255 : v); };
-    return IM_COL32(c(r * k), c(g * k), c(b * k), a);
-}
-// A horizontal slice of the tower's body, its shaded (left) and lit (right) halves
-static void slab(ImDrawList *d, float cx, float y0, float y1, float hw0, float hw1, float k) {
-    float g = 0.85f + 0.15f * k;  // (uplit: brighter low)
-    d->AddQuadFilled(ImVec2(cx - hw0, y0), ImVec2(cx, y0), ImVec2(cx, y1), ImVec2(cx - hw1, y1), shade(196, 192, 226, g * 0.80f));
-    d->AddQuadFilled(ImVec2(cx, y0), ImVec2(cx + hw0, y0), ImVec2(cx + hw1, y1), ImVec2(cx, y1), shade(226, 222, 246, g));
-}
-static void horn(ImDrawList *d, ImVec2 p0, ImVec2 p1, ImVec2 p2, float w0, float w1, bool lit) {  // a curved tapering prong
-    ImVec2 pl, pr;
-    for (int i = 0; i <= 16; i++) {
-        float u = i / 16.0f, v = 1 - u;
-        ImVec2 p(v * v * p0.x + 2 * v * u * p1.x + u * u * p2.x, v * v * p0.y + 2 * v * u * p1.y + u * u * p2.y);
-        ImVec2 tg(2 * v * (p1.x - p0.x) + 2 * u * (p2.x - p1.x), 2 * v * (p1.y - p0.y) + 2 * u * (p2.y - p1.y));
-        float l = sqrtf(tg.x * tg.x + tg.y * tg.y), hw = (w0 + (w1 - w0) * u) / 2;
-        ImVec2 nl(p.x - tg.y / l * hw, p.y + tg.x / l * hw), nr(p.x + tg.y / l * hw, p.y - tg.x / l * hw);
-        if (i) d->AddQuadFilled(pl, pr, nr, nl, lit ? shade(226, 222, 246, 0.9f) : shade(196, 192, 226, 0.72f));
-        pl = nl, pr = nr;
-    }
-}
+// Lumiose City's Prism Tower as glowing wireframe: a dark body outlined in the accent - the tiered base with window
+// bands and the arched door, curved legs crossed by beams up to the deck, the hourglass shaft with its long X-lattice
+// window, the crown's cup with two horns curving out and the spire with its antenna; red lights on the horn tips.
+// H: its height to the antenna's tip, from the ground.
 static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t) {
+    const ImU32 fill = IM_COL32(12, 18, 30, 255), c = IM_COL32(160, 220, 90, 235), dim = IM_COL32(120, 180, 70, 130);
     auto Y = [&](float f) { return ground - f * H; };
-    ImDrawListFlags fl = d->Flags;
-    d->Flags &= ~ImDrawListFlags_AntiAliasedFill;  // (slices meet without seams)
-    // the prism shimmer behind the top: thin rays turning slowly through the rainbow
-    ImVec2 tip(cx, Y(1.0f));
-    for (int i = 0; i < 18; i++) {  // (fanned upward, as light off a prism)
-        float an = -3.14159265f * (0.08f + 0.84f * i / 17.0f), len = H * (0.06f + 0.035f * sinf(t * 0.9f + i * 1.7f)), sp = 0.03f;
-        float hue = fmodf(i / 18.0f + t * 0.04f, 1.0f);
-        ImVec4 c;
-        ImGui::ColorConvertHSVtoRGB(hue, 0.55f, 1.0f, c.x, c.y, c.z);
-        d->AddTriangleFilled(tip, ImVec2(tip.x + cosf(an - sp) * len, tip.y + sinf(an - sp) * len),
-                             ImVec2(tip.x + cosf(an + sp) * len, tip.y + sinf(an + sp) * len),
-                             IM_COL32((int)(c.x * 255), (int)(c.y * 255), (int)(c.z * 255), 22));
-    }
-    // the base: two tiers with window bands, the arched door
-    slab(d, cx, Y(0.000f), Y(0.035f), 0.215f * H, 0.215f * H, 1.0f);
-    slab(d, cx, Y(0.035f), Y(0.075f), 0.165f * H, 0.165f * H, 0.97f);
-    d->AddRectFilled(ImVec2(cx - 0.20f * H, Y(0.026f)), ImVec2(cx + 0.20f * H, Y(0.012f)), IM_COL32(90, 150, 240, 230));
-    d->AddRectFilled(ImVec2(cx - 0.15f * H, Y(0.065f)), ImVec2(cx + 0.15f * H, Y(0.047f)), IM_COL32(90, 150, 240, 230));
-    d->PathArcTo(ImVec2(cx, Y(0.0f)), 0.045f * H, 3.14159265f, 6.2831853f, 24);  // the door: a lit half disc
-    d->PathFillConvex(IM_COL32(255, 206, 150, 255));
-    d->PathArcTo(ImVec2(cx, Y(0.0f)), 0.052f * H, 3.14159265f, 6.2831853f, 24);
-    d->PathStroke(IM_COL32(236, 232, 250, 255), 0, 2.5f);
-    // the legs, curving in up to the deck
-    for (int i = 0; i < 40; i++) {
-        float f0 = 0.075f + 0.165f * i / 40, f1 = 0.075f + 0.165f * (i + 1) / 40;
-        auto hw = [&](float f) { float u = (f - 0.075f) / 0.165f; return H * (0.070f + 0.085f * (1 - u) * (1 - u)); };
-        slab(d, cx, Y(f0), Y(f1), hw(f0), hw(f1), 1 - f0);
-    }
-    float arch = 0.045f * H;  // the opening between the legs: an arch, lit blue from inside
-    d->PathLineTo(ImVec2(cx - arch, Y(0.075f)));
-    d->PathArcTo(ImVec2(cx, Y(0.165f)), arch, 3.14159265f, 6.2831853f, 20);
-    d->PathLineTo(ImVec2(cx + arch, Y(0.075f)));
-    d->PathFillConvex(IM_COL32(70, 110, 210, 255));
-    d->AddRectFilled(ImVec2(cx - arch * 0.8f, Y(0.115f)), ImVec2(cx + arch * 0.8f, Y(0.075f)), IM_COL32(120, 180, 255, 255));
-    slab(d, cx, Y(0.240f), Y(0.258f), 0.095f * H, 0.095f * H, 0.8f);  // the deck
-    d->AddRectFilled(ImVec2(cx - 0.09f * H, Y(0.252f)), ImVec2(cx + 0.09f * H, Y(0.246f)), IM_COL32(120, 190, 255, 255));
-    // the shaft: an hourglass, narrowest a little under the middle
+    auto legw = [&](float f) { float u = (f - 0.075f) / 0.165f; return H * (0.070f + 0.085f * (1 - u) * (1 - u)); };
     auto shw = [&](float f) { float u = f - 0.52f; return H * (0.036f + 0.52f * u * u); };
-    for (int i = 0; i < 80; i++) {
-        float f0 = 0.258f + 0.542f * i / 80, f1 = 0.258f + 0.542f * (i + 1) / 80;
-        slab(d, cx, Y(f0), Y(f1), shw(f0), shw(f1), 1 - f0);
+    float cup0 = shw(0.80f), cupw = cup0 + H * 0.030f;
+    auto cuph = [&](float f) { float u = (f - 0.80f) / 0.05f; return cup0 + H * 0.030f * u * u; };
+    auto spw = [&](float f) { return H * (0.018f - 0.014f * (f - 0.84f) / 0.12f); };
+    // a body part between heights f0..f1 with half width hw(f): filled dark, its two sides stroked
+    auto part = [&](float f0, float f1, int n, auto hw, float thick) {
+        ImVec2 L[96], R[96];
+        for (int i = 0; i <= n; i++) {
+            float f = f0 + (f1 - f0) * i / n;
+            L[i] = ImVec2(cx - hw(f), Y(f)), R[i] = ImVec2(cx + hw(f), Y(f));
+        }
+        ImDrawListFlags fl = d->Flags;
+        d->Flags &= ~ImDrawListFlags_AntiAliasedFill;  // (slices meet without seams)
+        for (int i = 0; i < n; i++) d->AddQuadFilled(L[i], R[i], R[i + 1], L[i + 1], fill);
+        d->Flags = fl;
+        d->AddPolyline(L, n + 1, c, 0, thick), d->AddPolyline(R, n + 1, c, 0, thick);
+    };
+    // a horn: a tapering prong along a curve, filled dark, outlined
+    auto horn = [&](ImVec2 p0, ImVec2 p1, ImVec2 p2, float w0, float w1) {
+        ImVec2 A[17], B[17];
+        for (int i = 0; i <= 16; i++) {
+            float u = i / 16.0f, v = 1 - u;
+            ImVec2 p(v * v * p0.x + 2 * v * u * p1.x + u * u * p2.x, v * v * p0.y + 2 * v * u * p1.y + u * u * p2.y);
+            ImVec2 tg(2 * v * (p1.x - p0.x) + 2 * u * (p2.x - p1.x), 2 * v * (p1.y - p0.y) + 2 * u * (p2.y - p1.y));
+            float l = sqrtf(tg.x * tg.x + tg.y * tg.y), hw = (w0 + (w1 - w0) * u) / 2;
+            A[i] = ImVec2(p.x - tg.y / l * hw, p.y + tg.x / l * hw), B[i] = ImVec2(p.x + tg.y / l * hw, p.y - tg.x / l * hw);
+        }
+        for (int i = 0; i < 16; i++) d->AddQuadFilled(A[i], B[i], B[i + 1], A[i + 1], fill);
+        d->AddPolyline(A, 17, c, 0, 2.0f), d->AddPolyline(B, 17, c, 0, 2.0f), d->AddLine(A[16], B[16], c, 2.0f);
+    };
+    // the base: two tiers with window bands, the arched door
+    for (int k = 0; k < 2; k++) {
+        float hw = (k ? 0.165f : 0.215f) * H, y0 = Y(k ? 0.035f : 0.0f), y1 = Y(k ? 0.075f : 0.035f);
+        d->AddRectFilled(ImVec2(cx - hw, y1), ImVec2(cx + hw, y0), fill);
+        d->AddRect(ImVec2(cx - hw, y1), ImVec2(cx + hw, y0), c, 0, 0, 2.0f);
+        float yb = Y(k ? 0.056f : 0.019f);
+        for (float x = cx - hw + 8; x < cx + hw - 8; x += 9)  // (the window band: a row of lit panes)
+            d->AddLine(ImVec2(x, yb - 3), ImVec2(x, yb + 3), dim, 1.2f);
     }
-    // the crown: a cup flaring out, its two horns, the spire between them
-    for (int i = 0; i < 16; i++) {
-        float f0 = 0.80f + 0.05f * i / 16, f1 = 0.80f + 0.05f * (i + 1) / 16, u0 = (f0 - 0.80f) / 0.05f, u1 = (f1 - 0.80f) / 0.05f;
-        slab(d, cx, Y(f0), Y(f1), shw(0.80f) + H * 0.030f * u0 * u0, shw(0.80f) + H * 0.030f * u1 * u1, 0.3f);
+    d->PathArcTo(ImVec2(cx, Y(0.0f)), 0.045f * H, 3.14159265f, 6.2831853f, 24);  // the door
+    d->PathFillConvex(fill);
+    d->PathArcTo(ImVec2(cx, Y(0.0f)), 0.045f * H, 3.14159265f, 6.2831853f, 24);
+    d->PathStroke(c, 0, 2.0f);
+    // the legs, curving in up to the deck, beams crossed between them, the arch under them
+    part(0.075f, 0.240f, 40, legw, 2.5f);
+    for (int i = 0; i < 5; i++) {
+        float f0 = 0.10f + 0.028f * i, f1 = f0 + 0.028f;
+        float l0 = cx - legw(f0), r0 = cx + legw(f0), l1 = cx - legw(f1), r1 = cx + legw(f1);
+        d->AddLine(ImVec2(l0, Y(f0)), ImVec2(r1, Y(f1)), dim, 1.2f), d->AddLine(ImVec2(r0, Y(f0)), ImVec2(l1, Y(f1)), dim, 1.2f);
+        d->AddLine(ImVec2(l1, Y(f1)), ImVec2(r1, Y(f1)), c, 1.3f);
     }
-    float cupw = shw(0.80f) + H * 0.030f;
-    horn(d, ImVec2(cx - cupw + 0.014f * H, Y(0.835f)), ImVec2(cx - cupw + 0.006f * H, Y(0.93f)), ImVec2(cx - cupw - 0.016f * H, Y(0.975f)),
-         0.032f * H, 0.009f * H, false);
-    horn(d, ImVec2(cx + cupw - 0.014f * H, Y(0.835f)), ImVec2(cx + cupw - 0.006f * H, Y(0.93f)), ImVec2(cx + cupw + 0.016f * H, Y(0.975f)),
-         0.032f * H, 0.009f * H, true);
-    for (int i = 0; i < 20; i++) {  // the spire, tapering
-        float f0 = 0.84f + 0.12f * i / 20, f1 = 0.84f + 0.12f * (i + 1) / 20;
-        slab(d, cx, Y(f0), Y(f1), H * (0.018f - 0.014f * (f0 - 0.84f) / 0.12f), H * (0.018f - 0.014f * (f1 - 0.84f) / 0.12f), 0.3f);
-    }
-    d->Flags = fl;
-    d->AddLine(ImVec2(cx, Y(0.96f)), ImVec2(cx, Y(1.0f)), IM_COL32(220, 220, 240, 255), 1.5f);  // antenna
-    d->AddLine(ImVec2(cx - 0.008f * H, Y(0.972f)), ImVec2(cx + 0.008f * H, Y(0.972f)), IM_COL32(220, 220, 240, 255), 1.2f);
-    d->AddLine(ImVec2(cx - 0.005f * H, Y(0.985f)), ImVec2(cx + 0.005f * H, Y(0.985f)), IM_COL32(220, 220, 240, 255), 1.2f);
-    // the long window up the shaft, and its X lattice
-    float w0 = 0.30f, w1 = 0.78f, glow = 0.85f + 0.15f * sinf(t * 1.3f);
+    float arch = 0.045f * H;
+    d->PathLineTo(ImVec2(cx - arch, Y(0.075f)));
+    d->PathArcTo(ImVec2(cx, Y(0.120f)), arch, 3.14159265f, 6.2831853f, 20);
+    d->PathLineTo(ImVec2(cx + arch, Y(0.075f)));
+    d->PathFillConvex(IM_COL32(20, 34, 40, 255));
+    d->PathLineTo(ImVec2(cx - arch, Y(0.075f)));
+    d->PathArcTo(ImVec2(cx, Y(0.120f)), arch, 3.14159265f, 6.2831853f, 20);
+    d->PathLineTo(ImVec2(cx + arch, Y(0.075f)));
+    d->PathStroke(c, 0, 2.0f);
+    d->AddRectFilled(ImVec2(cx - 0.095f * H, Y(0.258f)), ImVec2(cx + 0.095f * H, Y(0.240f)), fill);  // the deck
+    d->AddRect(ImVec2(cx - 0.095f * H, Y(0.258f)), ImVec2(cx + 0.095f * H, Y(0.240f)), c, 0, 0, 2.0f);
+    // the shaft (rings now and then), the horns, the crown's cup over their feet, the spire
+    part(0.258f, 0.800f, 80, shw, 2.5f);
+    for (float f = 0.29f; f < 0.80f; f += 0.06f) d->AddLine(ImVec2(cx - shw(f), Y(f)), ImVec2(cx + shw(f), Y(f)), dim, 1.0f);
+    horn(ImVec2(cx - cupw + 0.014f * H, Y(0.835f)), ImVec2(cx - cupw + 0.006f * H, Y(0.93f)), ImVec2(cx - cupw - 0.016f * H, Y(0.975f)),
+         0.032f * H, 0.009f * H);
+    horn(ImVec2(cx + cupw - 0.014f * H, Y(0.835f)), ImVec2(cx + cupw - 0.006f * H, Y(0.93f)), ImVec2(cx + cupw + 0.016f * H, Y(0.975f)),
+         0.032f * H, 0.009f * H);
+    part(0.800f, 0.850f, 16, cuph, 2.5f);
+    d->AddLine(ImVec2(cx - cupw, Y(0.85f)), ImVec2(cx + cupw, Y(0.85f)), c, 2.0f);
+    part(0.840f, 0.960f, 20, spw, 2.0f);
+    d->AddLine(ImVec2(cx, Y(0.96f)), ImVec2(cx, Y(1.0f)), c, 2.0f);  // antenna
+    d->AddLine(ImVec2(cx - 0.008f * H, Y(0.972f)), ImVec2(cx + 0.008f * H, Y(0.972f)), c, 1.3f);
+    d->AddLine(ImVec2(cx - 0.005f * H, Y(0.985f)), ImVec2(cx + 0.005f * H, Y(0.985f)), c, 1.3f);
+    // the long window up the shaft: its outline and its X lattice
+    const float w0 = 0.30f, w1 = 0.78f;
     auto whw = [&](float f) { float u = (f - w0) / (w1 - w0); return shw(f) * 0.70f * sqrtf(fmaxf(0.0f, sinf(u * 3.14159265f))); };
-    for (int i = 0; i < 60; i++) {
-        float f0 = w0 + (w1 - w0) * i / 60, f1 = w0 + (w1 - w0) * (i + 1) / 60;
-        d->AddQuadFilled(ImVec2(cx - whw(f0), Y(f0)), ImVec2(cx + whw(f0), Y(f0)), ImVec2(cx + whw(f1), Y(f1)), ImVec2(cx - whw(f1), Y(f1)),
-                         shade(110, 180, 255, glow));
+    ImVec2 L[61], R[61];
+    for (int i = 0; i <= 60; i++) {
+        float f = w0 + (w1 - w0) * i / 60;
+        L[i] = ImVec2(cx - whw(f), Y(f)), R[i] = ImVec2(cx + whw(f), Y(f));
     }
+    d->AddPolyline(L, 61, c, 0, 1.8f), d->AddPolyline(R, 61, c, 0, 1.8f);
     for (int i = 0; i < 9; i++) {
         float f0 = w0 + (w1 - w0) * (i + 0.5f) / 9.5f, f1 = w0 + (w1 - w0) * (i + 1.5f) / 9.5f;
-        ImU32 lc = IM_COL32(225, 240, 255, 230);
-        d->AddLine(ImVec2(cx - whw(f0), Y(f0)), ImVec2(cx + whw(f1), Y(f1)), lc, 1.4f);
-        d->AddLine(ImVec2(cx + whw(f0), Y(f0)), ImVec2(cx - whw(f1), Y(f1)), lc, 1.4f);
-        d->AddLine(ImVec2(cx - whw(f1), Y(f1)), ImVec2(cx + whw(f1), Y(f1)), lc, 1.0f);
+        d->AddLine(ImVec2(cx - whw(f0), Y(f0)), ImVec2(cx + whw(f1), Y(f1)), dim, 1.2f);
+        d->AddLine(ImVec2(cx + whw(f0), Y(f0)), ImVec2(cx - whw(f1), Y(f1)), dim, 1.2f);
+        d->AddLine(ImVec2(cx - whw(f1), Y(f1)), ImVec2(cx + whw(f1), Y(f1)), c, 1.3f);
     }
-    // the outline's light edge on the lit side, the red lights on the tips (blinking), the beacon
+    // red lights on the horn tips (blinking), the beacon on the antenna
     float blink = sinf(t * 3.0f) > 0 ? 1.0f : 0.35f;
     ImVec2 tips[2] = {ImVec2(cx - cupw - 0.016f * H, Y(0.975f)), ImVec2(cx + cupw + 0.016f * H, Y(0.975f))};
     for (ImVec2 p : tips) {
@@ -497,8 +493,8 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
         d->AddCircleFilled(p, 3, IM_COL32(255, 90, 80, (int)(255 * blink)), 12);
     }
     float pulse = 0.5f + 0.5f * sinf(t * 2.2f);
-    d->AddCircleFilled(tip, 6 + 3 * pulse, IM_COL32(255, 120, 120, (int)(90 + 100 * pulse)), 16);
-    d->AddCircleFilled(tip, 2.5f, IM_COL32(255, 240, 240, 255), 12);
+    d->AddCircleFilled(ImVec2(cx, Y(1.0f)), 5 + 3 * pulse, IM_COL32(220, 255, 140, (int)(120 + 120 * pulse)), 16);
+    d->AddCircleFilled(ImVec2(cx, Y(1.0f)), 2.5f, IM_COL32(255, 255, 230, 255), 12);
 }
 
 // The launcher's banner: a city at night around Prism Tower, its lights twinkling, and the title
@@ -507,7 +503,7 @@ static void banner(ImDrawList *d, ImVec2 a, ImVec2 b, float t) {
     banner_sky(d, a, b);
     float w = b.x - a.x, h = b.y - a.y, cx = a.x + w * 0.66f, base = b.y - h * 0.16f;
     for (int i = 48; i > 0; i--)  // (the glow behind the tower)
-        d->AddCircleFilled(ImVec2(cx, base - h * 0.40f), h * 0.011f * i, IM_COL32(150, 170, 255, 2), 64);
+        d->AddCircleFilled(ImVec2(cx, base - h * 0.40f), h * 0.011f * i, IM_COL32(150, 230, 90, 2), 64);
     uint32_t s = 7;
     for (int layer = 0; layer < 2; layer++) {  // back row (taller, darker), then the tower, then the front row
         if (layer == 1) prism_tower(d, cx, base, h * 0.74f, t);
