@@ -6,6 +6,7 @@
 // keep the old path for a while. Ranges the GPU may write (exec.c gpuw) never come here. Render thread only.
 // LARECOMP_VCACHE=0: off.
 #include <string.h>
+#include <SDL3/SDL_timer.h>
 
 #include "../../rt.h"
 #include "vk.h"
@@ -33,6 +34,7 @@ typedef struct { VkBuffer buf; VmaAllocation mem; uint64_t seq; } DeadBuf;
 static DeadBuf *g_dead;  // released buffers, destroyed once the GPU is past their last submission
 static int g_ndead, g_capdead;
 uint64_t g_vcache_hits, g_vcache_uploads;
+uint64_t prof_vc_new, prof_vc_create_ns, prof_vc_protect_ns, prof_vc_copy_ns, prof_vc_part_ns;  // (exec.c [spike]: new entries, their parts)
 uint64_t g_vcache_why[8];  // (LARECOMP_VCACHE_LOG: misses too big / outside the heap, volatile, turned volatile; bytes copied in part, in full; entries)
 
 static inline bool in_heap(uint64_t a) { return a >= HEAP_BASE && a < HEAP_BASE + HEAP_MAX; }
@@ -84,14 +86,17 @@ static bool edges_changed(VEnt *e, uint64_t hn, uint64_t tn) {
 
 // [a, a + n) of the range to its buffer; the edge bytes in it to the shadow, from the same snapshot
 static void copy_part(VkCommandBuffer cb, VEnt *e, uint64_t a, uint64_t n, uint64_t hn, uint64_t tn) {
-    VkSpan s = vk_transient(n, 16);
-    memcpy(s.ptr, (const void *)(uintptr_t)a, n);
-    VkBufferCopy rg = {s.off, a - e->addr, n};
-    vkCmdCopyBuffer(cb, s.buf, e->buf, 1, &rg);  // (the upload buffer runs before the draws, then a barrier)
-    const uint8_t *p = s.ptr;
+    // The edges' shadow from the game's memory, before the upload copy: read back from the upload buffer (write-combined
+    // memory, ~100 MB/s to read) it cost the render thread ~30 us a new stream - 4.4 ms of the frame where 150 came in
+    // (Lumiose). A write in between leaves the shadow older than the copy: the next draw sees the edge changed, uploads again.
+    const uint8_t *p = (const uint8_t *)(uintptr_t)a;
     uint64_t ts = e->addr + e->len - tn;
     if (hn && a == e->addr) memcpy(e->shadow, p, hn);
     if (tn && a <= ts && a + n >= ts + tn) memcpy(e->shadow + hn, p + (ts - a), tn);
+    VkSpan s = vk_transient(n, 16);
+    memcpy(s.ptr, p, n);
+    VkBufferCopy rg = {s.off, a - e->addr, n};
+    vkCmdCopyBuffer(cb, s.buf, e->buf, 1, &rg);  // (the upload buffer runs before the draws, then a barrier)
 }
 
 // The VRAM copy of a vertex stream or index range, uploaded now if new or written since (false: not cached - volatile, too big,
@@ -199,6 +204,7 @@ bool vcache_get(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off) {
             g_vcache_why[3] += hn + tn;
         }
     } else {
+        uint64_t t0 = SDL_GetTicksNS();
         drop_buf(e);
         VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = (len + 255) & ~255ull,
                                  .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
@@ -209,11 +215,14 @@ bool vcache_get(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off) {
             return false;
         }
         g_bytes += bi.size;
+        uint64_t t1 = SDL_GetTicksNS();
         e->stamp = pagewatch_now();
         if (ihi > ilo) pagewatch_protect(ilo, ihi - ilo);
+        uint64_t t2 = SDL_GetTicksNS();
         if (!e->shadow && hn + tn) e->shadow = malloc(hn + tn);
         copy_part(cb, e, addr, len, hn, tn);
         g_vcache_why[4] += len;
+        prof_vc_new++, prof_vc_create_ns += t1 - t0, prof_vc_protect_ns += t2 - t1, prof_vc_copy_ns += SDL_GetTicksNS() - t2;
     }
     g_vcache_uploads++;
     if (verify()) e->hash = hash_range(addr, len);

@@ -13,6 +13,9 @@ Z-A:
   stalled behind it. Lumiose walk capped at 144 (Max people, Ultra shadows, 1440p, i9-12900K, 3 runs each): late
   presents (over 7.6 ms) 2.3% -> 0.8%, hitches over 10.4 ms ~26 -> ~10, 1% low ~117 -> ~134 fps.
   `LARECOMP_PIN_SMT=0`: one CPU per core, as before.
+- Fewer hitches when new models appear: the VRAM vertex cache kept each stream's partial edge pages by reading them back
+  from the write-combined upload buffer (~30 us a stream): 4.4 ms of the frame where 150 streams came in (Lumiose) ->
+  0.5 ms; they are taken from the game's memory now.
 - Fewer hitches when new things appear (the render thread, Lumiose walk at 144): a possible button icon (a small BC4 /
   BC5 texture) is put together in normal memory - it was hashed by reading back the write-combined upload buffer,
   ~0.1-0.3 ms per texture, up to 3.7 ms of one frame; redrawn icons are kept (the game uploads the same prompts
