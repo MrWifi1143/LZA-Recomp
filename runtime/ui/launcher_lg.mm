@@ -471,7 +471,7 @@ extern "C" void launcher_lg_run(const char *root) {
         ImGui::Checkbox(T("Anti-aliasing (SMAA)", "Suavizar serrilhado (SMAA)"), &smaa);
         static const char *const fps_names_en[] = {"30 fps", "60 fps", "120 fps", "144 fps", "Unlimited"};  // (above 30: experimental)
         static const char *const fps_names_pt[] = {"30 fps", "60 fps", "120 fps", "144 fps", "Ilimitada"};
-        ImGui::Combo(T("Frame rate (experimental above 30)", "Taxa de quadros (experimental acima de 30)"), &fps_i, g_pt ? fps_names_pt : fps_names_en, 5);
+        ImGui::Combo(T("Frame rate (experimental above 30)", "Taxa de quadros (experimental acima de 30)"), &fps_i, g_pt ? fps_names_pt : fps_names_en, 4);  // (Unlimited hidden for now: battles)
         if (fps_i >= 1 && fps_i <= 3)  // (Unlimited: always real time, hle/fps60.c)
             ImGui::Checkbox(T("Keep full speed when the frame rate dips", "Manter a velocidade total quando a taxa de quadros cai"), &realtime);
         if (fps_i >= 2)  // (120 / 144 / Unlimited: the game's own logic was made for 30; some of it counts frames)

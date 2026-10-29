@@ -46,7 +46,7 @@ static void parse_line(const char *line) {
         return;
     }
     if (!strcmp(key, "fullscreen")) g_settings.fullscreen = atoi(val) != 0;
-    else if (!strcmp(key, "fps")) { int f = atoi(val); g_settings.fps = f == 60 || f == 120 || f == 144 || f == FPS_UNLIMITED ? f : 30; }
+    else if (!strcmp(key, "fps")) { int f = atoi(val); g_settings.fps = f == 60 || f == 120 || f == 144 ? f : f == FPS_UNLIMITED ? 144 : 30; }  // (Unlimited hidden for now: the battles' Pokémon and trainers misbehave)
     else if (!strcmp(key, "frame_timing")) g_settings.fixed_steps = !strcmp(val, "fixed");
     else if (!strcmp(key, "render_height")) g_settings.res_height = atoi(val) >= 360 && atoi(val) <= 4320 ? atoi(val) : 0;
     else if (!strcmp(key, "volume")) g_settings.volume = (float)atof(val);

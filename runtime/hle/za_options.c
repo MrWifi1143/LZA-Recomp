@@ -151,7 +151,7 @@ static const Row k_rows[] = {  // (per tab in this order; Gameplay's first is th
     {0, "Pokémon Files", "Press A to save your boxed Pokémon as PKHeX files, or add the ones in pokemon/import.",
      CHOICE, 2, {"Export", "Import"}, pkm_files_get, pkm_files_set, pkm_files_run},
     {1, "Frame Rate", "Choose how many frames are drawn a second.",
-     CHOICE, 5, {"30 fps", "60 fps", "120 fps", "144 fps", "Unlimited"}, get_fps, set_fps},
+     CHOICE, 4, {"30 fps", "60 fps", "120 fps", "144 fps", "Unlimited"}, get_fps, set_fps},  // (Unlimited hidden for now: battles)
     {1, "Frame Timing", "Choose whether the game keeps full speed when the frame rate dips (Real Time) or slows down with it.",
      CHOICE, 2, {"Real Time", "Fixed"}, get_steps, set_steps},
     {1, "Resolution (Next Start)", "Choose the resolution the game is drawn at, from the next time you start it.",
