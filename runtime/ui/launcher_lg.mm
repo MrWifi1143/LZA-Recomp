@@ -396,7 +396,7 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
     auto Y = [&](float f) { return ground - f * H; };
     auto legw = [&](float f) { float u = (f - 0.075f) / 0.165f; return H * (0.070f + 0.085f * (1 - u) * (1 - u)); };
     auto shw = [&](float f) { float u = f - 0.52f; return H * (0.036f + 0.52f * u * u); };
-    float cup0 = shw(0.80f), cupw = cup0 + H * 0.030f;
+    float cup0 = shw(0.80f);
     ImVec2 tips[2];  // (the horns' tips: the red lights)
     // a body part between heights f0..f1 with half width hw(f): filled dark, its two sides stroked
     auto part = [&](float f0, float f1, int n, auto hw, float thick) {
@@ -454,30 +454,48 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
                 P[n++] = ImVec2(v * v * p0.x + 2 * v * u * p1.x + u * u * p2.x, v * v * p0.y + 2 * v * u * p1.y + u * u * p2.y);
             }
         };
-        float tipx = cupw + 0.016f * H, sp = 0.0145f * H;
-        // left half, from the shaft up the outside of the horn, down its inside, through the notch, up the spire
+        // the crown, as on the Prism Tower card: the shaft flares into flat fins with slanted tops (the red lights on
+        // their outer corners), a rounded notch between each fin and the stepped block in the middle that carries the
+        // needle; a second pair of fins stands behind (drawn first, dimmer)
+        float o = cup0, fin = o + 0.040f * H;  // (the shaft's half width where the crown starts; the fins' outer corners)
+        for (int k = -1; k <= 1; k += 2) {
+            ImVec2 q[4] = {ImVec2(cx + k * 0.030f * H, Y(0.86f)), ImVec2(cx + k * 0.056f * H, Y(0.86f)),
+                           ImVec2(cx + k * 0.062f * H, Y(0.984f)), ImVec2(cx + k * 0.038f * H, Y(0.976f))};
+            d->AddQuadFilled(q[0], q[1], q[2], q[3], fill);
+            d->AddPolyline(q, 4, dim, ImDrawFlags_Closed, 1.6f);
+            d->AddLine(ImVec2(cx + k * 0.047f * H, Y(0.88f)), ImVec2(cx + k * 0.053f * H, Y(0.968f)), dim, 1.0f);  // (its face's edge)
+        }
+        // left half: up the shaft, out along the fin's outer edge, across its slanted top, down its inner edge, round
+        // the notch, up the middle block's step and shoulder to the needle
         for (int i = 0; i < 80; i++) {  // the shaft (an hourglass), from the deck up
             float f = 0.258f + 0.542f * i / 80;
             P[n++] = ImVec2(cx - shw(f), Y(f));
         }
-        bez(ImVec2(cx - cup0, Y(0.80f)), ImVec2(cx - cup0 - 0.019f * H, Y(0.865f)), ImVec2(cx - tipx, Y(0.975f)), 24, true);  // (the control point keeps the shaft's slope: no kink)
-        bez(ImVec2(cx - tipx + 0.009f * H, Y(0.975f)), ImVec2(cx - cupw + 0.018f * H, Y(0.90f)), ImVec2(cx - 0.034f * H, Y(0.858f)), 18, true);
-        bez(ImVec2(cx - 0.034f * H, Y(0.858f)), ImVec2(cx - 0.018f * H, Y(0.846f)), ImVec2(cx - sp, Y(0.875f)), 10, false);
-        P[n++] = ImVec2(cx - 0.004f * H, Y(0.96f));
+        bez(ImVec2(cx - o, Y(0.80f)), ImVec2(cx - o - 0.020f * H, Y(0.875f)), ImVec2(cx - fin, Y(0.970f)), 24, true);  // (keeps the shaft's slope)
+        P[n++] = ImVec2(cx - o + 0.004f * H, Y(0.958f));                                  // the slanted top's inner corner
+        P[n++] = ImVec2(cx - o + 0.006f * H, Y(0.885f));                                  // the fin's inner edge
+        bez(ImVec2(cx - o + 0.006f * H, Y(0.885f)), ImVec2(cx - o + 0.006f * H, Y(0.852f)), ImVec2(cx - 0.048f * H, Y(0.852f)), 8, false);
+        bez(ImVec2(cx - 0.048f * H, Y(0.852f)), ImVec2(cx - 0.024f * H, Y(0.852f)), ImVec2(cx - 0.024f * H, Y(0.885f)), 8, false);  // the notch
+        P[n++] = ImVec2(cx - 0.024f * H, Y(0.930f));                                      // the middle block
+        P[n++] = ImVec2(cx - 0.013f * H, Y(0.940f));
+        P[n++] = ImVec2(cx - 0.013f * H, Y(0.962f));                                      // its upper step
+        P[n++] = ImVec2(cx - 0.005f * H, Y(0.969f));
+        P[n++] = ImVec2(cx - 0.004f * H, Y(0.976f));                                      // the needle's foot
         int half = n;
         for (int i = half - 1; i >= 0; i--) P[n++] = ImVec2(2 * cx - P[i].x, P[i].y);  // (the right half, mirrored)
-        P[half] = ImVec2(cx + 0.004f * H, Y(0.96f));
         ImDrawListFlags fl = d->Flags;
         d->Flags &= ~ImDrawListFlags_AntiAliasedFill;
         d->AddConcavePolyFilled(P, n, fill);
         d->Flags = fl;
         d->AddPolyline(P, n, c, 0, 2.5f);  // (open at the deck)
-        tips[0] = ImVec2(cx - tipx + 0.0045f * H, Y(0.975f)), tips[1] = ImVec2(cx + tipx - 0.0045f * H, Y(0.975f));
+        for (int k = -1; k <= 1; k += 2)  // (the fins' faces: a fold line up each)
+            d->AddLine(ImVec2(cx + k * (o + 0.004f * H), Y(0.83f)), ImVec2(cx + k * (fin - 0.014f * H), Y(0.962f)), dim, 1.2f);
+        tips[0] = ImVec2(cx - fin, Y(0.970f)), tips[1] = ImVec2(cx + fin, Y(0.970f));
     }
     for (float f = 0.29f; f < 0.80f; f += 0.06f) d->AddLine(ImVec2(cx - shw(f), Y(f)), ImVec2(cx + shw(f), Y(f)), dim, 1.0f);  // rings
-    d->AddLine(ImVec2(cx, Y(0.96f)), ImVec2(cx, Y(1.0f)), c, 2.0f);  // antenna
-    d->AddLine(ImVec2(cx - 0.008f * H, Y(0.972f)), ImVec2(cx + 0.008f * H, Y(0.972f)), c, 1.3f);
-    d->AddLine(ImVec2(cx - 0.005f * H, Y(0.985f)), ImVec2(cx + 0.005f * H, Y(0.985f)), c, 1.3f);
+    d->AddLine(ImVec2(cx, Y(0.976f)), ImVec2(cx, Y(1.0f)), c, 2.0f);  // antenna
+    d->AddLine(ImVec2(cx - 0.007f * H, Y(0.984f)), ImVec2(cx + 0.007f * H, Y(0.984f)), c, 1.3f);
+    d->AddLine(ImVec2(cx - 0.004f * H, Y(0.993f)), ImVec2(cx + 0.004f * H, Y(0.993f)), c, 1.3f);
     // the long window up the shaft: its outline and its X lattice
     const float w0 = 0.30f, w1 = 0.78f;
     auto whw = [&](float f) { float u = (f - w0) / (w1 - w0); return shw(f) * 0.70f * sqrtf(fmaxf(0.0f, sinf(u * 3.14159265f))); };
