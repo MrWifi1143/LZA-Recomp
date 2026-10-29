@@ -7,6 +7,10 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- Foot IK is the game's own again: feet are placed on the ground (slopes, steps, kerbs) as on a Switch. It had been
+  off since 2026-10-19 because running stretched the legs back to where the run began; on this build the run, the stop
+  and standing are right with it at 30, 60 and 144 fps (the Lumiose walk too, at the same frame rate), so a fix since
+  then cured that. `LARECOMP_ZA_FOOT_IK=0` turns it off again (the old workaround).
 - A launcher, like an older PC game's (Fallout: New Vegas style), instead of the one-window start screen: the banner
   (a night city around a lattice tower, drawn by the program: no game art), Play, and pages for Options (Display /
   Graphics / Game tabs, with this PC's recommended settings), Controls (controller and keyboard), Game Files and Mods.

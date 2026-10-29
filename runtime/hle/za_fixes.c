@@ -6,7 +6,9 @@
 // (0x7003014970) hit the ground as they should, and every FP/SIMD, integer and load/store instruction form the game
 // uses matches a reference ARM emulator (Unicorn), so the cause is elsewhere. With those weights looked up as 0 the
 // legs follow the animation: correct on flat ground, the feet just don't adapt to slopes and steps.
-// LARECOMP_ZA_FOOT_IK=1 keeps the game's foot IK.
+// 2026-10-29: gone - with the game's foot IK the run, the stop and standing are right at 30, 60 and 144 fps (the
+// cemetery, the Lumiose walk with its kerbs), so the game's foot IK is on again; one of the fixes since (the lifter,
+// the kernel, HLE) cured it, which one wasn't bisected. LARECOMP_ZA_FOOT_IK=0 brings the workaround back.
 // Where the cause is (2026-10-19): the lookup returns (owner+0xe0 map [key], default 1.0) x (owner+0xa8 map [key]).
 // The +0xa8 map holds the BipedIK keys at a constant 1.0; the +0xe0 map, the per-frame values that should make the
 // feet let go, stays empty - nothing ever calls its setters (vtable slots 0x700134a100 / 0x700134a2d4) or the
@@ -676,7 +678,7 @@ void za_fixes_configure(const char *exefs) {
         LOG("[za] NPC animation evaluated every frame (LARECOMP_ZA_NPC_LOD=1 keeps the game's animation LOD)\n");
     }
     const char *e = getenv("LARECOMP_ZA_FOOT_IK");
-    if (e && atoi(e)) {
+    if (!e || atoi(e)) {  // (the game's foot IK: the default since the stretched legs are gone)
         if (getenv("LARECOMP_ZA_PARAMS")) rt_register_fnhook_at(ZA_PARAM_LOOKUP, param_lookup);  // (g_biped empty: no change)
         return;
     }
@@ -685,7 +687,7 @@ void za_fixes_configure(const char *exefs) {
                                    "BipedIKControl1ToeWeight"};
     for (int i = 0; i < 8; i++) g_biped[i] = fnv1a(names[i]);
     rt_register_fnhook_at(ZA_PARAM_LOOKUP, param_lookup);
-    LOG("[za] foot IK off (stretched legs workaround; LARECOMP_ZA_FOOT_IK=1 keeps it)\n");
+    LOG("[za] foot IK off (LARECOMP_ZA_FOOT_IK=0: the old stretched-legs workaround)\n");
 }
 
 // (research, LARECOMP_ZA_QSTATS=1: the render queue lookup 0x7001802c90 called from the queue walk 0x700180ee10 -
