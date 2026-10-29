@@ -995,6 +995,11 @@ HLE_FUNC("_ZN2nn3hid15GetNpadStyleSetERKj", hid_style_set) {
     c->x[0] = id == npad_id_used(&style) ? style : 0;
 }
 
+// GetNpadJoyAssignment(id): Dual (0) for every controller - the SDK reads it from the hid shared memory and aborts
+// (UnexpectedDefault) on a value it doesn't know; Z-A asked for the handheld id once while its loading crawled
+// (a scheduling experiment) and the game stopped there. A full controller / handheld reports Dual on the console.
+HLE_FUNC("_ZN2nn3hid20GetNpadJoyAssignmentERKj", hid_joy_assignment) { c->x[0] = 0; }
+
 // BindNpadStyleSetUpdateEvent(id, SystemEventType*, clear mode): signaled once so the game sees a
 // controller connected.
 #include "../kernel.h"

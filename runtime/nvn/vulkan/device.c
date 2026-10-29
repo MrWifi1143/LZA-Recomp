@@ -1158,9 +1158,12 @@ void backend_present(NvnTexture *t) {
             }
             snprintf(path, sizeof path, "%s/trace", dir);  // (research: renderthread.c rt_trace, ~300 presents)
             {
-                static long trace_end = -1;
-                if (access(path, F_OK) == 0) {
-                    remove(path);
+                static long trace_end = -1, trace_at = -2;  // (or LARECOMP_TRACE_AT=<present>)
+                if (trace_at == -2) trace_at = ENV("LARECOMP_TRACE_AT") ? atol(ENV("LARECOMP_TRACE_AT")) : -1;
+                bool at = trace_at >= 0 && (long)total_frames >= trace_at;
+                if (at) trace_at = -1;
+                if (at || access(path, F_OK) == 0) {
+                    if (!at) remove(path);
                     extern void rt_trace_start(void);
                     rt_trace_start();
                     trace_end = (long)total_frames + 300;

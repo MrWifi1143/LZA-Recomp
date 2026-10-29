@@ -83,10 +83,10 @@ uint64_t renderer_game_frame(void) {
 
 // Research: LARECOMP_LIVE <dir>/trace - timestamped events of the next ~2 s (game submits and presents, the render
 // thread's jobs, the game's fence waits) -> build/trace.txt: "<us> <thread> <event> <arg>"
-#define TRN (1 << 18)
+#define TRN (1 << 21)  // (untouched pages cost nothing until a trace runs)
 static struct { uint64_t us; uint32_t tid; char ev; uint64_t arg; } g_tr[TRN];
 static _Atomic uint32_t g_trn;
-static volatile int g_tr_on;
+volatile int g_tr_on;  // (kernel.c times its lock only while a trace runs)
 static uint64_t g_tr_t0;
 static uint32_t trace_tid(void) {
 #ifdef _WIN32

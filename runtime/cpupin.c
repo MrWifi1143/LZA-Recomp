@@ -47,12 +47,32 @@ void cpupin_init(void) {
     LOG("[cpu] %d fast physical cores\n", n);
 }
 void cpupin_self(int cpu) { (void)cpu; }
+void cpupin_self_core(int c) { (void)c; }
 #elif !defined(__linux__)
 void cpupin_init(void) {}
 void cpupin_self(int cpu) { (void)cpu; }
+void cpupin_self_core(int c) { (void)c; }
 #else
 #include <sched.h>
 
+void cpupin_self(int cpu);
+static cpu_set_t g_core_sib[8];  // (each emulated core's physical core: its hyperthreads)
+// This thread on emulated core c's physical core, both of its hyperthreads (its first CPU only without SMT). Each
+// emulated core's guest threads share it - the game's main loop or a job worker with that core's RenderWorker, audio
+// and helper threads - and on a single CPU a thread woken there (a lock it waited for free, a job done) preempted the
+// core's owner or waited for its slice: the game's frame stalled behind it (the Lumiose walk's critical path: wake-ups
+// ~0.5 ms instead of ~0.1 in the frames that missed 144 Hz). On the core's otherwise idle sibling it runs at once; only
+// one of them runs guest code at a time (kernel.c "cores") anyway. Lumiose walk capped at 144 (3 runs each, Max people,
+// Ultra shadows, 1440p, i9-12900K): presents over 7.6 ms 2.3% -> 0.8%, over 10.4 ms ~26 -> ~10 per 7400, 1% low
+// ~117 -> ~134 fps. Uncapped the average drops a little (~175 -> ~170: two busy threads on one physical core) while
+// frames over 10 ms fall ~58 -> ~21. LARECOMP_PIN_SMT=0: one CPU per core, as before.
+void cpupin_self_core(int c) {
+    static int smt = -1;
+    if (smt < 0) smt = !(getenv("LARECOMP_PIN_SMT") && atoi(getenv("LARECOMP_PIN_SMT")) == 0);
+    if (c < 0 || c >= 8 || g_core_cpu[c] < 0) return;
+    if (smt && CPU_COUNT(&g_core_sib[c]) > 1) sched_setaffinity(0, sizeof g_core_sib[c], &g_core_sib[c]);
+    else cpupin_self(g_core_cpu[c]);
+}
 void cpupin_self(int cpu) {
     if (cpu < 0) return;
     cpu_set_t cs;
@@ -143,9 +163,9 @@ void cpupin_init(void) {
     for (int i = 0; i < 5; i++)
         for (int k = 0; k < CPU_SETSIZE; k++)
             if (CPU_ISSET(k, &pc[i].sib)) CPU_CLR(k, &rest);
-    for (int i = 0; i < 4; i++) g_core_cpu[i] = pc[i].first;
+    for (int i = 0; i < 4; i++) g_core_cpu[i] = pc[i].first, g_core_sib[i] = pc[i].sib;
     g_render_cpu = pc[4].first;
-    for (int i = 4; i < 8 && i + 1 < fast; i++) g_core_cpu[i] = pc[i + 1].first;  // (cores 4+, when a game has them -
+    for (int i = 4; i < 8 && i + 1 < fast; i++) g_core_cpu[i] = pc[i + 1].first, g_core_sib[i] = pc[i + 1].sib;  // (cores 4+, when a game has them -
     // hle/za_jobs.c's extra job workers - on the next fast cores; not kept free of other threads)
     sched_setaffinity(0, sizeof rest, &rest);  // (this thread and every thread it starts from now on)
     LOG("[cpu] cores on CPUs %d %d %d %d, render thread %d; other threads on the %d CPUs left\n", g_core_cpu[0], g_core_cpu[1],

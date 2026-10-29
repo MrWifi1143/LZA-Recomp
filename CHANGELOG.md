@@ -7,6 +7,16 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- Smoother 144 fps on Linux: each emulated core's threads may now run on both hyperthreads of its physical core
+  (before: one CPU each). The game's main loop and job workers share their core with its RenderWorker, audio and
+  helper threads; a thread woken there used to preempt the core's owner or wait out its time slice, and the frame
+  stalled behind it. Lumiose walk capped at 144 (Max people, Ultra shadows, 1440p, i9-12900K, 3 runs each): late
+  presents (over 7.6 ms) 2.3% -> 0.8%, hitches over 10.4 ms ~26 -> ~10, 1% low ~117 -> ~134 fps.
+  `LARECOMP_PIN_SMT=0`: one CPU per core, as before.
+- Controllers: nn::hid::GetNpadJoyAssignment answers Dual for every controller - the SDK aborts on a value it doesn't
+  expect (seen once while loading stalled under a scheduling experiment).
+- Research: `LARECOMP_TRACE_AT=<present>` starts the frame trace (render thread, game presents, and now the kernel's
+  waits, wakes, core waits and long g_klock waits); thread dumps show each thread's host tid and core mask.
 - Shadow Smoothing (Next Start), Settings > Graphics and the start screen, On by default: the shadow mask's 16
   shadow-map taps are bilinear - each tap's lit / shadowed test is made on the 4 texels around it and weighted by
   where it lies between them, as a hardware compare sampler would - so shadow edges are smooth instead of stepping
