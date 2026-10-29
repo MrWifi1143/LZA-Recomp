@@ -397,8 +397,7 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
     auto legw = [&](float f) { float u = (f - 0.075f) / 0.165f; return H * (0.070f + 0.085f * (1 - u) * (1 - u)); };
     auto shw = [&](float f) { float u = f - 0.52f; return H * (0.036f + 0.52f * u * u); };
     float cup0 = shw(0.80f), cupw = cup0 + H * 0.030f;
-    auto cuph = [&](float f) { float u = (f - 0.80f) / 0.05f; return cup0 + H * 0.030f * u * u; };
-    auto spw = [&](float f) { return H * (0.018f - 0.014f * (f - 0.84f) / 0.12f); };
+    ImVec2 tips[2];  // (the horns' tips: the red lights)
     // a body part between heights f0..f1 with half width hw(f): filled dark, its two sides stroked
     auto part = [&](float f0, float f1, int n, auto hw, float thick) {
         ImVec2 L[96], R[96];
@@ -411,19 +410,6 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
         for (int i = 0; i < n; i++) d->AddQuadFilled(L[i], R[i], R[i + 1], L[i + 1], fill);
         d->Flags = fl;
         d->AddPolyline(L, n + 1, c, 0, thick), d->AddPolyline(R, n + 1, c, 0, thick);
-    };
-    // a horn: a tapering prong along a curve, filled dark, outlined
-    auto horn = [&](ImVec2 p0, ImVec2 p1, ImVec2 p2, float w0, float w1) {
-        ImVec2 A[17], B[17];
-        for (int i = 0; i <= 16; i++) {
-            float u = i / 16.0f, v = 1 - u;
-            ImVec2 p(v * v * p0.x + 2 * v * u * p1.x + u * u * p2.x, v * v * p0.y + 2 * v * u * p1.y + u * u * p2.y);
-            ImVec2 tg(2 * v * (p1.x - p0.x) + 2 * u * (p2.x - p1.x), 2 * v * (p1.y - p0.y) + 2 * u * (p2.y - p1.y));
-            float l = sqrtf(tg.x * tg.x + tg.y * tg.y), hw = (w0 + (w1 - w0) * u) / 2;
-            A[i] = ImVec2(p.x - tg.y / l * hw, p.y + tg.x / l * hw), B[i] = ImVec2(p.x + tg.y / l * hw, p.y - tg.x / l * hw);
-        }
-        for (int i = 0; i < 16; i++) d->AddQuadFilled(A[i], B[i], B[i + 1], A[i + 1], fill);
-        d->AddPolyline(A, 17, c, 0, 2.0f), d->AddPolyline(B, 17, c, 0, 2.0f), d->AddLine(A[16], B[16], c, 2.0f);
     };
     // the base: two tiers with window bands, the arched door
     for (int k = 0; k < 2; k++) {
@@ -457,16 +443,38 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
     d->PathStroke(c, 0, 2.0f);
     d->AddRectFilled(ImVec2(cx - 0.095f * H, Y(0.258f)), ImVec2(cx + 0.095f * H, Y(0.240f)), fill);  // the deck
     d->AddRect(ImVec2(cx - 0.095f * H, Y(0.258f)), ImVec2(cx + 0.095f * H, Y(0.240f)), c, 0, 0, 2.0f);
-    // the shaft (rings now and then), the horns, the crown's cup over their feet, the spire
-    part(0.258f, 0.800f, 80, shw, 2.5f);
-    for (float f = 0.29f; f < 0.80f; f += 0.06f) d->AddLine(ImVec2(cx - shw(f), Y(f)), ImVec2(cx + shw(f), Y(f)), dim, 1.0f);
-    horn(ImVec2(cx - cupw + 0.014f * H, Y(0.835f)), ImVec2(cx - cupw + 0.006f * H, Y(0.93f)), ImVec2(cx - cupw - 0.016f * H, Y(0.975f)),
-         0.032f * H, 0.009f * H);
-    horn(ImVec2(cx + cupw - 0.014f * H, Y(0.835f)), ImVec2(cx + cupw - 0.006f * H, Y(0.93f)), ImVec2(cx + cupw + 0.016f * H, Y(0.975f)),
-         0.032f * H, 0.009f * H);
-    part(0.800f, 0.850f, 16, cuph, 2.5f);
-    d->AddLine(ImVec2(cx - cupw, Y(0.85f)), ImVec2(cx + cupw, Y(0.85f)), c, 2.0f);
-    part(0.840f, 0.960f, 20, spw, 2.0f);
+    // the shaft and the crown, one outline: the shaft's sides flare out and run on up into the horns; each horn's inner
+    // edge comes down into a rounded notch that rises into the spire
+    {
+        ImVec2 P[320];
+        int n = 0;
+        auto bez = [&](ImVec2 p0, ImVec2 p1, ImVec2 p2, int k, bool first) {
+            for (int i = first ? 0 : 1; i <= k; i++) {
+                float u = (float)i / k, v = 1 - u;
+                P[n++] = ImVec2(v * v * p0.x + 2 * v * u * p1.x + u * u * p2.x, v * v * p0.y + 2 * v * u * p1.y + u * u * p2.y);
+            }
+        };
+        float tipx = cupw + 0.016f * H, sp = 0.0145f * H;
+        // left half, from the shaft up the outside of the horn, down its inside, through the notch, up the spire
+        for (int i = 0; i < 80; i++) {  // the shaft (an hourglass), from the deck up
+            float f = 0.258f + 0.542f * i / 80;
+            P[n++] = ImVec2(cx - shw(f), Y(f));
+        }
+        bez(ImVec2(cx - cup0, Y(0.80f)), ImVec2(cx - cup0 - 0.019f * H, Y(0.865f)), ImVec2(cx - tipx, Y(0.975f)), 24, true);  // (the control point keeps the shaft's slope: no kink)
+        bez(ImVec2(cx - tipx + 0.009f * H, Y(0.975f)), ImVec2(cx - cupw + 0.018f * H, Y(0.90f)), ImVec2(cx - 0.034f * H, Y(0.858f)), 18, true);
+        bez(ImVec2(cx - 0.034f * H, Y(0.858f)), ImVec2(cx - 0.018f * H, Y(0.846f)), ImVec2(cx - sp, Y(0.875f)), 10, false);
+        P[n++] = ImVec2(cx - 0.004f * H, Y(0.96f));
+        int half = n;
+        for (int i = half - 1; i >= 0; i--) P[n++] = ImVec2(2 * cx - P[i].x, P[i].y);  // (the right half, mirrored)
+        P[half] = ImVec2(cx + 0.004f * H, Y(0.96f));
+        ImDrawListFlags fl = d->Flags;
+        d->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+        d->AddConcavePolyFilled(P, n, fill);
+        d->Flags = fl;
+        d->AddPolyline(P, n, c, 0, 2.5f);  // (open at the deck)
+        tips[0] = ImVec2(cx - tipx + 0.0045f * H, Y(0.975f)), tips[1] = ImVec2(cx + tipx - 0.0045f * H, Y(0.975f));
+    }
+    for (float f = 0.29f; f < 0.80f; f += 0.06f) d->AddLine(ImVec2(cx - shw(f), Y(f)), ImVec2(cx + shw(f), Y(f)), dim, 1.0f);  // rings
     d->AddLine(ImVec2(cx, Y(0.96f)), ImVec2(cx, Y(1.0f)), c, 2.0f);  // antenna
     d->AddLine(ImVec2(cx - 0.008f * H, Y(0.972f)), ImVec2(cx + 0.008f * H, Y(0.972f)), c, 1.3f);
     d->AddLine(ImVec2(cx - 0.005f * H, Y(0.985f)), ImVec2(cx + 0.005f * H, Y(0.985f)), c, 1.3f);
@@ -487,7 +495,6 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
     }
     // red lights on the horn tips (blinking), the beacon on the antenna
     float blink = sinf(t * 3.0f) > 0 ? 1.0f : 0.35f;
-    ImVec2 tips[2] = {ImVec2(cx - cupw - 0.016f * H, Y(0.975f)), ImVec2(cx + cupw + 0.016f * H, Y(0.975f))};
     for (ImVec2 p : tips) {
         d->AddCircleFilled(p, 7, IM_COL32(255, 60, 60, (int)(70 * blink)), 16);
         d->AddCircleFilled(p, 3, IM_COL32(255, 90, 80, (int)(255 * blink)), 12);
