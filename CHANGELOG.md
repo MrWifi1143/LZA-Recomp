@@ -9,7 +9,7 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 Arceus:
 
 - A launcher, like an older PC game's (Fallout: New Vegas style), instead of the one-window start screen: the banner
-  (dusk mountains under a golden ring, drawn by the program: no game art), Play, and pages for Options (Display /
+  (Mount Coronet under the space-time rift, drawn by the program: no game art), Play, and pages for Options (Display /
   Graphics / Game tabs, with this PC's recommended settings), Controls (controller and keyboard), Game Files and Mods.
   It opens in a window; the game goes fullscreen (or stays a window) after Play. The old start screen is kept for
   console ports: `LARECOMP_START_SCREEN=classic`, or built with `-DRT_CLASSIC_START_SCREEN=1`.

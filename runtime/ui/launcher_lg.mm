@@ -381,39 +381,153 @@ static void banner_sky(ImDrawList *d, ImVec2 a, ImVec2 b) {
             d->AddCircleFilled(ImVec2(x, y), 1.3f, IM_COL32(255, 226, 170, (int)(26 * (1 - (y - a.y) / h) + 4)), 6);
 }
 
-// The launcher's banner: mountain ranges at dusk under a slowly turning golden ring, and the title
+// The space-time rift over Mount Coronet's summit, as the game shows it: a flattened dark disc with a torn, ragged
+// rim, grey streaks turning in it, shards breaking off around its edge and drifting, a white starburst in the middle.
+// (cx, cy): its middle, rx: its half width.
+static void rift(ImDrawList *d, float cx, float cy, float rx, float t) {
+    const float ry = rx * 0.30f;
+    uint32_t s = 21;
+    for (int i = 18; i > 0; i--)  // (a faint pale light around it: the dusk sky is dark, as the rift is)
+        d->AddEllipseFilled(ImVec2(cx, cy), ImVec2(rx * (0.95f + 0.03f * i), ry * (0.95f + 0.07f * i)), IM_COL32(170, 175, 215, 3));
+    // the body: an ellipse whose rim is torn (its radius pulled in and out), filled as a fan of triangles from the middle
+    ImVec2 rim[120];
+    for (int i = 0; i < 120; i++) {
+        float th = i * 6.2831853f / 120, r = 1 + 0.05f * sinf(7 * th + 0.4f) + 0.035f * sinf(17 * th + 1.3f) + 0.02f * sinf(29 * th + t * 0.4f);
+        if (rnd(&s) % 7 == 0) r -= 0.06f + 0.06f * (float)(rnd(&s) % 100) / 100;  // (a bite out of the edge)
+        rim[i] = ImVec2(cx + cosf(th) * rx * r, cy + sinf(th) * ry * r);
+    }
+    ImDrawListFlags fl = d->Flags;
+    d->Flags &= ~ImDrawListFlags_AntiAliasedFill;  // (the fan's triangles meet without seams)
+    for (int i = 0; i < 120; i++) d->AddTriangleFilled(ImVec2(cx, cy), rim[i], rim[(i + 1) % 120], IM_COL32(44, 46, 56, 240));
+    d->Flags = fl;
+    d->AddPolyline(rim, 120, IM_COL32(150, 155, 175, 110), ImDrawFlags_Closed, 1.2f);  // (the torn edge catching light)
+    for (int i = 0; i < 6; i++)  // (darker toward the middle)
+        d->AddEllipseFilled(ImVec2(cx, cy), ImVec2(rx * (0.85f - 0.12f * i), ry * (0.85f - 0.12f * i)), IM_COL32(20, 20, 28, 40));
+    for (int k = 0; k < 28; k++) {  // grey wisps swirling in it: short, wobbling, at all depths
+        float a0 = k * 2.39996f + t * (0.05f + 0.015f * (k % 4)), r0 = 0.22f + 0.70f * (float)((k * 53) % 100) / 100;
+        int m = 6 + (k * 7) % 8;
+        ImVec2 pts[14];
+        for (int i = 0; i < m; i++) {
+            float th = a0 + i * 0.06f, rr = r0 * (1 - 0.12f * i / 13.0f) + 0.010f * sinf(i * 0.6f + k);
+            pts[i] = ImVec2(cx + cosf(th) * rx * rr, cy + sinf(th) * ry * rr);
+        }
+        d->AddPolyline(pts, m, IM_COL32(160, 164, 180, (int)(40 + 70 * (1 - r0))), 0, 1.1f + 0.6f * (k % 2));
+    }
+    for (int k = 0; k < 34; k++) {  // shards breaking off the rim, drifting round it (more at the sides)
+        float th = (float)(rnd(&s) % 1000) / 1000 * 6.2831853f + t * (0.015f + 0.01f * (k % 3)), out = 1.02f + 0.16f * (float)(rnd(&s) % 100) / 100;
+        out += 0.10f * fabsf(cosf(th));
+        ImVec2 p(cx + cosf(th) * rx * out, cy + sinf(th) * ry * out);
+        float sz = 2.5f + 6.0f * (float)(rnd(&s) % 100) / 100, an = (float)(rnd(&s) % 628) / 100 + t * 0.5f;
+        ImVec2 q0(p.x + cosf(an) * sz, p.y + sinf(an) * sz * 0.6f), q1(p.x + cosf(an + 2.3f) * sz * 0.7f, p.y + sinf(an + 2.3f) * sz * 0.5f),
+            q2(p.x + cosf(an + 4.1f) * sz * 0.8f, p.y + sinf(an + 4.1f) * sz * 0.5f);
+        d->AddTriangleFilled(q0, q1, q2, IM_COL32(78, 82, 98, 235));
+    }
+    // the starburst: a soft glow, thin rays (longest across), a bright point, iridescent specks round it
+    float g = 0.7f + 0.3f * sinf(t * 2.4f);
+    for (int i = 10; i > 0; i--) d->AddEllipseFilled(ImVec2(cx, cy), ImVec2(rx * 0.022f * i, ry * 0.05f * i), IM_COL32(220, 230, 255, (int)(7 * g)));
+    for (int i = 0; i < 12; i++) {
+        float an = i * 0.5235988f + 0.15f * sinf(t * 0.5f + i), l = rx * (i % 3 == 0 ? 0.22f : 0.11f) * (0.85f + 0.3f * g) * (0.6f + 0.4f * fabsf(cosf(an)));
+        d->AddLine(ImVec2(cx, cy), ImVec2(cx + cosf(an) * l, cy + sinf(an) * l * 0.55f), IM_COL32(255, 255, 255, (int)(210 * g)), i % 3 == 0 ? 1.6f : 1.0f);
+    }
+    d->AddCircleFilled(ImVec2(cx, cy), 3.0f + 1.5f * g, IM_COL32(255, 255, 255, 255), 12);
+    static const ImU32 spk[3] = {IM_COL32(170, 220, 255, 200), IM_COL32(255, 190, 230, 200), IM_COL32(220, 255, 210, 200)};
+    for (int k = 0; k < 9; k++) {
+        float an = k * 0.7f + t * 0.2f, r = 0.10f + 0.12f * (float)((k * 41) % 100) / 100;
+        float tw = 0.5f + 0.5f * sinf(t * 3.1f + k * 1.9f);
+        d->AddCircleFilled(ImVec2(cx + cosf(an) * rx * r, cy + sinf(an) * ry * r), 1.3f, (spk[k % 3] & 0x00FFFFFF) | ((ImU32)(200 * tw) << 24), 6);
+    }
+}
+
+// The launcher's banner: Mount Coronet at dusk under the rift, drawn as the Prism Tower is in Z-A's (a dark shape,
+// glowing outlines): the cone with its broken summit, the snowcap's ragged edge and the gullies, foothills in front
 static void banner(ImDrawList *d, ImVec2 a, ImVec2 b, float t) {
     d->PushClipRect(a, b, true);
     banner_sky(d, a, b);
-    float w = b.x - a.x, h = b.y - a.y, cx = a.x + w * 0.64f, cy = a.y + h * 0.50f, R = h * 0.30f;
-    for (int i = 40; i > 0; i--)  // (the glow behind the ring)
-        d->AddCircleFilled(ImVec2(cx, cy), R * 0.05f * i, IM_COL32(255, 200, 110, 2), 64);
-    d->AddCircle(ImVec2(cx, cy), R, IM_COL32(244, 200, 100, 230), 96, 5.0f);
-    d->AddCircle(ImVec2(cx, cy), R * 0.86f, IM_COL32(244, 200, 100, 90), 96, 1.5f);
-    for (int i = 0; i < 12; i++) {  // (the ring's jewels, turning)
-        float an = t * 0.08f + i * 3.14159265f / 6;
-        ImVec2 p(cx + cosf(an) * R, cy + sinf(an) * R);
-        d->AddCircleFilled(p, i % 3 ? 4.0f : 7.0f, IM_COL32(255, 236, 170, 255), 16);
-        if (i % 3 == 0) d->AddCircle(p, 11.0f, IM_COL32(255, 220, 140, 120), 16, 1.5f);
+    const ImU32 fill = IM_COL32(26, 20, 40, 255), c = IM_COL32(240, 196, 92, 235), dim = IM_COL32(200, 160, 80, 110),
+                snow = IM_COL32(236, 228, 255, 210);
+    float w = b.x - a.x, h = b.y - a.y, cx = a.x + w * 0.66f, peak = a.y + h * 0.32f, foot = b.y - h * 0.10f;
+    rift(d, cx, a.y + h * 0.19f, w * 0.17f, t);  // (just above the summit, clear of the title)
+    // the cone: near-straight flanks easing out low (half width = summit + spread * u^1.25), the summit broad, broken
+    float sw = w * 0.06f, spread = w * 0.62f;
+    auto hw = [&](float y) { float u = (y - peak) / (foot - peak); return sw + spread * powf(u < 0 ? 0 : u, 1.25f); };
+    ImVec2 P[160];
+    int n = 0;
+    for (int i = 0; i <= 50; i++) {  // left flank, from the foot up
+        float y = foot - (foot - peak) * i / 50.0f;
+        P[n++] = ImVec2(cx - hw(y), y);
     }
-    uint32_t s = 11;
-    static const ImU32 col[3] = {IM_COL32(70, 46, 70, 255), IM_COL32(42, 30, 52, 255), IM_COL32(20, 16, 30, 255)};
+    static const float jag[9] = {0.0f, -0.5f, 0.2f, -0.9f, -0.3f, -1.0f, 0.1f, -0.6f, 0.0f};  // (the broken rim, in sw / 2)
+    for (int i = 1; i < 8; i++) P[n++] = ImVec2(cx - sw + 2 * sw * i / 8.0f, peak + jag[i] * sw * 0.5f);
+    for (int i = 50; i >= 0; i--) {  // right flank, down to the foot
+        float y = foot - (foot - peak) * i / 50.0f;
+        P[n++] = ImVec2(cx + hw(y), y);
+    }
     ImDrawListFlags fl = d->Flags;
-    d->Flags &= ~ImDrawListFlags_AntiAliasedFill;  // (the strips' soft edges showed as seams)
-    for (int layer = 0; layer < 3; layer++) {  // three ranges, the near one darkest; the far one has the tall peak
-        float base = b.y - h * (0.30f - 0.08f * layer), amp = h * (layer == 0 ? 0.34f : 0.16f - 0.03f * layer);
-        ImVec2 pts[64];
-        int n = 0;
-        pts[n++] = ImVec2(a.x, b.y);
-        for (int i = 0; i <= 60; i++) {
-            float x = a.x + w * i / 60.0f, f = (x - cx) / w;
-            float y = base - amp * (layer == 0 ? expf(-f * f * 18) : 0.35f + 0.65f * (float)(rnd(&s) % 100) / 100.0f * (0.6f + 0.4f * sinf(i * 0.7f + layer)));
-            pts[n++] = ImVec2(x, y);
+    d->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+    d->AddConcavePolyFilled(P, n, fill);
+    d->Flags = fl;
+    // the snowcap: broad snowfields with tongues of snow reaching down the gullies (a few, of different lengths and
+    // widths), lighter above the line; streaks on down from the longest tongues
+    uint32_t s = 5;
+    const int ns = 72;
+    float tpos[9], td[9], tw[9];
+    for (int k = 0; k < 9; k++)
+        tpos[k] = (k + 0.5f) / 9 + 0.03f * ((float)(rnd(&s) % 100) / 50 - 1), td[k] = 0.04f + 0.16f * (float)(rnd(&s) % 100) / 100,
+        tw[k] = 0.025f + 0.03f * (float)(rnd(&s) % 100) / 100;
+    float yl = peak + (foot - peak) * 0.28f;
+    ImVec2 S[ns + 2];
+    for (int i = 0; i < ns; i++) {
+        float f = i / (float)(ns - 1), dep = 0.012f * sinf(f * 23.0f);
+        for (int k = 0; k < 9; k++) {
+            float q = 1 - fabsf(f - tpos[k]) / tw[k];
+            if (q > 0) dep = fmaxf(dep, td[k] * q * q);
         }
-        pts[n++] = ImVec2(b.x, b.y);
-        for (int i = 1; i + 1 < n; i++)  // (a fan of quads down to the bottom: the outline isn't convex)
+        if (i == 0 || i == ns - 1) dep = 0;
+        S[i] = ImVec2(cx + (2 * f - 1) * hw(yl), yl + (foot - peak) * dep);  // (even steps across: never crosses itself)
+    }
+    {  // (the snow above the line: strips from the cone's outline down to the line)
+        auto top = [&](float x) {  // (the outline's height above x: hw(y) = |x - cx| solved for y)
+            float dx = fabsf(x - cx);
+            return dx <= sw ? peak : peak + (foot - peak) * powf((dx - sw) / spread, 1 / 1.25f);
+        };
+        d->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+        for (int i = 0; i + 1 < ns; i++)
+            d->AddQuadFilled(ImVec2(S[i].x, top(S[i].x)), ImVec2(S[i + 1].x, top(S[i + 1].x)), S[i + 1], S[i], IM_COL32(150, 140, 205, 90));
+        d->Flags = fl;
+    }
+    d->AddPolyline(S, ns, snow, 0, 1.5f);
+    for (int k = 0; k < 9; k++) {  // streaks below the longer tongues
+        if (td[k] < 0.11f) continue;
+        float f = tpos[k], y = yl + (foot - peak) * td[k], x = cx + (2 * f - 1) * hw(yl), len = (foot - peak) * 0.08f;
+        d->AddLine(ImVec2(x, y + 4), ImVec2(x + (2 * f - 1) * len * 0.35f, y + len), IM_COL32(236, 228, 255, 110), 1.2f);
+    }
+    for (int i = -3; i <= 3; i++) {  // the ridges: from the rim down the flanks
+        if (!i) continue;
+        float f = i / 3.5f;
+        ImVec2 R[12];
+        for (int j = 0; j < 12; j++) {
+            float y = peak + (foot - peak) * (0.03f + 0.80f * j / 11.0f);
+            R[j] = ImVec2(cx + f * hw(y) * (0.92f - 0.10f * fabsf(f)), y);
+        }
+        d->AddPolyline(R, 12, dim, 0, 1.2f);
+    }
+    d->AddPolyline(P, n, c, 0, 2.5f);  // the cone's outline, over the rest
+    // the foothills in front: two ranges, the near one darkest, outlined
+    static const ImU32 col[2] = {IM_COL32(34, 26, 46, 255), IM_COL32(20, 16, 30, 255)};
+    d->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+    for (int layer = 0; layer < 2; layer++) {
+        float base = b.y - h * (0.22f - 0.08f * layer), amp = h * (0.13f - 0.03f * layer);
+        ImVec2 pts[64];
+        int m = 0;
+        for (int i = 0; i <= 60; i++) {
+            float x = a.x + w * i / 60.0f;
+            pts[m++] = ImVec2(x, base - amp * (0.35f + 0.65f * (float)(rnd(&s) % 100) / 100.0f * (0.6f + 0.4f * sinf(i * 0.7f + layer))));
+        }
+        for (int i = 0; i + 1 < m; i++)
             d->AddQuadFilled(pts[i], pts[i + 1], ImVec2(pts[i + 1].x, b.y), ImVec2(pts[i].x, b.y), col[layer]);
-        if (layer == 0) d->AddPolyline(pts + 1, n - 2, IM_COL32(255, 210, 140, 70), 0, 1.5f);
+        d->Flags = fl;
+        d->AddPolyline(pts, m, layer ? dim : IM_COL32(220, 176, 86, 160), 0, 1.5f);
+        d->Flags &= ~ImDrawListFlags_AntiAliasedFill;
     }
     d->Flags = fl;
     d->AddRectFilledMultiColor(ImVec2(a.x, b.y - h * 0.2f), b, IM_COL32(12, 10, 18, 0), IM_COL32(12, 10, 18, 0), IM_COL32(12, 10, 18, 255),
