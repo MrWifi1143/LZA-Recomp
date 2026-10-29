@@ -8,6 +8,12 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Arceus:
 
+- Shadow Smoothing (Next Start), the game's Settings and the start screen, Enabled by default: the shadow mask's near
+  cascade taps are bilinear - each tap's lit / shadowed test (depth, or the shadow map's object id = the receiver's) is
+  made on the 4 texels around it and weighted by where it lies between them - so the edges of people's and Pokémon's
+  shadows no longer step along the shadow map's texels. The far cascade (no id test: bilinear, sloping ground would
+  shadow itself) is kept as it was. Checked on the Prelude Beach: same image through the rewritten path with one texel,
+  no new dark specks on open sand.
 - Frame rate: an Unlimited choice (the game's Settings and the start screen): as fast as the PC goes, paced at 360 at
   most. New Frame Timing row, Real Time by default: above 30 fps the world now steps by the time each frame really
   took instead of the frame rate's fixed period, so a dip (a hitch, a busy area) no longer slows the game down -

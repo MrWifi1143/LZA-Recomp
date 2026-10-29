@@ -108,6 +108,8 @@ static int get_minvy(void) { return g_settings.mouse_invert_y ? 1 : 0; }
 static void set_minvy(int i) { g_settings.mouse_invert_y = i == 1; }
 static int get_minvx(void) { return g_settings.mouse_invert_x ? 1 : 0; }
 static void set_minvx(int i) { g_settings.mouse_invert_x = i == 1; }
+static int get_smooth(void) { return g_settings.shadow_smooth ? 0 : 1; }
+static void set_smooth(int i) { g_settings.shadow_smooth = i == 0; }
 static int get_shl(void) { return g_settings.shader_nowait ? 1 : 0; }
 static void set_shl(int i) { g_settings.shader_nowait = i; }
 static int get_bg(void) { return g_settings.background >= BG_KEEP && g_settings.background <= BG_PAUSE ? g_settings.background : BG_KEEP; }
@@ -132,6 +134,8 @@ static const Row k_rows[] = {
     {"Screen Mode", "Choose whether the game fills the screen or plays in a window.", CHOICE, 2, {"Window", "Fullscreen"},
      get_full, set_full},
     {"Anti-Aliasing", "Choose whether to smooth jagged edges (SMAA).", CHOICE, 2, {"Enabled", "Disabled"}, get_aa, set_aa},
+    {"Shadow Smoothing (Next Start)", "Choose whether shadow edges are smoothed or show the shadow map's steps.", CHOICE, 2,
+     {"Enabled", "Disabled"}, get_smooth, set_smooth},
     {"Shader Loading", "Wait for new things to load (may stutter), or show them a moment later.", CHOICE, 2,
      {"Wait", "Don't Wait"}, get_shl, set_shl},
     {"Button Prompts", "Choose which button prompts show. Auto shows the ones you are playing with.", CHOICE, 5,

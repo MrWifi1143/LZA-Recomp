@@ -1406,6 +1406,154 @@ static void save_glsl(const char *src, uint64_t addr, const char *suffix) {
 }
 
 static void gpl_prebuild(void *arg);
+// Legends: Arceus's shadow mask (three variants: fs 4b939b54f87f7794, aadb7169a8eebe27, 52a5c7cf8d756842) takes 16 taps
+// of its near shadow cascade and 16 of the far one (a depth array, texture(tD, ...)). A near tap counts lit when the
+// receiver is at least as near the light (rREF >= depth) or the shadow map's 8-bit id there (texelFetch(tI, ...)) is the
+// receiver's own (its depth register zeroed); each reads one texel, so a shadow's edge steps along the map's texels.
+// Here each near tap's 0 / 1 becomes the same test on the 4 texels around it, weighted by where the tap lies between
+// them (bilinear PCF, what a hardware compare sampler does). The far taps have no id test - bilinear, they would let
+// sloping ground shadow itself - and stay as they are. The tap's position is saved before its read (the read often
+// lands in the position's own register); the receiver's id and the id layer are read from the registers the game
+// compares them with. Returns the new GLSL, or NULL if the code isn't laid out as expected.
+static char *pla_soft_shadows(const char *src) {
+    char dt[8] = "", it[8] = "", idreg[8] = "", lyreg[8] = "", rs[8] = "";
+    // the id texture, its rscale slot and layer register (its reads), the receiver's id register (compared with them)
+    int idres[64], nidres = 0, votes[256] = {0};
+    for (const char *l = src; (l = strstr(l, "texelFetch(t")); l++) {
+        int ti, a, b, sc, ly, end = 0, d;
+        if (sscanf(l, "texelFetch(t%d, ivec3(ivec2(rsc(uvec2(r%d, r%d), rscale[%d])), int(r%d)), 0);%n", &ti, &a, &b, &sc, &ly, &end) != 5 || !end) continue;
+        const char *e = strchr(l, '\n');
+        if (!e || sscanf(e + 1, " r%d = as_u(t[0]);", &d) != 1 || d < 0 || d > 255) continue;
+        snprintf(it, sizeof it, "t%d", ti), snprintf(rs, sizeof rs, "%d", sc), snprintf(lyreg, sizeof lyreg, "r%d", ly);
+        if (nidres < 64) idres[nidres++] = d;
+    }
+    for (const char *l = src; (l = strstr(l, "bool cmp = (r")); l++) {
+        int a, b;
+        if (sscanf(l, "bool cmp = (r%d == r%d);", &a, &b) != 2 || a < 0 || a > 255 || b < 0 || b > 255) continue;
+        for (int k = 0; k < nidres; k++) {
+            if (idres[k] == b) votes[a]++;
+            else if (idres[k] == a) votes[b]++;
+        }
+    }
+    int best = -1;
+    for (int r = 0; r < 256; r++) if (votes[r] && (best < 0 || votes[r] > votes[best])) best = r;
+    if (!it[0] || best < 0) return NULL;
+    snprintf(idreg, sizeof idreg, "r%d", best);
+    char decl[32];
+    snprintf(decl, sizeof decl, "usampler2DArray %s;", it);
+    bool uid = strstr(src, decl) != NULL;
+    // pass 1: which taps an id test can zero before their compare (the near cascade's)
+    bool idtested[64] = {0};
+    {
+        int tap_of[256], n = 0;
+        for (int i = 0; i < 256; i++) tap_of[i] = -1;
+        for (const char *l = src; *l;) {
+            const char *e = strchr(l, '\n');
+            size_t len = e ? (size_t)(e - l) + 1 : strlen(l);
+            int ti, u, v, ly, bias, d, a, b, end = 0, end2 = 0;
+            const char *t = len < 400 ? strstr(l, "texture(t") : NULL;
+            if (t && t < l + len && e && n < 64 &&
+                sscanf(t, "texture(t%d, vec3(vec2(uintBitsToFloat(r%d), uintBitsToFloat(r%d)), float(min(uint(r%d), uint(tsize%*d(0).z) - 1u))), uintBitsToFloat(r%d));%n",
+                       &ti, &u, &v, &ly, &bias, &end) == 5 && end &&
+                sscanf(e + 1, " r%d = as_u(t[0]);%n", &d, &end2) == 1 && end2 && d >= 0 && d < 256) {
+                snprintf(dt, sizeof dt, "t%d", ti);
+                tap_of[d] = n++;
+                const char *e2 = strchr(e + 1, '\n');  // (past the read's result line too)
+                l = e2 ? e2 + 1 : e + 1 + strlen(e + 1);
+                continue;
+            } else if (len < 64 && sscanf(l, " r%d = 0u;%n", &a, &end) == 1 && end && a >= 0 && a < 256 && tap_of[a] >= 0) {
+                idtested[tap_of[a]] = true;
+            } else if (len < 200 && sscanf(l, " r%d = ((((uintBitsToFloat(r%*d) >= uintBitsToFloat(r%d))) && true) ? 0x3f800000u : 0u);%n", &a, &b, &end) == 2 && end &&
+                       b >= 0 && b < 256 && tap_of[b] >= 0) {
+                if (a >= 0 && a < 256) tap_of[a] = -1;
+            } else if (len < 400 && sscanf(l, " r%d = ", &a) == 1 && a >= 0 && a < 256) {
+                tap_of[a] = -1;
+            }
+            l += len;
+        }
+    }
+    if (!dt[0]) return NULL;
+    char helper[2048];
+    snprintf(helper, sizeof helper,
+        "float pcf_bl(vec3 tap, float cmpref, uint myid, int l6) {\n"
+        "  vec2 s5 = vec2(textureSize(%s, 0).xy), s6 = floor(vec2(textureSize(%s, 0).xy) / rscale[%s].xy + 0.5f);\n"
+        "  vec2 p = tap.xy * s5 - 0.5f, b = floor(p), w = p - b;\n"
+        "  float r = 0.0f;\n"
+        "  for (int k = 0; k < 4; k++) {\n"
+        "    ivec2 c = clamp(ivec2(b) + ivec2(k & 1, k >> 1), ivec2(0), ivec2(s5) - 1);\n"
+        "    float d = texelFetch(%s, ivec3(c, int(tap.z)), 0).x;\n"
+        "    uint id = %s(texelFetch(%s, ivec3(ivec2(rsc(uvec2((vec2(c) + 0.5f) / s5 * s6), rscale[%s])), l6), 0).x);\n"
+        "    float lit = (myid == id || cmpref >= d) ? 1.0f : 0.0f;\n"
+        "    r += lit * ((k & 1) != 0 ? w.x : 1.0f - w.x) * ((k >> 1) != 0 ? w.y : 1.0f - w.y);\n"
+        "  }\n"
+        "  return r;\n"
+        "}\n", dt, it, rs, dt, uid ? "" : "floatBitsToUint", it, rs);
+    size_t cap = strlen(src) * 2 + 8192, n = 0;
+    char *out = malloc(cap);
+    int tap_of[256], ntap = 0, nrep = 0;
+    bool mained = false, layered = false;
+    for (int i = 0; i < 256; i++) tap_of[i] = -1;
+#define EMIT(str, len) do { size_t l_ = (len); if (n + l_ + 1 > cap) { cap = (n + l_ + 1) * 2; out = realloc(out, cap); } memcpy(out + n, (str), l_); n += l_; } while (0)
+    for (const char *l = src; *l;) {
+        const char *e = strchr(l, '\n');
+        size_t len = e ? (size_t)(e - l) + 1 : strlen(l);
+        char buf[512];
+        int ti, u, v, ly, bias, d, a, b, ref, end = 0, end2 = 0;
+        const char *t = len < 400 ? strstr(l, "texture(t") : NULL;
+        if (t && t < l + len && e && ntap < 64 &&
+            sscanf(t, "texture(t%d, vec3(vec2(uintBitsToFloat(r%d), uintBitsToFloat(r%d)), float(min(uint(r%d), uint(tsize%*d(0).z) - 1u))), uintBitsToFloat(r%d));%n",
+                   &ti, &u, &v, &ly, &bias, &end) == 5 && end &&
+            sscanf(e + 1, " r%d = as_u(t[0]);%n", &d, &end2) == 1 && end2 && d >= 0 && d < 256) {
+            const char *e2 = strchr(e + 1, '\n');
+            size_t len2 = e2 ? (size_t)(e2 - e) : strlen(e + 1);
+            int m = snprintf(buf, sizeof buf, "    pcf_tap[%d] = vec3(uintBitsToFloat(r%d), uintBitsToFloat(r%d), float(min(uint(r%d), uint(tsize%d(0).z) - 1u)));\n",
+                             ntap, u, v, ly, ti);
+            EMIT(buf, (size_t)m);
+            EMIT(l, len);
+            EMIT(e + 1, len2);  // (the read's result: the tap's depth register)
+            tap_of[d] = ntap++, l = e + 1 + len2;
+            continue;
+        }
+        if (len < 200 && sscanf(l, " r%d = ((((uintBitsToFloat(r%d) >= uintBitsToFloat(r%d))) && true) ? 0x3f800000u : 0u);%n", &a, &ref, &b, &end) == 3 && end &&
+            b >= 0 && b < 256 && tap_of[b] >= 0 && idtested[tap_of[b]]) {
+            int m = snprintf(buf, sizeof buf, "    r%d = floatBitsToUint(pcf_bl(pcf_tap[%d], uintBitsToFloat(r%d), %s, pcf_l6));\n", a, tap_of[b], ref, idreg);
+            EMIT(buf, (size_t)m);
+            if (a >= 0 && a < 256) tap_of[a] = -1;
+            nrep++, l += len;
+            continue;
+        }
+        if (len < 400 && sscanf(l, " r%d = ", &a) == 1 && a >= 0 && a < 256 && strncmp(strchr(l, '=') + 2, "0u;", 3)) tap_of[a] = -1;
+        if (!mained && !strncmp(l, "void main() {", 13)) {
+            EMIT(helper, strlen(helper));
+            EMIT(l, len);
+            static const char decl2[] = "  vec3 pcf_tap[64]; int pcf_l6 = 0;\n";
+            EMIT(decl2, sizeof decl2 - 1);
+            mained = true, l += len;
+            continue;
+        }
+        EMIT(l, len);
+        char idread[24];
+        snprintf(idread, sizeof idread, "texelFetch(%s, ", it);
+        const char *f = layered || !e ? NULL : strstr(l, idread);
+        if (f && f < e) {  // (after the first id read: its layer)
+            const char *e2 = strchr(e + 1, '\n');
+            size_t len2 = e2 ? (size_t)(e2 - e) : strlen(e + 1);
+            EMIT(e + 1, len2);
+            int m = snprintf(buf, sizeof buf, "    pcf_l6 = int(%s);\n", lyreg);
+            EMIT(buf, (size_t)m);
+            layered = true, l = e + 1 + len2;
+            continue;
+        }
+        l += len;
+    }
+#undef EMIT
+    out[n] = 0;
+    if (mained && layered && nrep >= 8) return out;
+    LOG("[pla] shadow mask: %d taps, %d bilinear - not patched\n", ntap, nrep);
+    free(out);
+    return NULL;
+}
+
 static void compile_program(void *arg) {
     Prog *p = arg;
     size_t nv = 0, nf = 0;
@@ -1619,6 +1767,16 @@ static void translate_program(void *arg) {
                 if (s && fread(s, 1, (size_t)n, f) == (size_t)n) { s[n] = 0; p->fi->msl = s; LOG("[exp] GLSL override: %s\n", path); }
                 fclose(f);
             }
+        }
+    }
+    // Legends: Arceus's shadow mask (pla_soft_shadows), Settings.shadow_smooth: its near cascade's taps bilinear
+    if (p->code[1] && g_settings.shadow_smooth) {
+        extern uint64_t vk_fs_hash(uint64_t fs);
+        uint64_t h = vk_fs_hash(p->code[1]);
+        if (h == 0x4b939b54f87f7794ull || h == 0xaadb7169a8eebe27ull || h == 0x52a5c7cf8d756842ull) {
+            char *s = pla_soft_shadows(p->fi->msl);
+            if (s) p->fi->msl = s;
+            LOG("[pla] shadow mask %016llx: %s\n", (unsigned long long)h, s ? "near cascade's taps bilinear (smooth edges)" : "not the expected code, left as it is");
         }
     }
     if (p->vkey.xfb_count[0]) xfb_rewrite(p);

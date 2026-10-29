@@ -24,6 +24,7 @@ Settings g_settings = {
     .mouse_camera = true,
     .stick_deadzone = 0.15f,
     .reverb = true,
+    .shadow_smooth = true,
     .movie_audio = true,
     .show_fps = false,
     .render_thread = true,
@@ -58,6 +59,7 @@ static void parse_line(const char *line) {
     else if (!strcmp(key, "mouse_camera")) g_settings.mouse_camera = atoi(val) != 0;
     else if (!strcmp(key, "mouse_invert_x")) g_settings.mouse_invert_x = atoi(val) != 0;
     else if (!strcmp(key, "mouse_invert_y")) g_settings.mouse_invert_y = atoi(val) != 0;
+    else if (!strcmp(key, "shadow_smoothing")) g_settings.shadow_smooth = atoi(val) != 0;
     else if (!strcmp(key, "shader_loading")) g_settings.shader_nowait = !strcmp(val, "nowait") || !strcmp(val, "1");
     else if (!strcmp(key, "pkhex_link")) g_settings.pkhex_link = atoi(val) >= 0 && atoi(val) <= 2 ? atoi(val) : 0;
     else if (!strcmp(key, "background")) g_settings.background = atoi(val) >= BG_KEEP && atoi(val) <= BG_PAUSE ? atoi(val) : BG_KEEP;
@@ -132,6 +134,7 @@ void settings_save(void) {
     fprintf(f, "mouse_camera = %d\n", g_settings.mouse_camera);
     fprintf(f, "mouse_invert_x = %d\nmouse_invert_y = %d\n", g_settings.mouse_invert_x, g_settings.mouse_invert_y);
     fprintf(f, "shader_loading = %s\n", g_settings.shader_nowait ? "nowait" : "wait");
+    fprintf(f, "shadow_smoothing = %d\n", g_settings.shadow_smooth);
     fprintf(f, "pkhex_link = %d\n", g_settings.pkhex_link);
     fprintf(f, "background = %d\n", g_settings.background);
     fprintf(f, "upscaler = %s\n", g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");

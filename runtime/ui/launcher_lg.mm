@@ -388,6 +388,7 @@ extern "C" void launcher_lg_run(const char *root) {
         fprintf(stderr, "[launcher] this PC: %s; recommended: %s%s\n", pc, rec.text, g_settings_fresh ? " (first start: applied)" : "");
     }
     int shl_i = g_settings.shader_nowait ? 1 : 0;
+    bool smooth_sh = g_settings.shadow_smooth;
     auto apply_rec = [&]() { res = rec.res, fps_i = rec.fps, shl_i = rec.nowait; };
     if (g_settings_fresh) apply_rec();
     int bg_i = g_settings.background >= 0 && g_settings.background <= 2 ? g_settings.background : 0;
@@ -470,6 +471,7 @@ extern "C" void launcher_lg_run(const char *root) {
         // (the game's Settings rows of the same names: runtime/hle/pla_options.c)
         const char *const shl_names[] = {T("Wait (may stutter the first time)", "Esperar (pode travar na primeira vez)"),
                                          T("Don't wait (may show late the first time)", "Não esperar (pode aparecer atrasado na primeira vez)")};
+        ImGui::Checkbox(T("Smooth shadow edges", "Suavizar as bordas das sombras"), &smooth_sh);
         ImGui::Combo(T("Shader loading", "Carregamento de shaders"), &shl_i, shl_names, 2);
         const char *const bg_names[] = {T("Keep playing", "Continuar jogando"), T("Mute", "Silenciar"), T("Pause", "Pausar")};
         ImGui::Combo(T("In background", "Em segundo plano"), &bg_i, bg_names, 3);
@@ -540,6 +542,7 @@ extern "C" void launcher_lg_run(const char *root) {
     g_settings.skip_start = skipstart;
     g_settings.button_prompts = prompts_i;
     g_settings.shader_nowait = shl_i;
+    g_settings.shadow_smooth = smooth_sh;
     g_settings.background = bg_i;
     g_settings.pkhex_link = pk_i;
     snprintf(g_settings.mod, sizeof g_settings.mod, "%s", mod ? mods[mod - 1] : "");
