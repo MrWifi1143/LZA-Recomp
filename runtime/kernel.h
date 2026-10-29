@@ -33,6 +33,7 @@ struct KThread {
     uint32_t core_mask;  // the cores it may run on
     int run_core;        // the emulated core it holds while running guest code, -1 = none (kernel.c "cores")
     int pinned_cpu;      // (LARECOMP_PIN) the host CPU it was put on + 1, 0 = none
+    unsigned pin_epoch;  // (cpupin_epoch() when it was)
     int host_tid;        // (the OS thread id, for thread dumps and schedstat)
     bool core_shared;    // it took run_core beside its owner (that one ran without an svc for too long)
     bool cancel, in_sync_wait;

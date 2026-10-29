@@ -141,6 +141,7 @@ static void *render_main(void *arg) {
     { extern int cpupin_render(void); extern void cpupin_self(int cpu); cpupin_self(cpupin_render()); }  // (runtime/cpupin.c)
     pthread_mutex_lock(&lk);
     for (;;) {
+        { extern void cpupin_render_refresh(void); cpupin_render_refresh(); }  // (cpupin.c: adaptive pinning)
         while (qhead == qtail) {
             if (renderer_fence_seq() > idle_seq) {  // (lists batched into the pending submission: backend_execute)
                 pthread_mutex_unlock(&lk);

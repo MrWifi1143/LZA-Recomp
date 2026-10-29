@@ -48,15 +48,45 @@ void cpupin_init(void) {
 }
 void cpupin_self(int cpu) { (void)cpu; }
 void cpupin_self_core(int c) { (void)c; }
+unsigned cpupin_epoch(void) { return 0; }
+void cpupin_render_refresh(void) {}
+void cpupin_rest_push(void) {}
+void cpupin_rest_pop(void) {}
 #elif !defined(__linux__)
 void cpupin_init(void) {}
 void cpupin_self(int cpu) { (void)cpu; }
 void cpupin_self_core(int c) { (void)c; }
+unsigned cpupin_epoch(void) { return 0; }
+void cpupin_render_refresh(void) {}
+void cpupin_rest_push(void) {}
+void cpupin_rest_pop(void) {}
 #else
 #include <sched.h>
+#include <pthread.h>
+#include <unistd.h>
 
 void cpupin_self(int cpu);
-static cpu_set_t g_core_sib[8];  // (each emulated core's physical core: its hyperthreads)
+static cpu_set_t g_core_sib[8];
+// Adaptive pinning: pinned threads can't move off a CPU another program's thread is busy on, so under load (a game, a
+// build, a world generating beside us) the pinning that helps on a quiet PC costs frames. Lumiose walk uncapped beside
+// a steady 12-thread load (3 runs each): pinned 110 fps avg / 1% low 65, adaptive 116 / 72, not pinned 118 / 72; on
+// a quiet PC (2 each): pinned 177, adaptive 189 (frames over 6.94 ms ~85), not pinned 172-184 (155-323). cpupin_monitor
+// watches the CPU time other programs use (all CPUs' busy time minus ours, /proc/stat and /proc/self/stat); above
+// LARECOMP_PIN_ADAPT cores (default 4) for 3 s the cores' and the render thread's threads may run on any CPU
+// (g_loose), back to their own cores once it stays below half that for 5 s. LARECOMP_PIN_ADAPT=0: always pinned.
+static cpu_set_t g_all, g_rest;
+#include <dirent.h>
+// Every thread of ours on the given CPUs (the cores' and render thread's own pinning follows by the epoch)
+static void all_threads(const cpu_set_t *cs) {
+    DIR *d = opendir("/proc/self/task");
+    if (!d) return;
+    for (struct dirent *e; (e = readdir(d));)
+        if (e->d_name[0] != '.') sched_setaffinity((pid_t)atoi(e->d_name), sizeof *cs, cs);
+    closedir(d);
+}
+static volatile int g_loose;
+static volatile unsigned g_epoch = 1;
+unsigned cpupin_epoch(void) { return g_epoch; }  // (each emulated core's physical core: its hyperthreads)
 // This thread on emulated core c's physical core, both of its hyperthreads (its first CPU only without SMT). Each
 // emulated core's guest threads share it - the game's main loop or a job worker with that core's RenderWorker, audio
 // and helper threads - and on a single CPU a thread woken there (a lock it waited for free, a job done) preempted the
@@ -70,6 +100,7 @@ void cpupin_self_core(int c) {
     static int smt = -1;
     if (smt < 0) smt = !(getenv("LARECOMP_PIN_SMT") && atoi(getenv("LARECOMP_PIN_SMT")) == 0);
     if (c < 0 || c >= 8 || g_core_cpu[c] < 0) return;
+    if (g_loose) { sched_setaffinity(0, sizeof g_all, &g_all); return; }
     if (smt && CPU_COUNT(&g_core_sib[c]) > 1) sched_setaffinity(0, sizeof g_core_sib[c], &g_core_sib[c]);
     else cpupin_self(g_core_cpu[c]);
 }
@@ -79,6 +110,29 @@ void cpupin_self(int cpu) {
     CPU_ZERO(&cs);
     CPU_SET(cpu, &cs);
     sched_setaffinity(0, sizeof cs, &cs);
+}
+
+// A thread that isn't a core's or the render thread's - or one that starts those (a pinned thread's new threads inherit
+// its CPU: the render thread's pipeline compilers all landed on its one CPU, a game thread's audio threads on that
+// core's) - on the CPUs left over until cpupin_rest_pop
+static __thread cpu_set_t t_saved;
+static __thread int t_pushed;
+void cpupin_rest_push(void) {
+    if (!CPU_COUNT(&g_rest)) return;
+    t_pushed = sched_getaffinity(0, sizeof t_saved, &t_saved) == 0;
+    sched_setaffinity(0, sizeof g_rest, g_loose ? &g_all : &g_rest);
+}
+void cpupin_rest_pop(void) {
+    if (t_pushed) sched_setaffinity(0, sizeof t_saved, &t_saved), t_pushed = 0;
+}
+
+// The render thread, once a frame: its CPU again after the mode changed
+void cpupin_render_refresh(void) {
+    static __thread unsigned seen;
+    if (seen == g_epoch || g_render_cpu < 0) return;
+    seen = g_epoch;
+    if (g_loose) sched_setaffinity(0, sizeof g_all, &g_all);
+    else cpupin_self(g_render_cpu);
 }
 
 static long read_long(const char *path) {
@@ -107,6 +161,51 @@ static bool read_list(const char *path, cpu_set_t *out) {  // "0-1", "4,12", ...
         else break;
     }
     return CPU_COUNT(out) > 0;
+}
+
+static bool read_cpu_ticks(unsigned long long *busy, unsigned long long *self) {
+    FILE *f = fopen("/proc/stat", "r");
+    if (!f) return false;
+    unsigned long long v[10] = {0};
+    int n = fscanf(f, "cpu %llu %llu %llu %llu %llu %llu %llu %llu", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]);
+    fclose(f);
+    if (n < 5) return false;
+    *busy = v[0] + v[1] + v[2] + v[5] + v[6] + v[7];  // (user nice system irq softirq steal: not idle / iowait)
+    f = fopen("/proc/self/stat", "r");
+    if (!f) return false;
+    char buf[1024];
+    size_t len = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[len] = 0;
+    char *p = strrchr(buf, ')');
+    unsigned long long ut = 0, st = 0;
+    if (!p || sscanf(p + 2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu", &ut, &st) != 2) return false;
+    *self = ut + st;
+    return true;
+}
+static void *monitor(void *arg) {
+    double on = *(double *)arg, off = on / 2;
+    long hz = sysconf(_SC_CLK_TCK);
+    unsigned long long b0 = 0, s0 = 0;
+    read_cpu_ticks(&b0, &s0);
+    int above = 0, below = 0;
+    for (;;) {
+        usleep(500000);
+        unsigned long long b1, s1;
+        if (!read_cpu_ticks(&b1, &s1)) continue;
+        double others = (double)((long long)(b1 - b0) - (long long)(s1 - s0)) / (double)hz / 0.5;  // (CPUs busy with other programs)
+        b0 = b1, s0 = s1;
+        above = others > on ? above + 1 : 0;
+        below = others < off ? below + 1 : 0;
+        if (!g_loose && above >= 6) {  // (3 s: a world saving or a burst of chunk work beside us flipped it every few seconds)
+            g_loose = 1, g_epoch++, all_threads(&g_all);
+            LOG("[cpu] other programs busy (%.1f CPUs): threads not pinned for now\n", others);
+        } else if (g_loose && below >= 10) {
+            g_loose = 0, all_threads(&g_rest), g_epoch++;  // (then each core's threads back on their own core, cpupin_self_core)
+            LOG("[cpu] quiet again (%.1f CPUs): threads pinned\n", others);
+        }
+    }
+    return NULL;
 }
 
 typedef struct { int first; long freq; cpu_set_t sib; } PhysCore;
@@ -167,7 +266,18 @@ void cpupin_init(void) {
     g_render_cpu = pc[4].first;
     for (int i = 4; i < 8 && i + 1 < fast; i++) g_core_cpu[i] = pc[i + 1].first, g_core_sib[i] = pc[i + 1].sib;  // (cores 4+, when a game has them -
     // hle/za_jobs.c's extra job workers - on the next fast cores; not kept free of other threads)
+    g_all = allowed, g_rest = rest;
     sched_setaffinity(0, sizeof rest, &rest);  // (this thread and every thread it starts from now on)
+    {
+        const char *a = getenv("LARECOMP_PIN_ADAPT");
+        double on = a ? atof(a) : 4.0;
+        if (on > 0) {
+            static double s_on;
+            s_on = on;
+            pthread_t t;
+            if (pthread_create(&t, NULL, monitor, &s_on) == 0) pthread_detach(t);
+        }
+    }
     LOG("[cpu] cores on CPUs %d %d %d %d, render thread %d; other threads on the %d CPUs left\n", g_core_cpu[0], g_core_cpu[1],
         g_core_cpu[2], g_core_cpu[3], g_render_cpu, CPU_COUNT(&rest));
 }

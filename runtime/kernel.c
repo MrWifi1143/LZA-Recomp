@@ -173,10 +173,12 @@ int cpupin_core(int c);
 void cpupin_self(int cpu);
 static void pin_to_core(KThread *t, int c) {
     int cpu = cpupin_core(c);
-    if (cpu < 0 || t->core_shared || t->pinned_cpu == cpu + 1) return;
+    extern unsigned cpupin_epoch(void);  // (cpupin.c: changes when pinning is loosened / tightened)
+    unsigned ep = cpupin_epoch();
+    if (cpu < 0 || t->core_shared || (t->pinned_cpu == cpu + 1 && t->pin_epoch == ep)) return;
     extern void cpupin_self_core(int c);  // (cpupin.c: the core's CPU, or its physical core's hyperthreads)
     cpupin_self_core(c);
-    t->pinned_cpu = cpu + 1;
+    t->pinned_cpu = cpu + 1, t->pin_epoch = ep;
 }
 static bool waiter_before(const CoreWaiter *a, const CoreWaiter *b) {
     if (a->t->prio != b->t->prio) return a->t->prio < b->t->prio;
@@ -676,7 +678,8 @@ static uint64_t lock_spin_ns(void) {
     if (ns < 0) {
         const char *e = getenv("LARECOMP_LOCK_SPIN_US");
         long us = e ? atol(e) : 40;
-        if (!e && plat_cpu_count() < 4) us = 0;  // (the owner would have to run on the spinner's CPU: sleep at once)
+        if (!e && SDL_GetNumLogicalCPUCores() < 4) us = 0;  // (the owner would have to run on the spinner's CPU: sleep at once;
+        // the machine's count - plat_cpu_count is the caller's, a pinned game thread's 2, which turned spinning off)
         ns = us > 0 ? us * 1000 : 0;
     }
     return (uint64_t)ns;

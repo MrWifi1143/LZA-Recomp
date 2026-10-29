@@ -936,9 +936,12 @@ static void renderer_open_output(Renderer *r) {
         if (r->wav) wav_header(r->wav, 0);
     }
     if (ENV("LARECOMP_NO_AUDIO") && strcmp(ENV("LARECOMP_NO_AUDIO"), "0")) return;
-    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) { LOG("[audren] SDL audio init failed: %s\n", SDL_GetError()); return; }
+    extern void cpupin_rest_push(void), cpupin_rest_pop(void);  // (SDL's audio threads off this game thread's core: cpupin.c)
+    cpupin_rest_push();
+    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) { cpupin_rest_pop(); LOG("[audren] SDL audio init failed: %s\n", SDL_GetError()); return; }
     SDL_AudioSpec spec = {SDL_AUDIO_F32, 2, (int)r->sample_rate};
     r->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
+    cpupin_rest_pop();
     if (!r->stream) { LOG("[audren] SDL audio open failed: %s\n", SDL_GetError()); return; }
     if (ENV("LARECOMP_AUDIO_GAIN")) SDL_SetAudioStreamGain(r->stream, (float)atof(ENV("LARECOMP_AUDIO_GAIN")));
     SDL_ResumeAudioStreamDevice(r->stream);
@@ -1243,6 +1246,8 @@ SERVICE("audout:u", audout_u) {
             snprintf(path, sizeof path, "%s.%uch.raw", ENV("LARECOMP_AUDOUT_WAV"), a->channels);
             a->wav = fopen(path, "wb");
         }
+        extern void cpupin_rest_push(void), cpupin_rest_pop(void);  // (SDL's audio threads off this game thread's core: cpupin.c)
+        cpupin_rest_push();
         if (!(ENV("LARECOMP_NO_AUDIO") && strcmp(ENV("LARECOMP_NO_AUDIO"), "0")) && SDL_InitSubSystem(SDL_INIT_AUDIO)) {
             SDL_AudioSpec spec = {SDL_AUDIO_S16, (int)a->channels, (int)a->rate};
             a->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
@@ -1251,7 +1256,8 @@ SERVICE("audout:u", audout_u) {
                 SDL_ResumeAudioStreamDevice(a->stream);
             }
         }
-        pthread_create(&a->thread, NULL, audout_thread, a);
+        pthread_create(&a->thread, NULL, audout_thread, a);  // (its feeder thread off the core too)
+        cpupin_rest_pop();
         audio_track(NULL, a);
         IpcBuf *b = out_buf(req, 0);
         if (b && b->size) strncpy((char *)(uintptr_t)b->addr, "DeviceOut", b->size);

@@ -717,6 +717,7 @@ static pthread_cond_t jobs_cond = PTHREAD_COND_INITIALIZER;
 
 static void *worker(void *a) {
     (void)a;
+    { extern void cpupin_rest_push(void); cpupin_rest_push(); }  // (not on the render thread's CPU, which started it: cpupin.c)
     for (;;) {
         pthread_mutex_lock(&jobs_lock);
         while (!jobs_head) pthread_cond_wait(&jobs_cond, &jobs_lock);
@@ -745,7 +746,7 @@ static void run_job(void (*fn)(void *), void *arg) {
     if (!started) {
         started = true;
         // first entry into an area builds dozens of pipelines at once: use most of the CPU (draws wait for them)
-        int n = plat_cpu_count() - 4;
+        int n = SDL_GetNumLogicalCPUCores() - 4;  // (the machine's: plat_cpu_count is the caller's, the pinned render thread's 1)
         if (n < 4) n = 4;
         if (n > 16) n = 16;
         for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }
