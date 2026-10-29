@@ -20,10 +20,10 @@ LZ&A Recomp has one branch per game:
 
 1. Download `LZA-Recomp-PLA-windows.zip` from the [releases](../../releases) and unzip it somewhere you can write to
    (not Program Files).
-2. Get your game's `exefs` and `romfs` folders (below).
+2. Put your dumped game files in one folder: the base game and the 1.1.1 update (`.nsp` / `.xci`, below).
 3. Run `PLARecomp.exe` (not code-signed: "More info" -> "Run anyway" if Windows asks), click **Select game folder...**
-   and pick the folder that holds `exefs` and `romfs`.
-4. Wait while the game files are copied and the game code is generated and compiled for your PC. This happens once,
+   and pick that folder.
+4. Wait while the game files are read and the game code is generated and compiled for your PC. This happens once,
    and takes from several minutes on a big CPU to much longer on a small one.
 5. Click **Play**. The first start also prepares the shaders once (a progress bar).
 
@@ -40,7 +40,7 @@ program and starts it.
 git clone -b LegendsA https://github.com/MrWifi1143/LZA-Recomp.git PLA-Recomp && cd PLA-Recomp && ./tools/linux/install.sh && ./play.sh
 ```
 
-On the start screen click **Select game folder...** and pick the folder with your extracted `exefs` and `romfs`
+On the start screen click **Select game folder...** and pick the folder with your dumped `.nsp` / `.xci` files
 (below); the game code is built for your PC once. Later, start it again with `./play.sh` in that folder. To update:
 `git pull && ./tools/linux/install.sh`.
 
@@ -48,33 +48,23 @@ The repository is private for now: you need access to it (`gh auth login`, or a 
 
 Requirements: x86-64 with AVX2, a GPU with a Vulkan 1.3 driver (Mesa or NVIDIA), ~25 GB free during setup.
 
-## Getting `exefs` and `romfs`
-
-The recomp reads the game's **extracted** files: an `exefs` folder (`main`, `sdk`, `subsdk0`, `subsdk1`, `main.npdm`) and
-a `romfs` folder (with `bin/`). It does not open `.nsp` / `.xci` files and never needs your keys: the keys are only used by
-the tool you extract with.
+## Your game files
 
 What you need, all from your own Switch:
 
 - the base game and the **1.1.1 update**, dumped as `.nsp` (or `.xci` for the game card)
-- `prod.keys` and `title.keys` (dumped with Lockpick_RCM)
+- `prod.keys` (dumped with Lockpick_RCM)
 
-The extracted files must have the update applied: the recomp is made for 1.1.1 and other versions won't work.
-The update is a patch on top of the base game's RomFS. Use
-[hac2l](https://github.com/Atmosphere-NX/hac2l) or [hactoolnet](https://github.com/Thealexbarney/LibHac/releases):
+Put the `.nsp` / `.xci` files in one folder and pick it on the start screen. The recomp reads them itself, like the
+emulators do: it applies the update over the base game, writes only what it needs (the game code and one RomFS
+image) and never changes your dumps. It looks for `prod.keys` in that folder first, then in `.switch` in your home
+folder and in the emulators' key folders (Eden, Yuzu and its forks, Ryujinx). Title keys come from the tickets
+inside the `.nsp` files, or from a `title.keys` beside `prod.keys`. The recomp is made for 1.1.1; other versions
+won't work. Compressed dumps (`.nsz` / `.xcz`) aren't read: decompress them first (`nsz -D`).
 
-1. Unpack both `.nsp` files (they are plain archives), e.g. `hactoolnet -t pfs0 base.nsp --outdir base` and the same
-   for the update. In each, the **program NCA** is the biggest `.nca` file.
-2. Extract the update on top of the base game:
-
-   ```sh
-   hac2l -k prod.keys --titlekeys=title.keys --basenca=base/<base program>.nca \
-         --exefsdir=game/exefs --romfsdir=game/romfs update/<update program>.nca
-   ```
-
-   (`hactoolnet` takes the same `--basenca`, `--exefsdir` and `--romfsdir` options.) If the update's title key is not
-   in your `title.keys` yet, it is in the update's `.tik` file: rights ID at offset 0x2A0, key at 0x180.
-3. Pick the `game` folder on the start screen.
+**Already extracted files** work too: pick the folder with `exefs` (`main`, `sdk`, `subsdk0`, `subsdk1`, `main.npdm`)
+and `romfs` (with `bin/`), extracted with the update applied (e.g. `hac2l -k prod.keys --titlekeys=title.keys
+--basenca=<base program>.nca --exefsdir=game/exefs --romfsdir=game/romfs <update program>.nca`).
 
 ## Status
 

@@ -8,6 +8,11 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Arceus:
 
+- The start screen reads your dumped `.nsp` / `.xci` files directly, like the emulators: pick the folder with the base
+  game and the update and the recomp applies the update over the base game itself, with your `prod.keys` (looked for
+  beside the files, in `~/.switch` and in the emulators' key folders). No hac2l / hactoolnet step any more; extracted
+  `exefs` / `romfs` folders still work. Written out: the game code and one RomFS image - checked byte for byte against
+  hac2l's output (every file of both games).
 - Button icons for Xbox / PlayStation / keyboard prompts are drawn once and kept on disk (cache/glyphs/): each redraw
   cost ~1.8 ms of the render thread (measured in Legends Z-A).
 - Fewer hitches when new models appear: the VRAM vertex cache kept each stream's partial edge pages by reading them back
