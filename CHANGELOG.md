@@ -8,6 +8,11 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Arceus:
 
+- Steadier frame rate when capped: while waiting for the next frame's time the game thread lends its emulated core
+  to the game's other threads, and taking it back at the frame's time sometimes waited milliseconds for the thread
+  holding it - the frame started late. It is now taken back ahead of time and the last moment waited out. Intro capped
+  at 60 on four efficiency cores (an older quad-core PC): 0.1% low 19 -> 54 fps, longest frame 64 -> 20 ms.
+  LARECOMP_PACE_LOG=1 logs the take-backs.
 - A thread cancelled while waiting for a lock no longer has that cancel land on its next lock or event wait: as
   on the Switch only a WaitSynchronization takes it. Arceus aborted at random in its intro (an event wait answered
   "cancelled", svcBreak 2001-0118, 1 run in 4); the game cancels threads mid-lock 7-8 times in that intro.
