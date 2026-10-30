@@ -7,6 +7,12 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- Steady frame rate when capped: at 60 fps the game no longer dips into the 50s. While it waits for the next frame's
+  time the game thread lends its emulated core to the game's other threads; taking it back at the frame's time sometimes
+  waited milliseconds for the thread holding it, and the frame started late. It is now taken back ahead of time (a
+  margin that follows how long that takes) and the last moment is waited out. Lumiose walk capped at 60 on four
+  efficiency cores (an older quad-core PC), 720p: 58.5 fps average / 1% low 41.5 / 0.1% low 29.5 -> 60.0 / 59.7 / 56.2.
+  At 144 on an i9-12900K: unchanged. LARECOMP_PACE_LOG=1 logs the take-backs.
 - ARM Linux builds (the Steam Frame) target ARMv8.2: atomics are single instructions instead of a call that checks
   the CPU each time (7% of the Frame's CPU time went to those calls; frame rate unchanged - they weren't on the critical
   path - but less work). Every ARMv8.2+ core qualifies (Cortex-A55 / A75 and later, Snapdragon 845+, Apple M1).

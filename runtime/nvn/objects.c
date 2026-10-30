@@ -883,13 +883,55 @@ static void present_pace(int interval) {
     static uint64_t logged;
     if (logged != period) { logged = period; LOG("[nvn] present pacing: %.1f fps (interval %d)\n", 1e9 / period, interval); }
     uint64_t now = plat_now_ns();
+    static int old_pace = -1;  // (LARECOMP_PACE_OLD=1, research: the core taken back at the frame's time, as before)
+    if (old_pace < 0) old_pace = ENV("LARECOMP_PACE_OLD") != NULL;
     if (!next || now > next + 2 * period) next = now;  // first frame / fell behind: start over, no burst
-    else {
-        kernel_block_begin();  // (the emulated core is free while the game thread waits: runtime/kernel.c)
+    else if (old_pace) {
+        kernel_block_begin();
         plat_sleep_until_ns(next);
         kernel_block_end();
         extern uint64_t g_wait_pace_add;
         g_wait_pace_add += plat_now_ns() - now;
+    } else {
+        // The emulated core goes to its other threads while the game thread waits (runtime/kernel.c), and is taken back
+        // `margin` before the frame's time: taking it back waits for the thread holding it, which on a busy CPU took
+        // milliseconds - the frame then started late. A 4-core PC capped at 60 had 6% of its frames at 20-25 ms (2.5% of
+        // the time lost) while the same walk uncapped had almost none over 16.7 ms; the 60 fps cap dipped into the 50s on
+        // a fast PC too. The rest is waited out holding the core: a sleep, then a spin for the last 0.3 ms (a sleep wakes
+        // late by up to ~0.1 ms, more on a busy CPU). margin follows the latest take-backs (the slowest, decaying).
+        // LARECOMP_PACE_LOG=1: how late they were, every 10 s.
+        static int64_t margin = 2000000;
+        static int plog = -1;
+        static uint64_t n_frames, n_late, sum_back, max_back;
+        if (plog < 0) plog = ENV("LARECOMP_PACE_LOG") != NULL;
+        uint64_t until = next > (uint64_t)margin + now ? next - (uint64_t)margin : now;
+        kernel_block_begin();
+        if (until > now) plat_sleep_until_ns(until);
+        kernel_block_end();
+        uint64_t got = plat_now_ns();
+        int64_t back = (int64_t)(got - until);  // (the sleep's overshoot + the core's take-back)
+        margin = margin * 31 / 32;  // (decays ~3% a frame) ...
+        if (back + 300000 > margin) margin = back + 300000;  // ... to the slowest recent take-back, with room
+        if (margin < 500000) margin = 500000;
+        if (margin > (int64_t)period / 3) margin = (int64_t)period / 3;
+        if (next > got + 300000) plat_sleep_until_ns(next - 300000);
+        while (plat_now_ns() < next) {
+#if defined(__x86_64__)
+            __builtin_ia32_pause();
+#elif defined(__aarch64__)
+            __asm__ volatile("yield");
+#endif
+        }
+        uint64_t end = plat_now_ns();
+        n_frames++, n_late += got > next, sum_back += (uint64_t)back, max_back = (uint64_t)back > max_back ? (uint64_t)back : max_back;
+        if (plog && n_frames % 600 == 0) {
+            LOG("[pace] %llu frames: core taken back %.2f ms avg, %.2f max; %llu after the frame's time; margin now %.2f ms\n",
+                (unsigned long long)n_frames, (double)sum_back / 600 / 1e6, (double)max_back / 1e6, (unsigned long long)n_late,
+                (double)margin / 1e6);
+            sum_back = max_back = 0, n_late = 0;
+        }
+        extern uint64_t g_wait_pace_add;
+        g_wait_pace_add += end - now;
     }
     next += period;
 }
