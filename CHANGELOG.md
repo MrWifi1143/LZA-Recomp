@@ -11,7 +11,11 @@ Z-A:
   and private battles - with each copy as a console of its own (nn::ldn answered by the recomp, the game's Pia
   traffic over loopback UDP). Tested with two copies: a trade both ways (saved) and a private battle room, battle
   started. Sockets still only work inside such a network: the game never reaches the internet. The profanity filter
-  (`ngc:u`) now answers "clean" (the names a trade brings). Not yet: Windows, and copies on different PCs (LAN).
+  (`ngc:u`) now answers "clean" (the names a trade brings). The Windows build does the same (Winsock): a copy
+  under Wine traded with a Linux copy on the same PC. Not yet: copies on different PCs (LAN).
+- Windows: loading a save no longer crashes a few seconds into the world ("no function at ..." from a fiber switch).
+  A game fiber resumed on another thread wrote the old thread's fiber bookkeeping (the compiler kept the
+  thread-local address from before the switch); that work is now done after the switch, on the thread it runs on.
   Known: with Frame Timing "Real time", the trade ends on a white screen after "... sent over ..." (fine on "Fixed").
 - Faster on CPUs with 6+ fast cores: `extra_workers = auto` (the default) now gives the game up to three job threads
   more than the Switch's three (one per fast physical core past five: 8 performance cores -> 3). Lumiose walk uncapped

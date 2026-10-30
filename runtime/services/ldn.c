@@ -10,7 +10,7 @@
 // from a host; 'C' join (user name, version) -> 'A' node + NetworkInfo / 'R' refused; 'I' + NetworkInfo (the host to
 // its stations, on a change); 'L' node (a station leaves); 'D' (the host closed the network).
 // Structures (NetworkInfo 0x480 ...) as switchbrew / Ryujinx's Ldn types document them.
-// Windows: not yet (no wireless: the game finds nobody; sockets down).
+// Windows builds the same (Winsock): a copy under Wine plays with Linux ones on the same PC.
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,13 +20,16 @@
 #include "../platform.h"
 #include "../rt.h"
 
-#ifndef _WIN32
-#include <arpa/inet.h>
 #include <errno.h>
+#include <pthread.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
-#include <pthread.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -89,33 +92,56 @@ static void client_monitor(Service *s, IpcReq *req, IpcResp *resp) {
     if (req->cmd) LOG("[ldn] IClientProcessMonitor cmd %u (ok)\n", req->cmd);
 }
 
+// ------------------------------------------------------------------ sockets: POSIX / Winsock
+// (Windows: socket handles kept as ints - small numbers in practice, Wine's too; the service reports Linux errno
+// values, so Winsock's errors are turned into them; no MSG_DONTWAIT there: a poll first)
 #ifdef _WIN32
-// ------------------------------------------------------------------ Windows: no wireless yet
-SERVICE("bsd:u", bsd_u) {
-    (void)s;
-    switch (req->cmd) {
-    case 2: case 3: OUT(int32_t, 0) = -1, OUT(int32_t, 4) = 100, resp_size(resp, 8); break;  // Socket: ENETDOWN
-    case 9: OUT(int32_t, 0) = 1, OUT(int32_t, 4) = 0, resp_size(resp, 8); break;
-    default: LOG("[bsd] bsd:u cmd %u (ok)\n", req->cmd);
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
+#define close_sock(h) closesocket((SOCKET)(h))
+static int sock_poll(struct pollfd *p, unsigned n, int ms) { return WSAPoll(p, n, ms); }
+static int sock_errno(void) {
+    switch (WSAGetLastError()) {
+    case WSAEWOULDBLOCK: return 11;  // EAGAIN
+    case WSAEBADF: case WSAENOTSOCK: return 9;
+    case WSAEINVAL: return 22;
+    case WSAEMFILE: return 24;
+    case WSAEMSGSIZE: return 90;
+    case WSAEADDRINUSE: return 98;
+    case WSAEADDRNOTAVAIL: return 99;
+    case WSAENETDOWN: return 100;
+    case WSAENETUNREACH: return 101;
+    case WSAECONNRESET: return 104;
+    case WSAENOTCONN: return 107;
+    case WSAETIMEDOUT: return 110;
+    case WSAECONNREFUSED: return 111;
+    case WSAEHOSTUNREACH: return 113;
+    default: return 5;  // EIO
     }
 }
-static void ldn_user(Service *s, IpcReq *req, IpcResp *resp) {
-    bool *init = s->state;
-    switch (req->cmd) {
-    case 0: OUT(uint32_t, 0) = init && *init ? 1 : 0, resp_size(resp, 4); break;
-    case 100: resp->copy_handles[resp->ncopy++] = signalled_event(); break;
-    case 102: OUT(uint16_t, 0) = 0, resp_size(resp, 4); break;
-    case 400: case 402: if (init) *init = true; break;  // Initialize / InitializeWithVersion
-    case 401: if (init) *init = false; break;
-    default: LOG("[ldn] cmd %u (ok, no wireless)\n", req->cmd);
-    }
+static void net_init(void) {
+    static bool done;
+    if (done) return;
+    WSADATA w;
+    done = WSAStartup(MAKEWORD(2, 2), &w) == 0;
 }
-SERVICE("ldn:u", ldn_u) {
-    (void)s;
-    if (req->cmd == 0) ipc_return_object(resp, service_new("IUserLocalCommunicationService", ldn_user, calloc(1, sizeof(bool))));
-    else if (req->cmd == 1) ipc_return_object(resp, service_new("IClientProcessMonitor", client_monitor, NULL));
+static int udp_socket(void) {  // (a UDP socket that doesn't fail its receives over a peer's ICMP "port unreachable")
+    net_init();
+    SOCKET h = socket(AF_INET, SOCK_DGRAM, 0);
+    if (h == INVALID_SOCKET) return -1;
+    BOOL off = FALSE;
+    DWORD got;
+    WSAIoctl(h, SIO_UDP_CONNRESET, &off, sizeof off, NULL, 0, &got, NULL, NULL);
+    return (int)h;
 }
 #else
+#define close_sock(h) close(h)
+static int sock_poll(struct pollfd *p, unsigned n, int ms) { return poll(p, (nfds_t)n, ms); }
+static int sock_errno(void) { return errno; }
+static int udp_socket(void) { return socket(AF_INET, SOCK_DGRAM, 0); }
+#endif
+
 
 static bool ldn_log(void) {  // (LARECOMP_LDN_LOG=1: every ldn:u / bsd:u command)
     static int on = -1;
@@ -150,12 +176,12 @@ static void signal_change(void) {  // (caller may hold L.lock)
 }
 
 static int udp_bound(uint32_t ip, uint16_t port, bool reuse) {
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    int fd = udp_socket();
     if (fd < 0) return -1;
     int one = 1;
-    if (reuse) setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    if (reuse) setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const void *)&one, sizeof one);
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(port), .sin_addr.s_addr = htonl(ip)};
-    if (bind(fd, (struct sockaddr *)&a, sizeof a)) { close(fd); return -1; }
+    if (bind(fd, (struct sockaddr *)&a, sizeof a)) { close_sock(fd); return -1; }
     return fd;
 }
 static void ctrl_send(int fd, uint32_t ip, char type, const void *body, size_t n) {
@@ -289,7 +315,7 @@ static int scan(const ScanFilter *f, NetworkInfo *out, int max) {
     kernel_block_begin();
     for (uint64_t now; n < max && (now = plat_now_ns()) < end;) {
         struct pollfd p = {fd, POLLIN, 0};
-        if (poll(&p, 1, (int)((end - now) / 1000000) + 1) <= 0) break;
+        if (sock_poll(&p, 1, (int)((end - now) / 1000000) + 1) <= 0) break;
         uint8_t m[8 + sizeof(NetworkInfo)];
         ssize_t got = recv(fd, m, sizeof m, 0);
         if (got < 5 + (ssize_t)sizeof(NetworkInfo) || memcmp(m, "LDN1s", 5)) continue;
@@ -304,7 +330,7 @@ static int scan(const ScanFilter *f, NetworkInfo *out, int max) {
         if (ok) out[n++] = ni;
     }
     kernel_block_end();
-    close(fd);
+    close_sock(fd);
     return n;
 }
 
@@ -319,7 +345,7 @@ static bool station_connect(const NetworkInfo *want, const UserConfig *uc, uint1
     struct pollfd p = {fd, POLLIN, 0};
     bool ok = false;
     kernel_block_begin();
-    if (poll(&p, 1, 1000) > 0) {
+    if (sock_poll(&p, 1, 1000) > 0) {
         uint8_t m[8 + sizeof(NetworkInfo)];
         ssize_t got = recv(fd, m, sizeof m, 0);
         if (got >= 6 + (ssize_t)sizeof(NetworkInfo) && !memcmp(m, "LDN1A", 5)) {
@@ -331,7 +357,7 @@ static bool station_connect(const NetworkInfo *want, const UserConfig *uc, uint1
         }
     }
     kernel_block_end();
-    close(fd);
+    close_sock(fd);
     if (ok) LOG("[ldn] joined \"%s\"'s network as node %d\n", L.info.ldn.nodes[0].name, L.node);
     return ok;
 }
@@ -492,7 +518,7 @@ SERVICE("ldn:u", ldn_u) {
 static int g_sock[SOCKS];  // host fd + 1 (0: free)
 
 static int sock_host(int fd) { return fd >= 0 && fd < SOCKS && g_sock[fd] ? g_sock[fd] - 1 : -1; }
-static int linux_errno(void) { return errno; }  // (the bsd service reports Linux errno values)
+static bool g_nonblock[SOCKS];  // (O_NONBLOCK as the game set it: Winsock can't be asked)
 
 // guest sockaddr (BSD layout: len, family, port BE, addr BE) <-> host
 static bool to_host(const uint8_t *g, size_t n, struct sockaddr_in *h) {
@@ -520,8 +546,11 @@ static void to_guest(const struct sockaddr_in *h, uint8_t *g) {
 static int host_flags(int f) {  // (BSD MSG_ values -> Linux)
     static int seen;
     if (ldn_log() && (f & ~seen)) seen |= f, LOG("[bsd] message flags %#x\n", f);
-    return (f & 0x1 ? MSG_OOB : 0) | (f & 0x2 ? MSG_PEEK : 0) | (f & 0x4 ? MSG_DONTROUTE : 0) | (f & 0x40 ? MSG_WAITALL : 0) |
-           (f & 0x80 ? MSG_DONTWAIT : 0);
+    return (f & 0x1 ? MSG_OOB : 0) | (f & 0x2 ? MSG_PEEK : 0) | (f & 0x4 ? MSG_DONTROUTE : 0) | (f & 0x40 ? MSG_WAITALL : 0)
+#ifndef _WIN32
+           | (f & 0x80 ? MSG_DONTWAIT : 0)
+#endif
+        ;
 }
 static bool broadcast(const struct sockaddr_in *h) {
     uint32_t ip = ntohl(h->sin_addr.s_addr);
@@ -554,11 +583,9 @@ SERVICE("bsd:u", bsd_u) {
         if (!in || dom != 2 || (type & 0xF) != 2) { RET(-1, 100); break; }  // (only UDP, only in a network: else ENETDOWN)
         int fd = 3;
         while (fd < SOCKS && g_sock[fd]) fd++;
-        int h = fd < SOCKS ? socket(AF_INET, SOCK_DGRAM, 0) : -1;
+        int h = fd < SOCKS ? udp_socket() : -1;
         if (h < 0) { RET(-1, 24); break; }  // EMFILE
-        int one = 1;
-        setsockopt(h, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-        g_sock[fd] = h + 1;
+        g_sock[fd] = h + 1, g_nonblock[fd] = false;
         RET(fd, 0);
         break;
     }
@@ -571,11 +598,11 @@ SERVICE("bsd:u", bsd_u) {
         struct pollfd p[32];
         for (int i = 0; i < nfds; i++) p[i].fd = sock_host(g[i].fd), p[i].events = g[i].ev, p[i].revents = 0;
         kernel_block_begin();
-        int r = poll(p, (nfds_t)nfds, timeout);
+        int r = sock_poll(p, (unsigned)nfds, timeout);
         kernel_block_end();
         for (int i = 0; i < nfds; i++) g[i].rev = p[i].revents;
         if (ob && ob->addr) write_buf(ob, g, (size_t)nfds * 8);
-        RET(r, r < 0 ? linux_errno() : 0);
+        RET(r, r < 0 ? sock_errno() : 0);
         break;
     }
     case 8: case 9: {  // Recv(fd, flags; data) / RecvFrom(fd, flags; data, addr)
@@ -585,10 +612,18 @@ SERVICE("bsd:u", bsd_u) {
         int hf = host_flags(fl);
         struct sockaddr_in from;
         socklen_t fromlen = sizeof from;
+        ssize_t n;
+#ifdef _WIN32
+        struct pollfd pr = {(SOCKET)h, POLLIN, 0};
+        if ((fl & 0x80) && !g_nonblock[IN(int32_t, 0)] && sock_poll(&pr, 1, 0) == 0) {  // (MSG_DONTWAIT, nothing there)
+            RET(-1, 11);
+            break;
+        }
+#endif
         kernel_block_begin();
-        ssize_t n = recvfrom(h, (void *)(uintptr_t)b->addr, (size_t)b->size, hf, (struct sockaddr *)&from, &fromlen);
+        n = recvfrom(h, (void *)(uintptr_t)b->addr, (int)b->size, hf, (struct sockaddr *)&from, &fromlen);
         kernel_block_end();
-        RET(n, n < 0 ? linux_errno() : 0);
+        RET(n, n < 0 ? sock_errno() : 0);
         if (n > 0) g_recvd[0]++, g_recvd[1] += (uint64_t)n;
         if (req->cmd == 9) {
             uint8_t ga[16];
@@ -618,9 +653,9 @@ SERVICE("bsd:u", bsd_u) {
                 pthread_mutex_unlock(&L.lock);
             } else n = sendto(h, (const void *)(uintptr_t)b->addr, (size_t)b->size, hf, (struct sockaddr *)&to, sizeof to);
         } else n = send(h, (const void *)(uintptr_t)b->addr, (size_t)b->size, hf);
-        if (n < 0) LOG("[bsd] send failed: %s\n", strerror(errno));
+        if (n < 0) LOG("[bsd] send failed: errno %d\n", sock_errno());
         else g_sent[0]++, g_sent[1] += (uint64_t)n;
-        RET(n, n < 0 ? linux_errno() : 0);
+        RET(n, n < 0 ? sock_errno() : 0);
         break;
     }
     case 13: {  // Bind(fd; addr): to this copy's loopback address
@@ -632,11 +667,11 @@ SERVICE("bsd:u", bsd_u) {
         if (L.node >= 0) a.sin_addr.s_addr = htonl(real_ip(my_vip()));  // (any / our virtual address: ours)
         pthread_mutex_unlock(&L.lock);
         int one = 1;
-        setsockopt(h, SOL_SOCKET, SO_BROADCAST, &one, sizeof one);
+        setsockopt(h, SOL_SOCKET, SO_BROADCAST, (const void *)&one, sizeof one);
         int r = bind(h, (struct sockaddr *)&a, sizeof a);
         if (ldn_log()) LOG("[bsd] bind %s:%u\n", inet_ntoa(a.sin_addr), ntohs(a.sin_port));
-        if (r) LOG("[bsd] bind %s:%u: %s\n", inet_ntoa(a.sin_addr), ntohs(a.sin_port), strerror(errno));
-        RET(r, r ? linux_errno() : 0);
+        if (r) LOG("[bsd] bind %s:%u: errno %d\n", inet_ntoa(a.sin_addr), ntohs(a.sin_port), sock_errno());
+        RET(r, r ? sock_errno() : 0);
         break;
     }
     case 14: {  // Connect(fd; addr)
@@ -645,7 +680,7 @@ SERVICE("bsd:u", bsd_u) {
         struct sockaddr_in a;
         if (h < 0 || !ab || !ab->addr || !to_host((const uint8_t *)(uintptr_t)ab->addr, (size_t)ab->size, &a)) { RET(-1, 22); break; }
         int r = connect(h, (struct sockaddr *)&a, sizeof a);
-        RET(r, r ? linux_errno() : 0);
+        RET(r, r ? sock_errno() : 0);
         break;
     }
     case 15: case 16: {  // GetPeerName / GetSockName(fd; addr)
@@ -655,7 +690,7 @@ SERVICE("bsd:u", bsd_u) {
         int r = h < 0 ? -1 : req->cmd == 15 ? getpeername(h, (struct sockaddr *)&a, &al) : getsockname(h, (struct sockaddr *)&a, &al);
         uint8_t ga[16];
         if (!r) to_guest(&a, ga), write_buf(out_buf(req, 0), ga, 16);
-        RET(r, r ? (h < 0 ? 9 : linux_errno()) : 0);
+        RET(r, r ? (h < 0 ? 9 : sock_errno()) : 0);
         OUT(uint32_t, 8) = r ? 0 : 16, resp_size(resp, 12);
         break;
     }
@@ -669,9 +704,20 @@ SERVICE("bsd:u", bsd_u) {
     case 20: {  // Fcntl(fd, cmd, arg): F_GETFL 3 / F_SETFL 4, O_NONBLOCK 0x800
         int h = sock_host(IN(int32_t, 0)), c = IN(int32_t, 4), arg = IN(int32_t, 8);
         if (h < 0) { RET(-1, 9); break; }
-        int f = fcntl(h, F_GETFL, 0);
-        if (c == 3) RET((f & O_NONBLOCK) ? 0x800 : 0, 0);
-        else if (c == 4) RET(fcntl(h, F_SETFL, (arg & 0x800) ? (f | O_NONBLOCK) : (f & ~O_NONBLOCK)), 0);
+        int gfd = IN(int32_t, 0);
+        if (c == 3) RET(g_nonblock[gfd] ? 0x800 : 0, 0);
+        else if (c == 4) {
+            bool nb = (arg & 0x800) != 0;
+#ifdef _WIN32
+            u_long v = nb;
+            int r = ioctlsocket((SOCKET)h, FIONBIO, &v);
+#else
+            int f = fcntl(h, F_GETFL, 0);
+            int r = fcntl(h, F_SETFL, nb ? (f | O_NONBLOCK) : (f & ~O_NONBLOCK));
+#endif
+            if (!r) g_nonblock[gfd] = nb;
+            RET(r ? -1 : 0, r ? sock_errno() : 0);
+        }
         else RET(0, 0);
         break;
     }
@@ -680,10 +726,10 @@ SERVICE("bsd:u", bsd_u) {
         IpcBuf *b = in_buf(req, 0);
         int v = b && b->addr && b->size >= 4 ? *(const int32_t *)(uintptr_t)b->addr : 0;
         if (h >= 0 && level == 0xFFFF) {
-            if (name == 0x20) setsockopt(h, SOL_SOCKET, SO_BROADCAST, &v, sizeof v);
-            else if (name == 0x4) setsockopt(h, SOL_SOCKET, SO_REUSEADDR, &v, sizeof v);
-            else if (name == 0x1001) setsockopt(h, SOL_SOCKET, SO_SNDBUF, &v, sizeof v);
-            else if (name == 0x1002) setsockopt(h, SOL_SOCKET, SO_RCVBUF, &v, sizeof v);
+            if (name == 0x20) setsockopt(h, SOL_SOCKET, SO_BROADCAST, (const void *)&v, sizeof v);
+            else if (name == 0x4) setsockopt(h, SOL_SOCKET, SO_REUSEADDR, (const void *)&v, sizeof v);
+            else if (name == 0x1001) setsockopt(h, SOL_SOCKET, SO_SNDBUF, (const void *)&v, sizeof v);
+            else if (name == 0x1002) setsockopt(h, SOL_SOCKET, SO_RCVBUF, (const void *)&v, sizeof v);
         }
         RET(h < 0 ? -1 : 0, h < 0 ? 9 : 0);
         break;
@@ -691,10 +737,11 @@ SERVICE("bsd:u", bsd_u) {
     case 22: RET(0, 0); break;  // Shutdown
     case 26: {                  // Close(fd)
         int fd = IN(int32_t, 0), h = sock_host(fd);
-        if (h >= 0) close(h), g_sock[fd] = 0;
+        if (h >= 0) close_sock(h), g_sock[fd] = 0;
         RET(h < 0 ? -1 : 0, h < 0 ? 9 : 0);
         break;
     }
+#ifndef _WIN32
     case 31: {  // EventFd(initval, flags)
         int fd = 3;
         while (fd < SOCKS && g_sock[fd]) fd++;
@@ -711,14 +758,16 @@ SERVICE("bsd:u", bsd_u) {
         kernel_block_begin();
         ssize_t n = req->cmd == 24 ? write(h, (const void *)(uintptr_t)b->addr, (size_t)b->size) : read(h, (void *)(uintptr_t)b->addr, (size_t)b->size);
         kernel_block_end();
-        RET(n, n < 0 ? linux_errno() : 0);
+        RET(n, n < 0 ? sock_errno() : 0);
         break;
     }
+#else
+    case 24: case 25: case 31: RET(-1, 38); break;  // (no event fds: ENOSYS)
+#endif
     default: LOG("[bsd] bsd:u cmd %u (ok)\n", req->cmd); RET(0, 0);
     }
 #undef RET
 }
-#endif
 
 // (bsd:s: the same service for system modules - Pia's sockets come through it)
 SERVICE("bsd:s", bsd_s) { bsd_u(s, req, resp); }
