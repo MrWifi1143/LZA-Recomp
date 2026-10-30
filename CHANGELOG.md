@@ -7,6 +7,10 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- Steam Frame (and any GPU on 32-lane warp slices): the shader cache is kept between starts. The start-up clean-up
+  deleted it - it ran before the GPU was set up, when the cache's folder name (which slices change) wasn't known yet
+  - so every start compiled thousands of shaders again: 132 s of shader compiling and 93 C in the first minutes. Now a
+  second start compiles 3.7 s' worth and peaks at 81 C, 30 fps held in Lumiose.
 - A thread cancelled while waiting for a lock no longer has that cancel land on its next lock or event wait: as
   on the Switch only a WaitSynchronization takes it. Arceus aborted at random in its intro (an event wait answered
   "cancelled", svcBreak 2001-0118, 1 run in 4); the game cancels threads mid-lock 7-8 times in that intro.
