@@ -68,9 +68,9 @@ static void serve(Cpu *c) {
 
 // ---- --extract-shaders <romfs> (the shader warm-up's first step, runtime/nvn/vulkan/warmup.c): Z-A keeps its shader
 // containers in data.trpfs, mostly Oodle-compressed, where the warm-up's scan of the romfs can't see them - so a first
-// start had nothing to compile up front. This mode decodes the packs whose names say they hold shaders
-// ("...gfx2shader..." in data.trpfd's pack names: every .bnsh the game has), with the game's own decoder as above, and
-// writes each file that holds a BNSH container to cache/warm/romfs/<hash>.bin for the warm-up to scan; then exits.
+// start had nothing to compile up front. This mode decodes every pack (below: the shaders are not only in the
+// "...gfx2shader..." ones), with the game's own decoder as above, and writes the BNSH containers of each file that has
+// any to cache/warm/romfs/<hash>.bin for the warm-up to scan; then exits.
 //   data.trpfd {0 [u64 file hash], 1 [pack name], 2 [{0 u64 pack index}]}; data.trpfs "ONEPACK\0", u64 offset of
 //   {0 [u64 FNV-1a of a pack name], 1 [u64 offset]}; a pack (TRPAK) {0 [u64 hash], 1 [{1 i8 compression (-1 stored,
 //   3..7 Oodle), 3 u64 size, 4 [u8 data]}]}
@@ -153,14 +153,20 @@ static void extract(Cpu *c) {
     uint32_t nnames;
     size_t names = fb_vec(d, root, 1, &nnames);
     // the shader packs: their name hashes
-    uint64_t want[64];
+    // every pack: the gfx2shader ones hold ~13.9k programs, but the effects (.ptcl), UI layouts and models carry
+    // containers of their own (3943 files hold one; decoding all of it took 27 s), and the game draws with them - most of
+    // the vertex stages of the city's first minutes were only there. LARECOMP_EXTRACT_SURVEY=1 logs the packs with any.
+    static uint64_t want[65536];
+    static char wname[65536][96];
     int nwant = 0;
-    for (uint32_t i = 0; i < nnames && nwant < 64; i++) {
+    bool survey = getenv("LARECOMP_EXTRACT_SURVEY") != NULL;
+    for (uint32_t i = 0; i < nnames && nwant < 65536; i++) {
         size_t s = fb_deref(d, names + 4 * (size_t)i);
         uint32_t len = fb32(d, s);
         if (!s || s + 4 + len > d.n) continue;
         const char *nm = (const char *)fd + s + 4;
-        if (has_bytes((const uint8_t *)nm, len, "gfx2shader", 10)) want[nwant++] = fnv64(nm, len);
+        snprintf(wname[nwant], sizeof wname[0], "%.*s", (int)(len < 95 ? len : 95), nm);
+        want[nwant++] = fnv64(nm, len);
     }
     // where they are in data.trpfs (a pack ends where the next one starts, or at the table)
     FILE *fs = fopen(fsp, "rb");
@@ -177,6 +183,7 @@ static void extract(Cpu *c) {
     uint8_t *dec_mem = calloc(1, 0x80000);
     int files = 0, written = 0;
     for (int w = 0; w < nwant; w++) {
+        int written0 = written;
         uint64_t off = 0, end = toff;
         bool found = false;
         for (uint32_t i = 0; i < nh && i < no; i++) if (fb64(t, th + 8 * (size_t)i) == want[w]) off = fb64(t, to + 8 * (size_t)i), found = true;
@@ -200,15 +207,27 @@ static void extract(Cpu *c) {
             if (comp == -1) out = malloc(dn ? dn : 1), memcpy(out, pk + dd, dn), r = dn;
             else if (comp >= 3 && comp <= 7 && raw < (256u << 20) && (out = malloc(raw ? raw : 1))) r = oodle_decode(c, dec_mem, pk + dd, dn, out, raw);
             files++;
-            if (r > 0x60 && has_bytes(out, (size_t)r, "BNSH\0\0\0\0", 8)) {
+            if (r > 0x60 && has_bytes(out, (size_t)r, "BNSH\0\0\0\0", 8)) {  // (its containers only, one after another)
                 char path[96];
                 snprintf(path, sizeof path, "cache/warm/romfs/%016llx.bin", (unsigned long long)fb64(p, ph + 8 * (size_t)i));
                 FILE *o = fopen(path, "wb");
-                if (o) { written += fwrite(out, 1, (size_t)r, o) == (size_t)r; fclose(o); }
+                bool any = false;
+                for (const uint8_t *q = out, *end = out + r; o && (q = memchr(q, 'B', (size_t)(end - q))) && end - q >= 0x64; q++) {
+                    if (memcmp(q, "BNSH\0\0\0\0", 8) || memcmp(q + 0x60, "grsc", 4)) continue;
+                    uint32_t n;
+                    memcpy(&n, q + 0x1C, 4);
+                    if (n <= 0x100 || (int64_t)n > end - q) continue;
+                    any |= fwrite(q, 1, n, o) == n;
+                    q += n - 1;
+                }
+                if (o) fclose(o);
+                if (any) written++;
+                else remove(path);
             }
             free(out);
         }
         free(pk);
+        if (survey && written > written0) fprintf(stderr, "[extract] survey: %s: %d files with containers\n", wname[w], written - written0);
     }
     fprintf(stderr, "[extract] %d shader packs, %d files decoded, %d with shader containers -> cache/warm/romfs\n", nwant, files, written);
     _exit(written ? 0 : 3);

@@ -47,7 +47,9 @@
 #include "shaders.h"
 
 bool vk_ready(void);  // device.c: the device fully set up
-bool vk_warm_program(const uint8_t *vs, size_t vmax, size_t vcn, const uint8_t *fs, size_t fmax, size_t fcn, size_t flen, bool pipeline);  // exec.c
+bool rt_resource(const char *name, const char *dev_rel, char *out, size_t n);  // paths.c
+bool vk_warm_program_keyed(const uint8_t *vs, size_t vmax, size_t vcn, const uint8_t *fs, size_t fmax, size_t fcn, size_t flen,
+                           bool pipeline, const ShaderKey *vkey, const ShaderKey *fkey);  // exec.c
 
 static uint64_t fnv(const uint8_t *p, size_t n, uint64_t h) {
     for (size_t i = 0; i < n; i++) h = (h ^ p[i]) * 0x100000001b3ull;
@@ -76,7 +78,7 @@ static bool disabled(void) {
 }
 
 // ---- stages and programs (deduplicated by content), shared by the start's warm-up and the captures
-typedef struct { uint8_t *code; uint32_t len, max, cn; } WStage;  // code from its NVN header on; max = translate's max_size;
+typedef struct { uint8_t *code; uint32_t len, max, cn; uint8_t sph; } WStage;  // sph: the stage type (1 vertex, 5 fragment)  // code from its NVN header on; max = translate's max_size;
                                                                // cn: compiler constants after it (code + max)
 typedef struct { int vs, fs; } WProg;                        // stage indices (fs -1: vertex-only)
 typedef struct {
@@ -105,7 +107,7 @@ static void set_free(Set *s) {
     memset(s, 0, sizeof *s);
 }
 
-static int add_stage(Set *s, const uint8_t *code, uint32_t len, uint32_t max, uint32_t cn) {
+static int add_stage(Set *s, const uint8_t *code, uint32_t len, uint32_t max, uint32_t cn, int sph) {
     uint64_t h = fnv(code, len, 0xcbf29ce484222325ull ^ max);
     if (!h) h = 1;
     uint32_t k = (uint32_t)(h ^ (h >> 29)) & (s->stage_tab - 1);
@@ -121,7 +123,7 @@ static int add_stage(Set *s, const uint8_t *code, uint32_t len, uint32_t max, ui
     WStage *st = &s->stages[s->nstages];
     st->code = malloc(len);
     memcpy(st->code, code, len);
-    st->len = len, st->max = max, st->cn = cn;
+    st->len = len, st->max = max, st->cn = cn, st->sph = (uint8_t)sph;
     s->stage_hash[k] = h;
     s->stage_slot[k] = ++s->nstages;
     return s->nstages - 1;
@@ -167,7 +169,7 @@ static int record(Set *s, const uint8_t *c, uint32_t n, uint64_t base, uint32_t 
     if (code + len > n) len = (uint32_t)(n - code);
     if (len < 0x40) return -1;
     *stage = (int)sph_type;
-    return add_stage(s, c + code, len, len < max ? len : max, cn);
+    return add_stage(s, c + code, len, len < max ? len : max, cn, (int)sph_type);
 }
 
 // Every program of the container at c into s; returns how many were new
@@ -191,14 +193,175 @@ static bool container_at(const uint8_t *p, size_t avail, uint32_t *size) {
     return true;
 }
 
+// ---- the shader manifest
+// The programs the game draws with, in the order it first did, each with the key (shader.h ShaderKey: attribute and
+// target kinds, transform feedback, ...) of its draws: one line each, "<vertex> <fragment or 0> <vertex key> <fragment
+// key>" - maxwell_program_hash names and the keys' bytes, in hex (hashes and render state, nothing of the game's). The
+// warm-up builds these first and in that order - translated with their own keys and their pipeline shader parts compiled
+// (the ~50-100 ms per part a fresh driver cache costs, the first-play hitches) - then every other program as before. Two
+// lists: data/shader_manifest.txt, shipped (recorded from play-throughs: a first start has the intro's and the city's
+// ready before they are drawn), then cache/warm/played.txt, what this install's own sessions drew (appended as each
+// program first appears: the warm-up after an update starts with what this player has seen).
+// LARECOMP_SHADER_MANIFEST=<file>: that list instead of the shipped one (recording a new one: copy played.txt).
+typedef struct { uint64_t vh, fh; ShaderKey vk, fk; } MEntry;
+// Also the pipelines' state parts the game's draws asked for (exec.c vk_warm_state): "vi <hex>" a vertex input (formats,
+// strides, topology), "fo <hex>" a fragment output (target formats, blending) - built first of all.
+typedef struct { int kind; uint32_t n; uint8_t *bytes; } MState;
+bool vk_warm_state(int kind, const void *state, size_t n);  // exec.c
+
+static uint64_t mentry_hash(const MEntry *e) {
+    uint64_t h = fnv((const uint8_t *)&e->vk, sizeof e->vk, (e->vh * 31) ^ e->fh);
+    return fnv((const uint8_t *)&e->fk, sizeof e->fk, h) | 1;
+}
+
+static void hex_out(FILE *f, const void *p, size_t n) {
+    for (size_t i = 0; i < n; i++) fprintf(f, "%02x", ((const uint8_t *)p)[i]);
+}
+static bool hex_in(const char *s, void *p, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        unsigned v;
+        if (sscanf(s + 2 * i, "%2x", &v) != 1) return false;
+        ((uint8_t *)p)[i] = (uint8_t)v;
+    }
+    return s[2 * n] == 0 || s[2 * n] == ' ' || s[2 * n] == '\n' || s[2 * n] == '\r';
+}
+
+// Appends a manifest file's entries to *v (those whose line is well formed)
+// st (NULL: skipped): its state lines too
+typedef struct { MState *v; int n, cap; } MStates;
+static void manifest_read(const char *path, MEntry **v, int *n, int *cap, MStates *st) {
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    static char line[8192];
+    while (fgets(line, sizeof line, f)) {
+        if ((line[0] == 'v' && line[1] == 'i' && line[2] == ' ') || (line[0] == 'f' && line[1] == 'o' && line[2] == ' ')) {
+            size_t hl = strcspn(line + 3, " \r\n");
+            if (!st || !hl || hl & 1 || hl / 2 > 4096) continue;
+            MState e = {line[0] == 'v' ? 1 : 4, (uint32_t)(hl / 2), malloc(hl / 2)};
+            if (!hex_in(line + 3, e.bytes, e.n)) { free(e.bytes); continue; }
+            if (st->n == st->cap) st->v = realloc(st->v, (size_t)(st->cap = st->cap ? st->cap * 2 : 256) * sizeof *st->v);
+            st->v[st->n++] = e;
+            continue;
+        }
+        MEntry e;
+        memset(&e, 0, sizeof e);
+        char vk[256], fk[256];
+        unsigned long long vh, fh;
+        if (sscanf(line, "%llx %llx %255s %255s", &vh, &fh, vk, fk) != 4) continue;
+        e.vh = vh, e.fh = fh;
+        if (!hex_in(vk, &e.vk, sizeof e.vk) || !hex_in(fk, &e.fk, sizeof e.fk)) continue;
+        if (*n == *cap) *v = realloc(*v, (size_t)(*cap = *cap ? *cap * 2 : 4096) * sizeof **v);
+        (*v)[(*n)++] = e;
+    }
+    fclose(f);
+}
+
+// exec.c translate_program: a program the game draws with, translated with these keys (vertex-only: fh 0)
+static pthread_mutex_t g_played_lock = PTHREAD_MUTEX_INITIALIZER;
+void warmup_note_program(uint64_t vh, uint64_t fh, const ShaderKey *vk, const ShaderKey *fk) {
+    if (disabled()) return;
+    static uint64_t *seen;  // open addressing, mentry_hash
+    static int nseen, cap;
+    static FILE *out;
+    MEntry e;
+    memset(&e, 0, sizeof e);
+    e.vh = vh, e.fh = fh, e.vk = *vk;
+    if (fh) e.fk = *fk;
+    pthread_mutex_lock(&g_played_lock);
+    if (!seen) {  // (what earlier sessions noted: not again)
+        cap = 1 << 16;
+        seen = calloc((size_t)cap, sizeof *seen);
+        MEntry *old = NULL;
+        int n = 0, c = 0;
+        manifest_read("cache/warm/played.txt", &old, &n, &c, NULL);
+        for (int i = 0; i < n && nseen < cap / 2; i++) {
+            uint64_t h = mentry_hash(&old[i]);
+            uint32_t k = (uint32_t)(h ^ (h >> 31)) & (uint32_t)(cap - 1);
+            while (seen[k] && seen[k] != h) k = (k + 1) & (uint32_t)(cap - 1);
+            if (!seen[k]) seen[k] = h, nseen++;
+        }
+        free(old);
+    }
+    uint64_t h = mentry_hash(&e);
+    uint32_t k = (uint32_t)(h ^ (h >> 31)) & (uint32_t)(cap - 1);
+    while (seen[k] && seen[k] != h) k = (k + 1) & (uint32_t)(cap - 1);
+    if (!seen[k] && nseen < cap / 2) {
+        seen[k] = h, nseen++;
+        if (!out) {
+            mkdir("cache", 0755);
+            mkdir("cache/warm", 0755);
+            out = fopen("cache/warm/played.txt", "a");
+        }
+        if (out) {
+            fprintf(out, "%016llx %016llx ", (unsigned long long)vh, (unsigned long long)fh);
+            hex_out(out, &e.vk, sizeof e.vk);
+            fputc(' ', out);
+            hex_out(out, &e.fk, sizeof e.fk);
+            fputc('\n', out);
+            fflush(out);
+        }
+    }
+    pthread_mutex_unlock(&g_played_lock);
+}
+
+// exec.c lib_get: a state part the game's draws asked for (kind 1 vertex input, 4 fragment output), noted once
+void warmup_note_state(int kind, const void *state, size_t n) {
+    if (disabled()) return;
+    static uint64_t seen[8192];
+    static int nseen;
+    static FILE *out;
+    uint64_t h = fnv(state, n, 0xcbf29ce484222325ull ^ (uint64_t)kind) | 1;
+    pthread_mutex_lock(&g_played_lock);
+    static bool loaded;
+    if (!loaded) {  // (what earlier sessions noted)
+        loaded = true;
+        MEntry *m = NULL;
+        int nm = 0, cm = 0;
+        MStates old = {0};
+        manifest_read("cache/warm/played.txt", &m, &nm, &cm, &old);
+        free(m);
+        for (int i = 0; i < old.n; i++) {
+            uint64_t sh = fnv(old.v[i].bytes, old.v[i].n, 0xcbf29ce484222325ull ^ (uint64_t)old.v[i].kind) | 1;
+            uint32_t k = (uint32_t)(sh ^ (sh >> 31)) & 8191;
+            while (seen[k] && seen[k] != sh) k = (k + 1) & 8191;
+            if (!seen[k] && nseen < 4096) seen[k] = sh, nseen++;
+            free(old.v[i].bytes);
+        }
+        free(old.v);
+    }
+    uint32_t k = (uint32_t)(h ^ (h >> 31)) & 8191;
+    while (seen[k] && seen[k] != h) k = (k + 1) & 8191;
+    if (!seen[k] && nseen < 4096) {
+        seen[k] = h, nseen++;
+        if (!out) {
+            mkdir("cache", 0755);
+            mkdir("cache/warm", 0755);
+            out = fopen("cache/warm/played.txt", "a");
+        }
+        if (out) {
+            fputs(kind == 1 ? "vi " : "fo ", out);
+            hex_out(out, state, n);
+            fputc('\n', out);
+            fflush(out);
+        }
+    }
+    pthread_mutex_unlock(&g_played_lock);
+}
+
 // One program: translated and compiled (with the start screen's or the game's Vulkan device: also its shader modules and
-// pipeline layout, as a draw would make them)
-static void compile(const WStage *v, const WStage *f) {
+// pipeline layout, as a draw would make them). keys (vertex, fragment): a manifest entry's, its pipeline shader parts
+// built too; NULL: the key most draws have.
+static void compile_keyed(const WStage *v, const WStage *f, const ShaderKey *keys) {
     static int pipes = -1;
     if (pipes < 0) pipes = getenv("LARECOMP_WARMUP_PIPELINES") && atoi(getenv("LARECOMP_WARMUP_PIPELINES")) != 0;
-    if (vk_ready()) { vk_warm_program(v->code, v->max, v->cn, f ? f->code : NULL, f ? f->max : 0, f ? f->cn : 0, f ? f->len : 0, pipes); return; }
+    if (vk_ready()) {
+        vk_warm_program_keyed(v->code, v->max, v->cn, f ? f->code : NULL, f ? f->max : 0, f ? f->cn : 0, f ? f->len : 0, pipes,
+                              keys, keys ? keys + 1 : NULL);
+        return;
+    }
     ShaderKey vk = {0}, fk = {0};
     vk.glsl = fk.glsl = 1;  // (flip_y and depth_minus_one 0: window origin and depth mode 1 in both Legends games)
+    if (keys) vk = keys[0], fk = keys[1];
     ShaderInfo *vi = maxwell_translate_consts(v->code, v->max, v->cn ? v->code + v->max : NULL, v->cn, STAGE_VERTEX, &vk);
     if (vi && vi->msl) {
         size_t n;
@@ -212,11 +375,18 @@ static void compile(const WStage *v, const WStage *f) {
     }
     if (vi) maxwell_free(vi);
 }
+static void compile(const WStage *v, const WStage *f) { compile_keyed(v, f, NULL); }
 
 // ================================================================== at the start
 static Set g_set;
 static _Atomic int g_phase;  // 0 idle, 1 scanning, 2 compiling, 3 done
 static _Atomic int g_done, g_total, g_next;
+typedef struct { int prog; int key; } Job;  // key: index into g_keys (a manifest entry's two keys), -1 the usual key;
+                                            // prog -1: a state part, key its index in g_states
+static Job *g_jobs;
+static int g_njobs;
+static ShaderKey (*g_keys)[2];
+static MStates g_st;  // (the manifests' state parts, for the jobs)
 static _Atomic uint64_t g_scanned;  // bytes read so far
 static char g_root[1024], g_marker[1100];
 
@@ -268,6 +438,71 @@ static void scan_dir(const char *dir, bool captured) {
 }
 
 static bool g_background;  // (warmup_start_background: behind the game's threads)
+
+// The warm-up's order: the manifests' programs first (their keys, as listed), then the rest of g_set with the usual key.
+// A listed program's stages are looked up one by one (by maxwell_program_hash): the game pairs vertex and fragment
+// stages its own way, not always as they lie in a container - a listed pair is added to g_set as listed.
+static int stage_find(const uint64_t *hk, const int *hv, int tab, uint64_t h) {
+    uint32_t k = (uint32_t)(h ^ (h >> 29)) & (uint32_t)(tab - 1);
+    while (hk[k] && hk[k] != h) k = (k + 1) & (uint32_t)(tab - 1);
+    return hk[k] ? hv[k] - 1 : -1;
+}
+static void stage_put(uint64_t *hk, int *hv, int tab, uint64_t h, int i) {
+    uint32_t k = (uint32_t)(h ^ (h >> 29)) & (uint32_t)(tab - 1);
+    while (hk[k] && hk[k] != h) k = (k + 1) & (uint32_t)(tab - 1);
+    if (!hk[k]) hk[k] = h, hv[k] = i + 1;
+}
+static void plan_jobs(void) {
+    int np = g_set.nprogs, ns = g_set.nstages, tab = 1;
+    while (tab < ns * 4) tab <<= 1;
+    // stage hashes: as a vertex stage (the programs' first) and as a fragment stage (their second)
+    uint64_t *vk_ = calloc((size_t)tab, sizeof *vk_), *fk_ = calloc((size_t)tab, sizeof *fk_);
+    int *vv = calloc((size_t)tab, sizeof *vv), *fv = calloc((size_t)tab, sizeof *fv);
+    for (int i = 0; i < ns; i++) {  // (every stage, by its type: the game pairs them its own way)
+        const WStage *st = &g_set.stages[i];
+        if (st->sph != 1 && st->sph != 5) continue;
+        int stage = st->sph == 1 ? STAGE_VERTEX : STAGE_FRAGMENT;
+        uint64_t h = maxwell_program_hash(st->code, st->max, st->cn ? st->code + st->max : NULL, st->cn, stage);
+        if (stage == STAGE_VERTEX) stage_put(vk_, vv, tab, h, i);
+        else stage_put(fk_, fv, tab, h, i);
+    }
+    MEntry *m = NULL;
+    int nm = 0, cm = 0;
+    char shipped[1100];
+    const char *e = getenv("LARECOMP_SHADER_MANIFEST");
+    if (e) manifest_read(e, &m, &nm, &cm, &g_st);
+    else if (rt_resource("shader_manifest.txt", "data/shader_manifest.txt", shipped, sizeof shipped)) manifest_read(shipped, &m, &nm, &cm, &g_st);
+    int from_shipped = nm;
+    manifest_read("cache/warm/played.txt", &m, &nm, &cm, &g_st);
+    g_jobs = malloc((size_t)(nm + np + g_st.n) * sizeof *g_jobs);
+    for (int i = 0; i < g_st.n; i++) g_jobs[g_njobs++] = (Job){-1, i};  // (the state parts first: fast, and every scene's)
+    g_keys = malloc((size_t)(nm ? nm : 1) * sizeof *g_keys);
+    int found = 0, nov = 0, nof = 0;
+    uint64_t *done = calloc((size_t)(nm ? nm * 2 : 2), sizeof *done);  // (entries already queued: by mentry_hash)
+    for (int i = 0; i < nm; i++) {
+        int v = stage_find(vk_, vv, tab, m[i].vh), f = m[i].fh ? stage_find(fk_, fv, tab, m[i].fh) : -1;
+        if (v < 0) { nov++; continue; }  // (a program this install doesn't have: another game version's)
+        if (m[i].fh && f < 0) { nof++; continue; }
+        uint64_t eh = mentry_hash(&m[i]);
+        uint32_t d = (uint32_t)(eh ^ (eh >> 31)) % (uint32_t)(nm * 2);
+        while (done[d] && done[d] != eh) d = (d + 1) % (uint32_t)(nm * 2);
+        if (done[d]) continue;
+        done[d] = eh;
+        if (g_set.nprogs == g_set.capprogs) {
+            g_set.capprogs = g_set.capprogs ? g_set.capprogs * 2 : 4096;
+            g_set.progs = realloc(g_set.progs, (size_t)g_set.capprogs * sizeof *g_set.progs);
+        }
+        g_set.progs[g_set.nprogs] = (WProg){v, f};
+        g_keys[found][0] = m[i].vk, g_keys[found][1] = m[i].fk;
+        g_jobs[g_njobs++] = (Job){g_set.nprogs++, found++};
+    }
+    if (!getenv("LARECOMP_WARMUP_MANIFEST_ONLY"))  // (research: the manifest's programs only)
+        for (int i = 0; i < np; i++) g_jobs[g_njobs++] = (Job){i, -1};
+    LOG("[warmup] shader manifest: %d of %d programs listed (%d shipped, %d from this install's play) found here, built first"
+        " (%d vertex, %d fragment stages not here), after %d pipeline state parts\n", found, nm, from_shipped, nm - from_shipped, nov, nof,
+        g_st.n);
+    free(m), free(vk_), free(fk_), free(vv), free(fv), free(done);
+}
 static void lower_priority(void) {
 #ifdef _WIN32
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
@@ -279,9 +514,18 @@ static void lower_priority(void) {
 static void *worker(void *arg) {
     (void)arg;
     if (g_background) lower_priority();
-    for (int i; (i = atomic_fetch_add(&g_next, 1)) < g_set.nprogs; atomic_fetch_add(&g_done, 1)) {
-        WProg *p = &g_set.progs[i];
-        compile(&g_set.stages[p->vs], p->fs >= 0 ? &g_set.stages[p->fs] : NULL);
+    // The manifest's programs and state parts are built into pipeline parts with the game's device: in the background
+    // it comes up a few seconds after the start - waited for, or the intro's would be translated without their parts.
+    // (Before the game - the start screen has its device, `--play` with LARECOMP_WARMUP=1 none: not waited for.)
+    for (int w = 0; g_background && !vk_ready() && w < 300; w++) usleep(100000);
+    for (int i; (i = atomic_fetch_add(&g_next, 1)) < g_njobs; atomic_fetch_add(&g_done, 1)) {
+        if (g_jobs[i].prog < 0) {  // (a state part: with the game's device only)
+            const MState *st = &g_st.v[g_jobs[i].key];
+            if (vk_ready()) vk_warm_state(st->kind, st->bytes, st->n);
+            continue;
+        }
+        WProg *p = &g_set.progs[g_jobs[i].prog];
+        compile_keyed(&g_set.stages[p->vs], p->fs >= 0 ? &g_set.stages[p->fs] : NULL, g_jobs[i].key >= 0 ? g_keys[g_jobs[i].key] : NULL);
     }
     return NULL;
 }
@@ -293,14 +537,14 @@ static void extract_packed_shaders(void) {
     char fd[1100], exe[1100];
     struct stat sb;
     snprintf(fd, sizeof fd, "%s/romfs/arc/data.trpfd", g_root);
-    if (stat(fd, &sb) || !stat("cache/warm/romfs/.done", &sb) || !plat_exe_path(exe, sizeof exe)) return;
+    if (stat(fd, &sb) || !stat("cache/warm/romfs/.done-all", &sb) || !plat_exe_path(exe, sizeof exe)) return;
     uint64_t t0 = plat_now_ns();
     const char *argv[] = {exe, g_root, "--extract-shaders", NULL};
     PlatProc p = plat_spawn(argv, "cache/warm/extract.log", false);
     int rc = p ? plat_proc_wait(p, true) : -1;
     LOG("[warmup] shaders in data.trpfs: %s (%.1f s, cache/warm/extract.log)\n", rc == 0 ? "extracted" : "not extracted", (double)(plat_now_ns() - t0) / 1e9);
     if (rc == 0) {
-        FILE *f = fopen("cache/warm/romfs/.done", "w");
+        FILE *f = fopen("cache/warm/romfs/.done-all", "w");
         if (f) fclose(f);
     }
 }
@@ -321,10 +565,11 @@ static void *run(void *arg) {
     LOG("[warmup] %d shader programs (%d distinct stages): %d in the game's files, %d more in containers captured earlier "
         "(%.1f s, %.0f MB read)\n", g_set.nprogs, g_set.nstages, from_romfs, g_set.nprogs - from_romfs, (double)(t1 - t0) / 1e9,
         (double)atomic_load(&g_scanned) / 1048576.0);
-    atomic_store(&g_total, g_set.nprogs);
-    atomic_store(&g_phase, 2);
     maxwell_gmem_base = HEAP_BASE;  // (as exec.c sets them before translating)
     maxwell_gmem_size = HEAP_MAX;
+    plan_jobs();
+    atomic_store(&g_total, g_njobs);
+    atomic_store(&g_phase, 2);
     int nt = plat_cpu_count() - 1;
     if (g_background) nt = plat_cpu_count() / 2;  // (the game runs beside it)
     if (nt < 1) nt = 1;
@@ -334,6 +579,10 @@ static void *run(void *arg) {
     for (int i = 0; i < nt; i++) pthread_join(th[i], NULL);
     LOG("[warmup] compiled in %.1f s on %d threads%s\n", (double)(plat_now_ns() - t1) / 1e9, nt, g_background ? " (in the background)" : "");
     set_free(&g_set);
+    free(g_jobs), free(g_keys);
+    g_jobs = NULL, g_keys = NULL, g_njobs = 0;
+    for (int i = 0; i < g_st.n; i++) free(g_st.v[i].bytes);
+    free(g_st.v), memset(&g_st, 0, sizeof g_st);
     FILE *f = fopen(g_marker, "w");
     if (f) { fprintf(f, "%s\n", maxwell_build_id()); fclose(f); }
     atomic_store(&g_phase, 3);
@@ -513,6 +762,64 @@ static int g_cap_next;  // next of g_cap.progs for the compile thread
 static struct { uint64_t base; uint32_t size; } g_known[1024];
 static int g_nknown;
 static uint64_t g_miss[4096];  // 64 KB pages whose control sections are in no container (not searched again)
+// The shader manifest's programs, in captured containers: built first (their keys, their pipeline shader parts), as soon
+// as a loaded container brings their stages - while the game is still loading, before it draws with them. Z-A's
+// vertex stages in memory are often not the extracted packs' (206 of the manifest's 227 are found only in the loaded
+// containers), so the start's warm-up can't build them. CAP_TAB: stage hash maps (vertex / fragment) over g_cap's stages.
+#define CAP_TAB (1 << 19)
+static MEntry *g_cm;
+static int g_ncm;
+static char *g_cm_queued;
+static uint64_t *g_cvk, *g_cfk;
+static int *g_cvv, *g_cfv;
+static char *g_cap_hashed;  // per g_cap stage: bit 0 hashed as vertex, bit 1 as fragment
+static int g_cap_hashed_n;
+typedef struct { int vs, fs, e; } CapJob;
+static CapJob *g_pq;
+static int g_npq, g_pq_next, g_pq_cap;
+
+// (g_cap_lock held) the manifest's entries whose stages the containers captured so far have, queued
+static void cap_manifest(int from_prog) {
+    if (!g_cm) {
+        int cm = 0;
+        char shipped[1100];
+        const char *e = getenv("LARECOMP_SHADER_MANIFEST");
+        if (e) manifest_read(e, &g_cm, &g_ncm, &cm, NULL);
+        else if (rt_resource("shader_manifest.txt", "data/shader_manifest.txt", shipped, sizeof shipped)) manifest_read(shipped, &g_cm, &g_ncm, &cm, NULL);
+        manifest_read("cache/warm/played.txt", &g_cm, &g_ncm, &cm, NULL);
+        if (!g_cm) g_cm = calloc(1, sizeof *g_cm);
+        g_cm_queued = calloc((size_t)g_ncm + 1, 1);
+        g_cvk = calloc(CAP_TAB, sizeof *g_cvk), g_cfk = calloc(CAP_TAB, sizeof *g_cfk);
+        g_cvv = calloc(CAP_TAB, sizeof *g_cvv), g_cfv = calloc(CAP_TAB, sizeof *g_cfv);
+    }
+    if (!g_ncm) return;
+    if (g_cap_hashed_n < g_cap.nstages) {
+        g_cap_hashed = realloc(g_cap_hashed, (size_t)g_cap.capstages);
+        memset(g_cap_hashed + g_cap_hashed_n, 0, (size_t)(g_cap.nstages - g_cap_hashed_n));
+        g_cap_hashed_n = g_cap.nstages;
+    }
+    for (int i = from_prog; i < g_cap.nprogs; i++) {
+        int v = g_cap.progs[i].vs, f = g_cap.progs[i].fs;
+        if (!(g_cap_hashed[v] & 1)) {
+            const WStage *st = &g_cap.stages[v];
+            stage_put(g_cvk, g_cvv, CAP_TAB, maxwell_program_hash(st->code, st->max, st->cn ? st->code + st->max : NULL, st->cn, STAGE_VERTEX), v);
+            g_cap_hashed[v] |= 1;
+        }
+        if (f >= 0 && !(g_cap_hashed[f] & 2)) {
+            const WStage *st = &g_cap.stages[f];
+            stage_put(g_cfk, g_cfv, CAP_TAB, maxwell_program_hash(st->code, st->max, st->cn ? st->code + st->max : NULL, st->cn, STAGE_FRAGMENT), f);
+            g_cap_hashed[f] |= 2;
+        }
+    }
+    for (int i = 0; i < g_ncm; i++) {
+        if (g_cm_queued[i]) continue;
+        int v = stage_find(g_cvk, g_cvv, CAP_TAB, g_cm[i].vh), f = g_cm[i].fh ? stage_find(g_cfk, g_cfv, CAP_TAB, g_cm[i].fh) : -1;
+        if (v < 0 || (g_cm[i].fh && f < 0)) continue;
+        g_cm_queued[i] = 1;
+        if (g_npq == g_pq_cap) g_pq = realloc(g_pq, (size_t)(g_pq_cap = g_pq_cap ? g_pq_cap * 2 : 1024) * sizeof *g_pq);
+        g_pq[g_npq++] = (CapJob){v, f, i};
+    }
+}
 
 static void *cap_worker(void *arg) {
     (void)arg;
@@ -524,7 +831,19 @@ static void *cap_worker(void *arg) {
     uint64_t done = 0;
     for (;;) {
         pthread_mutex_lock(&g_cap_lock);
-        while (g_cap_next >= g_cap.nprogs) pthread_cond_wait(&g_cap_cond, &g_cap_lock);
+        while (g_pq_next >= g_npq && g_cap_next >= g_cap.nprogs) pthread_cond_wait(&g_cap_cond, &g_cap_lock);
+        if (g_pq_next < g_npq) {  // (the manifest's first, the one the game drew first - a scene's containers come in a burst)
+            int best = g_pq_next;
+            for (int i = g_pq_next + 1; i < g_npq; i++)
+                if (g_pq[i].e < g_pq[best].e) best = i;
+            CapJob j = g_pq[best];
+            g_pq[best] = g_pq[g_pq_next++];
+            WStage v = g_cap.stages[j.vs], f = j.fs >= 0 ? g_cap.stages[j.fs] : (WStage){0};  // (copies: the array may grow)
+            ShaderKey keys[2] = {g_cm[j.e].vk, g_cm[j.e].fk};
+            pthread_mutex_unlock(&g_cap_lock);
+            compile_keyed(&v, j.fs >= 0 ? &f : NULL, keys);
+            continue;
+        }
         WProg p = g_cap.progs[g_cap_next++];
         WStage v = g_cap.stages[p.vs], f = p.fs >= 0 ? g_cap.stages[p.fs] : (WStage){0};  // (copies: the array may grow)
         pthread_mutex_unlock(&g_cap_lock);
@@ -557,16 +876,28 @@ static void capture(uint64_t base, uint32_t size) {
     }
     static bool started;
     if (!g_cap.stage_tab) set_init(&g_cap, 1 << 18, 1 << 19);
+    int before = g_cap.nprogs, pq = g_npq;
     int added = scan_container(&g_cap, c, size, base);
+    cap_manifest(before);
     static int nlog;
     if (added && nlog++ < 16) LOG("[warmup] shader container at %llx (%u KB): %d new programs to compile\n", (unsigned long long)base, size >> 10, added);
-    if (added && !started) {
+    if (added && !started) {  // (a quarter of the CPUs: the manifest's parts are ~25-80 ms each, wanted before the draws)
         started = true;
-        pthread_t t;
-        pthread_create(&t, NULL, cap_worker, NULL);
-        pthread_detach(t);
+        int nt = plat_cpu_count() / 4;
+        if (nt < 1) nt = 1;
+        if (nt > 8) nt = 8;
+        for (int i = 0; i < nt; i++) {
+            pthread_t t;
+            pthread_create(&t, NULL, cap_worker, NULL);
+            pthread_detach(t);
+        }
     }
-    if (added) pthread_cond_signal(&g_cap_cond);
+    static int wlog = -1;  // LARECOMP_WARMUP_LOG=1: each container's manifest programs and the queue ahead of them
+    if (wlog < 0) wlog = getenv("LARECOMP_WARMUP_LOG") != NULL;
+    if (wlog && g_npq > pq)
+        LOG("[warmup] shader container at %llx: %d programs of the shader manifest queued first (%d before them)\n", (unsigned long long)base,
+            g_npq - pq, pq - g_pq_next);
+    if (added) pthread_cond_broadcast(&g_cap_cond);
 }
 
 // objects.c set_shaders: a program's stage with its control section at control (guest memory) was set up

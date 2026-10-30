@@ -7,6 +7,16 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- A first play no longer stutters on shaders. The first start's shader step ("Preparing the game's shaders") now also
+  knows what the game will draw with: data/shader_manifest.txt, recorded from play-throughs (the intro to Lumiose, a
+  street, a walk with the menu, a battle) - each program's hashes and the exact variant its draws use, and the render
+  states of the pipelines (hashes and settings only, nothing of the game's) - and builds those first, down to the
+  pipeline parts the GPU driver compiles (the ~50-100 ms per part a fresh driver cache costs). It also unpacks every
+  pack of the game data now, not only the shader packs: effects, UI and models carry shaders of their own (~20 s once
+  per install). Intro to the city on a fresh install (RTX 4090, Wait): draws skipped 952 -> 0, a new pipeline ready
+  after 60 ms on average -> under 1 ms, moments over 50 ms 20 -> 8 (a warm cache: 7 - the game's own scene loads).
+  Each install keeps adding what it draws to its own list (cache/warm/played.txt), which the next warm-up (after an
+  update) starts with. LARECOMP_WARMUP_LOG=1 logs what still compiles at a draw.
 - Steam Frame (and any GPU on 32-lane warp slices): the shader cache is kept between starts. The start-up clean-up
   deleted it - it ran before the GPU was set up, when the cache's folder name (which slices change) wasn't known yet
   - so every start compiled thousands of shaders again: 132 s of shader compiling and 93 C in the first minutes. Now a

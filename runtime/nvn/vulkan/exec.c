@@ -1557,6 +1557,7 @@ typedef struct {
     uint64_t fs_hash;   // vk_fs_hash of the fragment program (draw_: made on first use, fs_hash_ok)
     bool fs_hash_ok;
     bool warm;          // (vk_warm_program's: released right after, no pipeline parts)
+    uint64_t dbg_id[2], dbg_spv[2];  // (LARECOMP_WARMUP_LOG: program hashes, SPIR-V hashes)
 } Prog;
 
 static VkPipelineLayout make_layout(Prog *p, int nsets, VkShaderStageFlags s0, VkShaderStageFlags s1) {
@@ -1697,6 +1698,11 @@ static void compile_program(void *arg) {
         pthread_mutex_unlock(&lock);
     }
     if (!sv || !sf) { free(sv); free(sf); atomic_store(&p->state, 2); return; }
+    if (ENV("LARECOMP_WARMUP_LOG")) {
+        p->dbg_spv[0] = 0xcbf29ce484222325ull, p->dbg_spv[1] = 0xcbf29ce484222325ull;
+        for (size_t i = 0; i < nv * 4; i++) p->dbg_spv[0] = (p->dbg_spv[0] ^ ((const uint8_t *)sv)[i]) * 0x100000001B3ull;
+        for (size_t i = 0; i < nf * 4; i++) p->dbg_spv[1] = (p->dbg_spv[1] ^ ((const uint8_t *)sf)[i]) * 0x100000001B3ull;
+    }
     p->nbinds = vk_reflect(sv, nv, p->binds, MAX_BIND);
     p->nbinds += vk_reflect(sf, nf, p->binds + p->nbinds, MAX_BIND - p->nbinds);
     p->vs = vk_module(sv, nv);
@@ -1879,6 +1885,21 @@ static void translate_program(void *arg) {
         atomic_store(&p->state, 2);
         return;
     }
+    uint64_t vh = 0, fh = 0, t_xlat = SDL_GetTicksNS() - t0;
+    static int wlog = -1;  // LARECOMP_WARMUP_LOG=1: programs translated / compiled at their first draw (not in the caches yet)
+    if (wlog < 0) wlog = ENV("LARECOMP_WARMUP_LOG") != NULL;
+    if (!p->warm) {  // (the shader manifest: what the next warm-up builds first)
+        extern void warmup_note_program(uint64_t vh, uint64_t fh, const ShaderKey *vk, const ShaderKey *fk);
+        vh = maxwell_program_hash((const uint8_t *)(uintptr_t)p->code[0], p->cmax[0], (const uint8_t *)(uintptr_t)p->cst[0],
+                                           p->ncst[0], STAGE_VERTEX);
+        fh = p->code[1] ? maxwell_program_hash((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1],
+                                                        (const uint8_t *)(uintptr_t)p->cst[1], p->ncst[1], STAGE_FRAGMENT) : 0;
+        warmup_note_program(vh, fh, &p->vkey, &p->fkey);
+    }
+    if (wlog) {
+        p->dbg_id[0] = vh ? vh : maxwell_program_hash((const uint8_t *)(uintptr_t)p->code[0], p->cmax[0], (const uint8_t *)(uintptr_t)p->cst[0], p->ncst[0], STAGE_VERTEX);
+        p->dbg_id[1] = fh ? fh : p->code[1] ? maxwell_program_hash((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], (const uint8_t *)(uintptr_t)p->cst[1], p->ncst[1], STAGE_FRAGMENT) : 0;
+    }
     if (ENV("LARECOMP_GLSL_OVERRIDE_DIR")) {  // <code address>_fs.glsl replaces a fragment program's GLSL too
         char path[512];
         FILE *f;
@@ -1945,6 +1966,9 @@ static void translate_program(void *arg) {
         if (f) { fputs(p->fi->msl, f); fclose(f); }
     }
     compile_program(p);  // (this worker: queued again it would wait behind the other translations)
+    if (wlog && !p->warm && SDL_GetTicksNS() - t0 > 4000000)
+        LOG("[warmup] built at a draw: %016llx %016llx (translated %.1f ms, all %.1f ms)\n", (unsigned long long)vh, (unsigned long long)fh,
+            (double)t_xlat / 1e6, (double)(SDL_GetTicksNS() - t0) / 1e6);
 }
 
 #define PROG_TAB 4096
@@ -2476,6 +2500,7 @@ static bool gpl_lto(void) {
     return on;
 }
 
+static __thread bool tl_in_warm;  // (vk_warm_program_keyed / vk_warm_state on this thread: the warm-up's own parts)
 static void lib_create(Lib *l, VkGraphicsPipelineCreateInfo *pi, VkGraphicsPipelineLibraryFlagsEXT part) {
     VkGraphicsPipelineLibraryCreateInfoEXT li = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT,
                                                  .pNext = (void *)pi->pNext, .flags = part};
@@ -2485,6 +2510,10 @@ static void lib_create(Lib *l, VkGraphicsPipelineCreateInfo *pi, VkGraphicsPipel
     uint64_t t0 = SDL_GetTicksNS();
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, pi, NULL, &l->pipe);
     atomic_fetch_add(&stat_lib_ns, SDL_GetTicksNS() - t0);
+    static int wlog = -1;  // (LARECOMP_WARMUP_LOG=1: a part made in play over 5 ms)
+    if (wlog < 0) wlog = ENV("LARECOMP_WARMUP_LOG") != NULL;
+    if (wlog && !tl_in_warm && SDL_GetTicksNS() - t0 > 5000000)
+        LOG("[warmup] pipeline part %#x made at play: %.1f ms\n", (unsigned)part, (double)(SDL_GetTicksNS() - t0) / 1e6);
     atomic_fetch_add(&stat_libs, 1);
     if (r == VK_SUCCESS) atomic_fetch_add(&new_pipes, 1);
     else {
@@ -2496,6 +2525,26 @@ static void lib_create(Lib *l, VkGraphicsPipelineCreateInfo *pi, VkGraphicsPipel
 
 static void lib_build(Lib *l, int part, const PipeKey *k);
 // The part for key: built here if no one has started it, else waited for (another worker is building it)
+// The state parts' inputs (also what the shader manifest records of them: warmup.c, vk_warm_state)
+typedef struct { uint32_t mask, fmt[32], off[32], bind[32], stride[17], divisor[17], streams; uint8_t topo; } ViState;
+typedef struct { VkFormat color[8], depth, stencil; uint32_t ncolor, samples, write_mask[8]; uint8_t blend[8][8], blend_on, a2c; } FoState;
+static void vi_state(const PipeKey *k, ViState *v) {
+    memset(v, 0, sizeof *v);
+    v->mask = k->attr_mask, v->streams = k->used_streams, v->topo = k->topo_class;
+    for (int i = 0; i < 32; i++) if (k->attr_mask & (1u << i)) v->fmt[i] = k->attr_fmt[i], v->off[i] = k->attr_off[i], v->bind[i] = k->attr_bind[i];
+    for (int i = 0; i < 17; i++) if (k->used_streams & (1u << i)) v->stride[i] = k->stride[i], v->divisor[i] = k->divisor[i];
+}
+static void fo_state(const PipeKey *k, FoState *v) {
+    memset(v, 0, sizeof *v);
+    v->ncolor = k->ncolor, v->depth = k->depth, v->stencil = k->stencil, v->samples = k->samples, v->a2c = k->a2c;
+    v->blend_on = k->blend_on;
+    for (uint32_t i = 0; i < k->ncolor && i < 8; i++) {
+        v->color[i] = k->color[i], v->write_mask[i] = k->write_mask[i];
+        if ((k->blend_on >> i) & 1) memcpy(v->blend[i], k->blend[i], 8);
+    }
+}
+static __thread bool tl_warm_state;  // (vk_warm_state: not noted as played)
+static bool vk_warm_state_build(int kind, const void *state, size_t n, Prog *none);
 static VkPipeline lib_get(uint64_t key, int part, const PipeKey *k) {
     pthread_mutex_lock(&lib_lock);
     uint32_t sl = (uint32_t)(key ^ (key >> 29)) & (LIB_TAB - 1);
@@ -2510,6 +2559,12 @@ static VkPipeline lib_get(uint64_t key, int part, const PipeKey *k) {
     }
     pthread_mutex_unlock(&lib_lock);
     if (!l) return VK_NULL_HANDLE;  // (table full: the caller builds a whole pipeline)
+    if (mine && !tl_warm && !tl_warm_state && (part == VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT ||
+                             part == VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT)) {  // (the manifest's states)
+        extern void warmup_note_state(int kind, const void *state, size_t n);
+        if (part == VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT) { ViState v; vi_state(k, &v); warmup_note_state(1, &v, sizeof v); }
+        else { FoState v; fo_state(k, &v); warmup_note_state(4, &v, sizeof v); }
+    }
     if (mine) lib_build(l, part, k);
     else while (atomic_load(&l->state) == 0) SDL_DelayNS(50000);
     return atomic_load(&l->state) == 1 ? l->pipe : VK_NULL_HANDLE;
@@ -2537,18 +2592,22 @@ static void lib_build(Lib *l, int part, const PipeKey *k) {
             pi.pNext = &s.ri, pi.pColorBlendState = &s.cb, pi.pMultisampleState = &s.ms;
             break;
         }
+        uint64_t t0 = SDL_GetTicksNS();
         lib_create(l, &pi, (VkGraphicsPipelineLibraryFlagsEXT)part);
+        if ((part == VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT || part == VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT) &&
+            ENV("LARECOMP_WARMUP_LOG"))
+            LOG("[warmup] %s part %#x prog %016llx %016llx spv %016llx %016llx fill %d clamp %d binds %u: %.1f ms\n", tl_in_warm ? "warm" : "play",
+                (unsigned)part, (unsigned long long)k->prog->dbg_id[0], (unsigned long long)k->prog->dbg_id[1],
+                (unsigned long long)k->prog->dbg_spv[0], (unsigned long long)k->prog->dbg_spv[1], k->poly_fill, k->depth_clamp,
+                k->prog->nbinds, (double)(SDL_GetTicksNS() - t0) / 1e6);
     }
 }
 
 static uint64_t lib_key(uint64_t kind, const void *p, size_t n) { return hash_words(0x6a09e667f3bcc909ull * kind, p, n) | 1; }
 
 static uint64_t key_vertex_input(const PipeKey *k) {
-    struct { uint32_t mask, fmt[32], off[32], bind[32], stride[17], divisor[17], streams; uint8_t topo; } v;
-    memset(&v, 0, sizeof v);
-    v.mask = k->attr_mask, v.streams = k->used_streams, v.topo = k->topo_class;
-    for (int i = 0; i < 32; i++) if (k->attr_mask & (1u << i)) v.fmt[i] = k->attr_fmt[i], v.off[i] = k->attr_off[i], v.bind[i] = k->attr_bind[i];
-    for (int i = 0; i < 17; i++) if (k->used_streams & (1u << i)) v.stride[i] = k->stride[i], v.divisor[i] = k->divisor[i];
+    ViState v;
+    vi_state(k, &v);
     return lib_key(1, &v, sizeof v);
 }
 static uint64_t key_vertex_shader(const PipeKey *k) {
@@ -2560,15 +2619,40 @@ static uint64_t key_fragment_shader(const PipeKey *k) {
     return lib_key(3, &v, sizeof v);
 }
 static uint64_t key_output(const PipeKey *k) {
-    struct { VkFormat color[8], depth, stencil; uint32_t ncolor, samples, write_mask[8]; uint8_t blend[8][8], blend_on, a2c; } v;
-    memset(&v, 0, sizeof v);
-    v.ncolor = k->ncolor, v.depth = k->depth, v.stencil = k->stencil, v.samples = k->samples, v.a2c = k->a2c;
-    v.blend_on = k->blend_on;
-    for (uint32_t i = 0; i < k->ncolor && i < 8; i++) {
-        v.color[i] = k->color[i], v.write_mask[i] = k->write_mask[i];
-        if ((k->blend_on >> i) & 1) memcpy(v.blend[i], k->blend[i], 8);
-    }
+    FoState v;
+    fo_state(k, &v);
     return lib_key(4, &v, sizeof v);
+}
+
+// A state part (vertex input: kind 1, fragment output: kind 4) built ahead from a recorded state (warmup.c, the shader
+// manifest): kept in lib_tab as play would have made it - a scene's new vertex layouts and target / blend combinations
+// cost ~10-50 ms each on a fresh driver cache, built one after another as its draws first ask (the hitches left on a
+// first play once its shaders were ready). They depend on no program: a zeroed one stands in.
+bool vk_warm_state(int kind, const void *state, size_t n) {
+    static Prog none;
+    tl_warm_state = tl_in_warm = true;
+    bool ok = vk_warm_state_build(kind, state, n, &none);
+    tl_warm_state = tl_in_warm = false;
+    return ok;
+}
+static bool vk_warm_state_build(int kind, const void *state, size_t n, Prog *none) {
+    PipeKey k;
+    memset(&k, 0, sizeof k);
+    k.prog = none;
+    if (kind == 1 && n == sizeof(ViState)) {
+        const ViState *v = state;
+        k.attr_mask = v->mask, k.used_streams = v->streams, k.topo_class = v->topo;
+        memcpy(k.attr_fmt, v->fmt, sizeof k.attr_fmt), memcpy(k.attr_off, v->off, sizeof k.attr_off), memcpy(k.attr_bind, v->bind, sizeof k.attr_bind);
+        memcpy(k.stride, v->stride, sizeof k.stride), memcpy(k.divisor, v->divisor, sizeof k.divisor);
+        return lib_get(key_vertex_input(&k), VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT, &k) != VK_NULL_HANDLE;
+    }
+    if (kind == 4 && n == sizeof(FoState)) {
+        const FoState *v = state;
+        k.ncolor = v->ncolor, k.depth = v->depth, k.stencil = v->stencil, k.samples = v->samples, k.a2c = v->a2c, k.blend_on = v->blend_on;
+        memcpy(k.color, v->color, sizeof k.color), memcpy(k.write_mask, v->write_mask, sizeof k.write_mask), memcpy(k.blend, v->blend, sizeof k.blend);
+        return lib_get(key_output(&k), VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT, &k) != VK_NULL_HANDLE;
+    }
+    return false;
 }
 
 // The four parts linked (fast: no optimization across them). false: a part failed - the caller builds it whole.
@@ -2587,6 +2671,7 @@ static bool gpl_link(Pipe *pp) {
     uint64_t t0 = SDL_GetTicksNS();
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, VK_NULL_HANDLE, 1, &pi, NULL, &pp->pipe);
     atomic_fetch_add(&stat_link_ns, SDL_GetTicksNS() - t0);
+    if (ENV("LARECOMP_WARMUP_LOG") && SDL_GetTicksNS() - t0 > 5000000) LOG("[warmup] pipeline link: %.1f ms\n", (double)(SDL_GetTicksNS() - t0) / 1e6);
     atomic_fetch_add(&stat_links, 1);
     if (r != VK_SUCCESS) {
         static int n;
@@ -2666,18 +2751,25 @@ static void build_pipeline(void *arg) {
 // state and released, for the driver's shader cache. That only partly helps the draws' own pipelines later (NVIDIA, fresh
 // shader cache, PLA walk test: pipeline creation 10.3 -> 6.0 s) for a long wait (8427 programs: 98 s on 23 threads
 // instead of 17), so the warm-up asks for it only with LARECOMP_WARMUP_PIPELINES=1. false: failed.
-bool vk_warm_program(const uint8_t *vs, size_t vmax, size_t vcn, const uint8_t *fs, size_t fmax, size_t fcn, size_t flen, bool pipeline) {
+// keys: a shader manifest entry's (warmup.c) - translated with them, and its pipeline shader parts built into the driver's
+// caches as gpl_prebuild makes them in play (where they are then read back, not compiled); NULL: the usual key, no parts
+// unless LARECOMP_WARMUP_PARTS
+bool vk_warm_program_keyed(const uint8_t *vs, size_t vmax, size_t vcn, const uint8_t *fs, size_t fmax, size_t fcn, size_t flen,
+                           bool pipeline, const ShaderKey *vkey, const ShaderKey *fkey) {
     Prog *p = calloc(1, sizeof *p);
+    tl_in_warm = true;
     p->fs_len = fs ? (flen ? flen : 1) : 0;
     p->code[0] = (uint64_t)(uintptr_t)vs, p->cmax[0] = vmax;
     p->code[1] = (uint64_t)(uintptr_t)fs, p->cmax[1] = fs ? fmax : 0;
     if (vcn) p->cst[0] = (uint64_t)(uintptr_t)(vs + vmax), p->ncst[0] = vcn;
     if (fs && fcn) p->cst[1] = (uint64_t)(uintptr_t)(fs + fmax), p->ncst[1] = fcn;
     p->vkey.glsl = p->fkey.glsl = 1;  // (flip_y / depth_minus_one 0: window origin and depth mode 1 in both Legends games)
+    if (vkey) p->vkey = *vkey;
+    if (fkey && fs) p->fkey = *fkey;
     p->warm = true;
     translate_program(p);  // (and compile_program)
     bool ok = atomic_load(&p->state) == 1;
-    if (ok && g_vk.gpl && ENV("LARECOMP_WARMUP_PARTS")) {  // (opt-in: ~80 ms of CPU a part, 2 a program - minutes for the game)
+    if (ok && g_vk.gpl && (vkey || ENV("LARECOMP_WARMUP_PARTS"))) {  // (all programs: opt-in, ~80 ms of CPU a part - minutes)
         // its two shader parts, as gpl_prebuild makes them in play, into the pipeline cache: in play they are then read
         // back instead of compiled (~50-100 ms each, cold, on NVIDIA). Built and released (not kept in lib_tab: this
         // program is freed below).
@@ -2717,6 +2809,7 @@ bool vk_warm_program(const uint8_t *vs, size_t vmax, size_t vcn, const uint8_t *
     if (p->fi && p->code[1]) maxwell_free(p->fi);
     else if (p->fi) { free(p->fi->msl); free(p->fi); }
     free(p);
+    tl_in_warm = false;
     return ok;
 }
 
@@ -4217,6 +4310,9 @@ static bool wait_built(_Atomic int *state, int kind) {
     bool r = wait_budget(state);
     uint64_t dt = SDL_GetTicksNS() - t0;
     if (kind) prof_wpipe_n++, prof_wpipe_ns += dt; else prof_wprog_n++, prof_wprog_ns += dt;
+    static int wlog = -1;  // (LARECOMP_WARMUP_LOG=1: a draw's wait over 10 ms)
+    if (wlog < 0) wlog = ENV("LARECOMP_WARMUP_LOG") != NULL;
+    if (wlog && dt > 10000000) LOG("[warmup] a draw waited %.1f ms for its %s\n", (double)dt / 1e6, kind ? "pipeline" : "program");
     return r;
 }
 static bool wait_budget(_Atomic int *state) {

@@ -3491,6 +3491,13 @@ static void xuse_put(uint64_t code, const XUse *u, bool file) {
     if (!ok || rename(tmp, path) != 0) remove(tmp);
 }
 
+uint64_t maxwell_program_hash(const uint8_t *blob, size_t max_size, const uint8_t *consts, size_t nconsts, int stage) {
+    if (nconsts > 0x10000) nconsts = 0x10000;
+    uint64_t code = xfnv(blob, program_len(blob, max_size, stage), 0xcbf29ce484222325ull ^ (uint64_t)stage);
+    if (consts && nconsts) code = xfnv(consts, nconsts, code ^ 0xc1);  // (BRX targets come from them; none: as without them)
+    return code ? code : 1;
+}
+
 ShaderInfo *maxwell_translate_consts(const uint8_t *blob, size_t max_size, const uint8_t *consts, size_t nconsts, int stage,
                                      const ShaderKey *key) {
     if (nconsts > 0x10000) nconsts = 0x10000;
@@ -3500,9 +3507,7 @@ ShaderInfo *maxwell_translate_consts(const uint8_t *blob, size_t max_size, const
               getenv("LARECOMP_VK_PRECISE") || getenv("LARECOMP_SAVE_MSL") || getenv("LARECOMP_DUMP_FAILED_SHADERS") ||
               getenv("LARECOMP_XLAT_FLOW_DYN") || getenv("LARECOMP_XLAT_NO_RETYPE");
     if (off || maxwell_plain_glsl || maxwell_dbg_code || !key) return translate_impl(blob, max_size, consts, nconsts, stage, key);
-    uint64_t code = xfnv(blob, program_len(blob, max_size, stage), 0xcbf29ce484222325ull ^ (uint64_t)stage);
-    if (consts) code = xfnv(consts, nconsts, code ^ 0xc1);  // (BRX targets come from them)
-    if (!code) code = 1;
+    uint64_t code = maxwell_program_hash(blob, max_size, consts, nconsts, stage);
     XUse use;
     bool known = xuse_get(code, &use);
     ShaderKey used = known ? key_used(key, &use) : *key;

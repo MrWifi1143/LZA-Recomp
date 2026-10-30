@@ -46,6 +46,7 @@ mkdir -p "$D/gamelib-src"
 cp runtime/{cpu.h,simd.h,simd_fp.h,gamelib.h} tools/gamelib_entry.c runtime/hle/hle_symbols.txt "$D/gamelib-src/"
 cp docs/icon/icon_1024.png "$D/icon.png"
 cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$D/"
+cp data/shader_manifest.txt "$D/"  # (the warm-up's first programs: runtime/nvn/vulkan/warmup.c)
 cp docs/release-README.txt "$D/README.txt"
 # licenses: this project's, then every bundled component's (THIRD-PARTY-NOTICES.md says which is which)
 cp LICENSE "$D/LICENSE.txt"
