@@ -277,7 +277,7 @@ static void attr_load(Ctx *c, int dst, uint32_t addr, const char *idx) {
             c->in_attr_mask |= 1u << a;
             c->vs_in_comp[a] |= 1u << comp;
             int kind = c->key ? c->key->attr_kind[a] : 0;
-            if (kind == 0 && c->glsl) sprintf(e, "floatBitsToUint(in.a%d[%d])", a, comp);  // (a vec4: glsl_retype takes it off)
+            if (kind == 0 && c->glsl && !maxwell_plain_glsl) sprintf(e, "floatBitsToUint(in.a%d[%d])", a, comp);  // (a vec4: glsl_retype takes it off)
             else sprintf(e, "as_type<uint>(in.a%d[%d])", a, comp);
         } else if (addr == 0x2F8) { c->uses_iid = true; strcpy(e, "iid"); }
         else if (addr == 0x2FC) { c->uses_vid = true; strcpy(e, "vid"); }
@@ -570,7 +570,7 @@ static void write_tex_result(Ctx *c, int slot, const char *call, uint32_t mask, 
     for (int comp = 0; comp < 4; comp++) {
         if (!(mask & (1u << comp))) continue;
         int r = regs[n++];
-        if (r != RZ) { c->reg_used[r] = 1; sp(&c->body, c->glsl && !stencil ? "      r%d = floatBitsToUint(t[%d]);\n" : "      r%d = as_type<uint>(t[%d]);\n", r, comp); }
+        if (r != RZ) { c->reg_used[r] = 1; sp(&c->body, c->glsl && !stencil && !maxwell_plain_glsl ? "      r%d = floatBitsToUint(t[%d]);\n" : "      r%d = as_type<uint>(t[%d]);\n", r, comp); }
     }
     sp(&c->body, "    }\n");
 }
@@ -2150,7 +2150,7 @@ static bool uint_arg(const char *q) {
         q += 2;
         while ((*q >= '0' && *q <= '9') || (*q >= 'a' && *q <= 'f') || (*q >= 'A' && *q <= 'F')) q++;
         if (*q++ != 'u') return false;
-    } else if (*q >= '0' && *q <= '9') {  // (0u: RZ)
+    } else if (*q >= '0' && *q <= '9' && !maxwell_plain_glsl) {  // (0u: RZ)
         while (*q >= '0' && *q <= '9') q++;
         if (*q++ != 'u') return false;
     } else return false;
@@ -2218,7 +2218,7 @@ static void glsl_rewrite(Ctx *c, Str *o, const char *src) {
             if (!gt) { fail(c, "glsl: bad as_type"); return; }
             int tn = (int)(gt - p - 1);
             if (tn == 5 && !strncmp(p + 1, "float", 5)) sp(o, uint_arg(gt + 1) ? "uintBitsToFloat" : "as_f");
-            else if (tn == 4 && !strncmp(p + 1, "uint", 4)) sp(o, float_arg(gt + 1) ? "floatBitsToUint" : "as_u");
+            else if (tn == 4 && !strncmp(p + 1, "uint", 4)) sp(o, float_arg(gt + 1) && !maxwell_plain_glsl ? "floatBitsToUint" : "as_u");
             else if (tn == 3 && !strncmp(p + 1, "int", 3)) sp(o, "as_i");
             else if (tn == 5 && !strncmp(p + 1, "half2", 5)) sp(o, "unpack_h2");
             else { fail(c, "glsl: as_type<%.*s>", tn, p + 1); return; }
@@ -2613,7 +2613,7 @@ static char *drop_unused_helpers(char *src) {
 static char *glsl_retype(char *src) {
     static int off = -1;
     if (off < 0) off = getenv("LARECOMP_XLAT_NO_RETYPE") != NULL;
-    if (off) return src;
+    if (off || maxwell_plain_glsl) return src;
     return drop_unused_helpers(fold_casts(retype_cbufs(retype_regs(src))));
 }
 
@@ -3381,6 +3381,7 @@ static const char k_xlat_build[] = __DATE__ " " __TIME__;
 #endif
 const char *maxwell_build_id(void) { return k_xlat_build; }  // (runtime/nvn/vulkan/warmup.c: its marker)
 bool g_maxwell_warp_slices;  // (shader.h)
+_Thread_local bool maxwell_plain_glsl;
 
 const char *maxwell_cache_tag(void) {
     static char tags[2][17];  // (by g_maxwell_warp_slices: device.c may set it after a first call)
@@ -3498,7 +3499,7 @@ ShaderInfo *maxwell_translate_consts(const uint8_t *blob, size_t max_size, const
         off = getenv("LARECOMP_NO_XLAT_CACHE") || getenv("LARECOMP_NO_DISCARD") || getenv("LARECOMP_VK_EXACT_H2F") ||
               getenv("LARECOMP_VK_PRECISE") || getenv("LARECOMP_SAVE_MSL") || getenv("LARECOMP_DUMP_FAILED_SHADERS") ||
               getenv("LARECOMP_XLAT_FLOW_DYN") || getenv("LARECOMP_XLAT_NO_RETYPE");
-    if (off || maxwell_dbg_code || !key) return translate_impl(blob, max_size, consts, nconsts, stage, key);
+    if (off || maxwell_plain_glsl || maxwell_dbg_code || !key) return translate_impl(blob, max_size, consts, nconsts, stage, key);
     uint64_t code = xfnv(blob, program_len(blob, max_size, stage), 0xcbf29ce484222325ull ^ (uint64_t)stage);
     if (consts) code = xfnv(consts, nconsts, code ^ 0xc1);  // (BRX targets come from them)
     if (!code) code = 1;

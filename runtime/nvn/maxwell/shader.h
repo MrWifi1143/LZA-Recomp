@@ -98,6 +98,13 @@ extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
 // The GPU's subgroups are wider than 32 and can't be made 32 (Adreno: 64 / 128): warp operations work on each 32-lane
 // slice as a warp (lane id, masks, votes, shuffles). Set before the first translation (vulkan/device.c).
 extern bool g_maxwell_warp_slices;
+// This thread's next translations in the GLSL spelling from before glsl_retype (uint registers, as_u / as_f), not cached:
+// for a shader the renderer then patches by its text (runtime/nvn/vulkan/exec.c za_soft_shadows)
+#ifdef __cplusplus
+extern thread_local bool maxwell_plain_glsl;
+#else
+extern _Thread_local bool maxwell_plain_glsl;
+#endif
 // Debug: when translating the shader whose code starts at maxwell_dbg_code, output register
 // maxwell_dbg_reg as captured after the instruction at maxwell_dbg_pc (greyscale, all targets).
 extern const uint8_t *maxwell_dbg_code;

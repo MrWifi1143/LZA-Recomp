@@ -1861,8 +1861,12 @@ static void translate_program(void *arg) {
         p->fi->msl = strdup("#version 460\nvoid main() {}\n");
     } else if (p->vi->msl) {
         p->fkey.vs_out_mask = p->vi->out_mask;
+        // (the shadow mask that za_soft_shadows patches below: in the spelling its patterns match)
+        extern uint64_t vk_prog_fs_hash(uint64_t fs, size_t len);
+        maxwell_plain_glsl = g_settings.shadow_smooth && vk_prog_fs_hash(p->code[1], p->fs_len) == 0xec1c842f7a98584dull;
         p->fi = maxwell_translate_consts((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], (const uint8_t *)(uintptr_t)p->cst[1],
                                          p->ncst[1], STAGE_FRAGMENT, &p->fkey);
+        maxwell_plain_glsl = false;
     }
     atomic_fetch_add(&stat_translate_ns, SDL_GetTicksNS() - t0);
     if (!p->vi->msl) {
