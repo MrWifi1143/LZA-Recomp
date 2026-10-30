@@ -543,7 +543,7 @@ static void banner(ImDrawList *d, ImVec2 a, ImVec2 b, float t) {
         d->AddCircleFilled(ImVec2(cx, base - h * 0.40f), h * 0.011f * i, IM_COL32(150, 230, 90, 2), 64);
     uint32_t s = 7;
     for (int layer = 0; layer < 2; layer++) {  // back row (taller, darker), then the tower, then the front row
-        if (layer == 1) prism_tower(d, cx, base, h * 0.74f, t);
+        if (layer == 1) prism_tower(d, cx, base + h * 0.07f, h * 0.76f, t);  // (its foot down in the street: no buildings below it)
         float x = a.x - 10;
         while (x < b.x) {
             float bw = 26.0f + (float)(rnd(&s) % 48), bh = h * (layer ? 0.06f + (float)(rnd(&s) % 100) * 0.0011f

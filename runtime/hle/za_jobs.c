@@ -242,6 +242,10 @@ void za_jobs_configure(void) {
     if (g_want < 0) {  // (auto: one more per fast physical core past five, up to three - see above)
         int fast = cpupin_fast_cores();
         g_want = fast > 5 ? (fast - 5 < 3 ? fast - 5 : 3) : 0;
+#ifdef _WIN32
+        g_want = 0;  // (Windows: none - the Windows build under Wine crashed with three more right after the title
+                     // (a jump to data on an extra worker's core); not debugged yet: extra_workers = N to try them)
+#endif
     }
     if (g_want <= 0) { g_want = 0; LOG("[za] job workers: the game's three\n"); return; }
     if (g_want > 4) g_want = 4;
