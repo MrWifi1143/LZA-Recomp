@@ -59,7 +59,10 @@ ifeq ($(ARCH),x86_64)
 GENARCH  ?= -march=x86-64-v3  # as on Windows: AVX2 + FMA for the lifted FP/SIMD code (checked at startup)
 endif
 ifeq ($(ARCH),aarch64)
-GENARCH  ?= -include sj_aarch64.h  # (guest setjmp points: the runtime's own longjmp, runtime/sj_aarch64.h)
+# ARMv8.2 (LSE atomics inline: the default outlined them into a call per atomic that tests the CPU first, 7% of the
+# Steam Frame's CPU time; every ARMv8.2+ core has them - Cortex-A55 / A75 and later, Snapdragon 845+, Apple M1)
+ARMARCH  := -march=armv8.2-a
+GENARCH  ?= -include sj_aarch64.h $(ARMARCH)  # (guest setjmp points: the runtime's own longjmp, runtime/sj_aarch64.h)
 endif
 GENFLAGS += $(GENARCH) -fPIC
 OSFLAGS  := -Wno-format  # (%llx for uint64_t, which is unsigned long here: the same size)
@@ -111,7 +114,7 @@ GAMELIB_SRCS := tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools
 GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(GENFLAGS)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
 
 RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
-RTFLAGS  := -O2 -g -fno-strict-aliasing -fdenormal-fp-math=dynamic -Wall -Wno-unused-function -Iruntime -Iruntime/nvn -Ithird_party $(DEPINC) $(OSFLAGS)
+RTFLAGS  := -O2 -g -fno-strict-aliasing -fdenormal-fp-math=dynamic -Wall -Wno-unused-function -Iruntime -Iruntime/nvn -Ithird_party $(DEPINC) $(OSFLAGS) $(ARMARCH)
 CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn -Ithird_party $(DEPINC)
 
 all: $(EXE) $(if $(strip $(GEN_SRC)),$(GAMELIB))  # (strip: an empty wildcard list is spaces, which $(if) took as true)

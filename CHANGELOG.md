@@ -7,6 +7,9 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- ARM Linux builds (the Steam Frame) target ARMv8.2: atomics are single instructions instead of a call that checks
+  the CPU each time (7% of the Frame's CPU time went to those calls; frame rate unchanged - they weren't on the critical
+  path - but less work). Every ARMv8.2+ core qualifies (Cortex-A55 / A75 and later, Snapdragon 845+, Apple M1).
 - A first play no longer stutters on shaders. The first start's shader step ("Preparing the game's shaders") now also
   knows what the game will draw with: data/shader_manifest.txt, recorded from play-throughs (the intro to Lumiose, a
   street, a walk with the menu, a battle) - each program's hashes and the exact variant its draws use, and the render
