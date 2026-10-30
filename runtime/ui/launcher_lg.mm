@@ -394,8 +394,8 @@ static void banner_sky(ImDrawList *d, ImVec2 a, ImVec2 b) {
 static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t) {
     const ImU32 fill = IM_COL32(12, 18, 30, 255), c = IM_COL32(160, 220, 90, 235), dim = IM_COL32(120, 180, 70, 130);
     auto Y = [&](float f) { return ground - f * H; };
-    auto legw = [&](float f) { float u = (f - 0.075f) / 0.165f; return H * (0.070f + 0.085f * (1 - u) * (1 - u)); };
-    auto shw = [&](float f) { float u = f - 0.52f; return H * (0.036f + 0.52f * u * u); };
+    auto legw = [&](float f) { float u = (f - 0.075f) / 0.165f; return H * (0.075f + 0.105f * (1 - u) * (1 - u)); };  // (the base the widest)
+    auto shw = [&](float f) { float u = f - 0.52f; return H * (0.036f + (u > 0 ? 0.40f : 0.52f) * u * u); };  // (flaring less above the waist)
     float cup0 = shw(0.80f);
     ImVec2 tips[2], back_lights[2];  // (the fins' red lights)
     // a body part between heights f0..f1 with half width hw(f): filled dark, its two sides stroked
@@ -458,15 +458,15 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
         // their outer corners); between them the tower body goes on up as a wide middle column, the fins split off it
         // by narrow slits with rounded floors, the column stepping in to the needle; a second pair of fins stands
         // behind (drawn first, dimmer)
-        float o = cup0, fin = o + 0.040f * H;  // (the shaft's half width where the crown starts; the fins' outer corners)
+        float o = cup0, fin = o + 0.028f * H;  // (the shaft's half width where the crown starts; the fins' outer corners)
         for (int k = -1; k <= 1; k += 2) {  // (behind the column and the front fin: their tops show above the column's
                                             // first step, a little below the front fins' outer corners)
-            ImVec2 q[4] = {ImVec2(cx + k * 0.020f * H, Y(0.84f)), ImVec2(cx + k * 0.088f * H, Y(0.84f)),
-                           ImVec2(cx + k * 0.088f * H, Y(0.980f)), ImVec2(cx + k * 0.034f * H, Y(0.962f))};
+            ImVec2 q[4] = {ImVec2(cx + k * 0.020f * H, Y(0.84f)), ImVec2(cx + k * 0.074f * H, Y(0.84f)),
+                           ImVec2(cx + k * 0.074f * H, Y(0.980f)), ImVec2(cx + k * 0.034f * H, Y(0.962f))};
             d->AddQuadFilled(q[0], q[1], q[2], q[3], fill);
             d->AddPolyline(q, 4, IM_COL32(150, 210, 85, 190), ImDrawFlags_Closed, 1.8f);
             d->AddLine(ImVec2(cx + k * 0.046f * H, Y(0.86f)), ImVec2(cx + k * 0.048f * H, Y(0.962f)), dim, 1.0f);  // (its face's edge)
-            back_lights[k > 0] = ImVec2(cx + k * 0.088f * H, Y(0.980f));  // (on the tip: the outer top corner, above the front fin)
+            back_lights[k > 0] = ImVec2(cx + k * 0.074f * H, Y(0.980f));  // (on the tip: the outer top corner, above the front fin)
         }
         // left half: up the shaft, out along the fin's outer edge, across its slanted top, down its inner edge into
         // the slit, round its floor, up the middle column's side and its steps to the needle
@@ -474,7 +474,7 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
             float f = 0.258f + 0.542f * i / 80;
             P[n++] = ImVec2(cx - shw(f), Y(f));
         }
-        bez(ImVec2(cx - o, Y(0.80f)), ImVec2(cx - o - 0.020f * H, Y(0.875f)), ImVec2(cx - fin, Y(0.970f)), 24, true);  // (keeps the shaft's slope)
+        bez(ImVec2(cx - o, Y(0.80f)), ImVec2(cx - o - 0.017f * H, Y(0.875f)), ImVec2(cx - fin, Y(0.970f)), 24, true);  // (keeps the shaft's slope)
         P[n++] = ImVec2(cx - o + 0.004f * H, Y(0.958f));                                  // the slanted top's inner corner
         float fi = o - 0.006f * H, col = 0.052f * H;                                      // (the fin's inner edge, the column's side)
         P[n++] = ImVec2(cx - fi, Y(0.910f));                                              // the fin's inner edge, down into the slit
