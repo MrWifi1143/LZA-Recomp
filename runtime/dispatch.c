@@ -7,6 +7,7 @@
 
 #include "gamelib.h"
 #include "hle.h"
+#include "sj_aarch64.h"  // (AArch64: the guest setjmp points longjmp with rt_sj_long)
 
 typedef struct { const uint64_t *addrs; const GuestFn *fns; uint64_t count, lo, hi; } FnTable;
 static FnTable tables[GAMELIB_MAX_MODULES];

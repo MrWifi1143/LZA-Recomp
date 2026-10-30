@@ -58,6 +58,9 @@ DEPINC   := $(if $(DEPS),-I$(DEPS)/include)
 ifeq ($(ARCH),x86_64)
 GENARCH  ?= -march=x86-64-v3  # as on Windows: AVX2 + FMA for the lifted FP/SIMD code (checked at startup)
 endif
+ifeq ($(ARCH),aarch64)
+GENARCH  ?= -include sj_aarch64.h  # (guest setjmp points: the runtime's own longjmp, runtime/sj_aarch64.h)
+endif
 GENFLAGS += $(GENARCH) -fPIC
 OSFLAGS  := -Wno-format  # (%llx for uint64_t, which is unsigned long here: the same size)
 SHADERC  ?= -lshaderc  # (Debian / Ubuntu's libshaderc.so; a shaderc built from source: -lshaderc_shared)
@@ -104,7 +107,7 @@ endif
 # flags). A library with another id is rebuilt by the start screen, never loaded.
 GAMELIB_SRCS := tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/patches.py \
                 tools/simd_c.py tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
-                runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h
+                runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h $(if $(filter aarch64,$(ARCH)),runtime/sj_aarch64.h)
 GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(GENFLAGS)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
 
 RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))

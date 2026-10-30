@@ -165,6 +165,13 @@ rewrite the Z-A sources in place (its header says how, and which addresses neede
 
 The Windows release is cross-built from Linux with zig: see `tools/windows/README.md`.
 
+ARM Linux (experimental; tested on a Steam Frame: SteamOS, Snapdragon, Adreno 750 with Mesa's Turnip) builds the same
+way on the device: `make gen` there writes AArch64-flavoured game code (the game's FP / SIMD as inline assembly). SteamOS
+has no SDL 3 package: build SDL 3 from source into a prefix and pass it as `DEPS=<prefix>` (and put `<prefix>/lib` in
+`LD_LIBRARY_PATH` to run). Adreno needs no settings: its driver can't map the game's memory, so the game's heap is
+made of GPU memory there, and its 64-lane subgroups run the game's 32-lane warp code in slices (see `CHANGELOG.md`).
+Headsets and handhelds heat up fast: a first run compiles thousands of shaders on every core.
+
 Never commit or share `extracted/`, `generated/`, `build/` (the built game library is recompiled game code), `save/`
 or anything else that comes from the game. See `CONTRIBUTING.md`.
 
