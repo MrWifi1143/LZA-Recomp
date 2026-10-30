@@ -130,6 +130,7 @@ static std::atomic<int> g_kbd{0};  // 1 open, 2 confirmed, 3 cancelled
 static std::atomic<bool> g_last_pad{false};
 static char g_kbd_text[96];
 static int g_kbd_max = 8;
+static char g_kbd_title[256];  // (the game's heading for it: swkbd.c)
 static bool capturing() { return g_open.load() || g_kbd.load() == 1; }
 // The game gets no input while this is true (runtime/hle/input.c): the question or the name entry is up.
 extern "C" bool menu_input_captured(void) { return capturing(); }
@@ -345,7 +346,7 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
     ImGui::Begin("##kbd", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                                     ImGuiWindowFlags_AlwaysAutoResize);
     ImGui::PushFont(g_font_big);
-    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", M("Enter a name", "Digite o nome", "Введите имя"));
+    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", g_kbd_title[0] ? g_kbd_title : M("Enter a name", "Digite o nome", "Введите имя"));
     ImGui::PopFont();
     static bool was_open, was_pad;
     bool pad = g_last_pad.load(), appearing = !was_open || pad != was_pad;  // (switching device: focus the new one)
@@ -372,9 +373,10 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
 
 // Game thread (runtime/hle/swkbd.c): show the dialog, re-present the last frame until it's answered.
 // Returns 1 confirmed (out = text, UTF-8), 0 cancelled.
-extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, int cap) {
+extern "C" int menu_keyboard_run(const char *initial, int max_len, const char *title, char *out, int cap) {
     extern void backend_represent(void);
     snprintf(g_kbd_text, sizeof g_kbd_text, "%s", initial ? initial : "");
+    snprintf(g_kbd_title, sizeof g_kbd_title, "%s", title ? title : "");
     g_kbd_max = max_len > 0 && max_len < (int)sizeof g_kbd_text / 4 ? max_len : 8;
     input_reset();
     g_kbd = 1;

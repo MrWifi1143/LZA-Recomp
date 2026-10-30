@@ -7,6 +7,14 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- Shaders build ~44% faster (the first start's shader warm-up, and new areas on a first visit): the translated
+  GLSL now types each register and constant buffer as float or uint by how it is used, instead of uint everywhere
+  with a conversion around every float operation, folds float constants, and leaves out helper functions a shader
+  doesn't call. glslang over the game's 8,735 shaders: 106 s -> 59.5 s, SPIR-V 17% smaller, none failing; pictures
+  the same (a saved scene, with and without, differs no more than two runs of either). The cache is rebuilt once.
+  `LARECOMP_XLAT_NO_RETYPE=1` turns it off.
+- The on-screen keyboard is headed with the game's own text ("What is your name?", the Link Code prompt's) instead
+  of always "Enter a name".
 - GPUs whose driver can't map the game's memory (no `VK_EXT_external_memory_host`: Mesa's Turnip on Adreno, the
   Steam Frame) no longer draw the world as huge stretched slabs: the game's heap is then made of GPU memory (dma-buf
   chunks mapped at its addresses, bound into one sparse buffer), so what its compute shaders write reaches the
