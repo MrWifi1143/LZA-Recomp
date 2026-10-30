@@ -904,7 +904,11 @@ static void present_pace(int interval) {
         static int plog = -1;
         static uint64_t n_frames, n_late, sum_back, max_back;
         if (plog < 0) plog = ENV("LARECOMP_PACE_LOG") != NULL;
-        uint64_t until = next > (uint64_t)margin + now ? next - (uint64_t)margin : now;
+        // (scaled to the time left: near the frame rate's limit - 144 on a game that does ~170 - holding the core early
+        // took ~0.5-0.8 ms a frame from the threads sharing it and more frames came late, 2.75% -> 4.4% over 110% of
+        // the period; there the take-back has little to wait for anyway)
+        uint64_t left = next > now ? next - now : 0, hold = (uint64_t)margin < left / 4 ? (uint64_t)margin : left / 4, spin = 300000 < left / 8 ? 300000 : left / 8;
+        uint64_t until = left > hold ? next - hold : now;  // (a late frame: no wait, the take-back measured alone)
         kernel_block_begin();
         if (until > now) plat_sleep_until_ns(until);
         kernel_block_end();
@@ -914,7 +918,7 @@ static void present_pace(int interval) {
         if (back + 300000 > margin) margin = back + 300000;  // ... to the slowest recent take-back, with room
         if (margin < 500000) margin = 500000;
         if (margin > (int64_t)period / 3) margin = (int64_t)period / 3;
-        if (next > got + 300000) plat_sleep_until_ns(next - 300000);
+        if (next > got + spin) plat_sleep_until_ns(next - spin);
         while (plat_now_ns() < next) {
 #if defined(__x86_64__)
             __builtin_ia32_pause();
