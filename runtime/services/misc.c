@@ -61,3 +61,23 @@ SERVICE("aoc:u", aoc_u) {
     default: ok_logger(s, req, resp);  // (PrepareAddOnContent, NotifyMount..., CheckAddOnContentMountStatus: ok)
     }
 }
+
+// ------------------------------------------------------------------ ngc:u (the profanity filter)
+// The names a trade brings (the Pokemon's nickname, its trainer's) are checked here: nothing is filtered. The stub's
+// empty answer left the game re-checking for good, on a white screen after the trade.
+SERVICE("ngc:u", ngc_u) {
+    (void)s;
+    switch (req->cmd) {
+    case 0: OUT(uint32_t, 0) = 1; resp_size(resp, 4); break;  // GetContentVersion
+    case 1: OUT(uint32_t, 0) = 0; resp_size(resp, 4); break;  // Check: no word matched
+    case 2: {                                                  // Mask: the text as it is, nothing masked
+        IpcBuf *in = in_buf(req, 0), *out = out_buf(req, 0);
+        if (in && out && in->addr && out->addr)
+            memcpy((void *)(uintptr_t)out->addr, (const void *)(uintptr_t)in->addr, in->size < out->size ? in->size : out->size);
+        OUT(uint32_t, 0) = 0;
+        resp_size(resp, 4);
+        break;
+    }
+    default: LOG("[ngc] cmd %u (ok)\n", req->cmd);
+    }
+}

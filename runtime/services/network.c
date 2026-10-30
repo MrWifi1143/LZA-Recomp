@@ -93,43 +93,4 @@ SERVICE("ssl", ssl) {
     else LOG("[ssl] cmd %u (ok)\n", req->cmd);
 }
 
-// ------------------------------------------------------------------ bsd:u (sockets)
-// Setting up succeeds; a new socket fails with ENETDOWN (the network is down) and a receive returns one zero byte.
-SERVICE("bsd:u", bsd_u) {
-    (void)s;
-    switch (req->cmd) {
-    case 2:  // Socket
-    case 3:  // SocketExempt
-        OUT(int32_t, 0) = -1;
-        OUT(int32_t, 4) = 100;  // ENETDOWN (Linux errno values, switchbrew)
-        resp_size(resp, 8);
-        break;
-    case 9:  // RecvFrom
-        OUT(int32_t, 0) = 1;
-        OUT(int32_t, 4) = 0;
-        resp_size(resp, 8);
-        break;
-    default: LOG("[bsd] bsd:u cmd %u (ok)\n", req->cmd);
-    }
-}
-
-// ------------------------------------------------------------------ ldn:u (local wireless)
-typedef struct { bool init; } Ldn;
-
-static void ldn_user(Service *s, IpcReq *req, IpcResp *resp) {
-    Ldn *u = s->state;
-    switch (req->cmd) {
-    case 0: OUT(uint32_t, 0) = u && u->init ? 1 : 0; resp_size(resp, 4); break;  // GetState: initialized or not
-    case 100: resp->copy_handles[resp->ncopy++] = signalled_event(); break;       // GetStateChangeEvent
-    case 102: OUT(uint16_t, 0) = 0; resp_size(resp, 4); break;                    // Scan: no network found
-    case 400: if (u) u->init = true; break;                                        // Initialize
-    case 401: if (u) u->init = false; break;                                       // Finalize
-    default: LOG("[ldn] IUserLocalCommunicationService cmd %u (ok, no wireless)\n", req->cmd);
-    }
-}
-
-SERVICE("ldn:u", ldn_u) {
-    (void)s;
-    if (req->cmd == 0) ipc_return_object(resp, service_new("IUserLocalCommunicationService", ldn_user, calloc(1, sizeof(Ldn))));
-    else LOG("[ldn] ldn:u cmd %u (ok)\n", req->cmd);
-}
+// bsd:u and ldn:u: ldn.c (local wireless play between copies of the game on this PC)

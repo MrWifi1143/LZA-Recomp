@@ -7,6 +7,12 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- Local wireless play between copies of the game on one PC (Linux): Link Play's "Nearby Players" - link trades
+  and private battles - with each copy as a console of its own (nn::ldn answered by the recomp, the game's Pia
+  traffic over loopback UDP). Tested with two copies: a trade both ways (saved) and a private battle room, battle
+  started. Sockets still only work inside such a network: the game never reaches the internet. The profanity filter
+  (`ngc:u`) now answers "clean" (the names a trade brings). Not yet: Windows, and copies on different PCs (LAN).
+  Known: with Frame Timing "Real time", the trade ends on a white screen after "... sent over ..." (fine on "Fixed").
 - Faster on CPUs with 6+ fast cores: `extra_workers = auto` (the default) now gives the game up to three job threads
   more than the Switch's three (one per fast physical core past five: 8 performance cores -> 3). Lumiose walk uncapped
   (1440p, Max people, Ultra shadows, i9-12900K, 3 runs each): 167 -> 179 fps, 1% low 120 -> 126, frames over 6.94 ms
