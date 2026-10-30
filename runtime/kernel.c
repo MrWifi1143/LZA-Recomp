@@ -1125,6 +1125,8 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         }
         region_remove(HEAP_BASE);
         if (size) region_add(HEAP_BASE, size, 5, 3);
+        extern void gpuheap_back(uint64_t addr, uint64_t size);
+        gpuheap_back(HEAP_BASE, size);  // (drivers that can't import host memory: the heap is GPU memory, gpuheap.c)
         x[0] = R_OK;
         x[1] = HEAP_BASE;
         break;

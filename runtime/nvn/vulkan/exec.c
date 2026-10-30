@@ -3327,6 +3327,68 @@ static bool gmem_import(uint64_t size) {
 static uint64_t gmem_tried;  // heap size the import was last attempted for (gmem_info imports / re-imports)
 static VkDescriptorBufferInfo gmem_info(void);
 
+// Without the host import (gpuheap.c: the heap window is GPU memory, dma-buf chunks mapped at their guest addresses):
+// one sparse buffer over the whole window, each chunk imported and bound into it as gpuheap backs it. Bound before the
+// work that may read it is submitted (a fence: binds are few, at load).
+#define GMEM_MAX_CHUNKS 256
+static VkDeviceMemory gmem_chunk[GMEM_MAX_CHUNKS];
+static bool gmem_sparse_bind(void) {
+    extern int gpuheap_take(uint64_t *off, int *fds, int max);
+    extern uint64_t gpuheap_end(void), gpuheap_chunk_size(void), g_gpuheap_end;
+    if (gmem_buf && __atomic_load_n(&g_gpuheap_end, __ATOMIC_ACQUIRE) == gmem_size) return true;  // (nothing new)
+    if (!gmem_buf) {
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = HEAP_MAX,
+                                 .flags = VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT,
+                                 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                          VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+                                          VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                                          (g_vk.xfb ? VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT : 0)};
+        if (vkCreateBuffer(g_vk.dev, &bi, NULL, &gmem_buf) != VK_SUCCESS) { gmem_buf = VK_NULL_HANDLE; return false; }
+        VkBufferDeviceAddressInfo dai = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = gmem_buf};
+        gmem_addr = vkGetBufferDeviceAddress(g_vk.dev, &dai);
+    }
+    uint64_t off[GMEM_MAX_CHUNKS];
+    int fds[GMEM_MAX_CHUNKS];
+    int n = gpuheap_take(off, fds, GMEM_MAX_CHUNKS);
+    if (n) {
+        VkMemoryRequirements req;
+        vkGetBufferMemoryRequirements(g_vk.dev, gmem_buf, &req);
+        PFN_vkGetMemoryFdPropertiesKHR fdprops = (PFN_vkGetMemoryFdPropertiesKHR)vkGetDeviceProcAddr(g_vk.dev, "vkGetMemoryFdPropertiesKHR");
+        VkSparseMemoryBind binds[GMEM_MAX_CHUNKS];
+        uint64_t chunk = gpuheap_chunk_size();
+        for (int i = 0; i < n; i++) {
+            VkMemoryFdPropertiesKHR fp = {.sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
+            if (fdprops) fdprops(g_vk.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, fds[i], &fp);
+            uint32_t bits = fp.memoryTypeBits & req.memoryTypeBits;
+            if (!bits) FATAL("guest heap: the GPU memory can't back the heap buffer (types %#x / %#x)\n", fp.memoryTypeBits, req.memoryTypeBits);
+            VkImportMemoryFdInfoKHR imp = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+                                           .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, .fd = fds[i]};
+            VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &imp, .allocationSize = chunk,
+                                       .memoryTypeIndex = (uint32_t)__builtin_ctz(bits)};
+            unsigned k = (unsigned)(off[i] / chunk);
+            VkResult r = k < GMEM_MAX_CHUNKS ? vkAllocateMemory(g_vk.dev, &ai, NULL, &gmem_chunk[k]) : VK_ERROR_OUT_OF_DEVICE_MEMORY;
+            if (r != VK_SUCCESS) FATAL("guest heap: importing its GPU memory failed (%d)\n", (int)r);
+            binds[i] = (VkSparseMemoryBind){.resourceOffset = off[i], .size = chunk, .memory = gmem_chunk[k]};
+        }
+        VkSparseBufferMemoryBindInfo bb = {.buffer = gmem_buf, .bindCount = (uint32_t)n, .pBinds = binds};
+        VkBindSparseInfo si = {.sType = VK_STRUCTURE_TYPE_BIND_SPARSE_INFO, .bufferBindCount = 1, .pBufferBinds = &bb};
+        VkFenceCreateInfo fci = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        VkFence fence;
+        vkCreateFence(g_vk.dev, &fci, NULL, &fence);
+        extern void vk_queue_lock(void), vk_queue_unlock(void);
+        vk_queue_lock();
+        VkResult r = vkQueueBindSparse(g_vk.queue, 1, &si, fence);
+        vk_queue_unlock();
+        if (r == VK_SUCCESS) r = vkWaitForFences(g_vk.dev, 1, &fence, VK_TRUE, UINT64_MAX);
+        vkDestroyFence(g_vk.dev, fence, NULL);
+        if (r != VK_SUCCESS) FATAL("guest heap: binding its GPU memory failed (%d)\n", (int)r);
+    }
+    uint64_t end = gpuheap_end();
+    if (end != gmem_size) LOG("[vk] guest heap bound for shader global memory: %llu MB (sparse)\n", (unsigned long long)(end >> 20));
+    gmem_size = end;
+    return true;
+}
+
 // What shaders read and write the guest heap through (binding GMEM_BUFFER_INDEX): its GPU address and the size imported,
 // a 16-byte uniform. The translator's GLSL turns them into a buffer reference (GL_EXT_buffer_reference): 64-bit
 // addressing, no 4 GB limit - the heap was a storage buffer, and Vulkan storage buffers reach 4 GB at most
@@ -3340,7 +3402,12 @@ static VkDescriptorBufferInfo gmem_ref_info(void) {
 
 static VkDescriptorBufferInfo gmem_info(void) {
     static int off = -1;
-    if (off < 0) off = ENV("LARECOMP_VK_NO_GMEM") != NULL || !g_vk.host_import;
+    if (off < 0) off = ENV("LARECOMP_VK_NO_GMEM") != NULL || (!g_vk.host_import && !g_vk.gpuheap);
+    if (!off && g_vk.gpuheap) {  // (the heap window is GPU memory: gpuheap.c)
+        if (!gmem_sparse_bind()) LOG("[vk] guest heap: no sparse buffer: shader global memory reads return zero\n"), off = 1;
+        uint64_t max = g_vk.props.limits.maxStorageBufferRange;  // (a storage buffer binding: shaders use gmem_ref_info)
+        if (gmem_buf) return (VkDescriptorBufferInfo){gmem_buf, 0, gmem_size < max ? (gmem_size ? gmem_size : 256) : max};
+    }
     extern uint64_t g_stdheap_used;  // (runtime/hle/heaps.c: the StandardAllocator block above the heap)
     uint64_t heap = kernel_heap_size(), std_end = g_stdheap_used ? STDHEAP_BASE + g_stdheap_used - HEAP_BASE : 0;
     uint64_t want = ((heap > std_end ? heap : std_end) + 0xFFFF) & ~0xFFFFull;
@@ -3482,10 +3549,12 @@ void vk_exec_reset(void) {
     gcopy_gen++;
     if (gmem_buf) {
         vkDestroyBuffer(g_vk.dev, gmem_buf, NULL);
-        vkFreeMemory(g_vk.dev, gmem_mem, NULL);
+        if (gmem_mem) vkFreeMemory(g_vk.dev, gmem_mem, NULL);
         gmem_buf = VK_NULL_HANDLE;
         gmem_mem = VK_NULL_HANDLE;
     }
+    for (int i = 0; i < GMEM_MAX_CHUNKS; i++)  // (gpuheap's chunks: imported again after the guest reset)
+        if (gmem_chunk[i]) vkFreeMemory(g_vk.dev, gmem_chunk[i], NULL), gmem_chunk[i] = VK_NULL_HANDLE;
     gmem_size = gmem_tried = 0;
     st_defaults();
 }
