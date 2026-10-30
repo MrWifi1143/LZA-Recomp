@@ -8,6 +8,9 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Arceus:
 
+- A thread cancelled while waiting for a lock no longer has that cancel land on its next lock or event wait: as
+  on the Switch only a WaitSynchronization takes it. Arceus aborted at random in its intro (an event wait answered
+  "cancelled", svcBreak 2001-0118, 1 run in 4); the game cancels threads mid-lock 7-8 times in that intro.
 - Shaders build ~44% faster (the first start's shader warm-up, and new areas on a first visit): the translated
   GLSL now types each register and constant buffer as float or uint by how it is used, instead of uint everywhere
   with a conversion around every float operation, folds float constants, and leaves out helper functions a shader

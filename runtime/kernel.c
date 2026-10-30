@@ -394,7 +394,10 @@ static void waitlist_remove(KThread *t) {
         if (*p == t) { *p = t->wnext; return; }
 }
 
-// Block until wait_kind is cleared by a waker, timeout, or cancel. Caller holds g_klock.
+// Block until wait_kind is cleared by a waker or the timeout. Caller holds g_klock. Not a CancelSynchronization: as on
+// Horizon only WaitSynchronization is cancellable - mutex, condition variable and address arbiter waits ignore it and
+// it stays pending for the thread's next WaitSynchronization. Taking it here returned 0xec01 (Cancelled) from an
+// nn::os light event's address wait, which the SDK aborts on (Arceus, at random in the intro: svcBreak 2001-0118).
 static uint32_t block_current(int64_t timeout_ns) {
     KThread *t = t_cur;
     struct timespec ts;
@@ -402,12 +405,6 @@ static uint32_t block_current(int64_t timeout_ns) {
     waitlist_add(t);
     while (t->wait_kind != WAIT_NONE) {
         if (g_rt_unwind) {  // reboot: give up the wait (the thread unwinds when its svc returns)
-            t->wait_kind = WAIT_NONE;
-            t->wait_result = R_CANCELLED;
-            break;
-        }
-        if (t->cancel) {
-            t->cancel = false;
             t->wait_kind = WAIT_NONE;
             t->wait_result = R_CANCELLED;
             break;
@@ -1018,8 +1015,11 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         pthread_mutex_lock(&g_klock);
         KObject *o = handle_get((uint32_t)x[0]);
         if (o && o->type == KOBJ_THREAD) {
-            ((KThread *)o)->cancel = true;
-            wake((KThread *)o);
+            KThread *k = (KThread *)o;
+            if (!k->in_sync_wait && k->wait_kind != WAIT_NONE)  // (pending for its next WaitSynchronization: block_current)
+                LOG("[kernel] CancelSynchronization of a thread in another wait (kind %d): pending\n", (int)k->wait_kind);
+            k->cancel = true;
+            wake(k);
             x[0] = R_OK;
         } else x[0] = R_INVALID_HANDLE;
         pthread_mutex_unlock(&g_klock);
