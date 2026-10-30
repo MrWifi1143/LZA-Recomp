@@ -29,6 +29,7 @@
 #define xsize(f) (fseeko(f, 0, SEEK_END), (uint64_t)ftello(f))
 #endif
 #if defined(__x86_64__) || defined(__i386__)
+#include <cpuid.h>
 #include <immintrin.h>
 #define HAVE_AESNI 1
 #endif
@@ -148,7 +149,11 @@ static void ctr_xor(const Aes *a, uint64_t upper, uint64_t block, uint8_t *buf, 
     for (int i = 0; i < 8; i++) iv[i] = (uint8_t)(upper >> (56 - 8 * i));
 #ifdef HAVE_AESNI
     static int ni = -1;
-    if (ni < 0) ni = __builtin_cpu_supports("aes");
+    if (ni < 0) {  // (CPUID 1, ECX bit 25: AES-NI - read directly: __builtin_cpu_supports needs a runtime symbol the
+                   // Windows build (zig's lld-link) doesn't have)
+        unsigned a, b, c, d;
+        ni = __get_cpuid(1, &a, &b, &c, &d) && (c >> 25 & 1);
+    }
     if (ni) {
         uint64_t hi;
         memcpy(&hi, iv, 8);
