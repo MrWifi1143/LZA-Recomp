@@ -1734,8 +1734,13 @@ static void translate_program(void *arg) {
         p->fi->msl = strdup("#version 460\nvoid main() {}\n");
     } else if (p->vi->msl) {
         p->fkey.vs_out_mask = p->vi->out_mask;
+        // (the shadow masks that pla_soft_shadows patches below: in the spelling its patterns match)
+        extern uint64_t vk_fs_hash(uint64_t fs);
+        uint64_t h = g_settings.shadow_smooth && p->code[1] ? vk_fs_hash(p->code[1]) : 0;
+        maxwell_plain_glsl = h == 0x4b939b54f87f7794ull || h == 0xaadb7169a8eebe27ull || h == 0x52a5c7cf8d756842ull;
         p->fi = maxwell_translate_consts((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], (const uint8_t *)(uintptr_t)p->cst[1],
                                          p->ncst[1], STAGE_FRAGMENT, &p->fkey);
+        maxwell_plain_glsl = false;
     }
     atomic_fetch_add(&stat_translate_ns, SDL_GetTicksNS() - t0);
     if (!p->vi->msl) {

@@ -95,6 +95,13 @@ typedef struct {
 // Global memory (LDG/STG) is addressed through one buffer that wraps the guest heap.
 #define GMEM_BUFFER_INDEX 17
 extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
+// This thread's next translations in the GLSL spelling from before glsl_retype (uint registers, as_u / as_f), not cached:
+// for a shader the renderer then patches by its text (runtime/nvn/vulkan/exec.c pla_soft_shadows)
+#ifdef __cplusplus
+extern thread_local bool maxwell_plain_glsl;
+#else
+extern _Thread_local bool maxwell_plain_glsl;
+#endif
 // Debug: when translating the shader whose code starts at maxwell_dbg_code, output register
 // maxwell_dbg_reg as captured after the instruction at maxwell_dbg_pc (greyscale, all targets).
 extern const uint8_t *maxwell_dbg_code;
