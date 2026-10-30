@@ -258,6 +258,8 @@ static void create_device(void) {
     if (gpl) f.pNext = &gplf;
     g_vk.gpl = gpl;
     {   // subgroup size control (vk_sg32): only where 32 is possible but not the only size
+        extern bool g_maxwell_warp_slices;  // (LARECOMP_WARP_SLICES=1: the sliced warp operations anywhere - a 32-wide
+        g_maxwell_warp_slices = ENV("LARECOMP_WARP_SLICES") != NULL;  // subgroup is one slice: the same results, a test)
         VkPhysicalDeviceVulkan13Features h13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
         VkPhysicalDeviceFeatures2 hf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &h13};
         vkGetPhysicalDeviceFeatures2(g_vk.phys, &hf);
@@ -269,6 +271,10 @@ static void create_device(void) {
             f13.subgroupSizeControl = VK_TRUE;
             g_vk.sg32 = p13.requiredSubgroupSizeStages & (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT);
             LOG("[vk] guest shaders run in 32-wide subgroups (stages %#x)\n", g_vk.sg32);
+        } else if (p13.minSubgroupSize > 32 && !ENV("LARECOMP_NO_WARP_SLICES")) {
+            g_maxwell_warp_slices = true;
+            LOG("[vk] subgroups of %u..%u lanes: guest shaders' warp operations work on 32-lane slices\n", p13.minSubgroupSize,
+                p13.maxSubgroupSize);
         } else if (p13.minSubgroupSize != 32 || p13.maxSubgroupSize != 32)
             LOG("[vk] warning: no 32-wide subgroups: guest shaders' warp operations may misbehave\n");
     }

@@ -3332,6 +3332,10 @@ static VkDescriptorBufferInfo gmem_info(void);
 // work that may read it is submitted (a fence: binds are few, at load).
 #define GMEM_MAX_CHUNKS 256
 static VkDeviceMemory gmem_chunk[GMEM_MAX_CHUNKS];
+// Each chunk also as a plain buffer over the same memory, for what a driver can't do with a sparse one (Turnip's
+// transform feedback binding reads the buffer's own allocation: null for a sparse buffer, a crash): gmem_plain
+static VkBuffer gmem_chunk_buf[GMEM_MAX_CHUNKS];
+static uint64_t gmem_chunk_size;
 static bool gmem_sparse_bind(void) {
     extern int gpuheap_take(uint64_t *off, int *fds, int max);
     extern uint64_t gpuheap_end(void), gpuheap_chunk_size(void), g_gpuheap_end;
@@ -3369,6 +3373,13 @@ static bool gmem_sparse_bind(void) {
             VkResult r = k < GMEM_MAX_CHUNKS ? vkAllocateMemory(g_vk.dev, &ai, NULL, &gmem_chunk[k]) : VK_ERROR_OUT_OF_DEVICE_MEMORY;
             if (r != VK_SUCCESS) FATAL("guest heap: importing its GPU memory failed (%d)\n", (int)r);
             binds[i] = (VkSparseMemoryBind){.resourceOffset = off[i], .size = chunk, .memory = gmem_chunk[k]};
+            VkBufferCreateInfo pb = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = chunk,
+                                     .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                              VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                                              (g_vk.xfb ? VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT : 0)};
+            if (vkCreateBuffer(g_vk.dev, &pb, NULL, &gmem_chunk_buf[k]) == VK_SUCCESS)
+                vkBindBufferMemory(g_vk.dev, gmem_chunk_buf[k], gmem_chunk[k], 0);
+            gmem_chunk_size = chunk;
         }
         VkSparseBufferMemoryBindInfo bb = {.buffer = gmem_buf, .bindCount = (uint32_t)n, .pBinds = binds};
         VkBindSparseInfo si = {.sType = VK_STRUCTURE_TYPE_BIND_SPARSE_INFO, .bufferBindCount = 1, .pBufferBinds = &bb};
@@ -3386,6 +3397,17 @@ static bool gmem_sparse_bind(void) {
     uint64_t end = gpuheap_end();
     if (end != gmem_size) LOG("[vk] guest heap bound for shader global memory: %llu MB (sparse)\n", (unsigned long long)(end >> 20));
     gmem_size = end;
+    return true;
+}
+// [a, a + n) of guest memory as a buffer and offset: the imported heap's; with the sparse heap, its chunk's plain
+// buffer (false when the range crosses chunks)
+static bool gmem_plain(uint64_t a, uint64_t n, VkBuffer *buf, VkDeviceSize *off) {
+    if (!gmem_buf || a < HEAP_BASE || a + n > HEAP_BASE + gmem_size) return false;
+    uint64_t o = a - HEAP_BASE;
+    if (!g_vk.gpuheap) { *buf = gmem_buf, *off = o; return true; }
+    unsigned k = gmem_chunk_size ? (unsigned)(o / gmem_chunk_size) : 0;
+    if (!gmem_chunk_size || k >= GMEM_MAX_CHUNKS || !gmem_chunk_buf[k] || (o + n - 1) / gmem_chunk_size != k) return false;
+    *buf = gmem_chunk_buf[k], *off = o - (uint64_t)k * gmem_chunk_size;
     return true;
 }
 
@@ -3553,8 +3575,10 @@ void vk_exec_reset(void) {
         gmem_buf = VK_NULL_HANDLE;
         gmem_mem = VK_NULL_HANDLE;
     }
-    for (int i = 0; i < GMEM_MAX_CHUNKS; i++)  // (gpuheap's chunks: imported again after the guest reset)
+    for (int i = 0; i < GMEM_MAX_CHUNKS; i++) {  // (gpuheap's chunks: imported again after the guest reset)
+        if (gmem_chunk_buf[i]) vkDestroyBuffer(g_vk.dev, gmem_chunk_buf[i], NULL), gmem_chunk_buf[i] = VK_NULL_HANDLE;
         if (gmem_chunk[i]) vkFreeMemory(g_vk.dev, gmem_chunk[i], NULL), gmem_chunk[i] = VK_NULL_HANDLE;
+    }
     gmem_size = gmem_tried = 0;
     st_defaults();
 }
@@ -4081,7 +4105,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         // the driver constants the shader reads them from (c0[0x200..0x208], cbuf_info)
         VkDescriptorBufferInfo gm = gmem_info();
         uint64_t off = g_dispatch_indirect - HEAP_BASE;
-        if (!gm.buffer || g_dispatch_indirect < HEAP_BASE || off + 12 > gm.range) {
+        if (!gm.buffer || gm.buffer != gmem_buf || g_dispatch_indirect < HEAP_BASE || off + 12 > gmem_size) {  // (gmem_size: the range may be capped)
             static int warned;
             if (!warned++) LOG("[vk] indirect dispatch: arguments at %llx outside the heap import: skipped\n", (unsigned long long)g_dispatch_indirect);
             return;
@@ -4829,8 +4853,8 @@ static void draw_(CmdRec *r, bool indexed) {
         uint32_t nb = 0;
         for (int b = 0; b < 4 && pr->vkey.xfb_count[b]; b++) {
             uint64_t a = st.xfb_addr[b], n = st.xfb_size[b];
-            if (!gmem_buf || gi.buffer != gmem_buf || a < HEAP_BASE || a + n > HEAP_BASE + gmem_size || (a & 3)) { xfb_on = false; break; }
-            bufs[nb] = gmem_buf; offs[nb] = a - HEAP_BASE; sizes[nb] = n; nb++;
+            if (!gmem_buf || gi.buffer != gmem_buf || (a & 3) || !gmem_plain(a, n, &bufs[nb], &offs[nb])) { xfb_on = false; break; }
+            sizes[nb] = n; nb++;
         }
         static int logged;
         if (!xfb_on && logged++ < 10) LOG("[xfb] capture skipped: buffer %llx outside the imported heap\n", (unsigned long long)st.xfb_addr[0]);
@@ -4843,7 +4867,7 @@ static void draw_(CmdRec *r, bool indexed) {
     else if (g_draw_indirect) {
         VkDescriptorBufferInfo gm = gmem_info();
         uint64_t off = g_draw_indirect - HEAP_BASE;
-        if (gm.buffer && g_draw_indirect >= HEAP_BASE && off + 20 <= gm.range) {
+        if (gm.buffer && gm.buffer == gmem_buf && g_draw_indirect >= HEAP_BASE && off + 20 <= gmem_size) {  // (gmem_size: the range may be capped)
             if (use_index) vkCmdDrawIndexedIndirect(cb, gm.buffer, off, 1, 20);
             else vkCmdDrawIndirect(cb, gm.buffer, off, 1, 16);
         } else {

@@ -11,6 +11,9 @@ Z-A:
   Steam Frame) no longer draw the world as huge stretched slabs: the game's heap is then made of GPU memory (dma-buf
   chunks mapped at its addresses, bound into one sparse buffer), so what its compute shaders write reaches the
   vertices it draws. PCs with the import (NVIDIA, AMD, Intel) are unchanged. `LARECOMP_DMABUF_HEAP=0` turns it off.
+- GPUs whose subgroups are wider than 32 and can't be made 32 (Adreno: 64 / 128) run the game's warp operations
+  (lane ids, ballots, votes, shuffles) on 32-lane slices, as a Switch warp. `LARECOMP_WARP_SLICES=1` forces it
+  anywhere (a 32-wide subgroup is one slice: the same picture), `LARECOMP_NO_WARP_SLICES=1` turns it off.
 - Local wireless play between copies of the game on one PC (Linux): Link Play's "Nearby Players" - link trades
   and private battles - with each copy as a console of its own (nn::ldn answered by the recomp, the game's Pia
   traffic over loopback UDP). Tested with two copies: a trade both ways (saved) and a private battle room, battle
