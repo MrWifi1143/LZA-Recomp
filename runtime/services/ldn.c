@@ -1,17 +1,18 @@
-// Local wireless play (ldn:u) and the sockets it carries (bsd:u / bsd:s), between copies of the game on one PC:
-// Link Play's "Nearby Players" (link trades, private battles). The game's own nn::ldn calls (create / scan / connect /
-// the network's info) are answered here, and Pia's UDP sockets carry its data between the copies.
+// Local wireless play (ldn:u) and the sockets it carries (bsd:u / bsd:s) between copies of the game - on one PC or
+// on the LAN: Link Play's "Nearby Players" (link trades, private battles). The game's own nn::ldn calls (create / scan /
+// connect / the network's info) are answered here, and Pia's UDP sockets carry its data between the copies.
 //
-// Each copy is a console of its own, number N (1..LDN_PEERS): the first free control address 127.0.1.N:LDN_CTRL_PORT,
-// taken when the game first starts local play (Linux routes all of 127/8 to loopback). In a network its address is
-// 169.254.1.N; the game's sockets bind and send to 127.0.1.N for it and see 169.254.1.N back. A socket can only be made
-// while the copy is in a network - otherwise it still fails with ENETDOWN: nothing ever goes to the internet.
-// Control messages, UDP to the control ports ("LDN1" + type ...): 'S' scan (to every other copy) -> 's' + NetworkInfo
-// from a host; 'C' join (user name, version) -> 'A' node + NetworkInfo / 'R' refused; 'I' + NetworkInfo (the host to
-// its stations, on a change); 'L' node (a station leaves); 'D' (the host closed the network).
-// Structures (NetworkInfo 0x480 ...) as switchbrew / Ryujinx's Ldn types document them.
-// Windows builds the same (Winsock): a copy under Wine plays with Linux ones on the same PC.
+// Each copy is a console of its own. The first on a PC (slot 1) listens on all of the PC's addresses: copies on other
+// PCs find it by broadcast (or LARECOMP_LDN_PEERS); more copies on the same PC (tests) are reached on 127.0.1.N.
+// In a network the game sees the Switch-like addresses 169.254.1.(node + 1); its sockets bind where this copy listens
+// and send to the nodes' real addresses. A socket can only be made while the copy is in a network - otherwise it
+// still fails with ENETDOWN: nothing ever goes to the internet.
+// Control messages, UDP port LDN_CTRL_PORT ("LDN1" + type ...): 'S' scan -> 's' + NetworkInfo from a host; 'C' join
+// (user name, version) -> 'A' node + NetworkInfo + the nodes' addresses / 'R' refused; 'I' + NetworkInfo + addresses
+// (the host to its stations, on a change); 'L' node (a station leaves); 'D' (the host closed the network).
+// Structures (NetworkInfo 0x480 ...) as switchbrew / Ryujinx's Ldn types document them. Windows: the same, on Winsock.
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,6 +29,8 @@
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/eventfd.h>
@@ -150,23 +153,41 @@ static bool ldn_log(void) {  // (LARECOMP_LDN_LOG=1: every ldn:u / bsd:u command
 }
 
 // ------------------------------------------------------------------ the network (one per copy of the game)
+// A copy's place on its PC: slot N (1..LDN_PEERS), held by a lock socket on 127.0.2.N. Slot 1 listens on every address
+// (the control port and the game's ports): other PCs reach it - one copy per PC plays over the LAN. Slots 2.. listen on
+// 127.0.1.N only (more copies on one PC: tests). Here a copy is 127.0.1.N either way.
+// In a network the host numbers the nodes (address 169.254.1.(node + 1)) and sends everyone the nodes' real addresses
+// as it reached them (0: the host itself - each station knows where it found the host).
 #define LDN_PEERS 32
+#define LOOPBACK(ip) (((ip) >> 24) == 127)
 static struct {
     pthread_mutex_t lock;
     int state;
-    int me;                 // this copy's number, 0 none yet
+    int me;                 // this copy's slot, 0 none yet
     int node;               // this copy's node in the network (0 the host), -1 none
     NetworkInfo info;       // the network we host or joined
+    uint32_t real[NODES];   // the nodes' real addresses (host order; 0: out of reach)
+    uint32_t host_addr;     // (a station) where it found its host
     uint16_t disconnect_reason;
     KEvent *event;          // the game's state change event (AttachStateChangeEvent)
-    int ctrl;               // control socket (127.0.1.N:LDN_CTRL_PORT), -1 none
+    int ctrl;               // control socket, -1 none
     uint8_t changes[NODES]; // NodeLatestUpdate: 1 joined, 2 left - since the game last read them
-} L = {PTHREAD_MUTEX_INITIALIZER, ST_NONE, 0, -1, {0}, 0, NULL, -1, {0}};
+    struct { uint8_t session[16]; uint32_t addr; } found[NODES];  // the last scan's hosts
+    int nfound;
+} L = {.lock = PTHREAD_MUTEX_INITIALIZER, .state = ST_NONE, .node = -1, .ctrl = -1};
 
-static uint32_t my_vip(void) { return 0xA9FE0100u | (uint32_t)L.me; }            // 169.254.1.N
-static uint32_t real_ip(uint32_t vip) { return 0x7F000100u | (vip & 0xFF); }    // -> 127.0.1.N
+static uint32_t my_addr(void) { return 0x7F000100u | (uint32_t)L.me; }   // 127.0.1.N
+static uint32_t bind_addr(void) { return L.me == 1 ? 0 : my_addr(); }    // (slot 1: every address)
+static uint32_t canon(uint32_t ip) { return ip == 0x7F000001u ? 0x7F000101u : ip; }  // (slot 1 sends from 127.0.0.1)
+static uint32_t node_vip(int k) { return 0xA9FE0101u + (uint32_t)k; }   // 169.254.1.(k + 1)
+static uint32_t my_vip(void) { return L.node >= 0 ? node_vip(L.node) : 0; }
 static bool in_subnet(uint32_t ip) { return (ip & 0xFFFFFF00u) == 0xA9FE0100u; }
+static int vip_node(uint32_t ip) { return in_subnet(ip) && (ip & 0xFF) >= 1 && (ip & 0xFF) <= NODES ? (int)(ip & 0xFF) - 1 : -1; }
 static uint64_t local_id(uint64_t id) { return id == ~0ull ? g_program_id : id; }  // (-1: the game's own)
+static const char *ip_str(uint32_t ip, char *b) {
+    snprintf(b, 16, "%u.%u.%u.%u", ip >> 24, ip >> 16 & 255, ip >> 8 & 255, ip & 255);
+    return b;
+}
 
 static void signal_change(void) {  // (caller may hold L.lock)
     if (!L.event) return;
@@ -175,11 +196,13 @@ static void signal_change(void) {  // (caller may hold L.lock)
     pthread_mutex_unlock(&g_klock);
 }
 
+// (reuse: slot 1's wildcard sockets and the other slots' 127.0.1.N ones share ports - each must allow it)
 static int udp_bound(uint32_t ip, uint16_t port, bool reuse) {
     int fd = udp_socket();
     if (fd < 0) return -1;
     int one = 1;
     if (reuse) setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const void *)&one, sizeof one);
+    setsockopt(fd, SOL_SOCKET, SO_BROADCAST, (const void *)&one, sizeof one);
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(port), .sin_addr.s_addr = htonl(ip)};
     if (bind(fd, (struct sockaddr *)&a, sizeof a)) { close_sock(fd); return -1; }
     return fd;
@@ -190,11 +213,32 @@ static void ctrl_send(int fd, uint32_t ip, char type, const void *body, size_t n
     if (n > sizeof m - 5) n = sizeof m - 5;
     if (n) memcpy(m + 5, body, n);
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(LDN_CTRL_PORT), .sin_addr.s_addr = htonl(ip)};
-    sendto(fd, m, 5 + n, 0, (struct sockaddr *)&a, sizeof a);
+    sendto(fd, (const void *)m, (int)(5 + n), 0, (struct sockaddr *)&a, sizeof a);
 }
-static void host_broadcast_info(void) {  // (L.lock held) the network's info to every station
+// (L.lock held) the network's info and its nodes' addresses, as the host sends them: 0 for itself
+static size_t host_packet(uint8_t *out) {
+    memcpy(out, &L.info, sizeof L.info);
+    uint32_t t[NODES];
+    for (int k = 0; k < NODES; k++) t[k] = k ? L.real[k] : 0;
+    memcpy(out + sizeof L.info, t, sizeof t);
+    return sizeof L.info + sizeof t;
+}
+static void host_broadcast_info(void) {  // (L.lock held) to every station
+    uint8_t b[sizeof(NetworkInfo) + 4 * NODES];
+    size_t n = host_packet(b);
     for (int k = 1; k < NODES; k++)
-        if (L.info.ldn.nodes[k].connected) ctrl_send(L.ctrl, real_ip(L.info.ldn.nodes[k].ip), 'I', &L.info, sizeof L.info);
+        if (L.info.ldn.nodes[k].connected && L.real[k]) ctrl_send(L.ctrl, L.real[k], 'I', b, n);
+}
+// (L.lock held, a station) the nodes' addresses from the host's table
+static void station_table(const uint8_t *t) {
+    for (int k = 0; k < NODES; k++) {
+        uint32_t r;
+        memcpy(&r, t + 4 * k, 4);
+        if (k == 0) r = L.host_addr;
+        else if (k == L.node) r = my_addr();
+        else if (LOOPBACK(r) && !LOOPBACK(L.host_addr)) r = 0;  // (a second copy on the host's PC: loopback only)
+        L.real[k] = r;
+    }
 }
 
 static void *ctrl_thread(void *arg) {
@@ -204,52 +248,56 @@ static void *ctrl_thread(void *arg) {
         uint8_t m[8 + sizeof(NetworkInfo) + 64];
         struct sockaddr_in from;
         socklen_t fl = sizeof from;
-        ssize_t n = recvfrom(fd, m, sizeof m, 0, (struct sockaddr *)&from, &fl);
+        ssize_t n = recvfrom(fd, (void *)m, sizeof m, 0, (struct sockaddr *)&from, &fl);
         if (n < 5 || memcmp(m, "LDN1", 4)) continue;
-        uint32_t src = ntohl(from.sin_addr.s_addr);
+        uint32_t src = canon(ntohl(from.sin_addr.s_addr));
+        char sb[16];
         pthread_mutex_lock(&L.lock);
         char t = (char)m[4];
         if (L.state == ST_AP_CREATED && t == 'S') {  // a scan: our network
             uint8_t r[5 + sizeof(NetworkInfo)];
             memcpy(r, "LDN1s", 5), memcpy(r + 5, &L.info, sizeof L.info);
-            sendto(fd, r, sizeof r, 0, (struct sockaddr *)&from, sizeof from);
-        } else if (L.state == ST_AP_CREATED && t == 'C' && n >= 5 + 33 + 2 && (src & 0xFFFFFF00u) == 0x7F000100u) {  // a join
+            sendto(fd, (const void *)r, sizeof r, 0, (struct sockaddr *)&from, sizeof from);
+        } else if (L.state == ST_AP_CREATED && t == 'C' && n >= 5 + 33 + 2) {  // a join
             int k = 1;
             while (k < L.info.ldn.max_nodes && L.info.ldn.nodes[k].connected) k++;
-            uint8_t r[6 + sizeof(NetworkInfo)];
+            uint8_t r[6 + sizeof(NetworkInfo) + 4 * NODES];
             if (k >= L.info.ldn.max_nodes || L.info.ldn.accept_policy == 1) {  // (full / AcceptPolicy RejectAll)
                 memcpy(r, "LDN1R", 5);
-                sendto(fd, r, 5, 0, (struct sockaddr *)&from, sizeof from);
+                sendto(fd, (const void *)r, 5, 0, (struct sockaddr *)&from, sizeof from);
             } else {
                 NodeInfo *nd = &L.info.ldn.nodes[k];
                 memset(nd, 0, sizeof *nd);
-                nd->ip = 0xA9FE0100u | (src & 0xFF), nd->node_id = (uint8_t)k, nd->connected = 1;
-                nd->mac[0] = 2, nd->mac[5] = (uint8_t)(src & 0xFF);
+                nd->ip = node_vip(k), nd->node_id = (uint8_t)k, nd->connected = 1;
+                nd->mac[0] = 2, nd->mac[4] = (uint8_t)(src >> 8), nd->mac[5] = (uint8_t)src;
                 memcpy(nd->name, m + 5, 32), memcpy(&nd->version, m + 5 + 33, 2);
                 L.info.ldn.nodes_n++;
+                L.real[k] = src;
                 L.changes[k] = 1;
-                memcpy(r, "LDN1A", 5), r[5] = (uint8_t)k, memcpy(r + 6, &L.info, sizeof L.info);
-                sendto(fd, r, sizeof r, 0, (struct sockaddr *)&from, sizeof from);
+                memcpy(r, "LDN1A", 5), r[5] = (uint8_t)k;
+                size_t pn = host_packet(r + 6);
+                sendto(fd, (const void *)r, (int)(6 + pn), 0, (struct sockaddr *)&from, sizeof from);
                 host_broadcast_info();
-                LOG("[ldn] \"%s\" joined as node %d (copy %u)\n", nd->name, k, src & 0xFF);
+                LOG("[ldn] \"%s\" joined as node %d (%s)\n", nd->name, k, ip_str(src, sb));
                 signal_change();
             }
         } else if (L.state == ST_AP_CREATED && t == 'L' && n >= 6) {  // a station leaves
             int k = m[5];
-            if (k > 0 && k < NODES && L.info.ldn.nodes[k].connected && real_ip(L.info.ldn.nodes[k].ip) == src) {
+            if (k > 0 && k < NODES && L.info.ldn.nodes[k].connected && L.real[k] == src) {
                 memset(&L.info.ldn.nodes[k], 0, sizeof(NodeInfo));
-                L.info.ldn.nodes_n--, L.changes[k] = 2;
+                L.info.ldn.nodes_n--, L.changes[k] = 2, L.real[k] = 0;
                 host_broadcast_info();
                 LOG("[ldn] node %d left\n", k);
                 signal_change();
             }
-        } else if (L.state == ST_STATION_CONNECTED && src == real_ip(L.info.ldn.nodes[0].ip)) {  // from our host:
-            if (t == 'I' && n >= 5 + (ssize_t)sizeof(NetworkInfo)) {  // the network changed
+        } else if (L.state == ST_STATION_CONNECTED && src == L.host_addr) {  // from our host:
+            if (t == 'I' && n >= 5 + (ssize_t)(sizeof(NetworkInfo) + 4 * NODES)) {  // the network changed
                 NetworkInfo ni;
                 memcpy(&ni, m + 5, sizeof ni);
                 for (int k = 0; k < NODES; k++)
                     if (ni.ldn.nodes[k].connected != L.info.ldn.nodes[k].connected) L.changes[k] = ni.ldn.nodes[k].connected ? 1 : 2;
                 L.info = ni;
+                station_table(m + 5 + sizeof ni);
                 signal_change();
             } else if (t == 'D') {  // it closed the network
                 L.state = ST_STATION, L.disconnect_reason = 3, L.node = -1;  // (DestroyedByAccessPoint)
@@ -262,18 +310,22 @@ static void *ctrl_thread(void *arg) {
     return NULL;
 }
 
-// (L.lock held) this copy's number and control socket, once
+// (L.lock held) this copy's slot and control socket, once
 static bool attach(void) {
     if (L.me) return true;
-    for (int k = 1; k <= LDN_PEERS && !L.me; k++) {
-        int fd = udp_bound(0x7F000100u | (uint32_t)k, LDN_CTRL_PORT, false);
-        if (fd >= 0) L.me = k, L.ctrl = fd;
+    for (int k = 1; k <= LDN_PEERS && !L.me; k++)  // (the lock socket stays open for good)
+        if (udp_bound(0x7F000200u | (uint32_t)k, LDN_CTRL_PORT + 1, false) >= 0) L.me = k;
+    if (!L.me) { LOG("[ldn] no free local slot (1-%d)\n", LDN_PEERS); return false; }
+    L.ctrl = udp_bound(bind_addr(), LDN_CTRL_PORT, true);
+    if (L.ctrl < 0 && L.me == 1) {
+        LOG("[ldn] can't listen on port %d of this PC's addresses (errno %d): this PC only\n", LDN_CTRL_PORT, sock_errno());
+        L.me = 0, L.ctrl = udp_bound(0x7F000101u, LDN_CTRL_PORT, true), L.me = 1;
     }
-    if (!L.me) { LOG("[ldn] no free local address (127.0.1.1-%d)\n", LDN_PEERS); return false; }
+    if (L.ctrl < 0) { LOG("[ldn] no control socket (errno %d)\n", sock_errno()); return false; }
     pthread_t th;
     pthread_create(&th, NULL, ctrl_thread, NULL);
     pthread_detach(th);
-    LOG("[ldn] this copy is local player %d (127.0.1.%d)\n", L.me, L.me);
+    LOG("[ldn] this copy is local player %d (%s)\n", L.me, L.me == 1 ? "LAN and this PC" : "this PC only");
     return true;
 }
 
@@ -282,11 +334,12 @@ static void host_create(const NetworkConfig *nc, const SecurityConfig *sc, const
     uint8_t adv[sizeof L.info.ldn.adv];        // it back with GetNetworkInfo and sends that copy again later)
     memcpy(adv, L.info.ldn.adv, sizeof adv);
     memset(&L.info, 0, sizeof L.info);
+    memset(L.real, 0, sizeof L.real);
     L.info.ldn.adv_size = adv_size, memcpy(L.info.ldn.adv, adv, sizeof adv);
     L.info.id.intent = nc->intent;
     L.info.id.intent.local_id = local_id(nc->intent.local_id);
     for (int i = 0; i < 16; i++) L.info.id.session[i] = (uint8_t)rand();
-    L.info.common.mac[0] = 2, L.info.common.mac[5] = (uint8_t)L.me;
+    L.info.common.mac[0] = 2, L.info.common.mac[4] = (uint8_t)rand(), L.info.common.mac[5] = (uint8_t)L.me;
     L.info.common.ssid.len = 32;
     for (int i = 0; i < 32; i++) L.info.common.ssid.name[i] = "0123456789abcdef"[rand() & 15];
     L.info.common.channel = nc->channel ? nc->channel : 1, L.info.common.link = 3, L.info.common.type = 2;
@@ -295,38 +348,85 @@ static void host_create(const NetworkConfig *nc, const SecurityConfig *sc, const
     L.info.ldn.max_nodes = nc->max_nodes ? nc->max_nodes : NODES;
     if (L.info.ldn.max_nodes > NODES) L.info.ldn.max_nodes = NODES;
     NodeInfo *me = &L.info.ldn.nodes[0];
-    me->ip = my_vip(), me->node_id = 0, me->connected = 1, me->version = nc->version;
+    me->ip = node_vip(0), me->node_id = 0, me->connected = 1, me->version = nc->version;
     memcpy(me->mac, L.info.common.mac, 6), memcpy(me->name, uc->name, 32);
     L.info.ldn.nodes_n = 1;
-    L.node = 0;
+    L.node = 0, L.real[0] = my_addr();
     LOG("[ldn] hosting (local id %016llx, scene %u, up to %d players)\n", (unsigned long long)L.info.id.intent.local_id,
         nc->intent.scene_id, L.info.ldn.max_nodes);
 }
 
-// a scan: ask every other copy on this PC; the networks that match the filter
+// where a scan asks besides this PC's other copies (slot 1 only): the LAN's broadcast addresses, and
+// LARECOMP_LDN_PEERS=<ip>[,<ip>...] (other PCs by address: networks that drop broadcasts)
+static int lan_targets(uint32_t *out, int max) {
+    int n = 0;
+    out[n++] = 0xFFFFFFFFu;
+#ifndef _WIN32
+    struct ifaddrs *ifs = NULL;
+    if (!getifaddrs(&ifs)) {
+        for (struct ifaddrs *i = ifs; i && n < max; i = i->ifa_next)
+            if (i->ifa_addr && i->ifa_addr->sa_family == AF_INET && (i->ifa_flags & IFF_BROADCAST) && i->ifa_broadaddr &&
+                !(i->ifa_flags & IFF_LOOPBACK))
+                out[n++] = ntohl(((struct sockaddr_in *)i->ifa_broadaddr)->sin_addr.s_addr);
+        freeifaddrs(ifs);
+    }
+#endif
+    const char *e = getenv("LARECOMP_LDN_PEERS");
+    for (char buf[256], *tok = e ? (snprintf(buf, sizeof buf, "%s", e), strtok(buf, ", ")) : NULL; tok && n < max; tok = strtok(NULL, ", ")) {
+        struct in_addr a;
+        if (inet_pton(AF_INET, tok, &a) == 1) out[n++] = ntohl(a.s_addr);
+    }
+    return n;
+}
+
+// a scan: ask the other copies (this PC's, the LAN's); the networks that match the filter
 static int scan(const ScanFilter *f, NetworkInfo *out, int max) {
     if (max < 1 || !L.me) return 0;
-    int fd = udp_bound(real_ip(my_vip()), 0, false);
+    int fd = udp_bound(bind_addr(), 0, false);
     if (fd < 0) return 0;
     for (int k = 1; k <= LDN_PEERS; k++)
         if (k != L.me) ctrl_send(fd, 0x7F000100u | (uint32_t)k, 'S', NULL, 0);
+    if (L.me == 1) {
+        uint32_t t[24];
+        int nt = lan_targets(t, 24);
+        for (int i = 0; i < nt; i++) ctrl_send(fd, t[i], 'S', NULL, 0);
+    }
     int n = 0;
-    uint64_t end = plat_now_ns() + 200000000ull;
+    pthread_mutex_lock(&L.lock);
+    L.nfound = 0;
+    pthread_mutex_unlock(&L.lock);
+    uint64_t end = plat_now_ns() + 250000000ull;
     kernel_block_begin();
     for (uint64_t now; n < max && (now = plat_now_ns()) < end;) {
         struct pollfd p = {fd, POLLIN, 0};
         if (sock_poll(&p, 1, (int)((end - now) / 1000000) + 1) <= 0) break;
         uint8_t m[8 + sizeof(NetworkInfo)];
-        ssize_t got = recv(fd, m, sizeof m, 0);
+        struct sockaddr_in from;
+        socklen_t fl = sizeof from;
+        ssize_t got = recvfrom(fd, (void *)m, sizeof m, 0, (struct sockaddr *)&from, &fl);
         if (got < 5 + (ssize_t)sizeof(NetworkInfo) || memcmp(m, "LDN1s", 5)) continue;
         NetworkInfo ni;
         memcpy(&ni, m + 5, sizeof ni);
+        uint32_t src = canon(ntohl(from.sin_addr.s_addr));
+        int dup = -1;
+        pthread_mutex_lock(&L.lock);
+        for (int i = 0; i < L.nfound; i++)
+            if (!memcmp(L.found[i].session, ni.id.session, 16)) dup = i;
+        if (dup >= 0) {  // (the same host twice: its loopback address is the better one)
+            if (LOOPBACK(src)) L.found[dup].addr = src;
+            pthread_mutex_unlock(&L.lock);
+            continue;
+        }
+        if (L.nfound < NODES) memcpy(L.found[L.nfound].session, ni.id.session, 16), L.found[L.nfound++].addr = src;
+        pthread_mutex_unlock(&L.lock);
         bool ok = true;
         if (f->flags & 1) ok &= ni.id.intent.local_id == local_id(f->id.intent.local_id);  // LocalCommunicationId
         if (f->flags & 2) ok &= !memcmp(ni.id.session, f->id.session, 16);                // SessionId
         if (f->flags & 4) ok &= ni.common.type == f->type;                                 // NetworkType
         if (f->flags & 0x20) ok &= ni.id.intent.scene_id == f->id.intent.scene_id;         // SceneId
-        if (ldn_log()) LOG("[ldn]   found a network: adv %u bytes, %u/%u players\n", ni.ldn.adv_size, ni.ldn.nodes_n, ni.ldn.max_nodes);
+        char sb[16];
+        if (ldn_log()) LOG("[ldn]   found a network at %s: adv %u bytes, %u/%u players\n", ip_str(src, sb), ni.ldn.adv_size,
+                           ni.ldn.nodes_n, ni.ldn.max_nodes);
         if (ok) out[n++] = ni;
     }
     kernel_block_end();
@@ -334,43 +434,51 @@ static int scan(const ScanFilter *f, NetworkInfo *out, int max) {
     return n;
 }
 
-// joining a network: ask its host; true with our node and its info
+// joining a network found by the last scan: ask its host; true with our node, its info and its nodes' addresses
 static bool station_connect(const NetworkInfo *want, const UserConfig *uc, uint16_t version) {
-    if (!L.me || !want->ldn.nodes[0].ip) return false;
-    int fd = udp_bound(real_ip(my_vip()), 0, false);
+    uint32_t host = 0;
+    pthread_mutex_lock(&L.lock);
+    for (int i = 0; i < L.nfound; i++)
+        if (!memcmp(L.found[i].session, want->id.session, 16)) host = L.found[i].addr;
+    pthread_mutex_unlock(&L.lock);
+    if (!L.me || !host) return false;
+    int fd = udp_bound(bind_addr(), 0, false);
     if (fd < 0) return false;
     uint8_t body[33 + 2];
     memcpy(body, uc->name, 33), memcpy(body + 33, &version, 2);
-    ctrl_send(fd, real_ip(want->ldn.nodes[0].ip), 'C', body, sizeof body);
+    ctrl_send(fd, host, 'C', body, sizeof body);
     struct pollfd p = {fd, POLLIN, 0};
     bool ok = false;
     kernel_block_begin();
-    if (sock_poll(&p, 1, 1000) > 0) {
-        uint8_t m[8 + sizeof(NetworkInfo)];
-        ssize_t got = recv(fd, m, sizeof m, 0);
-        if (got >= 6 + (ssize_t)sizeof(NetworkInfo) && !memcmp(m, "LDN1A", 5)) {
+    if (sock_poll(&p, 1, 1500) > 0) {
+        uint8_t m[8 + sizeof(NetworkInfo) + 4 * NODES];
+        ssize_t got = recv(fd, (void *)m, sizeof m, 0);
+        if (got >= 6 + (ssize_t)(sizeof(NetworkInfo) + 4 * NODES) && !memcmp(m, "LDN1A", 5)) {
             pthread_mutex_lock(&L.lock);
-            L.node = m[5];
+            L.node = m[5], L.host_addr = host;
             memcpy(&L.info, m + 6, sizeof L.info);
+            station_table(m + 6 + sizeof L.info);
             pthread_mutex_unlock(&L.lock);
             ok = true;
         }
     }
     kernel_block_end();
     close_sock(fd);
-    if (ok) LOG("[ldn] joined \"%s\"'s network as node %d\n", L.info.ldn.nodes[0].name, L.node);
+    char sb[16];
+    if (ok) LOG("[ldn] joined \"%s\"'s network at %s as node %d\n", L.info.ldn.nodes[0].name, ip_str(host, sb), L.node);
     return ok;
 }
 static void leave(void) {  // (L.lock held) a station out / the host's network closed
     if (L.state == ST_STATION_CONNECTED && L.node > 0) {
         uint8_t k = (uint8_t)L.node;
-        ctrl_send(L.ctrl, real_ip(L.info.ldn.nodes[0].ip), 'L', &k, 1);
+        ctrl_send(L.ctrl, L.host_addr, 'L', &k, 1);
     }
     if (L.state == ST_AP_CREATED)
         for (int k = 1; k < NODES; k++)
-            if (L.info.ldn.nodes[k].connected) ctrl_send(L.ctrl, real_ip(L.info.ldn.nodes[k].ip), 'D', NULL, 0);
-    L.node = -1;
+            if (L.info.ldn.nodes[k].connected && L.real[k]) ctrl_send(L.ctrl, L.real[k], 'D', NULL, 0);
+    L.node = -1, L.host_addr = 0;
     memset(&L.info, 0, sizeof L.info);
+    memset(L.real, 0, sizeof L.real);
 }
 
 static void log_guest_stack(void) {  // (the guest calls that led here: debugging)
@@ -520,23 +628,32 @@ static int g_sock[SOCKS];  // host fd + 1 (0: free)
 static int sock_host(int fd) { return fd >= 0 && fd < SOCKS && g_sock[fd] ? g_sock[fd] - 1 : -1; }
 static bool g_nonblock[SOCKS];  // (O_NONBLOCK as the game set it: Winsock can't be asked)
 
-// guest sockaddr (BSD layout: len, family, port BE, addr BE) <-> host
+// guest sockaddr (BSD layout: len, family, port BE, addr BE) <-> host. The network's addresses (169.254.1.x) are the
+// nodes' real ones; any / our own is where this copy binds. false: out of reach (a node we have no address for)
 static bool to_host(const uint8_t *g, size_t n, struct sockaddr_in *h) {
-    if (n < 8) return false;
     memset(h, 0, sizeof *h);
+    if (n < 8) return false;
     h->sin_family = AF_INET;
     memcpy(&h->sin_port, g + 2, 2);
     uint32_t ip;
     memcpy(&ip, g + 4, 4);
     ip = ntohl(ip);
-    if (ip == 0 || ip == 0xFFFFFFFFu) ip = ip ? ip : (L.node >= 0 ? my_vip() : 0);
-    if (in_subnet(ip) && (ip & 0xFF) != 0xFF) ip = real_ip(ip);
+    pthread_mutex_lock(&L.lock);
+    int k = vip_node(ip);
+    if (ip == 0 || (k >= 0 && k == L.node)) ip = bind_addr();
+    else if (k >= 0) ip = L.real[k];
+    pthread_mutex_unlock(&L.lock);
     h->sin_addr.s_addr = htonl(ip);
-    return true;
+    return ip != 0 || k < 0;
 }
 static void to_guest(const struct sockaddr_in *h, uint8_t *g) {
-    uint32_t ip = ntohl(h->sin_addr.s_addr);
-    if ((ip & 0xFFFFFF00u) == 0x7F000100u) ip = 0xA9FE0100u | (ip & 0xFF);
+    uint32_t ip = canon(ntohl(h->sin_addr.s_addr));
+    pthread_mutex_lock(&L.lock);
+    if (ip == 0 || ip == my_addr()) ip = my_vip();
+    else
+        for (int k = 0; k < NODES; k++)
+            if (L.real[k] == ip) { ip = node_vip(k); break; }
+    pthread_mutex_unlock(&L.lock);
     memset(g, 0, 16);
     g[0] = 16, g[1] = 2;
     memcpy(g + 2, &h->sin_port, 2);
@@ -640,33 +757,36 @@ SERVICE("bsd:u", bsd_u) {
         int hf = host_flags(fl);
         struct sockaddr_in to;
         ssize_t n;
-        if (ab && ab->addr && to_host((const uint8_t *)(uintptr_t)ab->addr, (size_t)ab->size, &to)) {
-            if (broadcast(&to)) {  // (the network's broadcast: to every other node, the same port)
+        if (ab && ab->addr) {
+            if (!to_host((const uint8_t *)(uintptr_t)ab->addr, (size_t)ab->size, &to)) n = (ssize_t)b->size;  // (no way there: lost)
+            else if (broadcast(&to)) {  // (the network's broadcast: to every other node, the same port)
                 n = (ssize_t)b->size;
                 pthread_mutex_lock(&L.lock);
                 for (int k = 0; k < NODES; k++)
-                    if (k != L.node && L.info.ldn.nodes[k].connected) {
+                    if (k != L.node && L.info.ldn.nodes[k].connected && L.real[k]) {
                         struct sockaddr_in t = to;
-                        t.sin_addr.s_addr = htonl(real_ip(L.info.ldn.nodes[k].ip));
-                        sendto(h, (const void *)(uintptr_t)b->addr, (size_t)b->size, hf, (struct sockaddr *)&t, sizeof t);
+                        t.sin_addr.s_addr = htonl(L.real[k]);
+                        sendto(h, (const void *)(uintptr_t)b->addr, (int)b->size, hf, (struct sockaddr *)&t, sizeof t);
                     }
                 pthread_mutex_unlock(&L.lock);
-            } else n = sendto(h, (const void *)(uintptr_t)b->addr, (size_t)b->size, hf, (struct sockaddr *)&to, sizeof to);
-        } else n = send(h, (const void *)(uintptr_t)b->addr, (size_t)b->size, hf);
+            } else n = sendto(h, (const void *)(uintptr_t)b->addr, (int)b->size, hf, (struct sockaddr *)&to, sizeof to);
+        } else n = send(h, (const void *)(uintptr_t)b->addr, (int)b->size, hf);
         if (n < 0) LOG("[bsd] send failed: errno %d\n", sock_errno());
         else g_sent[0]++, g_sent[1] += (uint64_t)n;
         RET(n, n < 0 ? sock_errno() : 0);
         break;
     }
-    case 13: {  // Bind(fd; addr): to this copy's loopback address
+    case 13: {  // Bind(fd; addr): where this copy binds (slot 1: every address; else 127.0.1.N), the game's port
         int h = sock_host(IN(int32_t, 0));
         IpcBuf *ab = in_buf(req, 0);
         struct sockaddr_in a;
-        if (h < 0 || !ab || !ab->addr || !to_host((const uint8_t *)(uintptr_t)ab->addr, (size_t)ab->size, &a)) { RET(-1, 22); break; }
+        if (h < 0 || !ab || !ab->addr || ab->size < 8) { RET(-1, 22); break; }
+        to_host((const uint8_t *)(uintptr_t)ab->addr, (size_t)ab->size, &a);
         pthread_mutex_lock(&L.lock);
-        if (L.node >= 0) a.sin_addr.s_addr = htonl(real_ip(my_vip()));  // (any / our virtual address: ours)
+        a.sin_addr.s_addr = htonl(bind_addr());
         pthread_mutex_unlock(&L.lock);
         int one = 1;
+        setsockopt(h, SOL_SOCKET, SO_REUSEADDR, (const void *)&one, sizeof one);  // (slot 1's port is the others' too)
         setsockopt(h, SOL_SOCKET, SO_BROADCAST, (const void *)&one, sizeof one);
         int r = bind(h, (struct sockaddr *)&a, sizeof a);
         if (ldn_log()) LOG("[bsd] bind %s:%u\n", inet_ntoa(a.sin_addr), ntohs(a.sin_port));

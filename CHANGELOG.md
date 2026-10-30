@@ -12,7 +12,9 @@ Z-A:
   traffic over loopback UDP). Tested with two copies: a trade both ways (saved) and a private battle room, battle
   started. Sockets still only work inside such a network: the game never reaches the internet. The profanity filter
   (`ngc:u`) now answers "clean" (the names a trade brings). The Windows build does the same (Winsock): a copy
-  under Wine traded with a Linux copy on the same PC. Not yet: copies on different PCs (LAN).
+  under Wine traded with a Linux copy on the same PC. Copies on other PCs of the LAN are found by broadcast (UDP port
+  39100 and the game's own ports must get through), or listed with `LARECOMP_LDN_PEERS=<ip>,<ip>`; one copy per PC
+  plays over the LAN (further copies on a PC only reach that PC).
 - Windows: loading a save no longer crashes a few seconds into the world ("no function at ..." from a fiber switch).
   A game fiber resumed on another thread wrote the old thread's fiber bookkeeping (the compiler kept the
   thread-local address from before the switch); that work is now done after the switch, on the thread it runs on.
