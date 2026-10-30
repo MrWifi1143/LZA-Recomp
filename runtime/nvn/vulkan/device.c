@@ -219,7 +219,8 @@ static void create_device(void) {
                                             .pNext = g_vk.custom_border ? (void *)&cbc : g_vk.divisor ? (void *)&div : NULL};
     VkPhysicalDeviceVulkan12Features f12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
                                             .timelineSemaphore = VK_TRUE, .shaderInt8 = VK_TRUE, .samplerMirrorClampToEdge = VK_TRUE,
-                                            .uniformAndStorageBuffer8BitAccess = VK_TRUE, .storageBuffer8BitAccess = VK_TRUE,
+                                            .uniformAndStorageBuffer8BitAccess = have12.uniformAndStorageBuffer8BitAccess,  // (not on Adreno / Turnip)
+                                            .storageBuffer8BitAccess = VK_TRUE,
                                             .scalarBlockLayout = VK_TRUE, .shaderOutputLayer = VK_TRUE,
                                             .hostQueryReset = have12.hostQueryReset, .samplerFilterMinmax = have12.samplerFilterMinmax,
                                             .bufferDeviceAddress = VK_TRUE,  // (Vulkan 1.3 requires it: the guest heap's address, exec.c gmem_ref_info)
@@ -280,6 +281,7 @@ static void create_device(void) {
     if (ENV("LARECOMP_NO_ROBUST")) b->robustBufferAccess = VK_FALSE;  // (research: what the bounds checks cost)
     b->shaderClipDistance = h->shaderClipDistance;
     if (!h->shaderInt64) LOG("[vk] warning: no shaderInt64 (64-bit address math in shaders)\n");
+    if (!have12.uniformAndStorageBuffer8BitAccess) LOG("[vk] warning: no 8-bit uniform buffer access\n");
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
                                   .queueCount = 1, .pQueuePriorities = &prio};

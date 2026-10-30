@@ -1,7 +1,7 @@
 # System fonts (optional)
 
 Some of the game's text can use the Switch's built-in system font, which is not part of the game files. Without it,
-the recomp falls back to a font installed on your PC (Windows: Yu Gothic or MS Gothic, then Arial; Linux: DejaVu Sans). Most text is drawn
+the recomp falls back to a font installed on your PC (Windows: Yu Gothic or MS Gothic, then Arial; Linux: DejaVu Sans, else Noto Sans or Liberation Sans). Most text is drawn
 with the game's own fonts from the RomFS and does not change.
 
 For the exact look, put a copy taken from **your own** console here (system titles *FontStandard*,
