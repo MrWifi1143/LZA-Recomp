@@ -164,6 +164,22 @@ static void create_device(void) {
     if (g_vk.divisor) ext[n_ext++] = VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME;
     g_vk.host_import = has_ext(ep, ne, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);  // guest heap as a GPU buffer (exec.c)
     if (g_vk.host_import) ext[n_ext++] = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;
+    {   // without it: the heap window made of GPU memory (gpuheap.c), imported as dma-bufs into a sparse buffer (exec.c)
+        extern bool gpuheap_on(void);
+        uint32_t nq = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, NULL);
+        VkQueueFamilyProperties qp[16];
+        if (nq > 16) nq = 16;
+        vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, qp);
+        g_vk.gpuheap = gpuheap_on() && g_vk.qfam < nq && (qp[g_vk.qfam].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT);
+        if (g_vk.gpuheap) {
+            g_vk.host_import = false;  // (LARECOMP_DMABUF_HEAP=1 where both exist: this way)
+            if (has_ext(ep, ne, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME)) n_ext--;
+            ext[n_ext++] = VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME;
+            ext[n_ext++] = VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME;
+        } else if (gpuheap_on())
+            LOG("[vk] warning: the guest heap is GPU memory but the queue can't bind it: shader global memory reads return zero\n");
+    }
     g_vk.xfb = has_ext(ep, ne, VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME);
     if (g_vk.xfb) ext[n_ext++] = VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME;
     // pipelines linked from separately built parts (exec.c gpl_link); LARECOMP_VK_GPL=0: whole pipelines as before
@@ -289,6 +305,7 @@ static void create_device(void) {
     b->robustBufferAccess = h->robustBufferAccess;  // guest shaders index cbufs freely: keep OOB reads harmless
     if (getenv("LARECOMP_NO_ROBUST")) b->robustBufferAccess = VK_FALSE;  // (research: what the bounds checks cost)
     b->shaderClipDistance = h->shaderClipDistance;
+    b->sparseBinding = b->sparseResidencyBuffer = g_vk.gpuheap;  // (exec.c: the heap window's sparse buffer)
     if (!h->shaderInt64) LOG("[vk] warning: no shaderInt64 (64-bit address math in shaders)\n");
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
@@ -1289,7 +1306,10 @@ void backend_reset(void) {
     vk_exec_reset();
     g_last_presented = NULL;
 }
-void backend_guest_memory_reset(void) {}  // (exec.c re-imports the heap on first use)
+void backend_guest_memory_reset(void) {  // (exec.c re-imports the heap on first use)
+    extern void gpuheap_guest_reset(void);
+    gpuheap_guest_reset();  // (the GPU memory heap window: mapped again over the fresh guest range)
+}
 void backend_clear_window(void) {
     static const float black[4] = {0, 0, 0, 1};
     if (g_vk.dev && vk_frame_begin(black)) vk_frame_end(NULL);

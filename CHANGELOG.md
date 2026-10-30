@@ -71,6 +71,10 @@ Arceus:
   doesn't call. glslang over 1,613 of the game's shaders: 7.5 -> 4.2 ms each, none failing; the intro's pictures
   the same with and without. The cache is rebuilt once. `LARECOMP_XLAT_NO_RETYPE=1` turns it off.
 - The on-screen keyboard is headed with the game's own text ("What is your name?") instead of always "Enter a name".
+- GPUs whose driver can't map the game's memory (no `VK_EXT_external_memory_host`: Mesa's Turnip on Adreno, the
+  Steam Frame) and AMD's Linux driver (RADV, which revalidates an imported buffer on every submit): the game's heap is
+  then made of GPU memory (dma-buf chunks mapped at its addresses, bound into one sparse buffer) - ported from Z-A.
+  NVIDIA, Windows and the rest keep the import. `LARECOMP_DMABUF_HEAP=0` turns it off, `=1` forces it.
 - A launcher, like an older PC game's (Fallout: New Vegas style), instead of the one-window start screen: the banner
   (Mount Coronet under the space-time rift, drawn by the program: no game art), Play, and pages for Options (Display /
   Graphics / Game tabs, with this PC's recommended settings), Controls (controller and keyboard), Game Files and Mods.

@@ -147,6 +147,8 @@ static void std_virtual_to_block(Cpu *c) {
     c->x[1] = STDHEAP_BASE + g_stdheap_used;
     c->x[2] = size;
     g_stdheap_used += (size + 0xFFFF) & ~0xFFFFull;
+    extern void gpuheap_back(uint64_t addr, uint64_t size);
+    gpuheap_back(c->x[1], size);  // (the heap window as GPU memory, where the driver can't import it: gpuheap.c)
     LOG("[heaps] standard allocator: %#llx bytes of virtual memory asked, a %#llx-byte block at %llx given\n",
         (unsigned long long)want, (unsigned long long)size, (unsigned long long)c->x[1]);
 }
