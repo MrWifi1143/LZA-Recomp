@@ -272,7 +272,7 @@ static void attr_load(Ctx *c, int dst, uint32_t addr, const char *idx) {
             c->in_attr_mask |= 1u << a;
             c->vs_in_comp[a] |= 1u << comp;
             int kind = c->key ? c->key->attr_kind[a] : 0;
-            if (kind == 0) sprintf(e, "as_type<uint>(in.a%d[%d])", a, comp);
+            if (kind == 0 && c->glsl) sprintf(e, "floatBitsToUint(in.a%d[%d])", a, comp);  // (a vec4: glsl_retype takes it off)
             else sprintf(e, "as_type<uint>(in.a%d[%d])", a, comp);
         } else if (addr == 0x2F8) { c->uses_iid = true; strcpy(e, "iid"); }
         else if (addr == 0x2FC) { c->uses_vid = true; strcpy(e, "vid"); }
@@ -540,7 +540,8 @@ static const char *tex_type_name(int t) {
 // Write texture results: component mask selects which of r,g,b,a go to consecutive registers.
 static void write_tex_result(Ctx *c, int slot, const char *call, uint32_t mask, int d0, int d1, bool texs, bool f16) {
     // (a stencil view: integer results, the stencil value in .x - which the game takes as is, e.g. material bits)
-    sp(&c->body, "    { %s t = %s;\n", slot >= 0 && slot < c->info->ntex && c->info->tex[slot].stencil ? "uint4" : "float4", call);
+    bool stencil = slot >= 0 && slot < c->info->ntex && c->info->tex[slot].stencil;
+    sp(&c->body, "    { %s t = %s;\n", stencil ? "uint4" : "float4", call);
     if (f16) {
         // TEXS/TLDS .F16: components (in mask order) packed as half pairs into d0 (lo, hi) and d1 (lo, hi)
         int comps[4], n = 0;
@@ -564,7 +565,7 @@ static void write_tex_result(Ctx *c, int slot, const char *call, uint32_t mask, 
     for (int comp = 0; comp < 4; comp++) {
         if (!(mask & (1u << comp))) continue;
         int r = regs[n++];
-        if (r != RZ) { c->reg_used[r] = 1; sp(&c->body, "      r%d = as_type<uint>(t[%d]);\n", r, comp); }
+        if (r != RZ) { c->reg_used[r] = 1; sp(&c->body, c->glsl && !stencil ? "      r%d = floatBitsToUint(t[%d]);\n" : "      r%d = as_type<uint>(t[%d]);\n", r, comp); }
     }
     sp(&c->body, "    }\n");
 }
@@ -2103,7 +2104,7 @@ static bool is_branch_target_op(uint64_t w) {
 static bool id_start(char ch) { return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_'; }
 static bool id_char(char ch) { return id_start(ch) || (ch >= '0' && ch <= '9'); }
 
-// `(r12)`, `(cb3[283][0])`, `(0x3f800000u)`: a uint for certain - its bits as a float are the built-in
+// `(r12)`, `(cb3[283][0])`, `(0x3f800000u)`, `(0u)`: a uint for certain - its bits as a float are the built-in
 // uintBitsToFloat, not the as_f overload, which at -O0 is a real call in the SPIR-V (a temporary, a store, a call)
 // that the driver then has to inline: most of a shader's as_f are registers.
 static bool uint_arg(const char *q) {
@@ -2125,8 +2126,20 @@ static bool uint_arg(const char *q) {
         q += 2;
         while ((*q >= '0' && *q <= '9') || (*q >= 'a' && *q <= 'f') || (*q >= 'A' && *q <= 'F')) q++;
         if (*q++ != 'u') return false;
+    } else if (*q >= '0' && *q <= '9') {  // (0u: RZ)
+        while (*q >= '0' && *q <= '9') q++;
+        if (*q++ != 'u') return false;
     } else return false;
     return *q == ')';
+}
+
+// `(in.v3[0] * ...)`, `(in.pos[2])`, `(point_coord[0])`, `(fswzadd(...))`: a float for certain (varyings, the
+// fragment position, shuffled sums) - its bits are the built-in floatBitsToUint, which glsl_retype can take off
+static bool float_arg(const char *q) {
+    static const char *const f[] = {"(in.v", "(in.pos", "((in.pos", "(point_coord", "(fswzadd("};
+    for (size_t i = 0; i < sizeof f / sizeof f[0]; i++)
+        if (!strncmp(q, f[i], strlen(f[i]))) return true;
+    return false;
 }
 
 // MSL-spelled instruction body -> GLSL (token-aware; comments and numbers are copied as they are).
@@ -2181,7 +2194,7 @@ static void glsl_rewrite(Ctx *c, Str *o, const char *src) {
             if (!gt) { fail(c, "glsl: bad as_type"); return; }
             int tn = (int)(gt - p - 1);
             if (tn == 5 && !strncmp(p + 1, "float", 5)) sp(o, uint_arg(gt + 1) ? "uintBitsToFloat" : "as_f");
-            else if (tn == 4 && !strncmp(p + 1, "uint", 4)) sp(o, "as_u");
+            else if (tn == 4 && !strncmp(p + 1, "uint", 4)) sp(o, float_arg(gt + 1) ? "floatBitsToUint" : "as_u");
             else if (tn == 3 && !strncmp(p + 1, "int", 3)) sp(o, "as_i");
             else if (tn == 5 && !strncmp(p + 1, "half2", 5)) sp(o, "unpack_h2");
             else { fail(c, "glsl: as_type<%.*s>", tn, p + 1); return; }
@@ -2246,6 +2259,338 @@ static char *glsl_gmem_words(char *src) {
     o[w] = 0;
     free(src);
     return o;
+}
+
+// ------------------------------------------------------------------ register types
+// The body keeps every register a uint: float ops read uintBitsToFloat(rN) and write floatBitsToUint(...), and the
+// constant buffers are uvec4 read the same way - in Z-A two thirds of a translation's text. glslang's time goes per
+// call node (the same arithmetic compiles ~3x faster typed), so this last pass gives each register and each constant
+// buffer the type most of its uses want: a float one drops those casts, its other uses and writes get one. Bit casts
+// only: every value keeps its bits. Anything it doesn't recognize (a compound assignment, a constant buffer used some
+// other way) keeps that register / buffer as it was. LARECOMP_XLAT_NO_RETYPE=1: off (research).
+
+typedef struct { size_t a, b, span; const char *t; char lit[24]; } REdit;  // [a, b) -> t; span: an opening's extent
+typedef struct { REdit *v; size_t n, cap; } REdits;
+
+static void redit(REdits *e, size_t a, size_t b, size_t span, const char *t) {
+    if (e->n == e->cap) {
+        e->cap = e->cap ? e->cap * 2 : 1024;
+        e->v = realloc(e->v, e->cap * sizeof *e->v);
+    }
+    REdit *x = &e->v[e->n++];
+    x->a = a, x->b = b, x->span = span, x->t = t;
+    if (!t) x->lit[0] = 0;
+}
+
+static int redit_cmp(const void *x, const void *y) {
+    const REdit *p = x, *q = y;
+    if (p->a != q->a) return p->a < q->a ? -1 : 1;
+    if (p->b != q->b) return p->b < q->b ? -1 : 1;
+    return p->span == q->span ? 0 : p->span > q->span ? -1 : 1;  // (insertions at one place: the outer one first)
+}
+
+// src with the edits made (and freed); NULL when two of them overlap (src is kept)
+static char *redit_apply(char *src, REdits *e) {
+    qsort(e->v, e->n, sizeof *e->v, redit_cmp);
+    size_t n = strlen(src), len = n, pos = 0;
+    for (size_t i = 0; i < e->n; i++) {
+        if (e->v[i].a < pos) { free(e->v); e->v = NULL, e->n = e->cap = 0; return NULL; }
+        pos = e->v[i].b;
+        len += strlen(e->v[i].t ? e->v[i].t : e->v[i].lit) - (e->v[i].b - e->v[i].a);
+    }
+    char *o = malloc(len + 1), *w = o;
+    pos = 0;
+    for (size_t i = 0; i < e->n; i++) {
+        const char *t = e->v[i].t ? e->v[i].t : e->v[i].lit;
+        memcpy(w, src + pos, e->v[i].a - pos), w += e->v[i].a - pos;
+        memcpy(w, t, strlen(t)), w += strlen(t);
+        pos = e->v[i].b;
+    }
+    memcpy(w, src + pos, n - pos), w += n - pos;
+    *w = 0;
+    free(e->v);
+    e->v = NULL, e->n = e->cap = 0;
+    free(src);
+    return o;
+}
+
+static bool ends_with(const char *s, size_t i, const char *lit) {
+    size_t k = strlen(lit);
+    return i >= k && !memcmp(s + i - k, lit, k);
+}
+
+// The `)` closing the `(` at s[i]; 0 when unbalanced
+static size_t paren_close(const char *s, size_t i) {
+    for (int d = 0; s[i]; i++)
+        if (s[i] == '(') d++;
+        else if (s[i] == ')' && --d == 0) return i;
+    return 0;
+}
+
+// s[a, b) is fn(...) as a whole
+static bool wraps(const char *s, size_t a, size_t b, const char *fn) {
+    size_t k = strlen(fn);
+    return b > a + k && !memcmp(s + a, fn, k) && paren_close(s, a + k - 1) == b - 1;
+}
+
+// Float bits as a literal with the same value, when it reads back exactly (not denormals, infinities, NaNs, -0)
+static bool float_lit(uint32_t v, char *out) {
+    uint32_t e = (v >> 23) & 0xff;
+    if (v && (e == 0 || e == 255)) return false;
+    float f, g;
+    memcpy(&f, &v, 4);
+    char t[20];
+    snprintf(t, sizeof t, "%.9g", f);
+    for (const char *p = t; *p; p++)
+        if (!strchr("0123456789.e+-", *p)) return false;  // (a decimal comma: a locale)
+    g = strtof(t, NULL);
+    uint32_t u;
+    memcpy(&u, &g, 4);
+    if (u != v) return false;
+    snprintf(out, 24, v >> 31 ? "(%s%sf)" : "%s%sf", t, strpbrk(t, ".e") ? "" : ".0");
+    return true;
+}
+
+enum { RT_FU, RT_AF, RT_AU, RT_RAW, RT_DF, RT_DA, RT_DU };  // (uses: uintBitsToFloat(r) as_f(r) as_u(r) r; writes)
+typedef struct { size_t a, b, st, en; uint8_t r, kind; } ROcc;
+
+static char *retype_regs(char *src) {
+    const char *m = strstr(src, "void main() {\n");
+    if (!m) return src;
+    size_t decl[256] = {0}, scan = 0;
+    for (const char *p = strchr(m, '\n') + 1; *p == ' ' && p[1] == ' ';) {
+        const char *q = p + 2, *nl = strchr(p, '\n');
+        if (!nl) break;
+        if (!strncmp(q, "precise ", 8)) q += 8;
+        int r = -1, k = 0;
+        if (!strncmp(q, "uint r", 6) && sscanf(q + 6, "%d = 0u;%n", &r, &k) == 1 && q + 6 + k == nl && r >= 0 && r < 256) {
+            decl[r] = (size_t)(q - src);
+            scan = (size_t)(nl - src);
+        } else if (scan) break;  // (vertex shaders open with their outputs' defaults)
+        p = nl + 1;
+    }
+    if (!scan) return src;
+    ROcc *occ = NULL;
+    size_t nocc = 0, cap = 0;
+    int cnt[256][2] = {{0}};  // float-wanting, uint-wanting
+    bool bad[256] = {0};
+    for (size_t i = scan; src[i]; i++) {
+        if (src[i] != 'r' || src[i + 1] < '0' || src[i + 1] > '9' || id_char(src[i - 1]) || src[i - 1] == '.') continue;
+        size_t j = i + 1;
+        int r = 0;
+        while (src[j] >= '0' && src[j] <= '9') r = r * 10 + (src[j++] - '0');
+        if (id_char(src[j]) || r > 255 || !decl[r]) { i = j - 1; continue; }
+        ROcc o = {i, j, 0, 0, (uint8_t)r, RT_RAW};
+        size_t k = j;
+        while (src[k] == ' ') k++;
+        bool compound = (strchr("+-*/%&|^", src[k]) && src[k + 1] == '=') || (src[k] == '<' && src[k + 1] == '<' && src[k + 2] == '=') ||
+                        (src[k] == '>' && src[k + 1] == '>' && src[k + 2] == '=') || (src[k] == '+' && src[k + 1] == '+') ||
+                        (src[k] == '-' && src[k + 1] == '-') || ends_with(src, i, "++") || ends_with(src, i, "--");
+        if (compound) bad[r] = true;
+        else if (ends_with(src, i, "uintBitsToFloat(") && src[j] == ')') o.kind = RT_FU;
+        else if (ends_with(src, i, "as_f(") && src[j] == ')') o.kind = RT_AF;
+        else if (ends_with(src, i, "as_u(") && src[j] == ')') o.kind = RT_AU;
+        else if (ends_with(src, i, "as_i(") && src[j] == ')') { i = j - 1; continue; }  // (both overloads: as it is)
+        else if (src[k] == '=' && src[k + 1] != '=') {
+            size_t st = k + 1, en = st;
+            while (src[st] == ' ') st++;
+            int d = 0;
+            for (; src[en] && d >= 0 && !(src[en] == ';' && d == 0); en++) d += (src[en] == '(' || src[en] == '[') - (src[en] == ')' || src[en] == ']');
+            if (!src[en] || d < 0) bad[r] = true;  // (not a statement of its own)
+            while (en > st && src[en - 1] == ' ') en--;
+            o.st = st, o.en = en;
+            o.kind = wraps(src, st, en, "floatBitsToUint(") ? RT_DF : wraps(src, st, en, "as_u(") ? RT_DA : RT_DU;
+        }
+        if (o.kind != RT_DA) cnt[r][o.kind == RT_FU || o.kind == RT_AF || o.kind == RT_DF ? 0 : 1]++;
+        if (nocc == cap) occ = realloc(occ, (cap = cap ? cap * 2 : 1024) * sizeof *occ);
+        occ[nocc++] = o;
+        i = j - 1;
+    }
+    REdits e = {0};
+    bool fl[256];
+    for (int r = 0; r < 256; r++) {
+        fl[r] = decl[r] && !bad[r] && cnt[r][0] > cnt[r][1];
+        if (!fl[r]) continue;
+        char name[8];
+        int nl = snprintf(name, sizeof name, "r%d", r);
+        redit(&e, decl[r], decl[r] + 4, 0, "float");
+        redit(&e, decl[r] + 5 + nl + 3, decl[r] + 5 + nl + 5, 0, "0.0f");  // "uint rN = 0u;"
+    }
+    for (size_t i = 0; i < nocc; i++) {
+        ROcc *o = &occ[i];
+        if (!fl[o->r]) continue;
+        switch (o->kind) {
+        case RT_FU: redit(&e, o->a - 16, o->a, 0, ""), redit(&e, o->b, o->b + 1, 0, ""); break;
+        case RT_AF: redit(&e, o->a - 5, o->a, 0, ""), redit(&e, o->b, o->b + 1, 0, ""); break;
+        case RT_AU: redit(&e, o->a - 5, o->a, 0, "floatBitsToUint("); break;
+        case RT_RAW: redit(&e, o->a, o->a, o->b, "floatBitsToUint("), redit(&e, o->b, o->b, 0, ")"); break;
+        case RT_DF: redit(&e, o->st, o->st + 16, 0, ""), redit(&e, o->en - 1, o->en, 0, ""); break;
+        case RT_DA: redit(&e, o->st, o->st, o->en, "as_f("), redit(&e, o->en, o->en, 0, ")"); break;
+        case RT_DU: redit(&e, o->st, o->st, o->en, "uintBitsToFloat("), redit(&e, o->en, o->en, 0, ")"); break;
+        }
+    }
+    free(occ);
+    if (!e.n) { free(e.v); return src; }
+    char *o = redit_apply(src, &e);
+    return o ? o : src;
+}
+
+// Constant buffers read mostly as floats: vec4 arrays (refs: cbN[i][j], cbr(cbN, off))
+static char *retype_cbufs(char *src) {
+    enum { NCB = 32 };
+    size_t decl[NCB] = {0};
+    for (const char *p = src; (p = strstr(p, "uniform CB"));) {
+        int n = -1, k = 0;
+        if (sscanf(p + 10, "%d { uvec4 cb%*d[%n", &n, &k) == 1 && k && n >= 0 && n < NCB) decl[n] = (size_t)(strstr(p, "uvec4") - src);
+        p += 10;
+    }
+    typedef struct { size_t a, b; uint8_t n; bool f; } CRef;
+    CRef *ref = NULL;
+    size_t nref = 0, cap = 0;
+    int cnt[NCB][2] = {{0}};
+    bool bad[NCB] = {0};
+    for (size_t i = 1; src[i]; i++) {
+        if (src[i] != 'c' || src[i + 1] != 'b' || src[i + 2] < '0' || src[i + 2] > '9' || id_char(src[i - 1]) || src[i - 1] == '.') continue;
+        size_t j = i + 2;
+        int n = 0;
+        while (src[j] >= '0' && src[j] <= '9') n = n * 10 + (src[j++] - '0');
+        if (id_char(src[j]) || n >= NCB || !decl[n]) { i = j - 1; continue; }
+        CRef c = {0, 0, (uint8_t)n, false};
+        if (i > decl[n] && i < decl[n] + 8) {  // its declaration
+            i = j - 1;
+            continue;
+        }
+        if (ends_with(src, i, "cbr(") && src[j] == ',') {
+            c.a = i - 4, c.b = paren_close(src, i - 1) + 1;
+            if (c.b == 1) bad[n] = true;
+        } else if (src[j] == '[') {
+            size_t k = j;
+            for (int t = 0; t < 2; t++) {
+                if (src[k] != '[' || src[k + 1] < '0' || src[k + 1] > '9') { k = 0; break; }
+                for (k++; src[k] >= '0' && src[k] <= '9'; k++) {}
+                if (src[k++] != ']') { k = 0; break; }
+            }
+            if (!k) bad[n] = true;
+            c.a = i, c.b = k;
+        } else bad[n] = true;
+        if (!bad[n]) {
+            c.f = ends_with(src, c.a, "uintBitsToFloat(") && src[c.b] == ')';
+            cnt[n][c.f ? 0 : 1]++;
+            if (nref == cap) ref = realloc(ref, (cap = cap ? cap * 2 : 1024) * sizeof *ref);
+            ref[nref++] = c;
+        }
+        i = j - 1;
+    }
+    REdits e = {0};
+    bool fl[NCB];
+    for (int n = 0; n < NCB; n++) {
+        fl[n] = decl[n] && !bad[n] && cnt[n][0] > cnt[n][1];
+        if (fl[n]) redit(&e, decl[n], decl[n] + 5, 0, "vec4");
+    }
+    for (size_t i = 0; i < nref; i++) {
+        CRef *c = &ref[i];
+        if (!fl[c->n]) continue;
+        if (c->f) redit(&e, c->a - 16, c->a, 0, ""), redit(&e, c->b, c->b + 1, 0, "");
+        else redit(&e, c->a, c->a, c->b, "floatBitsToUint("), redit(&e, c->b, c->b, 0, ")");
+    }
+    free(ref);
+    if (!e.n) { free(e.v); return src; }
+    char *o = redit_apply(src, &e);
+    return o ? o : src;
+}
+
+// uintBitsToFloat(<literal>) -> a float literal; uintBitsToFloat(floatBitsToUint(x)) and the reverse -> (x)
+static char *fold_casts(char *src) {
+    REdits e = {0};
+    for (size_t i = 0; src[i]; i++) {
+        bool u2f = !strncmp(src + i, "uintBitsToFloat(", 16), f2u = !u2f && !strncmp(src + i, "floatBitsToUint(", 16);
+        if (!u2f && !f2u) continue;
+        if (i && id_char(src[i - 1])) continue;
+        const char *in = src + i + 16;
+        if (u2f && !strncmp(in, "0u)", 3)) {
+            redit(&e, i, i + 19, 0, "0.0f");
+            i += 18;
+        } else if (u2f && in[0] == '0' && in[1] == 'x' && strspn(in + 2, "0123456789abcdef") == 8 && !strncmp(in + 10, "u)", 2)) {
+            redit(&e, i, i + 28, 0, NULL);
+            if (!float_lit((uint32_t)strtoul(in + 2, NULL, 16), e.v[e.n - 1].lit)) e.n--;
+            else i += 27;
+        } else if (!strncmp(in, u2f ? "floatBitsToUint(" : "uintBitsToFloat(", 16)) {
+            size_t c = paren_close(src, i + 31);
+            if (c && src[c + 1] == ')') {
+                redit(&e, i, i + 32, 0, "(");
+                redit(&e, c, c + 2, 0, ")");
+                i += 31;
+            }
+        }
+    }
+    if (!e.n) { free(e.v); return src; }
+    char *o = redit_apply(src, &e);
+    return o ? o : src;
+}
+
+// name( with no identifier character before it, in src[from, to)
+static bool called(const char *src, const char *name, size_t from, size_t to) {
+    size_t k = strlen(name);
+    for (const char *p = src + from; (p = strstr(p, name)) && p < src + to; p += k)
+        if (p[k] == '(' && (p == src || !id_char(p[-1]))) return true;
+    return false;
+}
+
+// The prelude's helper functions the shader doesn't call, taken out: glslang compiles each of them for every shader
+// (~0.6 ms of a 7 ms average). A helper is the lines from `<type> <name>(` at the start of a line to its closing brace,
+// up to the first declaration; one is kept when its name is called after the helpers or by a kept helper.
+static char *drop_unused_helpers(char *src) {
+    enum { MAXH = 64 };
+    struct { size_t a, b; char name[24]; bool keep; } h[MAXH];
+    int nh = 0;
+    size_t end = 0;
+    for (const char *p = src; *p && nh < MAXH;) {
+        const char *nl = strchr(p, '\n');
+        if (!nl) break;
+        if (!strncmp(p, "layout", 6) || !strncmp(p, "void main", 9)) { end = (size_t)(p - src); break; }
+        if (*p == '#' || !id_start(*p)) { p = nl + 1; continue; }
+        const char *t = p;
+        while (id_char(*t)) t++;  // the return type
+        if (*t++ != ' ' || !id_start(*t)) { p = nl + 1; continue; }
+        const char *n = t;
+        while (id_char(*n)) n++;
+        if (*n != '(' || n - t >= (long)sizeof h[0].name) { p = nl + 1; continue; }
+        int d = 0;
+        const char *q = p;
+        for (bool opened = false; *q && !(opened && d == 0); q++) {
+            if (*q == '{') d++, opened = true;
+            else if (*q == '}') d--;
+        }
+        while (*q && *q != '\n') q++;
+        if (*q) q++;
+        h[nh].a = (size_t)(p - src), h[nh].b = (size_t)(q - src), h[nh].keep = false;
+        snprintf(h[nh].name, sizeof h[0].name, "%.*s", (int)(n - t), t);
+        nh++;
+        p = q;
+    }
+    if (!end || !nh) return src;
+    for (int i = 0; i < nh; i++) h[i].keep = called(src, h[i].name, end, strlen(src));
+    for (bool more = true; more;) {
+        more = false;
+        for (int i = 0; i < nh; i++)
+            if (h[i].keep)
+                for (int j = 0; j < nh; j++)
+                    if (!h[j].keep && (!strcmp(h[j].name, h[i].name) || called(src, h[j].name, h[i].a, h[i].b)))  // (overloads together)
+                        h[j].keep = more = true;
+    }
+    REdits e = {0};
+    for (int i = 0; i < nh; i++)
+        if (!h[i].keep) redit(&e, h[i].a, h[i].b, 0, "");
+    if (!e.n) { free(e.v); return src; }
+    char *o = redit_apply(src, &e);
+    return o ? o : src;
+}
+
+static char *glsl_retype(char *src) {
+    static int off = -1;
+    if (off < 0) off = getenv("LARECOMP_XLAT_NO_RETYPE") != NULL;
+    if (off) return src;
+    return drop_unused_helpers(fold_casts(retype_cbufs(retype_regs(src))));
 }
 
 static const char glsl_prelude[] =
@@ -2489,7 +2834,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         }
     }
     sp(&s, "}\n");
-    info->msl = info->uses_gmem ? glsl_gmem_words(s.buf) : s.buf;
+    info->msl = glsl_retype(info->uses_gmem ? glsl_gmem_words(s.buf) : s.buf);
     info->attr_mask = c->in_attr_mask;
     info->out_mask = stage == STAGE_FRAGMENT ? c->omap_target : c->out_attr_mask;
     free(c->body.buf);
@@ -3121,7 +3466,7 @@ ShaderInfo *maxwell_translate_consts(const uint8_t *blob, size_t max_size, const
     if (off < 0)
         off = getenv("LARECOMP_NO_XLAT_CACHE") || getenv("LARECOMP_NO_DISCARD") || getenv("LARECOMP_VK_EXACT_H2F") ||
               getenv("LARECOMP_VK_PRECISE") || getenv("LARECOMP_SAVE_MSL") || getenv("LARECOMP_DUMP_FAILED_SHADERS") ||
-              getenv("LARECOMP_XLAT_FLOW_DYN");
+              getenv("LARECOMP_XLAT_FLOW_DYN") || getenv("LARECOMP_XLAT_NO_RETYPE");
     if (off || maxwell_dbg_code || !key) return translate_impl(blob, max_size, consts, nconsts, stage, key);
     uint64_t code = xfnv(blob, program_len(blob, max_size, stage), 0xcbf29ce484222325ull ^ (uint64_t)stage);
     if (consts) code = xfnv(consts, nconsts, code ^ 0xc1);  // (BRX targets come from them)

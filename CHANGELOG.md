@@ -8,6 +8,12 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Arceus:
 
+- Shaders build ~44% faster (the first start's shader warm-up, and new areas on a first visit): the translated
+  GLSL now types each register and constant buffer as float or uint by how it is used, instead of uint everywhere
+  with a conversion around every float operation, folds float constants, and leaves out helper functions a shader
+  doesn't call. glslang over 1,613 of the game's shaders: 7.5 -> 4.2 ms each, none failing; the intro's pictures
+  the same with and without. The cache is rebuilt once. `LARECOMP_XLAT_NO_RETYPE=1` turns it off.
+- The on-screen keyboard is headed with the game's own text ("What is your name?") instead of always "Enter a name".
 - A launcher, like an older PC game's (Fallout: New Vegas style), instead of the one-window start screen: the banner
   (Mount Coronet under the space-time rift, drawn by the program: no game art), Play, and pages for Options (Display /
   Graphics / Game tabs, with this PC's recommended settings), Controls (controller and keyboard), Game Files and Mods.
