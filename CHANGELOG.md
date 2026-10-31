@@ -3,6 +3,21 @@
 Releases are tagged per game: `LegendsA-v*` (PL:A Recomp, branch `LegendsA`) and `LegendsZA-v*` (PL:Z-A Recomp,
 branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
+## Unreleased (branch `LegendsZA`)
+
+Z-A:
+
+- Cutscenes stay in step with their sound after a hitch. With Frame Timing "Real time" (the default) a frame longer
+  than 33.3 ms only moved the game on by 33.3 ms, and the sound (on the audio device's clock) kept going: each hitch put
+  the picture further behind - a first play's shader stalls plus a stream being encoded beside the game left the intro
+  seconds out of step. The rest of a long frame is now made up over the next frames (each still at most 33.3 ms, the
+  game's own step at 30 fps), up to 1 s - a longer stall is a load and isn't made up. Intro from a new game, cold caches,
+  RTX 4090: 2.5 s behind by the station -> only the title card's load (0.7 s) not made up. `LARECOMP_CATCHUP_MS=0`: as before.
+- AMD Radeon: shaders that use the GPU's warp operations (lane ids, ballots, votes, shuffles) in vertex and pixel shaders
+  now give the Switch's results - a friend's Radeon didn't draw some trees outside the intro's train window. A Radeon
+  runs those stages 64 lanes wide and AMD's driver can fix only compute shaders at 32; such stages now use the 32-lane
+  slices the Steam Frame build introduced (the same picture where a stage is 32 wide: checked on the intro with them
+  forced on an RTX 4090). `LARECOMP_NO_WARP_SLICES=1`: as before.
 ## 2026-10-31: LegendsZA-v0.6.1-alpha
 
 Z-A:

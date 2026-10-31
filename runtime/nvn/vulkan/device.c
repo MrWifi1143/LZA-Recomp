@@ -267,10 +267,21 @@ static void create_device(void) {
         VkPhysicalDeviceProperties2 hp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &p13};
         vkGetPhysicalDeviceProperties2(g_vk.phys, &hp);
         LOG("[vk] subgroup size %u..%u\n", p13.minSubgroupSize, p13.maxSubgroupSize);
+        const VkShaderStageFlags vfc = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
         if (h13.subgroupSizeControl && p13.minSubgroupSize <= 32 && p13.maxSubgroupSize >= 32 && p13.minSubgroupSize != p13.maxSubgroupSize) {
             f13.subgroupSizeControl = VK_TRUE;
-            g_vk.sg32 = p13.requiredSubgroupSizeStages & (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT);
-            LOG("[vk] guest shaders run in 32-wide subgroups (stages %#x)\n", g_vk.sg32);
+            g_vk.sg32 = p13.requiredSubgroupSizeStages & vfc;
+            LOG("[vk] guest shaders run in 32-wide subgroups (stages %#x of %#x the driver can fix at 32)\n", g_vk.sg32,
+                p13.requiredSubgroupSizeStages);
+            // A stage the driver can't fix at 32 (AMD's Windows driver: compute only) runs at its own width - wave64 on a
+            // Radeon - and the guest's warp operations (lane ids, ballots, votes, shuffles) there saw 64 lanes: wrong
+            // results in vertex / fragment shaders (a Radeon owner's trees out of the intro's train window didn't draw).
+            // Such stages get the 32-lane slices; on a stage fixed at 32 a slice is the whole subgroup (the same results).
+            if (p13.maxSubgroupSize > 32 && (g_vk.sg32 & vfc) != vfc && !ENV("LARECOMP_NO_WARP_SLICES")) {
+                g_maxwell_warp_slices = true;
+                LOG("[vk] subgroups up to %u lanes in stages not fixed at 32: guest shaders' warp operations work on 32-lane "
+                    "slices\n", p13.maxSubgroupSize);
+            }
         } else if (p13.minSubgroupSize > 32 && !ENV("LARECOMP_NO_WARP_SLICES")) {
             g_maxwell_warp_slices = true;
             LOG("[vk] subgroups of %u..%u lanes: guest shaders' warp operations work on 32-lane slices\n", p13.minSubgroupSize,
