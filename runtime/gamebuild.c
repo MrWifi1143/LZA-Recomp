@@ -216,6 +216,7 @@ static void log_tail(const char *path, char *out, size_t n) {  // the last line 
 typedef struct {
     char src[1100], obj[1100], log[1100];
     unsigned long long bytes;
+    int tries;  // (failed compiles started again: Windows Defender holds a freshly unpacked header for a moment)
 } Unit;
 
 typedef struct {
@@ -229,6 +230,7 @@ static void add_unit(Units *us, const char *src, const char *work, const char *s
         us->u = (Unit *)realloc(us->u, sizeof *us->u * us->cap);
     }
     Unit *u = &us->u[us->n++];
+    u->tries = 0;
     snprintf(u->src, sizeof u->src, "%s", src);
     snprintf(u->obj, sizeof u->obj, "%s" SEP "%s.o", work, stem);
     snprintf(u->log, sizeof u->log, "%s" SEP "%s.log", work, stem);
@@ -394,6 +396,14 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
             int r = finished(run[k].p);
             if (r < 0) continue;
             Unit *u = &units.u[run[k].unit];
+            if (r != 0 && u->tries < 3) {  // (a compiler that couldn't open a file of its own, on a fresh install: again)
+                char last[300];
+                log_tail(u->log, last, sizeof last);
+                LOG("[gamebuild] compiling %s failed (%s): again\n", u->src, last);
+                u->tries++;
+                plat_sleep_until_ns(plat_now_ns() + 500000000ull * (uint64_t)u->tries);
+                if ((run[k].p = start_compile(&t, u))) continue;
+            }
             if (r != 0) {
                 char last[300];
                 log_tail(u->log, last, sizeof last);
