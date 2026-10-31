@@ -439,8 +439,8 @@ static void banner_sky(ImDrawList *d, ImVec2 a, ImVec2 b) {
             d->AddCircleFilled(ImVec2(x, y), 1.3f, IM_COL32(150, 190, 255, (int)(34 * (1 - (y - a.y) / h) + 6)), 6);
 }
 
-// Lumiose City's Prism Tower as glowing wireframe: a dark body outlined in the accent - the stepped base (a sloping
-// pyramid with the arched entrance, banded tiers, the deck), the hourglass shaft with its long X-lattice
+// Lumiose City's Prism Tower as glowing wireframe: a dark body outlined in the accent - the base a pyramid running
+// smoothly into the hourglass shaft (the arched entrance, ledges, window bands), the shaft's long X-lattice
 // window, the crown's cup with two horns curving out and the spire with its antenna; red lights on the horn tips.
 // H: its height to the antenna's tip, from the ground.
 static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t) {
@@ -449,40 +449,12 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
     auto shw = [&](float f) { float u = f - 0.52f; return H * (0.036f + (u > 0 ? 0.40f : 0.52f) * u * u); };  // (flaring less above the waist)
     float cup0 = shw(0.80f);
     ImVec2 tips[2], back_lights[2];  // (the fins' red lights)
-    // the base, as the concept art draws it: a sharp stepped pyramid, no curves - a plinth, the big sloping base with the
-    // arched entrance and a dark lattice window either side, a ledge, a tier with a window band, a ledge, a smaller banded
-    // tier and the deck the shaft stands on (docs/icon/make_icon.py draws the same)
-    static const struct { float f0, f1, w0, w1; bool band; } tiers[] = {
-        {0.000f, 0.028f, 0.300f, 0.292f, false}, {0.028f, 0.150f, 0.270f, 0.190f, false}, {0.150f, 0.163f, 0.212f, 0.212f, false},
-        {0.163f, 0.213f, 0.180f, 0.165f, true},  {0.213f, 0.224f, 0.178f, 0.178f, false}, {0.224f, 0.246f, 0.150f, 0.135f, true},
-        {0.246f, 0.258f, 0.110f, 0.110f, false}};  // (heights, half widths at each)
-    for (const auto &tr : tiers) {
-        float a0 = tr.w0 * H, a1 = tr.w1 * H, y0 = Y(tr.f0), y1 = Y(tr.f1);
-        d->AddQuadFilled(ImVec2(cx - a0, y0), ImVec2(cx - a1, y1), ImVec2(cx + a1, y1), ImVec2(cx + a0, y0), fill);
-        d->AddQuad(ImVec2(cx - a0, y0), ImVec2(cx - a1, y1), ImVec2(cx + a1, y1), ImVec2(cx + a0, y0), c, 2.0f);
-        if (!tr.band) continue;
-        float yb = Y((tr.f0 + tr.f1) / 2), hb = ((tr.w0 + tr.w1) / 2 - 0.022f) * H, hh = 0.3f * (tr.f1 - tr.f0) * H;
-        int nb = (int)fmaxf(1.0f, roundf(2 * hb / 9));
-        for (int i = 0; i <= nb; i++) {  // (the window band: a row of lit panes)
-            float x = cx - hb + 2 * hb * i / nb;
-            d->AddLine(ImVec2(x, yb - hh), ImVec2(x, yb + hh), dim, 1.2f);
-        }
-    }
-    float arch = 0.065f * H;  // the arched entrance
-    for (int k = 0; k < 2; k++) {
-        d->PathLineTo(ImVec2(cx - arch, Y(0.028f)));
-        d->PathArcTo(ImVec2(cx, Y(0.028f) - 0.025f * H), arch, 3.14159265f, 6.2831853f, 24);
-        d->PathLineTo(ImVec2(cx + arch, Y(0.028f)));
-        if (k) d->PathStroke(c, ImDrawFlags_Closed, 2.0f);
-        else d->PathFillConvex(IM_COL32(20, 34, 40, 255));
-    }
-    for (int k = -1; k <= 1; k += 2) {  // the lattice windows beside it
-        ImVec2 p0(cx + k * 0.115f * H, Y(0.045f)), p1(cx + k * 0.175f * H, Y(0.105f));
-        ImVec2 lo(fminf(p0.x, p1.x), p1.y), hi(fmaxf(p0.x, p1.x), p0.y);
-        d->AddRectFilled(lo, hi, IM_COL32(20, 34, 40, 255));
-        d->AddRect(lo, hi, c, 0, 0, 1.5f);
-        d->AddLine(lo, hi, dim, 1.2f), d->AddLine(ImVec2(lo.x, hi.y), ImVec2(hi.x, lo.y), dim, 1.2f);
-    }
+    // the base: a pyramid whose straight sides run up into the shaft's curve with no corner - the line is the shaft's
+    // tangent at FJ, so its foot is as wide as that tangent reaches at the ground. Its steps are lines inside it (ledges,
+    // window bands), the arched entrance and a lattice window either side at the bottom (drawn over the outline's fill,
+    // below). docs/icon/make_icon.py draws the same.
+    const float FJ = 0.24f, slope = 1.04f * (0.52f - FJ) * H;  // (-d shw / df below the waist)
+    auto pw = [&](float f) { return shw(FJ) + slope * (FJ - f); };  // (the pyramid's half width at height f)
     // the shaft and the crown, one outline: the shaft's sides flare out and run on up into the horns; each horn's inner
     // edge comes down into a rounded notch that rises into the spire
     {
@@ -510,8 +482,9 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
         }
         // left half: up the shaft, out along the fin's outer edge, across its slanted top, down its inner edge into
         // the slit, round its floor, up the middle column's side and its steps to the needle
-        for (int i = 0; i < 80; i++) {  // the shaft (an hourglass), from the deck up
-            float f = 0.258f + 0.542f * i / 80;
+        P[n++] = ImVec2(cx - pw(0.0f), Y(0.0f));  // the pyramid's side, from the ground
+        for (int i = 0; i < 80; i++) {  // the shaft (an hourglass), from where the side meets its curve
+            float f = FJ + (0.80f - FJ) * i / 80;
             P[n++] = ImVec2(cx - shw(f), Y(f));
         }
         bez(ImVec2(cx - o, Y(0.80f)), ImVec2(cx - o - 0.017f * H, Y(0.875f)), ImVec2(cx - fin, Y(0.970f)), 24, true);  // (keeps the shaft's slope)
@@ -533,7 +506,34 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
         d->Flags &= ~ImDrawListFlags_AntiAliasedFill;
         d->AddConcavePolyFilled(P, n, fill);
         d->Flags = fl;
-        d->AddPolyline(P, n, c, 0, 2.5f);  // (open at the deck)
+        d->AddPolyline(P, n, c, 0, 2.5f);  // (open at the ground)
+        static const float ledges[3] = {0.075f, 0.135f, 0.180f};
+        for (float f : ledges)  // the base's ledges across it
+            d->AddLine(ImVec2(cx - pw(f), Y(f)), ImVec2(cx + pw(f), Y(f)), c, 1.6f);
+        static const float bands[2][2] = {{0.135f, 0.180f}, {0.180f, 0.218f}};
+        for (const auto &bd : bands) {  // window bands between them
+            float yb = Y((bd[0] + bd[1]) / 2), hb = pw((bd[0] + bd[1]) / 2) - 0.022f * H, hh = 0.3f * (bd[1] - bd[0]) * H;
+            int nb = (int)fmaxf(1.0f, roundf(2 * hb / 8));
+            for (int i = 0; i <= nb; i++) {
+                float x = cx - hb + 2 * hb * i / nb;
+                d->AddLine(ImVec2(x, yb - hh), ImVec2(x, yb + hh), dim, 1.2f);
+            }
+        }
+        float arch = 0.048f * H;  // the arched entrance
+        for (int k = 0; k < 2; k++) {
+            d->PathLineTo(ImVec2(cx - arch, Y(0.0f)));
+            d->PathArcTo(ImVec2(cx, Y(0.0f) - 0.022f * H), arch, 3.14159265f, 6.2831853f, 24);
+            d->PathLineTo(ImVec2(cx + arch, Y(0.0f)));
+            if (k) d->PathStroke(c, ImDrawFlags_Closed, 2.0f);
+            else d->PathFillConvex(IM_COL32(20, 34, 40, 255));
+        }
+        for (int k = -1; k <= 1; k += 2) {  // the lattice windows beside it
+            float x0 = cx + k * 0.068f * H, x1 = cx + k * 0.108f * H;
+            ImVec2 lo(fminf(x0, x1), Y(0.058f)), hi(fmaxf(x0, x1), Y(0.012f));
+            d->AddRectFilled(lo, hi, IM_COL32(20, 34, 40, 255));
+            d->AddRect(lo, hi, c, 0, 0, 1.5f);
+            d->AddLine(lo, hi, dim, 1.2f), d->AddLine(ImVec2(lo.x, hi.y), ImVec2(hi.x, lo.y), dim, 1.2f);
+        }
         for (int k = -1; k <= 1; k += 2)  // (the fins' faces: a fold line up each)
             d->AddLine(ImVec2(cx + k * (o + 0.004f * H), Y(0.83f)), ImVec2(cx + k * (fin - 0.014f * H), Y(0.962f)), dim, 1.2f);
         tips[0] = ImVec2(cx - fin, Y(0.970f)), tips[1] = ImVec2(cx + fin, Y(0.970f));
@@ -588,7 +588,7 @@ static void banner(ImDrawList *d, ImVec2 a, ImVec2 b, float t) {
         while (x < b.x) {
             float bw = 26.0f + (float)(rnd(&s) % 48), bh = h * (layer ? 0.06f + (float)(rnd(&s) % 100) * 0.0011f
                                                                        : 0.14f + (float)(rnd(&s) % 100) * 0.0022f);
-            float foot = 0.31f * h * 0.76f;  // (the base's half width and a little: no front building over its sloping sides)
+            float foot = 0.17f * h * 0.76f;  // (the base's half width and a little: no front building over its sloping sides)
             if (layer == 1 && x < cx + foot && x + bw > cx - foot) { x += bw; continue; }  // (the tower's foot stays clear)
             ImVec2 p(x, base - bh), q(x + bw - 3, b.y);
             d->AddRectFilled(p, q, layer ? IM_COL32(8, 9, 20, 255) : IM_COL32(20, 22, 44, 255));
