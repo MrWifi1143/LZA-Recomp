@@ -4,6 +4,14 @@ Releases are tagged per game: `LegendsA-v*` (PL:A Recomp, branch `LegendsA`) and
 branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 
+## Unreleased (branch `LegendsA`)
+
+Arceus:
+
+- New app icon (window, taskbar, the exe, the release folder): Mount Coronet under the space-time rift, the launcher banner's art, instead
+  of the Master Ball left over from the runtime's first game. docs/icon/make_icon.py draws it from the launcher's
+  shapes (runtime/ui/launcher_lg.mm) and writes icon.svg, icon_1024.png, icon.ico and icon.icns.
+
 ## 2026-10-31: LegendsA-v0.6.2-alpha
 
 Arceus:
