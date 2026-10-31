@@ -39,6 +39,39 @@ make dist                 # = tools/windows/build_exe.sh $(WIN_EXE) + tools/wind
   (`docs/release-README.txt`) and every license (`licenses/`). It refuses to finish if anything from the game ended up
   in the folder.
 
+## Building on Windows
+
+`tools/windows/build.py` builds the same exe natively on Windows, with nothing but Python and zig (no make, MSYS2 or
+bash): it compiles with the Makefile's Windows flags, works out the same game code id and translator hash the Makefile
+does, and relinks with every runtime function exported plus the import library, as `build_exe.sh` does. Its output
+goes to `build/win-native/` (the Linux cross build's `build/win/` stays its own).
+
+What you need:
+
+- Python 3.8 or later (python.org)
+- the build folder (`LZA_WINBUILD`) with `deps/` and `zig-windows.zip` from the table above: it is unpacked to
+  `zig-windows/` on first use (or point `--zig` / `ZIG` at a zig 0.17.0 `zig.exe`, or have it on PATH)
+
+From the repository root, in PowerShell:
+
+```powershell
+$env:LZA_WINBUILD = 'D:\winbuild'
+python tools/windows/build.py                          # build/win-native/<exe>.exe + lasrecomp.dll.a (+ plugins/)
+python tools/windows/build.py --install D:\LZA-Recomp-ZA   # ... and put it into an installed release folder
+```
+
+`--install` is the quick way to play a change: unzip a release once (its start screen sets up your game files and
+builds the game code), then each build drops the new exe (and the Steam relay plugin, on Z-A's branch) into that folder
+- the old exe kept as `<exe>.exe.prev`; it works while the game is running too (the running one is moved aside). The
+build is incremental (objects older than their source or a runtime header are rebuilt; `-j` sets the parallel jobs).
+Making the release zip itself (`make_zip.sh`) still happens on Linux.
+
+Keep zig (and so the build folder, or `--zig`'s zig) and an installed release on an NTFS drive: on a btrfs drive
+mounted in Windows (WinBtrfs, e.g. a drive shared with Linux) zig fails at random under parallel compiles ("Permission
+denied" / "failed to open" on its own files, "unable to open global cache directory ... Unexpected") - the build
+here then fails, and so does a release's game code build on its start screen. Checked 2026-10-31: the same build on
+NTFS ran clean. The repository itself can stay on the shared drive.
+
 ## Testing
 
 Wine runs the exe and the game (with a game code library cross-built on Linux), but not the player-side game code
