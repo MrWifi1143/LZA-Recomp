@@ -7,6 +7,13 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- Fixed: on an installed copy (a release set up from your game files) the first start's shader step found nothing to
+  prepare - it only looked for the game's shader packs in a romfs/ folder, and an install has the romfs.bin image
+  instead. The packs are now read from inside romfs.bin. Checked on a fresh Windows install: 0 -> 23841 shader
+  programs prepared up front (365 of the 376 in the manifest), 59 s on 23 threads. Same for Linux installs.
+- Windows: a native build from source (tools/windows/build.py: Python + zig, no make or MSYS2; tools/windows/README.md),
+  and the start screen's game code build retries a compile that failed for a moment (Windows Defender holding a freshly
+  unpacked file).
 - With the Steam relay on, a player reachable directly (this PC, the LAN) is joined directly: a room heard both ways
   kept the relay's address (it looked like this PC's). Checked: two copies with the relay loaded join at 127.0.1.x.
 - Experimental settings (start screen, Display tab): frame rates above 60 - 120, 144 and Unlimited - are offered only

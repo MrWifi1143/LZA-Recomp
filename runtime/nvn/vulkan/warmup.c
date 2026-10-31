@@ -534,10 +534,14 @@ static void *worker(void *arg) {
 // (runtime/oodle_server.c) decodes the shader packs with the game's own decoder into cache/warm/romfs/ (a first start
 // then has them to compile up front, not only what a session has captured)
 static void extract_packed_shaders(void) {
-    char fd[1100], exe[1100];
+    char fd[1100], img[1100], exe[1100];
     struct stat sb;
     snprintf(fd, sizeof fd, "%s/romfs/arc/data.trpfd", g_root);
-    if (stat(fd, &sb) || !stat("cache/warm/romfs/.done-all", &sb) || !plat_exe_path(exe, sizeof exe)) return;
+    snprintf(img, sizeof img, "%s/romfs.bin", g_root);
+    // (a romfs/ folder - a source checkout - or, on an install, the romfs.bin image the start screen built: the
+    // extractor reads the packs from there; checking only the folder skipped every install, 2026-10-31)
+    bool packs = !stat(fd, &sb) || !stat(img, &sb);
+    if (!packs || !stat("cache/warm/romfs/.done-all", &sb) || !plat_exe_path(exe, sizeof exe)) return;
     uint64_t t0 = plat_now_ns();
     const char *argv[] = {exe, g_root, "--extract-shaders", NULL};
     PlatProc p = plat_spawn(argv, "cache/warm/extract.log", false);

@@ -126,6 +126,33 @@ static uint8_t *read_range(const char *path, uint64_t off, uint64_t n) {
 }
 static const char *g_extract_romfs;
 
+// A RomFS file the extractor reads: on its own in a romfs/ folder (a source checkout), or a byte range of the romfs.bin
+// image (an install: what the start screen sets up - there is no folder)
+bool romfs_image_file(const char *path, int *fd, uint64_t *off, uint64_t *size);  // runtime/services/fs.c
+typedef struct { char path[1100]; int fd; uint64_t base, size; } Src;
+static bool src_open(Src *s, const char *rel) {
+    snprintf(s->path, sizeof s->path, "%s/%s", g_extract_romfs, rel);
+    s->fd = -1, s->base = 0;
+    FILE *f = fopen(s->path, "rb");
+    if (f) {
+        s->size = xsize(f);
+        fclose(f);
+        return true;
+    }
+    return romfs_image_file(rel, &s->fd, &s->base, &s->size);
+}
+static uint8_t *src_read(const Src *s, uint64_t off, uint64_t n) {
+    if (s->fd < 0) return read_range(s->path, off, n);
+    if (off > s->size || n > s->size - off) return NULL;
+    uint8_t *d = malloc(n ? n : 1);
+    for (uint64_t done = 0; d && done < n;) {
+        ssize_t r = pread(s->fd, d + done, n - done, (off_t)(s->base + off + done));
+        if (r <= 0) { free(d); return NULL; }
+        done += (uint64_t)r;
+    }
+    return d;
+}
+
 static int64_t oodle_decode(Cpu *c, uint8_t *dec_mem, const uint8_t *in, uint64_t n, uint8_t *out, uint64_t raw) {
     uint64_t sp = c->sp;
     c->sp = (sp - 0x40) & ~15ull;
@@ -140,14 +167,12 @@ static int64_t oodle_decode(Cpu *c, uint8_t *dec_mem, const uint8_t *in, uint64_
 }
 
 static void extract(Cpu *c) {
-    char fdp[1100], fsp[1100];
-    snprintf(fdp, sizeof fdp, "%s/arc/data.trpfd", g_extract_romfs);
-    snprintf(fsp, sizeof fsp, "%s/arc/data.trpfs", g_extract_romfs);
-    FILE *f = fopen(fdp, "rb");
-    long fdn = 0;
-    if (f) { fseek(f, 0, SEEK_END); fdn = ftell(f); fclose(f); }
-    uint8_t *fd = fdn > 0 ? read_range(fdp, 0, (uint64_t)fdn) : NULL, *head = read_range(fsp, 0, 16);
+    Src sd, ss;
+    bool have = src_open(&sd, "arc/data.trpfd") && src_open(&ss, "arc/data.trpfs");
+    long fdn = have ? (long)sd.size : 0;
+    uint8_t *fd = fdn > 0 ? src_read(&sd, 0, (uint64_t)fdn) : NULL, *head = have ? src_read(&ss, 0, 16) : NULL;
     if (!g_fn || !fd || !head || memcmp(head, "ONEPACK", 7)) { fprintf(stderr, "[extract] no decoder or no data.trpfd / data.trpfs\n"); _exit(2); }
+    fprintf(stderr, "[extract] data.trpfs from %s\n", ss.fd >= 0 ? "the romfs.bin image" : "the romfs folder");
     FbBuf d = {fd, (size_t)fdn};
     size_t root = fb_root(d);
     uint32_t nnames;
@@ -169,12 +194,9 @@ static void extract(Cpu *c) {
         want[nwant++] = fnv64(nm, len);
     }
     // where they are in data.trpfs (a pack ends where the next one starts, or at the table)
-    FILE *fs = fopen(fsp, "rb");
-    if (!fs) _exit(2);
-    uint64_t total = xsize(fs), toff;
-    fclose(fs);
+    uint64_t total = ss.size, toff;
     memcpy(&toff, head + 8, 8);
-    uint8_t *tab = toff < total ? read_range(fsp, toff, total - toff) : NULL;
+    uint8_t *tab = toff < total ? src_read(&ss, toff, total - toff) : NULL;
     if (!tab) _exit(2);
     FbBuf t = {tab, (size_t)(total - toff)};
     uint32_t nh, no;
@@ -189,7 +211,7 @@ static void extract(Cpu *c) {
         for (uint32_t i = 0; i < nh && i < no; i++) if (fb64(t, th + 8 * (size_t)i) == want[w]) off = fb64(t, to + 8 * (size_t)i), found = true;
         if (!found) continue;
         for (uint32_t i = 0; i < no; i++) { uint64_t o = fb64(t, to + 8 * (size_t)i); if (o > off && o < end) end = o; }
-        uint8_t *pk = read_range(fsp, off, end - off);
+        uint8_t *pk = src_read(&ss, off, end - off);
         if (!pk) continue;
         FbBuf p = {pk, (size_t)(end - off)};
         size_t pr = fb_root(p);
