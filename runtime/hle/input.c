@@ -361,13 +361,48 @@ int input_pad_family(void) {
     return env >= 0 ? env : pad_family;
 }
 
+// Every connected controller is opened (SDL reports only an open one's buttons) and the game reads the one used last:
+// the first one SDL lists isn't always the player's - a virtual pad (Steam Input, DS4Windows / ViGEm, vJoy), a wheel or
+// a second receiver can come first, and an Xbox controller then did nothing in the game.
+static SDL_Gamepad *pads[8];
+static void pad_use(SDL_JoystickID id) {
+    SDL_Gamepad *g = SDL_GetGamepadFromID(id);
+    if (!g || g == pad) return;
+    pad = g;
+    LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad));
+    note_family();
+}
+static int pad_slot(SDL_JoystickID id) {
+    for (int i = 0; i < 8; i++) if (pads[i] && SDL_GetGamepadID(pads[i]) == id) return i;
+    return -1;
+}
+static void pad_open(SDL_JoystickID id) {
+    if (pad_slot(id) >= 0) return;
+    SDL_Gamepad *g = SDL_OpenGamepad(id);  // (opened again when the start screen has it open too: SDL counts the opens)
+    if (!g) return;
+    for (int i = 0; i < 8; i++) if (!pads[i]) { pads[i] = g; break; }
+    if (!pad) pad_use(id);
+    else LOG("[input] gamepad connected: %s (used once a button is pressed on it)\n", SDL_GetGamepadName(g));
+}
+static void pad_close(SDL_JoystickID id) {
+    int s = pad_slot(id);
+    if (s < 0) return;
+    SDL_Gamepad *g = pads[s];
+    pads[s] = NULL;
+    SDL_CloseGamepad(g);
+    if (pad != g) return;
+    pad = NULL;
+    for (int i = 0; i < 8 && !pad; i++) if (pads[i]) pad_use(SDL_GetGamepadID(pads[i]));
+    note_family();
+}
+
 void input_handle_event(const SDL_Event *e) {
     static bool scanned;  // pads present at startup: their ADDED event may have gone to the start screen's loop
     if (!scanned) {
         scanned = true;
         int n = 0;
         SDL_JoystickID *ids = SDL_GetGamepads(&n);
-        if (n > 0 && !pad) { pad = SDL_OpenGamepad(ids[0]); LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad)); note_family(); }
+        for (int i = 0; ids && i < n; i++) pad_open(ids[i]);
         SDL_free(ids);
     }
     switch (e->type) {
@@ -439,18 +474,25 @@ void input_handle_event(const SDL_Event *e) {
         break;
     case SDL_EVENT_WINDOW_FOCUS_GAINED: atomic_store(&g_unfocused, 0); break;
     case SDL_EVENT_GAMEPAD_ADDED:
-        if (!pad) { pad = SDL_OpenGamepad(e->gdevice.which); LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad)); note_family(); }
+        pad_open(e->gdevice.which);
         break;
     case SDL_EVENT_GAMEPAD_REMOVED:
-        if (pad && SDL_GetGamepadID(pad) == e->gdevice.which) { SDL_CloseGamepad(pad); pad = NULL; note_family(); }
+        pad_close(e->gdevice.which);
         recompute_pad();
         break;
-    case SDL_EVENT_GAMEPAD_AXIS_MOTION: case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
-        if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && abs(e->gaxis.value) > 20000))
-            last_kbm = 0;
+    case SDL_EVENT_GAMEPAD_AXIS_MOTION: case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP: {
+        bool used = e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && abs(e->gaxis.value) > 20000);
+        SDL_JoystickID from = e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION ? e->gaxis.which : e->gbutton.which;
+        if (!pad || SDL_GetGamepadID(pad) != from) {
+            if (pad && !used) break;  // (another controller's drift or release: not the one in use)
+            pad_open(from);
+            pad_use(from);
+        }
+        if (used) last_kbm = 0;
         if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && e->gbutton.button == SDL_GAMEPAD_BUTTON_MISC1) g_screenshot_request = 1;
         recompute_pad();
         break;
+    }
     }
 }
 
