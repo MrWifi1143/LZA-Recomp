@@ -29,6 +29,8 @@ extern "C" {
 #include "gamesetup.h"
 #include "input_bind.h"
 #include "mods.h"
+#include "platform.h"
+#include "plugin.h"
 #include "paths.h"
 #include "settings.h"
 void settings_save(void);
@@ -278,6 +280,56 @@ static void SDLCALL picked_mod(void *, const char *const *files, int) {
     snprintf(g_pick_mod, sizeof g_pick_mod, "%s", files[0]);
     pthread_mutex_unlock(&g_pick_lock);
 }
+// The Mods page's helpers: what a plugin is, a folder deleted, a folder opened, a plugin file added
+static const char *plugin_title(const char *file) {
+    return strstr(file, "steamrelay") ? T("Steam relay", "Relay Steam") : strstr(file, "vrmod") ? "LegendsVR" : file;
+}
+static const char *plugin_about(const char *file) {
+    return strstr(file, "steamrelay") ? T("Link Trades and Private Battles with your Steam friends, anywhere (Steam shows \"Playing Spacewar\" "
+                                          "while the game runs).",
+                                          "Trocas e batalhas privadas com seus amigos da Steam, de qualquer lugar (a Steam mostra \"Jogando "
+                                          "Spacewar\" enquanto o jogo roda).")
+         : strstr(file, "vrmod") ? T("Play in a VR headset.", "Jogue com um headset de RV.")
+                                 : T("A plugin (code that runs with the game).", "Um plugin (código que roda com o jogo).");
+}
+static SDL_EnumerationResult SDLCALL remove_entry(void *, const char *dir, const char *name) {
+    char p[1024];
+    snprintf(p, sizeof p, "%s%s", dir, name);
+    SDL_PathInfo info;
+    if (SDL_GetPathInfo(p, &info) && info.type == SDL_PATHTYPE_DIRECTORY) SDL_EnumerateDirectory(p, remove_entry, NULL);
+    SDL_RemovePath(p);
+    return SDL_ENUM_CONTINUE;
+}
+static void remove_tree(const char *dir) {
+    SDL_EnumerateDirectory(dir, remove_entry, NULL);
+    SDL_RemovePath(dir);
+}
+static void open_folder(const char *sub) {  // (in the data root, the working directory)
+    SDL_CreateDirectory(sub);
+    char *cwd = SDL_GetCurrentDirectory(), url[1200];
+    if (!cwd) return;
+    snprintf(url, sizeof url, "file://%s%s%s", cwd[0] == '/' ? "" : "/", cwd, sub);
+    SDL_free(cwd);
+    SDL_OpenURL(url);
+}
+static bool add_plugin(const char *src, char *msg, size_t cap) {  // src a plugin file: copied into plugins/
+#ifdef _WIN32
+    const char *ext = ".dll";
+#else
+    const char *ext = ".so";
+#endif
+    size_t n = strlen(src), k = strlen(ext);
+    if (n <= k || SDL_strcasecmp(src + n - k, ext)) return false;
+    const char *base = src + n;
+    while (base > src && base[-1] != '/' && base[-1] != '\\') base--;
+    char dst[300];
+    snprintf(dst, sizeof dst, "plugins/%s", base);
+    SDL_CreateDirectory("plugins");
+    if (SDL_CopyFile(src, dst)) snprintf(msg, cap, "%s %s", T("Added", "Adicionado"), dst);
+    else snprintf(msg, cap, "%s %s", T("Couldn't copy", "Não foi possível copiar"), base);
+    return true;
+}
+
 static bool take(char *slot, char *out, size_t n) {
     pthread_mutex_lock(&g_pick_lock);
     bool got = slot[0] != 0;
@@ -643,6 +695,7 @@ extern "C" void launcher_lg_run(const char *root) {
     for (int i = 0; i < 6; i++) if (res_lines[i] == g_settings.res_height) res = i;
     bool full = g_settings.fullscreen, smaa = g_settings.antialias == AA_SMAA, wildb = g_settings.wild_battle, showfps = g_settings.show_fps, realtime = !g_settings.fixed_steps;
     int fps_i = g_settings.fps == FPS_UNLIMITED ? 4 : g_settings.fps == 144 ? 3 : g_settings.fps == 120 ? 2 : g_settings.fps == 60 ? 1 : 0;
+    bool experimental = g_settings.experimental;
     // Recommended settings for this PC (from Z-A's start screen; by the GPU, the CPU threads and the RAM): shown with an
     // Apply button, and applied at once on a first start (no larecomp.ini yet)
     struct Rec { int res, fps, nowait; char text[120]; } rec;
@@ -673,6 +726,35 @@ extern "C" void launcher_lg_run(const char *root) {
     static char mods[MODS_MAX][128];
     int nmods = mods_list(mods, MODS_MAX), mod = 0;
     for (int i = 0; i < nmods; i++) if (!strcmp(mods[i], g_settings.mod)) mod = i + 1;
+    // Plugins (plugins/: code mods - the VR mod, the Steam relay): each on or off. They load before this screen (they
+    // may extend the Vulkan device it draws with), so a change restarts the game once when Play is pressed.
+    static char plugs[16][64];
+    static bool plug_on[16];
+    int nplugs = 0;
+    auto plugins_refresh = [&]() {  // (the list again - a plugin added or removed: the choices made kept)
+        static char was[16][64];
+        static bool was_on[16];
+        int nwas = nplugs;
+        memcpy(was, plugs, sizeof plugs), memcpy(was_on, plug_on, sizeof plug_on);
+        nplugs = plugins_files(plugs, 16);
+        for (int i = 0; i < nplugs; i++) {
+            plug_on[i] = plugin_enabled(plugs[i]);
+            for (int j = 0; j < nwas; j++) if (!strcmp(was[j], plugs[i])) plug_on[i] = was_on[j];
+        }
+    };
+    auto plugins_on_now = [&](char *out, size_t cap) {  // (the ones on, as one string)
+        out[0] = 0;
+        for (int i = 0; i < nplugs; i++)
+            if (plug_on[i] && strlen(out) + strlen(plugs[i]) + 2 < cap) strcat(out, ","), strcat(out, plugs[i]);
+    };
+    plugins_refresh();
+    char plugins_at_start[1100];  // (the ones loaded)
+    plugins_on_now(plugins_at_start, sizeof plugins_at_start);
+    if (const char *t = getenv("LARECOMP_TEST_PLUGINS_TOGGLE"))  // (tests: these switched over, as if clicked)
+        for (int i = 0; i < nplugs; i++) if (plugin_listed(t, plugs[i])) plug_on[i] = !plug_on[i];
+    setenv("LARECOMP_TEST_PLUGINS_TOGGLE", "", 1);  // (not again after the restart)
+    int mod_sel = -1;  // (the Mods page's selected row: translations first, then plugins)
+    char mod_msg[256] = "";
     long shot_at = getenv("LARECOMP_LAUNCHER_SHOT") ? atol(getenv("LARECOMP_LAUNCHER_SHOT")) : 0, frame = 0;
     bool autoplay = getenv("LARECOMP_LAUNCHER_AUTOPLAY") != NULL, play = false;
     // "Skip this screen": straight to the game once it's ready - unless Shift is held in the first moments
@@ -696,7 +778,11 @@ extern "C" void launcher_lg_run(const char *root) {
     if (getenv("LARECOMP_SETUP_DIR")) setup_start(getenv("LARECOMP_SETUP_DIR"));
     if (getenv("LARECOMP_MOD_INSTALL")) mod_install_start(getenv("LARECOMP_MOD_INSTALL"));
     static const float bg[4] = {0.08f, 0.08f, 0.10f, 1};
-    static const SDL_DialogFileFilter mod_filters[] = {{"Translation / mod (.zip, .rar, .7z)", "zip;rar;7z"}};
+#ifdef _WIN32
+    static const SDL_DialogFileFilter mod_filters[] = {{"Mod (.zip, .rar, .7z) or plugin (.dll)", "zip;rar;7z;dll"}};
+#else
+    static const SDL_DialogFileFilter mod_filters[] = {{"Mod (.zip, .rar, .7z) or plugin (.so)", "zip;rar;7z;so"}};
+#endif
     int inst = 0;
     bool ready = false;
 
@@ -705,20 +791,31 @@ extern "C" void launcher_lg_run(const char *root) {
         ImGui::Combo(T("Resolution", "Resolução"), &res, g_pt ? res_pt : res_en, 6);
         if (ImGui::Checkbox(T("Fullscreen", "Tela cheia"), &full) && classic) SDL_SetWindowFullscreen(win, full);  // (launcher: at Play)
         ImGui::Checkbox(T("Anti-aliasing (SMAA)", "Suavizar serrilhado (SMAA)"), &smaa);
-        static const char *const fps_names_en[] = {"30 fps", "60 fps", "120 fps", "144 fps", "Unlimited"};  // (above 30: experimental)
+        static const char *const fps_names_en[] = {"30 fps", "60 fps", "120 fps", "144 fps", "Unlimited"};  // (above 60: Experimental settings)
         static const char *const fps_names_pt[] = {"30 fps", "60 fps", "120 fps", "144 fps", "Ilimitada"};
-        ImGui::Combo(T("Frame rate (experimental above 30)", "Taxa de quadros (experimental acima de 30)"), &fps_i, g_pt ? fps_names_pt : fps_names_en, 5);
+        if (!experimental && fps_i > 1) fps_i = 1;
+        ImGui::Combo(T("Frame rate", "Taxa de quadros"), &fps_i, g_pt ? fps_names_pt : fps_names_en, experimental ? 5 : 2);
         if (fps_i >= 1 && fps_i <= 3)  // (Unlimited: always real time, hle/fps60.c)
             ImGui::Checkbox(T("Keep full speed when the frame rate dips", "Manter a velocidade total quando a taxa de quadros cai"), &realtime);
         if (fps_i >= 2)  // (120 / 144 / Unlimited: the game's own logic was made for 30; some of it counts frames)
             ImGui::TextColored(k_yellow, "%s",
                                T("120 fps and above are experimental. Some scripted scenes can stall at these rates\n"
-                                 "(a cutscene that walks you somewhere may never let go of you). If that happens,\n"
-                                 "set 60 or 30 fps in the game's Settings and step into the scene again.",
-                                 "120 fps ou mais são experimentais. Algumas cenas com script podem travar nessas taxas\n"
-                                 "(uma cena que leva você a algum lugar pode nunca soltar o controle). Se acontecer,\n"
-                                 "escolha 60 ou 30 fps nas configurações do jogo e entre na cena de novo."));
+                                              "(a cutscene that walks you somewhere may never let go of you). If that happens,\n"
+                                              "set 60 or 30 fps in the game's Settings and step into the scene again.",
+                                              "120 fps ou mais são experimentais. Algumas cenas com script podem travar nessas taxas\n"
+                                              "(uma cena que leva você a algum lugar pode nunca soltar o controle). Se acontecer,\n"
+                                              "escolha 60 ou 30 fps nas configurações do jogo e entre na cena de novo."));
         ImGui::Checkbox(T("Show FPS counter", "Mostrar contador de FPS"), &showfps);
+        ImGui::Spacing();
+        ImGui::Checkbox(T("Experimental settings", "Configurações experimentais"), &experimental);
+        ImGui::Indent(ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        ImGui::TextWrapped("%s", T("Settings that aren't finished yet: frame rates above 60 (120, 144, Unlimited). Shown here and in "
+                                   "the game's Settings only while this is on.",
+                                   "Configurações ainda não terminadas: taxas de quadros acima de 60 (120, 144, Ilimitada). Aparecem "
+                                   "aqui e nas configurações do jogo só com isto ligado."));
+        ImGui::PopStyleColor();
+        ImGui::Unindent(ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x);
     };
     auto settings_graphics = [&]() {  // (the game's Settings rows of the same names: runtime/hle/pla_options.c)
         ImGui::Checkbox(T("Smooth shadow edges", "Suavizar as bordas das sombras"), &smooth_sh);
@@ -743,6 +840,98 @@ extern "C" void launcher_lg_run(const char *root) {
             for (int i = 0; i < nmods; i++)
                 if (ImGui::Selectable(mods[i], mod == i + 1)) mod = i + 1;
             ImGui::EndCombo();
+        }
+    };
+    // The launcher's Mods page: Add / Remove / the folder at the top, then every mod - translations (mods/, one at a
+    // time) and plugins (plugins/) - with a tick box each
+    auto mods_page = [&]() {
+        bool busy = inst == MOD_INSTALL_RUNNING;
+        ImGui::BeginDisabled(busy);
+        if (ImGui::Button(T("Add a mod...", "Adicionar mod..."))) SDL_ShowOpenFileDialog(picked_mod, NULL, win, mod_filters, 1, NULL, false);
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(mod_sel < 0 || busy);
+        if (ImGui::Button(T("Remove", "Remover"))) ImGui::OpenPopup("##remove");
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button(T("Open the mods folder", "Abrir a pasta de mods"))) open_folder("mods");
+        if (busy) ImGui::TextDisabled("%s", T("Installing the mod...", "Instalando o mod..."));
+        else if (inst == MOD_INSTALL_FAIL_UNPACK || inst == MOD_INSTALL_FAIL_NOT_MOD)
+            ImGui::TextColored(k_red, "%s", inst == MOD_INSTALL_FAIL_UNPACK ? T("Couldn't unpack that file.", "Não foi possível abrir esse arquivo.")
+                                                                            : T("No mod for this game in that file.", "Esse arquivo não tem mod para este jogo."));
+        else if (mod_msg[0]) ImGui::TextDisabled("%s", mod_msg);
+        ImGui::Spacing();
+        if (!nmods && !nplugs)
+            ImGui::TextDisabled("%s", T("No mods yet. Add a mod... takes a translation (.zip / .rar / .7z) or a plugin.",
+                                        "Nenhum mod ainda. Adicionar mod... aceita uma tradução (.zip / .rar / .7z) ou um plugin."));
+        else if (ImGui::BeginTable("##mods", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_PadOuterX)) {
+            ImGui::TableSetupColumn("on", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFrameHeight());
+            ImGui::TableSetupColumn("mod", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("kind", ImGuiTableColumnFlags_WidthFixed, 130);
+            for (int r = 0; r < nmods + nplugs; r++) {
+                bool tr = r < nmods;
+                int i = tr ? r : r - nmods;
+                ImGui::PushID(r);
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                bool on = tr ? mod == i + 1 : plug_on[i];
+                if (ImGui::Checkbox("##on", &on)) {
+                    if (tr) mod = on ? i + 1 : 0;  // (one translation at a time)
+                    else plug_on[i] = on;
+                }
+                ImGui::TableSetColumnIndex(1);
+                if (ImGui::Selectable(tr ? mods[i] : plugin_title(plugs[i]), mod_sel == r,
+                                      ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap))
+                    mod_sel = r;
+                char about[300];
+                if (tr) {
+                    const char *lang = mod_language(mods[i]);
+                    snprintf(about, sizeof about, "%s%s%s", T("Replaces game files", "Substitui arquivos do jogo"),
+                             lang ? T(" - texts: ", " - textos: ") : "", lang ? lang : "");
+                } else snprintf(about, sizeof about, "%s", plugin_about(plugs[i]));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                ImGui::TextWrapped("%s", about);
+                ImGui::PopStyleColor();
+                ImGui::TableSetColumnIndex(2);
+                ImGui::TextDisabled("%s", tr ? T("Translation", "Tradução") : T("Plugin", "Plugin"));
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
+        }
+        ImGui::Spacing();
+        ImGui::TextDisabled("%s", T("One translation at a time. Plugins load as the game starts: a change restarts it once when you press Play.",
+                                    "Uma tradução por vez. Plugins carregam ao iniciar: uma mudança reinicia o jogo uma vez ao apertar Jogar."));
+        if (ImGui::BeginPopupModal("##remove", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+            bool tr = mod_sel < nmods;
+            int i = tr ? mod_sel : mod_sel - nmods;
+            if (mod_sel < 0 || i >= (tr ? nmods : nplugs)) ImGui::CloseCurrentPopup();
+            else {
+                char path[300];
+                snprintf(path, sizeof path, tr ? "mods/%s" : "plugins/%s", tr ? mods[i] : plugs[i]);
+                ImGui::Text("%s %s?", T("Remove", "Remover"), tr ? mods[i] : plugin_title(plugs[i]));
+                ImGui::TextDisabled("%s %s", T("This deletes", "Isto apaga"), path);
+                ImGui::Spacing();
+                if (ImGui::Button(T("Remove", "Remover"), ImVec2(140, 0))) {
+                    if (tr) {
+                        char active[128] = "";
+                        if (mod && mod != i + 1) snprintf(active, sizeof active, "%s", mods[mod - 1]);
+                        remove_tree(path);
+                        nmods = mods_list(mods, MODS_MAX), mod = 0;
+                        for (int k = 0; k < nmods; k++) if (!strcmp(mods[k], active)) mod = k + 1;
+                    } else if (remove(path)) {  // (a plugin loaded now: Windows keeps its file - gone at the next start)
+                        char later[320];
+                        snprintf(later, sizeof later, "%s.removed", path);
+                        rename(path, later);
+                    }
+                    if (!tr) plugins_refresh();
+                    snprintf(mod_msg, sizeof mod_msg, "%s %s", T("Removed", "Removido"), path);
+                    mod_sel = -1;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button(T("Cancel", "Cancelar"), ImVec2(140, 0))) ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
         }
     };
     auto mod_install_row = [&]() {
@@ -922,13 +1111,7 @@ extern "C" void launcher_lg_run(const char *root) {
                 ImGui::Spacing();
                 game_files_section(win);
             } else if (page == PAGE_MODS) {
-                ImGui::TextWrapped("%s", T("Translations and other mods for the game (mods/ in the game's folder). Pick one to play with, "
-                                           "or install one from a .zip / .rar / .7z.",
-                                           "Traduções e outros mods do jogo (mods/ na pasta do jogo). Escolha um para jogar, "
-                                           "ou instale um de um .zip / .rar / .7z."));
-                ImGui::Spacing();
-                settings_mods();
-                mod_install_row();
+                mods_page();
             }
             ImGui::PopItemWidth();
             ImGui::EndChild();
@@ -958,7 +1141,13 @@ extern "C" void launcher_lg_run(const char *root) {
         }
         char path[1024];
         if (take(g_pick_game, path, sizeof path)) setup_start(path);
-        if (take(g_pick_mod, path, sizeof path)) mod_install_start(path);
+        if (take(g_pick_mod, path, sizeof path)) {
+            if (add_plugin(path, mod_msg, sizeof mod_msg)) {  // (a plugin: into plugins/, ticked)
+                plugins_refresh();
+                const char *base = strrchr(mod_msg, '/') ? strrchr(mod_msg, '/') + 1 : mod_msg;
+                for (int i = 0; i < nplugs; i++) if (strstr(base, plugs[i])) plug_on[i] = true;
+            } else mod_install_start(path);
+        }
         static int last_install;
         inst = mod_install_state();
         if (inst != last_install && inst == MOD_INSTALL_DONE) {  // a new translation: listed and chosen
@@ -1003,6 +1192,8 @@ extern "C" void launcher_lg_run(const char *root) {
     g_settings.res_height = res_lines[res];
     g_settings.fullscreen = full;
     g_settings.antialias = smaa ? AA_SMAA : AA_OFF;
+    if (!experimental && fps_i > 1) fps_i = 1;
+    g_settings.experimental = experimental;
     g_settings.fps = fps_i == 4 ? FPS_UNLIMITED : fps_i == 3 ? 144 : fps_i == 2 ? 120 : fps_i == 1 ? 60 : 30;
     g_settings.wild_battle = wildb;
     g_settings.show_fps = showfps;
@@ -1014,7 +1205,16 @@ extern "C" void launcher_lg_run(const char *root) {
     g_settings.pkhex_link = pk_i;
     g_settings.shader_nowait = shl_i;
     snprintf(g_settings.mod, sizeof g_settings.mod, "%s", mod ? mods[mod - 1] : "");
+    plugins_choose(plugs, plug_on, nplugs);
     settings_save();
+    char plugins_now[1100];
+    plugins_on_now(plugins_now, sizeof plugins_now);
+    const char *again = getenv("LARECOMP_PLUGINS_RESTARTED");
+    if (strcmp(plugins_at_start, plugins_now) && !(again && *again)) {  // the plugins loaded aren't the ones chosen: once more, straight in (once)
+        fprintf(stderr, "[launcher] plugins changed (on: \"%s\"): restarting\n", plugins_now + (plugins_now[0] == ','));
+        setenv("LARECOMP_LAUNCHER_AUTOPLAY", "1", 1), setenv("LARECOMP_PLUGINS_RESTARTED", "1", 1);
+        plat_exec(NULL);
+    }
     { extern void pkm_link_apply(void); pkm_link_apply(); }  // (PKHeX Link as just chosen: hle/pkm_link.c)
     if (warmup_needed(root)) {  // first start, or the first after an update: every shader of the game, once (warmup.c)
         warmup_start();

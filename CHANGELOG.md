@@ -8,6 +8,13 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Arceus:
 
+- Experimental settings (start screen, Display tab), as in Z-A: frame rates above 60 - 120, 144, Unlimited - only with
+  it ticked, in the start screen and the game's Settings (Frame Rate shows 30 / 60 otherwise). An older larecomp.ini
+  with a rate above 60 turns it on.
+- The start screen's Mods page is one list, as in Z-A: translations and plugins with a tick box each, Add a mod... /
+  Remove / Open the mods folder at the top; a plugin change restarts the game once when Play is pressed.
+- Plugin API 3 (as Z-A's; the local-play relay functions are empty here), plugins' shutdown hooks run when the game
+  quits, opt-in plugins (larecomp.ini plugins_on).
 - Shader translator safety fix (found in Z-A, where it hung the GPU during a Link Trade): typed GLSL kept integer
   values such as loop counters in float variables when a register held both kinds of data; the GPU may flush such
   values (denormal floats) and a shader loop would never end. Registers are now float only when every value written to

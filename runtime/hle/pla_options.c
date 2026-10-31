@@ -161,18 +161,20 @@ static const Row k_rows[] = {
      CHOICE, 2, {"Export", "Import"}, pkm_files_get, pkm_files_set, pkm_files_run},
 };
 #define NROWS (int)(sizeof k_rows / sizeof *k_rows)
+// A row's choices as offered: the frame rate's above 60 only with the start screen's Experimental settings on
+static int nchoice(const Row *w) { return w->get == get_fps && !g_settings.experimental ? 2 : w->n; }
 static int g_first[NROWS];  // CHOICE rows of more than 3: the first of the three shown
 
 static int row_of(uint32_t id) { return id >= FIRST_ID && id < FIRST_ID + (uint32_t)NROWS ? (int)(id - FIRST_ID) : -1; }
 static void keep_shown(int r, int v) {
     if (v < g_first[r]) g_first[r] = v;
     if (v > g_first[r] + 2) g_first[r] = v - 2;
-    g_first[r] = clampi(g_first[r], 0, k_rows[r].n - 3);
+    g_first[r] = clampi(g_first[r], 0, nchoice(&k_rows[r]) - 3);
 }
 static int shown_value(int r) {
     const Row *w = &k_rows[r];
     int v = w->get();
-    if (w->kind != CHOICE || w->n <= 3) return v;
+    if (w->kind != CHOICE || nchoice(w) <= 3) return v;
     keep_shown(r, v);
     return v - g_first[r];
 }
@@ -280,7 +282,7 @@ static void draw_row(Cpu *c, uint64_t view, int r, uint64_t slot, bool texts, ui
         guest(c, OPT_SLIDER, (uint64_t[]){view, (uint64_t)w->get(), 0, 10, slot, active}, 6, 0);
         return;
     }
-    int n = w->n > 3 ? 3 : w->n, first = w->n > 3 ? (shown_value(r), g_first[r]) : 0;
+    int n = nchoice(w) > 3 ? 3 : nchoice(w), first = nchoice(w) > 3 ? (shown_value(r), g_first[r]) : 0;
     if (texts) {
         guest(c, OPT_HEADING, (uint64_t[]){view, slot, our_label(w->name)}, 3, 0);
         for (int i = 0; i < n; i++) guest(c, OPT_CHOICE_LABEL, (uint64_t[]){view, (uint64_t)i, slot, our_label(w->choice[first + i])}, 4, 0);
@@ -334,7 +336,7 @@ static int show_value_hook(Cpu *c, uint64_t addr) {  // (view, id, slot, active)
     if (bind_of((uint32_t)c->x[1]) >= 0) { draw_bind(c, c->x[0], bind_of((uint32_t)c->x[1]), c->x[2], c->x[3] & 1); return 1; }
     int r = row_of((uint32_t)c->x[1]);
     if (r < 0) return 0;
-    draw_row(c, c->x[0], r, c->x[2], k_rows[r].kind == CHOICE && k_rows[r].n > 3, c->x[3] & 1);  // (sliding: texts too)
+    draw_row(c, c->x[0], r, c->x[2], k_rows[r].kind == CHOICE && nchoice(&k_rows[r]) > 3, c->x[3] & 1);  // (sliding: texts too)
     return 1;
 }
 
@@ -349,10 +351,10 @@ static int change_hook(Cpu *c, uint64_t addr) {  // (model, id, op)
     int r = row_of((uint32_t)c->x[1]), op = (int)(uint32_t)c->x[2];
     if (r < 0 || (op != 0 && op != 1)) return 0;
     const Row *w = &k_rows[r];
-    int v = w->get(), to = clampi(v + (op ? 1 : -1), 0, w->kind == BAR10 ? 10 : w->n - 1);
+    int v = w->get(), to = clampi(v + (op ? 1 : -1), 0, w->kind == BAR10 ? 10 : nchoice(w) - 1);
     if (to != v) w->set(to), settings_save();
     if (to != v && w->get == get_fps) g_info_pending = true;
-    if (w->kind == CHOICE && w->n > 3) keep_shown(r, to);
+    if (w->kind == CHOICE && nchoice(w) > 3) keep_shown(r, to);
     c->x[0] = to != v;
     return 1;
 }
