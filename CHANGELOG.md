@@ -7,6 +7,8 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- With the Steam relay on, a player reachable directly (this PC, the LAN) is joined directly: a room heard both ways
+  kept the relay's address (it looked like this PC's). Checked: two copies with the relay loaded join at 127.0.1.x.
 - Experimental settings (start screen, Display tab): frame rates above 60 - 120, 144 and Unlimited - are offered only
   with it ticked, in the start screen and in the game's Settings (its Frame Rate row shows 30 / 60 otherwise). Unlimited
   is back behind it (in battles, Pokémon and trainers can misbehave; its warning says so). An older larecomp.ini with

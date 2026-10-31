@@ -456,8 +456,10 @@ static int scan(const ScanFilter *f, NetworkInfo *out, int max) {
         pthread_mutex_lock(&L.lock);
         for (int i = 0; i < L.nfound; i++)
             if (!memcmp(L.found[i].session, ni.id.session, 16)) dup = i;
-        if (dup >= 0) {  // (the same host twice: its loopback address is the better one)
-            if (LOOPBACK(src)) L.found[dup].addr = src;
+        if (dup >= 0) {  // (the same host twice: this PC's address, else the LAN's, over the relay's - the direct way)
+            uint32_t had = L.found[dup].addr;
+            int rank_src = RELAY(src) ? 0 : LOOPBACK(src) ? 2 : 1, rank_had = RELAY(had) ? 0 : LOOPBACK(had) ? 2 : 1;
+            if (rank_src > rank_had) L.found[dup].addr = src;
             pthread_mutex_unlock(&L.lock);
             continue;
         }
