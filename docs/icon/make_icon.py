@@ -198,14 +198,16 @@ def za(svg):
         while x < S:
             bw = 52.0 + rnd(s) % 96
             bh = (0.05 + rnd(s) % 100 * 0.0010) * S if layer else (0.11 + rnd(s) % 100 * 0.0018) * S
-            p, q = (x, street - bh), (x + bw - 6, street)
+            low = street + (8 if layer else 0)  # (the front row down over the street line and the tower's base line: not floating)
+            gap = 0 if layer and abs(x + bw / 2 - cx) < 0.30 * H else 6  # (no gap in front of the base: it would show through)
+            p, q = (x, street - bh), (x + bw - gap, low)
             g = 0.13 * H  # (as the launcher: the front row over the sides of the tower's foot, only its middle - the door - clear)
             if layer == 1 and p[0] < cx + g and q[0] > cx - g:
                 if p[0] >= cx - g and q[0] <= cx + g:  # (wholly in the middle: left out)
                     x += bw
                     continue
                 bh = max(bh, 0.15 * H)  # (beside the foot: tall enough to hide the legs' feet)
-                p, q = ((x, street - bh), (cx - g, street)) if p[0] < cx - g else ((cx + g, street - bh), (x + bw - 6, street))
+                p, q = ((x, street - bh), (cx - g, low)) if p[0] < cx - g else ((cx + g, street - bh), (x + bw - gap, low))
             svg.poly([p, (q[0], p[1]), q, (p[0], q[1])], fill=rgba(8, 9, 20) if layer else rgba(20, 22, 44), closed=True)
             wy = p[1] + 16
             while wy < street - 12:
