@@ -210,11 +210,18 @@ win-exe:
 dist: win-exe
 	tools/windows/make_zip.sh $(WIN_TAG) $(WIN_EXE)
 
-# The Steam relay plugin (contrib/steamrelay): Link Trades / Private Battles with Steam friends. Copy the .so to
-# <game folder>/plugins/; the start screen's Mods page switches it on and off. Linux only for now.
-steamrelay: $(B)/plugins/libsteamrelay.so
-$(B)/plugins/libsteamrelay.so: contrib/steamrelay/steamrelay.c runtime/plugin.h
+# The Steam relay plugin (contrib/steamrelay): Link Trades / Private Battles with Steam friends. In <game folder>/plugins/
+# (the Windows zip has it there); off until switched on in the start screen's Mods page.
+ifeq ($(PLATFORM),windows)
+RELAY := $(B)/plugins/steamrelay.dll
+RELAY_LIBS := -lws2_32 -ladvapi32
+else
+RELAY := $(B)/plugins/libsteamrelay.so
+RELAY_LIBS := -fPIC -lpthread -ldl
+endif
+steamrelay: $(RELAY)
+$(RELAY): contrib/steamrelay/steamrelay.c runtime/plugin.h
 	@mkdir -p $(dir $@)
-	$(CC) -O2 -g -Wall -fPIC -shared -Iruntime -Ithird_party $< -o $@ -lpthread -ldl
+	$(CC) -O2 -g -Wall -shared -Iruntime -Ithird_party $(DEPINC) $< -o $@ $(RELAY_LIBS)
 
 .PHONY: all gen gen-objs runtime-objs win-exe dist steamrelay

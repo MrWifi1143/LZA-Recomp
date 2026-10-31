@@ -36,19 +36,22 @@ Settings g_settings = {
 
 // Unknown keys (an older larecomp.ini: Link's Awakening's options from LAS Recomp) are ignored, and dropped at the
 // next save.
+static bool g_experimental_seen;
 static void parse_line(const char *line) {
     char key[64];
     char val[128];
     if (sscanf(line, " %63[^= ] = %127[^\n]", key, val) < 1) return;
-    if (!strcmp(key, "game_lang") || !strcmp(key, "mod") || !strcmp(key, "plugins_off")) {  // (may be empty)
+    if (!strcmp(key, "game_lang") || !strcmp(key, "mod") || !strcmp(key, "plugins_off") || !strcmp(key, "plugins_on")) {  // (may be empty)
         if (sscanf(line, " %63[^= ] = %127[^\n]", key, val) != 2) val[0] = 0;
         if (key[0] == 'g') strlcpy(g_settings.game_lang, val, sizeof g_settings.game_lang);
-        else if (key[0] == 'p') strlcpy(g_settings.plugins_off, val, sizeof g_settings.plugins_off);
+        else if (!strcmp(key, "plugins_off")) strlcpy(g_settings.plugins_off, val, sizeof g_settings.plugins_off);
+        else if (key[0] == 'p') strlcpy(g_settings.plugins_on, val, sizeof g_settings.plugins_on);
         else strlcpy(g_settings.mod, val, sizeof g_settings.mod);
         return;
     }
     if (!strcmp(key, "fullscreen")) g_settings.fullscreen = atoi(val) != 0;
-    else if (!strcmp(key, "fps")) { int f = atoi(val); g_settings.fps = f == 60 || f == 120 || f == 144 ? f : f == FPS_UNLIMITED ? 144 : 30; }  // (Unlimited hidden for now: the battles' Pokémon and trainers misbehave)
+    else if (!strcmp(key, "fps")) { int f = atoi(val); g_settings.fps = f == 60 || f == 120 || f == 144 || f == FPS_UNLIMITED ? f : 30; }
+    else if (!strcmp(key, "experimental")) g_settings.experimental = atoi(val) != 0, g_experimental_seen = true;
     else if (!strcmp(key, "frame_timing")) g_settings.fixed_steps = !strcmp(val, "fixed");
     else if (!strcmp(key, "render_height")) g_settings.res_height = atoi(val) >= 360 && atoi(val) <= 4320 ? atoi(val) : 0;
     else if (!strcmp(key, "volume")) g_settings.volume = (float)atof(val);
@@ -116,6 +119,10 @@ void settings_load(void) {
         }
     }
     fclose(f);
+    // Above 60 fps is experimental (the game's logic was made for 30; Unlimited: battles misbehave): offered only with
+    // "Experimental settings" on. An ini from before that switch with such a rate in it: the switch turned on for it.
+    if (!g_experimental_seen && g_settings.fps > 60) g_settings.experimental = true;
+    if (!g_settings.experimental && g_settings.fps > 60) g_settings.fps = 60;
     if (g_settings.volume < 0) g_settings.volume = 0;
     if (g_settings.volume > 2) g_settings.volume = 2;
     LOG("[settings] loaded %s\n", SETTINGS_FILE);
@@ -132,6 +139,7 @@ void settings_save(void) {
     fprintf(f, "smaa = %d\n", g_settings.antialias == AA_SMAA);
     fprintf(f, "mod = %s\n", g_settings.mod);
     fprintf(f, "plugins_off = %s\n", g_settings.plugins_off);
+    fprintf(f, "plugins_on = %s\n", g_settings.plugins_on);
     fprintf(f, "mouse_sens = %.3f\n", g_settings.mouse_sens);
     fprintf(f, "stick_deadzone = %.2f\n", g_settings.stick_deadzone);
     fprintf(f, "volume = %.2f\n", g_settings.volume);
@@ -139,6 +147,7 @@ void settings_save(void) {
     fprintf(f, "movie_audio = %d\n", g_settings.movie_audio);
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
     fprintf(f, "skip_start_screen = %d\n", g_settings.skip_start);
+    fprintf(f, "experimental = %d\n", g_settings.experimental);
     fprintf(f, "mouse_camera = %d\n", g_settings.mouse_camera);
     fprintf(f, "mouse_invert_x = %d\nmouse_invert_y = %d\n", g_settings.mouse_invert_x, g_settings.mouse_invert_y);
     fprintf(f, "background = %d\n", g_settings.background);

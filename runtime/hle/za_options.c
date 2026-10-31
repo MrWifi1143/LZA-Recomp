@@ -77,13 +77,16 @@ static int find(const int *v, int n, int x) {
 static int get_fps(void) { return find(k_fps, 5, g_settings.next_fps ? g_settings.next_fps : g_settings.fps); }
 // (120 / 144: the game's own logic was made for 30 and some of it counts frames; the row's description says so while
 // one of them is chosen - shown again right after the change, settings_screen_buttons)
-static const char *const k_fps_warning = "Experimental: scripted scenes play at 60 fps. If you get stuck, set 60 or 30 fps.";
+static const char *const k_fps_warning = "Experimental: scripted scenes play at 60 fps. If you get stuck, set 60 or 30 fps.",
+                         *const k_unl_warning = "Unfinished: in battles, Pokémon and trainers can misbehave. Use 144 fps or lower for battles.";
 static int g_info_pending = -1;  // (a row whose description is to be drawn again)
 bool legends_set_fps(int fps);  // runtime/hle/fps60.c: at once
 static void set_fps(int i) {
     if (legends_set_fps(k_fps[i])) g_settings.fps = k_fps[i], g_settings.next_fps = 0;
     else g_settings.next_fps = k_fps[i] == g_settings.fps ? 0 : k_fps[i];
 }
+// A row's choices as offered: the frame rate's above 60 only with the start screen's Experimental settings on
+static int nchoice(const void *row);
 static int get_steps(void) { return g_settings.fixed_steps ? 1 : 0; }
 static void set_steps(int i) { g_settings.fixed_steps = i == 1; }
 static int get_res(void) { return find(k_lines, 6, g_settings.next_res_height ? g_settings.next_res_height - 1 : g_settings.res_height); }
@@ -156,7 +159,7 @@ static const Row k_rows[] = {  // (per tab in this order; Gameplay's first is th
     {0, "Pokémon Files", "Press A to save your boxed Pokémon as PKHeX files, or add the ones in pokemon/import.",
      CHOICE, 2, {"Export", "Import"}, pkm_files_get, pkm_files_set, pkm_files_run},
     {1, "Frame Rate", "Choose how many frames are drawn a second.",
-     CHOICE, 4, {"30 fps", "60 fps", "120 fps", "144 fps", "Unlimited"}, get_fps, set_fps},  // (Unlimited hidden for now: battles)
+     CHOICE, 5, {"30 fps", "60 fps", "120 fps", "144 fps", "Unlimited"}, get_fps, set_fps},  // (above 60: Experimental settings, nchoice)
     {1, "Frame Timing", "Choose whether the game keeps full speed when the frame rate dips (Real Time) or slows down with it.",
      CHOICE, 2, {"Real Time", "Fixed"}, get_steps, set_steps},
     {1, "Resolution (Next Start)", "Choose the resolution the game is drawn at, from the next time you start it.",
@@ -175,6 +178,10 @@ static const Row k_rows[] = {  // (per tab in this order; Gameplay's first is th
     {2, "Master Volume", "Adjust the volume of all of the game's sound.", BAR10, 0, {0}, get_vol, set_vol},
 };
 #define NROWS (int)(sizeof k_rows / sizeof *k_rows)
+static int nchoice(const void *row) {
+    const Row *w = row;
+    return w->get == get_fps && !g_settings.experimental ? 2 : w->n;
+}
 static int g_first[NROWS];  // CHOICE rows of more than 3: the first of the three shown
 
 static int added(int tab) {
@@ -194,17 +201,17 @@ static void keep_shown(int r, int v) {  // (the three choices shown include v)
     const Row *w = &k_rows[r];
     if (v < g_first[r]) g_first[r] = v;
     if (v > g_first[r] + 2) g_first[r] = v - 2;
-    g_first[r] = clampi(g_first[r], 0, w->n - 3);
+    g_first[r] = clampi(g_first[r], 0, nchoice(w) - 3);
 }
 static uint64_t type_of(const Row *w) {
     if (w->kind == BAR5) return 2;
     if (w->kind == BAR10) return 0xa00000002ull;
-    return w->n == 2 ? 0xa00000001ull : 0xa00000000ull;
+    return nchoice(w) == 2 ? 0xa00000001ull : 0xa00000000ull;
 }
 static int shown_value(int r) {  // the value as the row shows it
     const Row *w = &k_rows[r];
     int v = w->get();
-    if (w->kind != CHOICE || w->n <= 3) return v;
+    if (w->kind != CHOICE || nchoice(w) <= 3) return v;
     keep_shown(r, v);
     return v - g_first[r];
 }
@@ -404,9 +411,9 @@ static int row_set_hook(Cpu *c, uint64_t addr) {
     if (r < 0) return 0;
     const Row *w = &k_rows[r];
     int v = (int)(uint32_t)c->x[2];
-    if (w->kind == CHOICE && w->n > 3) {  // (shown 0..2, moving on past either end: +1 or -1 of the value)
-        int cur = w->get(), was = cur - g_first[r];
-        v = v == (was + 1) % 3 ? (cur + 1) % w->n : (cur + w->n - 1) % w->n;
+    if (w->kind == CHOICE && nchoice(w) > 3) {  // (shown 0..2, moving on past either end: +1 or -1 of the value)
+        int cur = w->get(), was = cur - g_first[r], n = nchoice(w);
+        v = v == (was + 1) % 3 ? (cur + 1) % n : (cur + n - 1) % n;
         keep_shown(r, v);
     }
     w->set(v);
@@ -444,8 +451,8 @@ static int row_texts_hook(Cpu *c, uint64_t addr) {
         call_with_texts(c, OPT_SET_NUMBER, (uint64_t[]){view, item, (uint64_t)w->get()}, 3, NULL, 0);
         return 1;
     }
-    int first = w->n > 3 ? (shown_value(r), g_first[r]) : 0;
-    if (w->n == 2) call_with_texts(c, OPT_SET_CHOICES2, (uint64_t[]){view, item, lab, lab}, 4, w->choice, 2);
+    int first = nchoice(w) > 3 ? (shown_value(r), g_first[r]) : 0;
+    if (nchoice(w) == 2) call_with_texts(c, OPT_SET_CHOICES2, (uint64_t[]){view, item, lab, lab}, 4, w->choice, 2);
     else call_with_texts(c, OPT_SET_CHOICES3, (uint64_t[]){view, item, lab, lab, lab}, 5, w->choice + first, 3);
     return 1;
 }
@@ -463,7 +470,7 @@ static int row_info_hook(Cpu *c, uint64_t addr) {
     }
     int r = row_index((int)(uint32_t)c->x[1], (int)(uint32_t)c->x[2]);
     if (r < 0) return 0;
-    const char *info = k_rows[r].get == get_fps && get_fps() >= 2 ? k_fps_warning : k_rows[r].info;
+    const char *info = k_rows[r].get == get_fps && get_fps() >= 2 ? (get_fps() == 4 ? k_unl_warning : k_fps_warning) : k_rows[r].info;
     call_with_texts(c, OPT_SET_INFO, (uint64_t[]){c->x[0], (uint64_t)(uintptr_t)&g_label}, 2, &info, 1);
     return 1;
 }

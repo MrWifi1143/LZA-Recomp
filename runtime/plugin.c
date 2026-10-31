@@ -55,10 +55,16 @@ void input_plugin_pad(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int3
 volatile uint32_t g_plugin_render_height;  // (runtime/nvn/output_scale.c)
 static void set_render_height(uint32_t lines) { g_plugin_render_height = lines >= 360 && lines <= 8640 ? lines : 0; }
 
+struct LdnRelay;
+void ldn_relay_set(const struct LdnRelay *r);
+uint32_t ldn_relay_local(void);
+static void relay_set(const void *r) { ldn_relay_set((const struct LdnRelay *)r); }
+
 static const LarecompPluginApi g_api = {
     .abi = LARECOMP_PLUGIN_ABI, .log = plugin_log, .register_fnhook = rt_register_fnhook_at,
     .call_original = rt_call_original, .title_id = game_title_id, .queue_lock = vk_queue_lock, .queue_unlock = vk_queue_unlock,
     .image_origin_lower_left = origin_lower_left, .set_pad = input_plugin_pad, .set_render_height = set_render_height,
+    .ldn_relay_set = relay_set, .ldn_relay_local = ldn_relay_local,
 };
 
 volatile int g_plugins_cbuf;
@@ -87,6 +93,13 @@ bool plugin_listed(const char *list, const char *name) {
     return false;
 }
 
+// Plugins that are off until the player switches them on (the start screen's Mods page): ones that change what the
+// game does with other people or the PC - the Steam relay (Steam shows "Playing Spacewar")
+bool plugin_opt_in(const char *name) { return strstr(name, "steamrelay") != NULL; }
+bool plugin_enabled(const char *name) {
+    return plugin_opt_in(name) ? plugin_listed(g_settings.plugins_on, name) : !plugin_listed(g_settings.plugins_off, name);
+}
+
 // The plugin files in plugins/ (names only, sorted), on or off: what the start screen lists
 int plugins_files(char (*names)[64], int max) {
     int n = 0;
@@ -101,6 +114,29 @@ int plugins_files(char (*names)[64], int max) {
     return n;
 }
 
+// The start screen's choice: plugins/ files names[i] on or off -> ini plugins_on / plugins_off (an opt-in one listed in
+// plugins_on when on, any other in plugins_off when off; names of files not there kept, should they come back)
+void plugins_choose(char (*names)[64], const bool *on, int n) {
+    char lists[2][sizeof g_settings.plugins_on], *was[2] = {g_settings.plugins_on, g_settings.plugins_off};
+    for (int l = 0; l < 2; l++) {
+        lists[l][0] = 0;
+        for (const char *p = was[l]; *p; p += strcspn(p, ",") + (p[strcspn(p, ",")] == ',')) {  // (the absent ones)
+            char nm[64];
+            snprintf(nm, sizeof nm, "%.*s", (int)strcspn(p, ","), p);
+            bool here = !nm[0];
+            for (int i = 0; i < n && !here; i++) here = !strcmp(names[i], nm);
+            if (!here && strlen(lists[l]) + strlen(nm) + 2 < sizeof lists[l]) strcat(lists[l], lists[l][0] ? "," : ""), strcat(lists[l], nm);
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        int l = plugin_opt_in(names[i]) ? 0 : 1;
+        if ((l == 0) == on[i] && strlen(lists[l]) + strlen(names[i]) + 2 < sizeof lists[l])
+            strcat(lists[l], lists[l][0] ? "," : ""), strcat(lists[l], names[i]);
+    }
+    memcpy(g_settings.plugins_on, lists[0], sizeof lists[0]), memcpy(g_settings.plugins_off, lists[1], sizeof lists[1]);
+}
+
+void plugins_shutdown(void);
 void plugins_load(void) {
     static int done;
     if (done++) return;
@@ -116,11 +152,18 @@ void plugins_load(void) {
     }
     settings_load();  // (plugins_off; the working directory is the data root)
     DIR *d = opendir("plugins");
+    for (struct dirent *e; d && (e = readdir(d));) {  // (ones removed on the start screen while loaded: gone now)
+        size_t n = strlen(e->d_name);
+        char path[1024];
+        snprintf(path, sizeof path, "plugins/%s", e->d_name);
+        if (n > 8 && !strcmp(e->d_name + n - 8, ".removed")) remove(path);
+    }
+    if (d) closedir(d), d = opendir("plugins");
     if (d) {
         for (struct dirent *e; (e = readdir(d));) {
             size_t n = strlen(e->d_name);
             if (n > 4 && !strcmp(e->d_name + n - strlen(PLUGIN_EXT), PLUGIN_EXT)) {
-                if (plugin_listed(g_settings.plugins_off, e->d_name)) {  // (switched off on the start screen)
+                if (!plugin_enabled(e->d_name)) {  // (switched off on the start screen, or not switched on)
                     LOG("[plugin] plugins/%s is switched off\n", e->d_name);
                     continue;
                 }
@@ -131,6 +174,7 @@ void plugins_load(void) {
         }
         closedir(d);
     }
+    if (g_n) atexit(plugins_shutdown);  // (hooks.shutdown: Steam must close its connections before the process goes)
 }
 
 int plugins_count(void) { return g_n; }

@@ -37,3 +37,6 @@ fonts/*.ttf
 __pycache__/
 play.log
 play-prev.log
+
+# Plugins dropped in by the player or `make steamrelay` (the source is contrib/)
+plugins/

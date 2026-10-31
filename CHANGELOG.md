@@ -7,6 +7,19 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- Experimental settings (start screen, Display tab): frame rates above 60 - 120, 144 and Unlimited - are offered only
+  with it ticked, in the start screen and in the game's Settings (its Frame Rate row shows 30 / 60 otherwise). Unlimited
+  is back behind it (in battles, Pokémon and trainers can misbehave; its warning says so). An older larecomp.ini with
+  120 / 144 in it turns the box on, so nobody's frame rate drops on update.
+- The start screen's Mods page is one list: every translation (mods/) and plugin (plugins/) with a tick box, what it
+  does, and Add a mod... (a .zip / .rar / .7z translation, or a plugin file) / Remove / Open the mods folder at the
+  top. One translation at a time; plugins switch on or off, and a change restarts the game once when Play is pressed.
+- Steam relay on Windows: the zip ships plugins/steamrelay.dll, off until ticked on the Mods page (plugins that talk
+  to others start off: larecomp.ini plugins_on). Steam's own steam_api64.dll is found through the registry and every
+  Steam library folder (SteamVR's copy, else any game's; an old one without the networking API is skipped). Checked: a
+  Link Trade through the relay between the Windows build (Wine) and the Linux build.
+- Plugin API 3: the relay's functions are handed to plugins (a Windows DLL can't look them up in the exe), and plugins'
+  shutdown hooks now run when the game quits (before, nothing called them).
 - Link Trades and Private Battles with Steam friends anywhere (Linux): the Steam relay plugin (contrib/steamrelay,
   `make steamrelay` -> build/plugins/libsteamrelay.so, copied to plugins/ in the game's folder). With Steam running,
   Link Play's "Nearby" also finds friends who are hosting, and the game's traffic goes over Steam's relay network

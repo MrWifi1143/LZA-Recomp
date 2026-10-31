@@ -9,7 +9,7 @@
 #include <stdint.h>
 #include <vulkan/vulkan.h>
 
-#define LARECOMP_PLUGIN_ABI 2  // (2: set_pad, set_render_height - a plugin checks abi >= 2 before using them)
+#define LARECOMP_PLUGIN_ABI 3  // (2: set_pad, set_render_height; 3: ldn_relay_* - a plugin checks abi before using them)
 
 struct Cpu;  // runtime/cpu.h: the guest registers (x[31], sp, pc, v[32]...)
 
@@ -35,6 +35,11 @@ typedef struct {
     // The render height wanted (lines; the width follows the window's shape), over the Internal resolution setting;
     // 0: the setting again. Takes effect at the next presented frame (the render targets are reallocated).
     void (*set_render_height)(uint32_t lines);
+    // ---- ABI 3
+    // Local play (Link Trades...) over another network: the relay's functions (runtime/services/ldn.c LdnRelay,
+    // contrib/steamrelay), and where a relay replays what a peer sent - this copy's address (127.0.1.N, host order)
+    void (*ldn_relay_set)(const void *relay);
+    uint32_t (*ldn_relay_local)(void);
 } LarecompPluginApi;
 
 typedef struct {
@@ -50,7 +55,7 @@ typedef struct {
     void (*frame)(VkCommandBuffer cb, VkImage image, VkFormat fmt, uint32_t w, uint32_t h);
     // That frame's commands are on the queue (images written by them may be handed on now)
     void (*frame_submitted)(void);
-    void (*shutdown)(void);
+    void (*shutdown)(void);  // (the process is exiting: from exit(), other threads still running)
     // A vertex / fragment stage's constant buffer (game memory at addr, size bytes) read for a draw now: what the frame
     // being recorded draws with (the next hooks.frame shows it). Called for every bind - keep it cheap.
     void (*cbuf_bound)(int stage, uint64_t addr, uint32_t size);
@@ -61,6 +66,9 @@ typedef int (*LarecompPluginInitFn)(const LarecompPluginApi *api, LarecompPlugin
 // ---- runtime side (runtime/plugin.c)
 void plugins_load(void);
 int plugins_files(char (*names)[64], int max);       // plugins/'s files, on or off (the start screen's list)
+bool plugin_opt_in(const char *name);                 // off until switched on (ini plugins_on): the Steam relay
+bool plugin_enabled(const char *name);                // as the ini has it (plugins_on / plugins_off)
+void plugins_choose(char (*names)[64], const bool *on, int n);  // the start screen's choice -> the ini lists
 bool plugin_listed(const char *list, const char *name);  // name in a comma-separated list (ini plugins_off)
 int plugins_count(void);
 uint32_t plugins_vk_instance_extensions(const char **out, uint32_t max);
