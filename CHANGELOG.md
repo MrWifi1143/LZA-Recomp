@@ -7,6 +7,12 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- Fixed: the GPU could hang during a Link Trade (the copy showing the trade animation stopped with "device lost"
+  about 15 s after the Pokémon were exchanged). The shader translator's typed GLSL (faster shader compiles) kept
+  integer values such as loop counters in float variables when a register held both kinds of data; the GPU may flush
+  such values (they are denormal floats) and a shader loop never ended. Registers are now float only when every value
+  written to them is float data. Shader compiles: 9% faster than untyped GLSL (was 44% - most of that gain came from
+  the mixed registers). Trade A/B: 3/3 hangs before, 0/4 after.
 - Steady frame rate when capped: at 60 fps the game no longer dips into the 50s. While it waits for the next frame's
   time the game thread lends its emulated core to the game's other threads; taking it back at the frame's time sometimes
   waited milliseconds for the thread holding it, and the frame started late. It is now taken back ahead of time (a

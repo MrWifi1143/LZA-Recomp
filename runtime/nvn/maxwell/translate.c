@@ -2375,6 +2375,27 @@ static bool float_lit(uint32_t v, char *out) {
     return true;
 }
 
+// A float register takes float data only: integer bits kept in a float variable are denormals or NaNs the GPU may
+// flush or quiet (a loop counter stuck at 0 hung the GPU in the Link Trade, 2026-10-30). src[st, en), a value written
+// as bits: a literal that is an ordinary float (1), a copy of register *from (2: float only when that one is), else 0.
+static int float_data(const char *s, size_t st, size_t en, int *from) {
+    char lit[24];
+    size_t k = st + 1;
+    if (en - st == 2 && !memcmp(s + st, "0u", 2)) return 1;
+    if (en - st == 11 && s[st] == '0' && s[st + 1] == 'x' && s[en - 1] == 'u') return float_lit((uint32_t)strtoul(s + st + 2, NULL, 16), lit);
+    if (s[st] >= '0' && s[st] <= '9' && s[en - 1] == 'u' && en - st <= 11) {
+        while (k < en - 1 && s[k] >= '0' && s[k] <= '9') k++;
+        return k == en - 1 && float_lit((uint32_t)strtoul(s + st, NULL, 10), lit);
+    }
+    if (s[st] == 'r') {
+        while (k < en && s[k] >= '0' && s[k] <= '9') k++;
+        if (k != en || k == st + 1 || k - st > 4) return 0;
+        *from = atoi(s + st + 1);
+        return *from < 256 ? 2 : 0;
+    }
+    return 0;
+}
+
 enum { RT_FU, RT_AF, RT_AU, RT_RAW, RT_DF, RT_DA, RT_DU };  // (uses: uintBitsToFloat(r) as_f(r) as_u(r) r; writes)
 typedef struct { size_t a, b, st, en; uint8_t r, kind; } ROcc;
 
@@ -2398,6 +2419,8 @@ static char *retype_regs(char *src) {
     size_t nocc = 0, cap = 0;
     int cnt[256][2] = {{0}};  // float-wanting, uint-wanting
     bool bad[256] = {0};
+    uint8_t (*copy)[2] = NULL;  // (rA = rB: A float only when B is)
+    size_t ncopy = 0, ccap = 0;
     for (size_t i = scan; src[i]; i++) {
         if (src[i] != 'r' || src[i + 1] < '0' || src[i + 1] > '9' || id_char(src[i - 1]) || src[i - 1] == '.') continue;
         size_t j = i + 1;
@@ -2424,6 +2447,15 @@ static char *retype_regs(char *src) {
             while (en > st && src[en - 1] == ' ') en--;
             o.st = st, o.en = en;
             o.kind = wraps(src, st, en, "floatBitsToUint(") ? RT_DF : wraps(src, st, en, "as_u(") ? RT_DA : RT_DU;
+            // Only float data goes into a float register: integer bits stored in one are denormals (or NaNs) the GPU may
+            // flush or quiet - a loop counter stuck at 0 hung the GPU in the Link Trade (2026-10-30). Float results and
+            // literals that are ordinary floats only.
+            int from = -1, fd = o.kind == RT_DU ? float_data(src, st, en, &from) : o.kind == RT_DF;
+            if (!fd) bad[r] = true;
+            else if (fd == 2) {
+                if (ncopy == ccap) copy = realloc(copy, (ccap = ccap ? ccap * 2 : 256) * sizeof *copy);
+                copy[ncopy][0] = r, copy[ncopy++][1] = (uint8_t)from;
+            }
         }
         if (o.kind != RT_DA) cnt[r][o.kind == RT_FU || o.kind == RT_AF || o.kind == RT_DF ? 0 : 1]++;
         if (nocc == cap) occ = realloc(occ, (cap = cap ? cap * 2 : 1024) * sizeof *occ);
@@ -2432,8 +2464,14 @@ static char *retype_regs(char *src) {
     }
     REdits e = {0};
     bool fl[256];
+    for (int r = 0; r < 256; r++) fl[r] = decl[r] && !bad[r] && cnt[r][0] > cnt[r][1];
+    for (bool more = true; more;) {
+        more = false;
+        for (size_t i = 0; i < ncopy; i++)
+            if (fl[copy[i][0]] && !fl[copy[i][1]]) fl[copy[i][0]] = false, more = true;
+    }
+    free(copy);
     for (int r = 0; r < 256; r++) {
-        fl[r] = decl[r] && !bad[r] && cnt[r][0] > cnt[r][1];
         if (!fl[r]) continue;
         char name[8];
         int nl = snprintf(name, sizeof name, "r%d", r);
