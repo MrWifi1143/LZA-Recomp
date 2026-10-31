@@ -95,6 +95,10 @@ typedef struct {
 // Global memory (LDG/STG) is addressed through one buffer that wraps the guest heap.
 #define GMEM_BUFFER_INDEX 17
 extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
+// The GPU's subgroups are (or may be) wider than 32 in stages that can't be made 32 (Adreno: 64 / 128; a Radeon's
+// vertex / fragment stages: wave64): warp operations work on each 32-lane slice as a warp (lane id, masks, votes,
+// shuffles). Set before the first translation (vulkan/device.c).
+extern bool g_maxwell_warp_slices;
 // This thread's next translations in the GLSL spelling from before glsl_retype (uint registers, as_u / as_f), not cached:
 // for a shader the renderer then patches by its text (runtime/nvn/vulkan/exec.c pla_soft_shadows)
 #ifdef __cplusplus

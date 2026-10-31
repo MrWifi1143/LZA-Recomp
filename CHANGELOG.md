@@ -12,6 +12,11 @@ Arceus:
   longer than 33.3 ms is now made up over the next frames (each still at most 33.3 ms), up to 1 s - before, every hitch
   put the picture further behind the sound for good. Found in Z-A's intro (2.5 s behind by the station on a first play).
   `LARECOMP_CATCHUP_MS=0`: as before.
+- AMD Radeon (and other GPUs whose shaders run wider than 32 lanes where the driver can't fix them at 32): the game's
+  warp operations (lane ids, lane masks, votes, shuffles) now work on 32-lane slices, as a Switch warp - ported from
+  Z-A, where a Radeon didn't draw some trees in the intro. AMD's Windows driver can fix only compute shaders at 32, so
+  vertex and pixel shaders ran 64 wide. Translations made this way have their own shader cache. `LARECOMP_NO_WARP_SLICES=1`:
+  as before; `LARECOMP_WARP_SLICES=1` forces them anywhere (a 32-wide subgroup is one slice: the same picture).
 ## 2026-10-31: LegendsA-v0.6.1-alpha
 
 Arceus:

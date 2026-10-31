@@ -477,6 +477,10 @@ static void *cleanup(void *arg) {
     lower_priority();
     uint64_t t0 = plat_now_ns();
     merge_containers();
+    // The cache folder in use is only known once the device is set up (device.c may turn g_maxwell_warp_slices on,
+    // which picks the tag): pruning before that would delete the cache in use, under it, at every start.
+    for (int i = 0; !vk_ready() && i < 600; i++) usleep(100000);
+    if (!vk_ready()) return NULL;
     uint64_t a = prune_dir("cache/xlat", maxwell_cache_tag()), b = prune_dir("cache/spirv", maxwell_cache_tag());
     if (a || b)
         LOG("[warmup] old shader caches deleted: %llu entries of cache/xlat, %llu of cache/spirv (%.1f s)\n", (unsigned long long)a,

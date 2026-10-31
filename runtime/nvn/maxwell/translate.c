@@ -1777,12 +1777,14 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         // Lane id and lane masks: Vulkan's subgroup = the Maxwell warp where the subgroup is 32 wide (NVIDIA). They were 0,
         // which broke warp-aggregated atomics (one lane adds for the ballot's lanes; each lane's slot = popc(ballot & ltmask)):
         // a Z-A compute shader's per-entry counters then grew without end, its GPU time with them (0.04 -> 6 ms a frame).
-        case 0x00: set_reg(c, d, "gl_SubgroupInvocationID"); break;  // SR_LANEID
-        case 0x38: set_reg(c, d, "gl_SubgroupEqMask.x"); break;      // SR_EQMASK
-        case 0x39: set_reg(c, d, "gl_SubgroupLtMask.x"); break;      // SR_LTMASK
-        case 0x3a: set_reg(c, d, "gl_SubgroupLeMask.x"); break;      // SR_LEMASK
-        case 0x3b: set_reg(c, d, "gl_SubgroupGtMask.x"); break;      // SR_GTMASK
-        case 0x3c: set_reg(c, d, "gl_SubgroupGeMask.x"); break;      // SR_GEMASK
+        // Subgroups wider than 32 that can't be made 32 (a Radeon's wave64 stages, Adreno; g_maxwell_warp_slices): each 32-lane
+        // slice is a warp.
+        case 0x00: set_reg(c, d, g_maxwell_warp_slices ? "(gl_SubgroupInvocationID & 31u)" : "gl_SubgroupInvocationID"); break;  // SR_LANEID
+        case 0x38: set_reg(c, d, g_maxwell_warp_slices ? "W32(gl_SubgroupEqMask)" : "gl_SubgroupEqMask.x"); break;  // SR_EQMASK
+        case 0x39: set_reg(c, d, g_maxwell_warp_slices ? "W32(gl_SubgroupLtMask)" : "gl_SubgroupLtMask.x"); break;  // SR_LTMASK
+        case 0x3a: set_reg(c, d, g_maxwell_warp_slices ? "W32(gl_SubgroupLeMask)" : "gl_SubgroupLeMask.x"); break;  // SR_LEMASK
+        case 0x3b: set_reg(c, d, g_maxwell_warp_slices ? "W32(gl_SubgroupGtMask)" : "gl_SubgroupGtMask.x"); break;  // SR_GTMASK
+        case 0x3c: set_reg(c, d, g_maxwell_warp_slices ? "W32(gl_SubgroupGeMask)" : "gl_SubgroupGeMask.x"); break;  // SR_GEMASK
         default: sprintf(t, "0u /* sr %#x */", sr); set_reg(c, d, t);
         }
     } else if (OPM(0x5c30000000000000ull, 0xfff8000000000000ull) || OPM(0x4c30000000000000ull, 0xfff8000000000000ull) ||
@@ -1934,9 +1936,17 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (mode > 2) { fail(c, "vote mode %d", mode); return; }
         const char *src = P(sp_, spn);
         sp(&c->body, "    { bool vsrc = %s;\n", src);
+        if (g_maxwell_warp_slices) {  // (the vote over this lane's 32-lane slice: its ballot against its active lanes)
+            static const char *const sl[3] = {"vb == va", "vb != 0u", "vb == 0u || vb == va"};
+            sp(&c->body, "      uint vb = W32(subgroupBallot(vsrc)), va = W32(subgroupBallot(true));\n");
+            if (vp != PT) { c->pred_used[vp] = 1; sp(&c->body, "      p%d = %s;\n", vp, sl[mode]); }
+            if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = vb;\n", d); }
+            sp(&c->body, "    }\n");
+        } else {
         if (vp != PT) { c->pred_used[vp] = 1; sp(&c->body, "      p%d = %s(vsrc);\n", vp, fn[mode]); }
         if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = subgroupBallot(vsrc).x;\n", d); }
         sp(&c->body, "    }\n");
+        }
     } else if (OPM(0x50f8000000000000ull, 0xfff8000000000000ull)) {  // FSWZADD
         // per quad lane (laneid & 3), 2 bits of the swizzle pick: a+b, b-a, a-b, b
         uint32_t swz = (uint32_t)bits(w, 28, 8);
@@ -1999,6 +2009,16 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         int pd = (int)bits(w, 48, 3);
         if (c->stage == STAGE_VERTEX) {
             set_reg(c, d, R(a));  // no SIMD-group functions in vertex functions: lane-local value
+        } else if (c->glsl && g_maxwell_warp_slices) {  // (within this lane's 32-lane slice; out of range: its own value)
+#define LN "(gl_SubgroupInvocationID & 31u)"
+            char sidx[200];
+            if (mode == 0) snprintf(sidx, sizeof sidx, "(uint(%s) & 31u)", bv);
+            else if (mode == 1) snprintf(sidx, sizeof sidx, "(" LN " >= uint(%s) ? " LN " - uint(%s) : " LN ")", bv, bv);
+            else if (mode == 2) snprintf(sidx, sizeof sidx, "(" LN " + uint(%s) <= 31u ? " LN " + uint(%s) : " LN ")", bv, bv);
+            else snprintf(sidx, sizeof sidx, "((" LN " ^ uint(%s)) & 31u)", bv);
+#undef LN
+            snprintf(t, sizeof t, "subgroupShuffle(%s, (gl_SubgroupInvocationID & ~31u) | %s)", R(a), sidx);
+            set_reg(c, d, t);
         } else if (c->glsl) {  // a quad xor (lane mask < 4) is the subgroup xor within the quad
             static const char *const fn[] = {"subgroupShuffle", "subgroupShuffleUp", "subgroupShuffleDown", "subgroupShuffleXor"};
             sprintf(t, "%s(%s, uint(%s))", fn[mode], R(a), bv);
@@ -2644,6 +2664,9 @@ static const char glsl_prelude[] =
     "#extension GL_ARB_shader_draw_parameters : require\n"
     "#extension GL_ARB_shader_viewport_layer_array : require\n"  // (gl_Layer from the vertex shader: 3D / layered targets)
     "#define cbr(cb, off) cb[min((off) >> 4, uint(cb.length() - 1))][((off) >> 2) & 3u]\n"
+    // (g_maxwell_warp_slices: this lane's 32-lane slice of a wider subgroup's mask - the warp's own mask)
+    // (selects, not an indexed array constructor: Turnip's compiler crashed on that in some compute shaders)
+    "#define W32(m) (gl_SubgroupInvocationID < 32u ? (m).x : gl_SubgroupInvocationID < 64u ? (m).y : gl_SubgroupInvocationID < 96u ? (m).z : (m).w)\n"
     "uint as_u(float x) { return floatBitsToUint(x); }\n"
     "uint as_u(uint x) { return x; }\n"
     "uint as_u(int x) { return uint(x); }\n"
@@ -3392,12 +3415,16 @@ static const char k_xlat_build[] = __DATE__ " " __TIME__;
 #endif
 const char *maxwell_build_id(void) { return k_xlat_build; }
 _Thread_local bool maxwell_plain_glsl;  // (shader.h)  // (runtime/nvn/vulkan/warmup.c: its marker)
+bool g_maxwell_warp_slices;  // (shader.h)
+
 const char *maxwell_cache_tag(void) {
-    static char tag[17];
+    static char tags[2][17];  // (by g_maxwell_warp_slices: device.c may set it after a first call)
+    char *tag = tags[g_maxwell_warp_slices];
     if (!tag[0]) {
         uint64_t h = 0xcbf29ce484222325ull;
         for (const char *p = k_xlat_build; *p; p++) h = (h ^ (uint8_t)*p) * 0x100000001b3ull;
-        snprintf(tag, sizeof tag, "%016llx", (unsigned long long)h);
+        if (g_maxwell_warp_slices) h = (h ^ 0x5a) * 0x100000001b3ull;  // (translations for sliced subgroups: their own)
+        snprintf(tag, 17, "%016llx", (unsigned long long)h);
     }
     return tag;
 }
