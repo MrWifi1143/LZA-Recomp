@@ -64,7 +64,9 @@ python tools/windows/build.py --install D:\LZA-Recomp-ZA   # ... and put it into
 builds the game code), then each build drops the new exe (and the Steam relay plugin, on Z-A's branch) into that folder
 - the old exe kept as `<exe>.exe.prev`; it works while the game is running too (the running one is moved aside). The
 build is incremental (objects older than their source or a runtime header are rebuilt; `-j` sets the parallel jobs).
-Making the release zip itself (`make_zip.sh`) still happens on Linux.
+`python tools/windows/make_zip.py [--out <folder>]` then makes the release folder and zip from that build, as
+`make_zip.sh` does on Linux (the same contents and checks; default output `$LZA_WINBUILD/dist`). It needs the build
+folder's `python-embed.zip`, `wheels/` and `zig-windows.zip` too.
 
 Keep zig (and so the build folder, or `--zig`'s zig) and an installed release on an NTFS drive: on a btrfs drive
 mounted in Windows (WinBtrfs, e.g. a drive shared with Linux) zig fails at random under parallel compiles ("Permission
