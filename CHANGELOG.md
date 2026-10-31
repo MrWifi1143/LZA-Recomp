@@ -3,6 +3,14 @@
 Releases are tagged per game: `LegendsA-v*` (PL:A Recomp, branch `LegendsA`) and `LegendsZA-v*` (PL:Z-A Recomp,
 branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
+## Unreleased (branch `LegendsZA`)
+
+Z-A:
+
+- Fixed: a controller could do nothing in the game while the launcher's Controls page saw it - the game used only
+  the first controller the system listed, and on Windows that is often a virtual one (Steam Input, DS4Windows /
+  ViGEm, vJoy, Virtual Desktop) or a second receiver. Every connected controller is now opened and the game follows
+  the one a button was last pressed on; the launcher's own controller navigation takes any controller too.
 ## 2026-10-31: LegendsZA-v0.6.0-alpha
 
 Z-A:

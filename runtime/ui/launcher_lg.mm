@@ -713,6 +713,7 @@ extern "C" void launcher_lg_run(const char *root) {
         st.FrameRounding = st.GrabRounding = st.TabRounding = 6;
     }
     ImGui_ImplSDL3_InitForVulkan(win);
+    ImGui_ImplSDL3_SetGamepadMode(ImGui_ImplSDL3_GamepadMode_AutoAll);  // (any controller moves the focus, not only the first one listed)
     vk_imgui_backend_init();
 
     static const char *const res_en[] = {"Automatic (window size)", "540p", "720p", "1080p", "1440p", "4K"};
