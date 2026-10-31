@@ -3,7 +3,7 @@
 Releases are tagged per game: `LegendsA-v*` (PL:A Recomp, branch `LegendsA`) and `LegendsZA-v*` (PL:Z-A Recomp,
 branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
-## Unreleased (branch `LegendsZA`)
+## 2026-10-31: LegendsZA-v0.6.1-alpha
 
 Z-A:
 
