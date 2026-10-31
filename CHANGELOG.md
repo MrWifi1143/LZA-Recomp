@@ -7,6 +7,10 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- Windows: vertex data is kept in video memory and copied again only when the game writes it, as on Linux - the page
+  write tracking (runtime/pagewatch.c) was Linux-only, so Windows copied every vertex range at every draw. Lumiose walk
+  on an RTX 4090: 1370 MB -> 214 MB uploaded per 2 s (Linux: 214), the copied ranges 138 thousand -> 0; frame times on
+  that PC unchanged (its PCIe bandwidth wasn't the limit). LARECOMP_PAGEWATCH=0 turns it off.
 - Fixed: on an installed copy (a release set up from your game files) the first start's shader step found nothing to
   prepare - it only looked for the game's shader packs in a romfs/ folder, and an install has the romfs.bin image
   instead. The packs are now read from inside romfs.bin. Checked on a fresh Windows install: 0 -> 23841 shader
