@@ -1,9 +1,11 @@
 // Runtime plugins: optional shared libraries loaded at startup, for mods that need code rather than files (the VR mod,
 // https://github.com/MrWifi1143/LegendsVR). Loaded from LARECOMP_PLUGINS (paths separated by ':') and from
-// <data root>/plugins/*.so; without either nothing changes. A plugin exports
+// <data root>/plugins/*.so (minus the ones switched off on the start screen's Mods page: larecomp.ini plugins_off);
+// without either nothing changes. A plugin exports
 //     int larecomp_plugin_init(const LarecompPluginApi *api, LarecompPluginHooks *hooks);
 // which fills in the hooks it wants (the rest stay NULL) and returns 0, or non-zero to stay out.
 #pragma once
+#include <stdbool.h>
 #include <stdint.h>
 #include <vulkan/vulkan.h>
 
@@ -58,6 +60,8 @@ typedef int (*LarecompPluginInitFn)(const LarecompPluginApi *api, LarecompPlugin
 
 // ---- runtime side (runtime/plugin.c)
 void plugins_load(void);
+int plugins_files(char (*names)[64], int max);       // plugins/'s files, on or off (the start screen's list)
+bool plugin_listed(const char *list, const char *name);  // name in a comma-separated list (ini plugins_off)
 int plugins_count(void);
 uint32_t plugins_vk_instance_extensions(const char **out, uint32_t max);
 VkPhysicalDevice plugins_vk_physical_device(VkInstance instance);

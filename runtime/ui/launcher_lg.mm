@@ -29,6 +29,8 @@ extern "C" {
 #include "gamesetup.h"
 #include "input_bind.h"
 #include "mods.h"
+#include "platform.h"
+#include "plugin.h"
 #include "paths.h"
 #include "settings.h"
 void settings_save(void);
@@ -709,6 +711,15 @@ extern "C" void launcher_lg_run(const char *root) {
     static char mods[MODS_MAX][128];
     int nmods = mods_list(mods, MODS_MAX), mod = 0;
     for (int i = 0; i < nmods; i++) if (!strcmp(mods[i], g_settings.mod)) mod = i + 1;
+    // Plugins (plugins/: code mods - the VR mod, the Steam relay): each on or off. They load before this screen (they
+    // may extend the Vulkan device it draws with), so a change restarts the game once when Play is pressed.
+    static char plugs[8][64];
+    int nplugs = plugins_files(plugs, 8);
+    bool plug_on[8];
+    const char *plug_test = getenv("LARECOMP_TEST_PLUGINS_OFF");  // (tests: these unticked, as if clicked)
+    for (int i = 0; i < nplugs; i++) plug_on[i] = !plugin_listed(plug_test ? plug_test : g_settings.plugins_off, plugs[i]);
+    char plugins_off_was[sizeof g_settings.plugins_off];
+    snprintf(plugins_off_was, sizeof plugins_off_was, "%s", g_settings.plugins_off);
     long shot_at = getenv("LARECOMP_LAUNCHER_SHOT") ? atol(getenv("LARECOMP_LAUNCHER_SHOT")) : 0, frame = 0;
     bool autoplay = getenv("LARECOMP_LAUNCHER_AUTOPLAY") != NULL, play = false;
     // "Skip this screen": straight to the game once it's ready - unless Shift is held in the first moments
@@ -785,6 +796,32 @@ extern "C" void launcher_lg_run(const char *root) {
                 if (ImGui::Selectable(mods[i], mod == i + 1)) mod = i + 1;
             ImGui::EndCombo();
         }
+    };
+    auto plugins_rows = [&]() {
+        if (!nplugs) return;
+        ImGui::Spacing();
+        ImGui::SeparatorText(T("Plugins", "Plugins"));
+        for (int i = 0; i < nplugs; i++) {
+            bool relay = strstr(plugs[i], "steamrelay") != NULL, vr = strstr(plugs[i], "vrmod") != NULL;
+            const char *what = relay ? T("Link Trades and Private Battles with your Steam friends, anywhere (Steam shows "
+                                         "\"Playing Spacewar\" while the game runs).",
+                                         "Trocas e batalhas privadas com seus amigos da Steam, de qualquer lugar (a Steam mostra "
+                                         "\"Jogando Spacewar\" enquanto o jogo roda).")
+                             : vr ? T("Play in a VR headset.", "Jogue com um headset de RV.")
+                                  : NULL;
+            char label[160];
+            snprintf(label, sizeof label, "%s  (%s)##p%d", relay ? T("Steam relay", "Relay Steam") : vr ? "LegendsVR" : plugs[i], plugs[i], i);
+            if (!relay && !vr) snprintf(label, sizeof label, "%s##p%d", plugs[i], i);
+            ImGui::Checkbox(label, &plug_on[i]);
+            if (what) {
+                ImGui::Indent(ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x);
+                ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                ImGui::TextWrapped("%s", what);
+                ImGui::PopStyleColor();
+                ImGui::Unindent(ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x);
+            }
+        }
+        ImGui::TextDisabled("%s", T("A change restarts the game once when you press Play.", "Uma mudança reinicia o jogo uma vez ao apertar Jogar."));
     };
     auto mod_install_row = [&]() {
         if (inst == MOD_INSTALL_RUNNING) ImGui::TextDisabled("%s", T("Installing the translation...", "Instalando a tradução..."));
@@ -970,6 +1007,7 @@ extern "C" void launcher_lg_run(const char *root) {
                 ImGui::Spacing();
                 settings_mods();
                 mod_install_row();
+                plugins_rows();
             }
             ImGui::PopItemWidth();
             ImGui::EndChild();
@@ -1058,7 +1096,25 @@ extern "C" void launcher_lg_run(const char *root) {
     g_settings.pkhex_link = pk_i;
     g_settings.shader_nowait = shl_i;
     snprintf(g_settings.mod, sizeof g_settings.mod, "%s", mod ? mods[mod - 1] : "");
+    g_settings.plugins_off[0] = 0;
+    for (int i = 0; i < nplugs; i++)
+        if (!plug_on[i] && strlen(g_settings.plugins_off) + strlen(plugs[i]) + 2 < sizeof g_settings.plugins_off)
+            strcat(g_settings.plugins_off, g_settings.plugins_off[0] ? "," : ""), strcat(g_settings.plugins_off, plugs[i]);
+    // (and the switched-off names of files no longer there kept, should they come back)
+    for (const char *p = plugins_off_was; *p; p += strcspn(p, ",") + (p[strcspn(p, ",")] == ',')) {
+        char nm[64];
+        snprintf(nm, sizeof nm, "%.*s", (int)strcspn(p, ","), p);
+        bool listed = false;
+        for (int i = 0; i < nplugs; i++) listed |= !strcmp(plugs[i], nm);
+        if (!listed && nm[0] && strlen(g_settings.plugins_off) + strlen(nm) + 2 < sizeof g_settings.plugins_off)
+            strcat(g_settings.plugins_off, g_settings.plugins_off[0] ? "," : ""), strcat(g_settings.plugins_off, nm);
+    }
     settings_save();
+    if (strcmp(plugins_off_was, g_settings.plugins_off)) {  // the plugins loaded aren't the ones chosen: once more, straight in
+        fprintf(stderr, "[launcher] plugins changed (off: \"%s\"): restarting\n", g_settings.plugins_off);
+        setenv("LARECOMP_LAUNCHER_AUTOPLAY", "1", 1);
+        plat_exec(NULL);
+    }
     { extern void pkm_link_apply(void); pkm_link_apply(); }  // (PKHeX Link as just chosen: hle/pkm_link.c)
     if (warmup_needed(root)) {  // first start, or the first after an update: every shader of the game, once (warmup.c)
         warmup_start();

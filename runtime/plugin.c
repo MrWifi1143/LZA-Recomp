@@ -8,6 +8,7 @@
 
 #include "plugin.h"
 #include "rt.h"
+#include "settings.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -76,6 +77,30 @@ static void load_one(const char *path) {
     LOG("[plugin] loaded %s\n", path);
 }
 
+// name (a file in plugins/) is in the comma-separated list
+bool plugin_listed(const char *list, const char *name) {
+    size_t n = strlen(name);
+    for (const char *p = list; *p; p += strcspn(p, ",") + (p[strcspn(p, ",")] == ',')) {
+        while (*p == ' ') p++;
+        if (!strncmp(p, name, n) && (p[n] == ',' || p[n] == 0 || p[n] == ' ')) return true;
+    }
+    return false;
+}
+
+// The plugin files in plugins/ (names only, sorted), on or off: what the start screen lists
+int plugins_files(char (*names)[64], int max) {
+    int n = 0;
+    DIR *d = opendir("plugins");
+    if (!d) return 0;
+    for (struct dirent *e; (e = readdir(d)) && n < max;) {
+        size_t k = strlen(e->d_name);
+        if (k > strlen(PLUGIN_EXT) && k < 64 && !strcmp(e->d_name + k - strlen(PLUGIN_EXT), PLUGIN_EXT)) snprintf(names[n++], 64, "%s", e->d_name);
+    }
+    closedir(d);
+    qsort(names, (size_t)n, 64, (int (*)(const void *, const void *))strcmp);
+    return n;
+}
+
 void plugins_load(void) {
     static int done;
     if (done++) return;
@@ -89,11 +114,16 @@ void plugins_load(void) {
         for (char *p = strtok(buf, ":"); p; p = strtok(NULL, ":")) load_one(p);
 #endif
     }
-    DIR *d = opendir("plugins");  // (the working directory is the data root)
+    settings_load();  // (plugins_off; the working directory is the data root)
+    DIR *d = opendir("plugins");
     if (d) {
         for (struct dirent *e; (e = readdir(d));) {
             size_t n = strlen(e->d_name);
             if (n > 4 && !strcmp(e->d_name + n - strlen(PLUGIN_EXT), PLUGIN_EXT)) {
+                if (plugin_listed(g_settings.plugins_off, e->d_name)) {  // (switched off on the start screen)
+                    LOG("[plugin] plugins/%s is switched off\n", e->d_name);
+                    continue;
+                }
                 char path[1024];
                 snprintf(path, sizeof path, "plugins/%s", e->d_name);
                 load_one(path);

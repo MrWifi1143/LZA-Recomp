@@ -40,9 +40,10 @@ static void parse_line(const char *line) {
     char key[64];
     char val[128];
     if (sscanf(line, " %63[^= ] = %127[^\n]", key, val) < 1) return;
-    if (!strcmp(key, "game_lang") || !strcmp(key, "mod")) {  // (may be empty)
+    if (!strcmp(key, "game_lang") || !strcmp(key, "mod") || !strcmp(key, "plugins_off")) {  // (may be empty)
         if (sscanf(line, " %63[^= ] = %127[^\n]", key, val) != 2) val[0] = 0;
         if (key[0] == 'g') strlcpy(g_settings.game_lang, val, sizeof g_settings.game_lang);
+        else if (key[0] == 'p') strlcpy(g_settings.plugins_off, val, sizeof g_settings.plugins_off);
         else strlcpy(g_settings.mod, val, sizeof g_settings.mod);
         return;
     }
@@ -130,6 +131,7 @@ void settings_save(void) {
     fprintf(f, "render_height = %d\n", g_settings.next_res_height ? g_settings.next_res_height - 1 : g_settings.res_height);
     fprintf(f, "smaa = %d\n", g_settings.antialias == AA_SMAA);
     fprintf(f, "mod = %s\n", g_settings.mod);
+    fprintf(f, "plugins_off = %s\n", g_settings.plugins_off);
     fprintf(f, "mouse_sens = %.3f\n", g_settings.mouse_sens);
     fprintf(f, "stick_deadzone = %.2f\n", g_settings.stick_deadzone);
     fprintf(f, "volume = %.2f\n", g_settings.volume);

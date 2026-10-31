@@ -189,6 +189,33 @@ static const char *ip_str(uint32_t ip, char *b) {
     return b;
 }
 
+// ------------------------------------------------------------------ a relay (optional, a mod: mods/steamrelay)
+// A mod can carry the network to players elsewhere (Steam's relay network). Each of its peers has an address here,
+// 127.0.4.<k>, which the network treats like any other player's: what this copy sends there goes to the relay
+// (ldn_relay_set) instead of a socket, and what a peer sends arrives from that address - the relay replays it over
+// loopback from 127.0.4.<k>:<the peer's port> to this copy (ldn_relay_local), so receiving is as on a LAN. A host's
+// node table carries its relay peers by id (a Steam id), each station has its own 127.0.4.<k> for them.
+#define RELAY(ip) (((ip) & 0xFFFFFF00u) == 0x7F000400u)
+typedef struct {
+    void (*send)(uint32_t to, uint16_t from_port, uint16_t to_port, const void *p, size_t n);
+    int (*targets)(uint32_t *out, int max);  // whom a scan asks (friends hosting)
+    void (*hosting)(int on);                 // this copy hosts a network / no longer
+    uint64_t (*id_of)(uint32_t addr);        // a peer's id (0: not a relay peer)
+    uint32_t (*addr_of)(uint64_t id);        // the address here of a peer by id (0: none)
+} LdnRelay;
+static const LdnRelay *g_relay;
+void ldn_relay_set(const LdnRelay *r) { g_relay = r; }
+uint32_t ldn_relay_local(void) { return my_addr(); }  // (where the relay replays: this copy's address, 127.0.1.N)
+static ssize_t net_sendto(int fd, const void *p, size_t n, int flags, const struct sockaddr_in *a) {
+    uint32_t ip = ntohl(a->sin_addr.s_addr);
+    if (!RELAY(ip)) return sendto(fd, p, (int)n, flags, (const struct sockaddr *)a, sizeof *a);
+    struct sockaddr_in me;
+    socklen_t ml = sizeof me;
+    if (!g_relay || getsockname(fd, (struct sockaddr *)&me, &ml)) return (ssize_t)n;  // (no relay: lost, as a packet)
+    g_relay->send(ip, ntohs(me.sin_port), ntohs(a->sin_port), p, n);
+    return (ssize_t)n;
+}
+
 static void signal_change(void) {  // (caller may hold L.lock)
     if (!L.event) return;
     pthread_mutex_lock(&g_klock);
@@ -208,23 +235,27 @@ static int udp_bound(uint32_t ip, uint16_t port, bool reuse) {
     return fd;
 }
 static void ctrl_send(int fd, uint32_t ip, char type, const void *body, size_t n) {
-    uint8_t m[8 + sizeof(NetworkInfo) + 64];
+    uint8_t m[8 + sizeof(NetworkInfo) + 4 * 8 * 3 + 64];
     memcpy(m, "LDN1", 4), m[4] = (uint8_t)type;
     if (n > sizeof m - 5) n = sizeof m - 5;
     if (n) memcpy(m + 5, body, n);
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(LDN_CTRL_PORT), .sin_addr.s_addr = htonl(ip)};
-    sendto(fd, (const void *)m, (int)(5 + n), 0, (struct sockaddr *)&a, sizeof a);
+    net_sendto(fd, m, 5 + n, 0, &a);
 }
-// (L.lock held) the network's info and its nodes' addresses, as the host sends them: 0 for itself
+// (L.lock held) the network's info and its nodes' addresses, as the host sends them: 0 for itself; then the relay ids
+// of the nodes it reaches through the relay
+#define TABLE_SIZE (4 * NODES + 8 * NODES)
 static size_t host_packet(uint8_t *out) {
     memcpy(out, &L.info, sizeof L.info);
     uint32_t t[NODES];
-    for (int k = 0; k < NODES; k++) t[k] = k ? L.real[k] : 0;
+    uint64_t r[NODES];
+    for (int k = 0; k < NODES; k++) t[k] = k ? L.real[k] : 0, r[k] = k && g_relay && RELAY(L.real[k]) ? g_relay->id_of(L.real[k]) : 0;
     memcpy(out + sizeof L.info, t, sizeof t);
-    return sizeof L.info + sizeof t;
+    memcpy(out + sizeof L.info + sizeof t, r, sizeof r);
+    return sizeof L.info + TABLE_SIZE;
 }
 static void host_broadcast_info(void) {  // (L.lock held) to every station
-    uint8_t b[sizeof(NetworkInfo) + 4 * NODES];
+    uint8_t b[sizeof(NetworkInfo) + TABLE_SIZE];
     size_t n = host_packet(b);
     for (int k = 1; k < NODES; k++)
         if (L.info.ldn.nodes[k].connected && L.real[k]) ctrl_send(L.ctrl, L.real[k], 'I', b, n);
@@ -233,10 +264,14 @@ static void host_broadcast_info(void) {  // (L.lock held) to every station
 static void station_table(const uint8_t *t) {
     for (int k = 0; k < NODES; k++) {
         uint32_t r;
+        uint64_t id;
         memcpy(&r, t + 4 * k, 4);
+        memcpy(&id, t + 4 * NODES + 8 * k, 8);
         if (k == 0) r = L.host_addr;
         else if (k == L.node) r = my_addr();
-        else if (LOOPBACK(r) && !LOOPBACK(L.host_addr)) r = 0;  // (a second copy on the host's PC: loopback only)
+        else if (id) r = g_relay ? g_relay->addr_of(id) : 0;      // (a relay peer: its address here)
+        else if (RELAY(L.host_addr)) r = 0;                        // (the host's LAN, out of reach from here)
+        else if (LOOPBACK(r) && !LOOPBACK(L.host_addr)) r = 0;     // (a second copy on the host's PC: loopback only)
         L.real[k] = r;
     }
 }
@@ -245,7 +280,7 @@ static void *ctrl_thread(void *arg) {
     (void)arg;
     int fd = L.ctrl;
     for (;;) {
-        uint8_t m[8 + sizeof(NetworkInfo) + 64];
+        uint8_t m[8 + sizeof(NetworkInfo) + TABLE_SIZE];
         struct sockaddr_in from;
         socklen_t fl = sizeof from;
         ssize_t n = recvfrom(fd, (void *)m, sizeof m, 0, (struct sockaddr *)&from, &fl);
@@ -254,17 +289,18 @@ static void *ctrl_thread(void *arg) {
         char sb[16];
         pthread_mutex_lock(&L.lock);
         char t = (char)m[4];
+        if (ldn_log()) LOG("[ldn]   control '%c' from %s:%u (state %d)\n", t, ip_str(src, sb), ntohs(from.sin_port), L.state);
         if (L.state == ST_AP_CREATED && t == 'S') {  // a scan: our network
             uint8_t r[5 + sizeof(NetworkInfo)];
             memcpy(r, "LDN1s", 5), memcpy(r + 5, &L.info, sizeof L.info);
-            sendto(fd, (const void *)r, sizeof r, 0, (struct sockaddr *)&from, sizeof from);
+            net_sendto(fd, r, sizeof r, 0, &from);
         } else if (L.state == ST_AP_CREATED && t == 'C' && n >= 5 + 33 + 2) {  // a join
             int k = 1;
             while (k < L.info.ldn.max_nodes && L.info.ldn.nodes[k].connected) k++;
-            uint8_t r[6 + sizeof(NetworkInfo) + 4 * NODES];
+            uint8_t r[6 + sizeof(NetworkInfo) + TABLE_SIZE];
             if (k >= L.info.ldn.max_nodes || L.info.ldn.accept_policy == 1) {  // (full / AcceptPolicy RejectAll)
                 memcpy(r, "LDN1R", 5);
-                sendto(fd, (const void *)r, 5, 0, (struct sockaddr *)&from, sizeof from);
+                net_sendto(fd, r, 5, 0, &from);
             } else {
                 NodeInfo *nd = &L.info.ldn.nodes[k];
                 memset(nd, 0, sizeof *nd);
@@ -276,7 +312,7 @@ static void *ctrl_thread(void *arg) {
                 L.changes[k] = 1;
                 memcpy(r, "LDN1A", 5), r[5] = (uint8_t)k;
                 size_t pn = host_packet(r + 6);
-                sendto(fd, (const void *)r, (int)(6 + pn), 0, (struct sockaddr *)&from, sizeof from);
+                net_sendto(fd, r, 6 + pn, 0, &from);
                 host_broadcast_info();
                 LOG("[ldn] \"%s\" joined as node %d (%s)\n", nd->name, k, ip_str(src, sb));
                 signal_change();
@@ -291,7 +327,7 @@ static void *ctrl_thread(void *arg) {
                 signal_change();
             }
         } else if (L.state == ST_STATION_CONNECTED && src == L.host_addr) {  // from our host:
-            if (t == 'I' && n >= 5 + (ssize_t)(sizeof(NetworkInfo) + 4 * NODES)) {  // the network changed
+            if (t == 'I' && n >= 5 + (ssize_t)(sizeof(NetworkInfo) + TABLE_SIZE)) {  // the network changed
                 NetworkInfo ni;
                 memcpy(&ni, m + 5, sizeof ni);
                 for (int k = 0; k < NODES; k++)
@@ -354,6 +390,7 @@ static void host_create(const NetworkConfig *nc, const SecurityConfig *sc, const
     L.node = 0, L.real[0] = my_addr();
     LOG("[ldn] hosting (local id %016llx, scene %u, up to %d players)\n", (unsigned long long)L.info.id.intent.local_id,
         nc->intent.scene_id, L.info.ldn.max_nodes);
+    if (g_relay) g_relay->hosting(1);
 }
 
 // where a scan asks besides this PC's other copies (slot 1 only): the LAN's broadcast addresses, and
@@ -384,11 +421,18 @@ static int scan(const ScanFilter *f, NetworkInfo *out, int max) {
     if (max < 1 || !L.me) return 0;
     int fd = udp_bound(bind_addr(), 0, false);
     if (fd < 0) return 0;
-    for (int k = 1; k <= LDN_PEERS; k++)
+    static int local = -1;  // (LARECOMP_LDN_LOCAL=0, tests: this PC's and the LAN's copies not asked - the relay only)
+    if (local < 0) local = !(getenv("LARECOMP_LDN_LOCAL") && atoi(getenv("LARECOMP_LDN_LOCAL")) == 0);
+    for (int k = 1; k <= LDN_PEERS && local; k++)
         if (k != L.me) ctrl_send(fd, 0x7F000100u | (uint32_t)k, 'S', NULL, 0);
-    if (L.me == 1) {
+    if (L.me == 1 && local) {
         uint32_t t[24];
         int nt = lan_targets(t, 24);
+        for (int i = 0; i < nt; i++) ctrl_send(fd, t[i], 'S', NULL, 0);
+    }
+    if (g_relay) {  // (the relay's: friends hosting elsewhere)
+        uint32_t t[32];
+        int nt = g_relay->targets(t, 32);
         for (int i = 0; i < nt; i++) ctrl_send(fd, t[i], 'S', NULL, 0);
     }
     int n = 0;
@@ -451,9 +495,9 @@ static bool station_connect(const NetworkInfo *want, const UserConfig *uc, uint1
     bool ok = false;
     kernel_block_begin();
     if (sock_poll(&p, 1, 1500) > 0) {
-        uint8_t m[8 + sizeof(NetworkInfo) + 4 * NODES];
+        uint8_t m[8 + sizeof(NetworkInfo) + TABLE_SIZE];
         ssize_t got = recv(fd, (void *)m, sizeof m, 0);
-        if (got >= 6 + (ssize_t)(sizeof(NetworkInfo) + 4 * NODES) && !memcmp(m, "LDN1A", 5)) {
+        if (got >= 6 + (ssize_t)(sizeof(NetworkInfo) + TABLE_SIZE) && !memcmp(m, "LDN1A", 5)) {
             pthread_mutex_lock(&L.lock);
             L.node = m[5], L.host_addr = host;
             memcpy(&L.info, m + 6, sizeof L.info);
@@ -473,9 +517,11 @@ static void leave(void) {  // (L.lock held) a station out / the host's network c
         uint8_t k = (uint8_t)L.node;
         ctrl_send(L.ctrl, L.host_addr, 'L', &k, 1);
     }
-    if (L.state == ST_AP_CREATED)
+    if (L.state == ST_AP_CREATED) {
         for (int k = 1; k < NODES; k++)
             if (L.info.ldn.nodes[k].connected && L.real[k]) ctrl_send(L.ctrl, L.real[k], 'D', NULL, 0);
+        if (g_relay) g_relay->hosting(0);
+    }
     L.node = -1, L.host_addr = 0;
     memset(&L.info, 0, sizeof L.info);
     memset(L.real, 0, sizeof L.real);
@@ -766,11 +812,17 @@ SERVICE("bsd:u", bsd_u) {
                     if (k != L.node && L.info.ldn.nodes[k].connected && L.real[k]) {
                         struct sockaddr_in t = to;
                         t.sin_addr.s_addr = htonl(L.real[k]);
-                        sendto(h, (const void *)(uintptr_t)b->addr, (int)b->size, hf, (struct sockaddr *)&t, sizeof t);
+                        net_sendto(h, (const void *)(uintptr_t)b->addr, b->size, hf, &t);
                     }
                 pthread_mutex_unlock(&L.lock);
-            } else n = sendto(h, (const void *)(uintptr_t)b->addr, (int)b->size, hf, (struct sockaddr *)&to, sizeof to);
-        } else n = send(h, (const void *)(uintptr_t)b->addr, (int)b->size, hf);
+            } else n = net_sendto(h, (const void *)(uintptr_t)b->addr, b->size, hf, &to);
+        } else {
+            struct sockaddr_in pa;
+            socklen_t pl = sizeof pa;
+            if (!getpeername(h, (struct sockaddr *)&pa, &pl) && RELAY(ntohl(pa.sin_addr.s_addr)))  // (connected to a relay peer)
+                n = net_sendto(h, (const void *)(uintptr_t)b->addr, b->size, hf, &pa);
+            else n = send(h, (const void *)(uintptr_t)b->addr, (int)b->size, hf);
+        }
         if (n < 0) LOG("[bsd] send failed: errno %d\n", sock_errno());
         else g_sent[0]++, g_sent[1] += (uint64_t)n;
         RET(n, n < 0 ? sock_errno() : 0);

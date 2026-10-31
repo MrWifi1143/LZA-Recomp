@@ -7,6 +7,17 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- Link Trades and Private Battles with Steam friends anywhere (Linux): the Steam relay plugin (contrib/steamrelay,
+  `make steamrelay` -> build/plugins/libsteamrelay.so, copied to plugins/ in the game's folder). With Steam running,
+  Link Play's "Nearby" also finds friends who are hosting, and the game's traffic goes over Steam's relay network
+  (no port forwarding, no IP addresses shared). Only friends can connect. It runs as Spacewar (app 480, the test app
+  every Steam account has), so Steam shows "Playing Spacewar". The Steam API is not shipped: Steam's own copy is used
+  (SteamVR's, or any installed game's; LARECOMP_STEAM_API=<path>). Verified: trades through the relay between two
+  copies (a stand-in transport, LARECOMP_RELAY_FAKE) and Steam sign-in, friend scans and a clean quit on a real
+  account; a trade between two Steam accounts is still to be tried.
+- The start screen's Mods page lists plugins (plugins/: the Steam relay, the VR mod) with an on/off switch each
+  (larecomp.ini plugins_off). Plugins load before the start screen, so a change restarts the game once when Play is
+  pressed, straight into the game.
 - Fixed: the GPU could hang during a Link Trade (the copy showing the trade animation stopped with "device lost"
   about 15 s after the Pokémon were exchanged). The shader translator's typed GLSL (faster shader compiles) kept
   integer values such as loop counters in float variables when a register held both kinds of data; the GPU may flush
