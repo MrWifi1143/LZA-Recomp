@@ -68,37 +68,49 @@ def prism_tower(svg, cx, ground, H):
     c, dim = rgba(160, 220, 90, 235), rgba(120, 180, 70, 130)
     Y = lambda f: ground - f * H
 
+    def legw(f):
+        u = (f - 0.075) / 0.165
+        return H * (0.075 + 0.105 * (1 - u) * (1 - u))
+
     def shw(f):
         u = f - 0.52
         return H * (0.036 + (0.40 if u > 0 else 0.52) * u * u)
 
     cup0 = shw(0.80)
 
-    # the base: a pyramid whose straight sides run up into the shaft's curve with no corner - the line is the shaft's
-    # tangent at FJ, so its foot is as wide as that tangent reaches at the ground. Its steps are lines inside it (ledges,
-    # window bands), the arched entrance and a lattice window either side at the bottom.
-    FJ = 0.24
-    slope = 1.04 * (0.52 - FJ) * H  # (-d shw / df below the waist: how much narrower per unit of height)
-    pw = lambda f: shw(FJ) + slope * (FJ - f)  # (the pyramid's half width at height f)
-    def base_detail():  # (over the outline's fill)
-        for f in (0.075, 0.135, 0.180):  # ledges across it
-            svg.line((cx - pw(f), Y(f)), (cx + pw(f), Y(f)), c, 1.6)
-        for f0, f1 in ((0.135, 0.180), (0.180, 0.218)):  # window bands between them
-            fb = (f0 + f1) / 2
-            hb = pw(fb) - 0.022 * H
-            n = max(1, round(2 * hb / 16))
-            for i in range(n + 1):
-                x = cx - hb + 2 * hb * i / n
-                svg.line((x, Y(fb) - 0.3 * (f1 - f0) * H), (x, Y(fb) + 0.3 * (f1 - f0) * H), dim, 1.2)
-        for k in (-1, 1):  # the lattice windows beside it
-            x0, x1 = cx + k * 0.068 * H, cx + k * 0.108 * H
-            y0, y1 = Y(0.012), Y(0.058)
-            svg.poly([(x0, y0), (x1, y0), (x1, y1), (x0, y1)], fill=rgba(20, 34, 40), stroke=c, width=1.5, closed=True)
-            svg.line((x0, y0), (x1, y1), dim, 1.2)
-            svg.line((x1, y0), (x0, y1), dim, 1.2)
-    r = 0.048 * H  # the arched entrance
-    A = [(cx - r, Y(0.0))] + [(cx + r * math.cos(math.pi + math.pi * i / 24), Y(0.0) - 0.022 * H + r * math.sin(math.pi + math.pi * i / 24))
-                              for i in range(25)] + [(cx + r, Y(0.0))]
+    def part(f0, f1, n, hw, thick):
+        L = [(cx - hw(f0 + (f1 - f0) * i / n), Y(f0 + (f1 - f0) * i / n)) for i in range(n + 1)]
+        R = [(cx + hw(f0 + (f1 - f0) * i / n), Y(f0 + (f1 - f0) * i / n)) for i in range(n + 1)]
+        svg.poly(L + R[::-1], fill=fill, closed=True)
+        svg.poly(L, stroke=c, width=thick)
+        svg.poly(R, stroke=c, width=thick)
+
+    for k in range(2):  # the base: two tiers with window bands
+        hw = (0.165 if k else 0.215) * H
+        y0, y1 = Y(0.035 if k else 0.0), Y(0.075 if k else 0.035)
+        svg.poly([(cx - hw, y1), (cx + hw, y1), (cx + hw, y0), (cx - hw, y0)], fill=fill, stroke=c, width=2.0, closed=True)
+        yb = Y(0.056 if k else 0.019)
+        x = cx - hw + 16
+        while x < cx + hw - 16:
+            svg.line((x, yb - 6), (x, yb + 6), dim, 1.2)
+            x += 18
+    door = [(cx + 0.045 * H * math.cos(math.pi + math.pi * i / 24), Y(0.0) + 0.045 * H * math.sin(math.pi + math.pi * i / 24))
+            for i in range(25)]
+    svg.poly(door, fill=fill, stroke=c, width=2.0, closed=True)
+    part(0.075, 0.240, 40, legw, 2.5)  # the legs, beams crossed between them
+    for i in range(5):
+        f0 = 0.10 + 0.028 * i
+        f1 = f0 + 0.028
+        l0, r0, l1, r1 = cx - legw(f0), cx + legw(f0), cx - legw(f1), cx + legw(f1)
+        svg.line((l0, Y(f0)), (r1, Y(f1)), dim, 1.2)
+        svg.line((r0, Y(f0)), (l1, Y(f1)), dim, 1.2)
+        svg.line((l1, Y(f1)), (r1, Y(f1)), c, 1.3)
+    arch = 0.045 * H
+    A = [(cx - arch, Y(0.075))] + [(cx + arch * math.cos(math.pi + math.pi * i / 20), Y(0.120) + arch * math.sin(math.pi + math.pi * i / 20))
+                                    for i in range(21)] + [(cx + arch, Y(0.075))]
+    svg.poly(A, fill=rgba(20, 34, 40), stroke=c, width=2.0)
+    svg.poly([(cx - 0.095 * H, Y(0.258)), (cx + 0.095 * H, Y(0.258)), (cx + 0.095 * H, Y(0.240)), (cx - 0.095 * H, Y(0.240))],
+             fill=fill, stroke=c, width=2.0, closed=True)  # the deck
     # the crown: the back fins first, then the shaft and front fins / middle column as one outline
     o, fin = cup0, cup0 + 0.028 * H
     back = []
@@ -107,7 +119,7 @@ def prism_tower(svg, cx, ground, H):
         svg.poly(q, fill=fill, stroke=rgba(150, 210, 85, 190), width=1.8, closed=True)
         svg.line((cx + k * 0.046 * H, Y(0.86)), (cx + k * 0.048 * H, Y(0.962)), dim, 1.0)
         back.append((cx + k * 0.074 * H, Y(0.980)))
-    P = [(cx - pw(0.0), Y(0.0))] + [(cx - shw(FJ + (0.80 - FJ) * i / 80), Y(FJ + (0.80 - FJ) * i / 80)) for i in range(80)]
+    P = [(cx - shw(0.258 + 0.542 * i / 80), Y(0.258 + 0.542 * i / 80)) for i in range(80)]
 
     def bez(p0, p1, p2, k, first):
         for i in range(0 if first else 1, k + 1):
@@ -126,8 +138,6 @@ def prism_tower(svg, cx, ground, H):
     P += [(2 * cx - x, y) for x, y in P[::-1]]
     svg.poly(P, fill=fill, closed=True)
     svg.poly(P, stroke=c, width=2.5)
-    svg.poly(A, fill=rgba(20, 34, 40), stroke=c, width=2.0, closed=True)
-    base_detail()
     for k in (-1, 1):
         svg.line((cx + k * (o + 0.004 * H), Y(0.83)), (cx + k * (fin - 0.014 * H), Y(0.962)), dim, 1.2)
     tips = [(cx - fin, Y(0.970)), (cx + fin, Y(0.970))]
@@ -168,8 +178,8 @@ def prism_tower(svg, cx, ground, H):
 
 def za(svg):
     frame(svg, '#0c1028', '#22143a', (150, 190, 255))
-    # the tower stands on the street (an icon has no status strip or front buildings over its foot, as the launcher's
-    # banner does): the whole base and door above it, the beacon below the top edge
+    # the tower stands on the street, the front row of buildings over the sides of its foot as in the launcher's banner
+    # (only the door's middle clear), the beacon below the top edge
     street = 930
     cx, ground, H = 512, street, 836
     svg.add('<defs><radialGradient id="glow"><stop offset="0" stop-color="rgb(150,230,90)" stop-opacity="0.32"/>'
@@ -178,7 +188,7 @@ def za(svg):
             '<stop offset="1" stop-color="rgb(8,9,20)"/></linearGradient></defs>')
     svg.add('<circle cx="%d" cy="%d" r="450" fill="url(#glow)"/>' % (cx, int(ground - 0.55 * H)))
     s = [7]
-    for layer in range(2):  # the city: a back row, the street and the tower, a low front row beside its foot (lit windows)
+    for layer in range(2):  # the city: a back row, the street and the tower, a low front row over its foot (lit windows)
         if layer == 1:
             svg.poly([(0, street), (S, street), (S, S), (0, S)], fill=rgba(10, 12, 24), closed=True)
             svg.add('<rect x="0" y="%d" width="%d" height="%d" fill="url(#street)"/>' % (street, S, S - street))
@@ -188,10 +198,14 @@ def za(svg):
         while x < S:
             bw = 52.0 + rnd(s) % 96
             bh = (0.05 + rnd(s) % 100 * 0.0010) * S if layer else (0.11 + rnd(s) % 100 * 0.0018) * S
-            if layer == 1 and abs(x + bw / 2 - cx) < S * 0.30:
-                x += bw
-                continue
             p, q = (x, street - bh), (x + bw - 6, street)
+            g = 0.13 * H  # (as the launcher: the front row over the sides of the tower's foot, only its middle - the door - clear)
+            if layer == 1 and p[0] < cx + g and q[0] > cx - g:
+                if p[0] >= cx - g and q[0] <= cx + g:  # (wholly in the middle: left out)
+                    x += bw
+                    continue
+                bh = max(bh, 0.15 * H)  # (beside the foot: tall enough to hide the legs' feet)
+                p, q = ((x, street - bh), (cx - g, street)) if p[0] < cx - g else ((cx + g, street - bh), (x + bw - 6, street))
             svg.poly([p, (q[0], p[1]), q, (p[0], q[1])], fill=rgba(8, 9, 20) if layer else rgba(20, 22, 44), closed=True)
             wy = p[1] + 16
             while wy < street - 12:
