@@ -8,6 +8,11 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Arceus:
 
+- Shader translator safety fix (found in Z-A, where it hung the GPU during a Link Trade): typed GLSL kept integer
+  values such as loop counters in float variables when a register held both kinds of data; the GPU may flush such
+  values (denormal floats) and a shader loop would never end. Registers are now float only when every value written to
+  them is float data. Arceus shader compiles: 11% faster than untyped GLSL (was 44%). Intro checked: shadow smoothing
+  still applied, no faults.
 - Steadier frame rate when capped: while waiting for the next frame's time the game thread lends its emulated core
   to the game's other threads, and taking it back at the frame's time sometimes waited milliseconds for the thread
   holding it - the frame started late. It is now taken back ahead of time and the last moment waited out. Intro capped
