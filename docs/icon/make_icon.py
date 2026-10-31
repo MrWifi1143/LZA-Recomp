@@ -68,51 +68,38 @@ def prism_tower(svg, cx, ground, H):
     c, dim = rgba(160, 220, 90, 235), rgba(120, 180, 70, 130)
     Y = lambda f: ground - f * H
 
-    def legw(f):
-        u = (f - 0.075) / 0.165
-        return H * (0.075 + 0.105 * (1 - u) * (1 - u))
-
     def shw(f):
         u = f - 0.52
         return H * (0.036 + (0.40 if u > 0 else 0.52) * u * u)
 
     cup0 = shw(0.80)
 
-    def part(f0, f1, n, hw, thick):
-        L = [(cx - hw(f0 + (f1 - f0) * i / n), Y(f0 + (f1 - f0) * i / n)) for i in range(n + 1)]
-        R = [(cx + hw(f0 + (f1 - f0) * i / n), Y(f0 + (f1 - f0) * i / n)) for i in range(n + 1)]
-        svg.poly(L + R[::-1], fill=fill, closed=True)
-        svg.poly(L, stroke=c, width=thick)
-        svg.poly(R, stroke=c, width=thick)
-
-    # the base: a stepped pedestal of two tiers with sloping sides (as the tower's own), each with a window band; the
-    # upper tier's top is as wide as the legs' foot, so their curves come down onto its corners
-    for f0, f1, w0, w1 in ((0.0, 0.035, 0.235, 0.215), (0.035, 0.075, 0.205, 0.180)):
+    # the base, as the concept art draws it: a sharp stepped pyramid, no curves - a plinth, the big sloping base with the
+    # arched entrance and a dark lattice window either side, a ledge, a tier with a window band, a ledge, a smaller
+    # banded tier and the deck the shaft stands on. (f0, f1, half width at f0, at f1, window band)
+    tiers = ((0.000, 0.028, 0.300, 0.292, False), (0.028, 0.150, 0.270, 0.190, False), (0.150, 0.163, 0.212, 0.212, False),
+             (0.163, 0.213, 0.180, 0.165, True), (0.213, 0.224, 0.178, 0.178, False), (0.224, 0.246, 0.150, 0.135, True),
+             (0.246, 0.258, 0.110, 0.110, False))
+    for f0, f1, w0, w1, band in tiers:
         a0, a1 = w0 * H, w1 * H
         svg.poly([(cx - a0, Y(f0)), (cx - a1, Y(f1)), (cx + a1, Y(f1)), (cx + a0, Y(f0))], fill=fill, stroke=c, width=2.0, closed=True)
-        fb = (f0 + f1) / 2
-        hb = ((w0 + w1) / 2 - 0.028) * H  # (the band, inside the sloping sides)
-        x = cx - hb
-        while x <= cx + hb + 0.5:
-            svg.line((x, Y(fb) - 6), (x, Y(fb) + 6), dim, 1.2)
-            x += 2 * hb / max(1, round(2 * hb / 18))
-    door = [(cx + 0.045 * H * math.cos(math.pi + math.pi * i / 24), Y(0.0) + 0.045 * H * math.sin(math.pi + math.pi * i / 24))
-            for i in range(25)]
-    svg.poly(door, fill=fill, stroke=c, width=2.0, closed=True)
-    part(0.075, 0.240, 40, legw, 2.5)  # the legs, beams crossed between them
-    for i in range(5):
-        f0 = 0.10 + 0.028 * i
-        f1 = f0 + 0.028
-        l0, r0, l1, r1 = cx - legw(f0), cx + legw(f0), cx - legw(f1), cx + legw(f1)
-        svg.line((l0, Y(f0)), (r1, Y(f1)), dim, 1.2)
-        svg.line((r0, Y(f0)), (l1, Y(f1)), dim, 1.2)
-        svg.line((l1, Y(f1)), (r1, Y(f1)), c, 1.3)
-    arch = 0.045 * H
-    A = [(cx - arch, Y(0.075))] + [(cx + arch * math.cos(math.pi + math.pi * i / 20), Y(0.120) + arch * math.sin(math.pi + math.pi * i / 20))
-                                    for i in range(21)] + [(cx + arch, Y(0.075))]
-    svg.poly(A, fill=rgba(20, 34, 40), stroke=c, width=2.0)
-    svg.poly([(cx - 0.095 * H, Y(0.258)), (cx + 0.095 * H, Y(0.258)), (cx + 0.095 * H, Y(0.240)), (cx - 0.095 * H, Y(0.240))],
-             fill=fill, stroke=c, width=2.0, closed=True)  # the deck
+        if band:  # (a row of lit panes inside the sloping sides)
+            fb = (f0 + f1) / 2
+            hb = ((w0 + w1) / 2 - 0.022) * H
+            n = max(1, round(2 * hb / 18))
+            for i in range(n + 1):
+                x = cx - hb + 2 * hb * i / n
+                svg.line((x, Y(fb) - 0.3 * (f1 - f0) * H), (x, Y(fb) + 0.3 * (f1 - f0) * H), dim, 1.2)
+    r = 0.065 * H  # the arched entrance
+    A = [(cx - r, Y(0.028))] + [(cx + r * math.cos(math.pi + math.pi * i / 24), Y(0.028) - 0.025 * H + r * math.sin(math.pi + math.pi * i / 24))
+                                for i in range(25)] + [(cx + r, Y(0.028))]
+    svg.poly(A, fill=rgba(20, 34, 40), stroke=c, width=2.0, closed=True)
+    for k in (-1, 1):  # the lattice windows beside it
+        x0, x1 = cx + k * 0.115 * H, cx + k * 0.175 * H
+        y0, y1 = Y(0.045), Y(0.105)
+        svg.poly([(x0, y0), (x1, y0), (x1, y1), (x0, y1)], fill=rgba(20, 34, 40), stroke=c, width=1.5, closed=True)
+        svg.line((x0, y0), (x1, y1), dim, 1.2)
+        svg.line((x1, y0), (x0, y1), dim, 1.2)
     # the crown: the back fins first, then the shaft and front fins / middle column as one outline
     o, fin = cup0, cup0 + 0.028 * H
     back = []
