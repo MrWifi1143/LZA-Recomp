@@ -178,25 +178,33 @@ def prism_tower(svg, cx, ground, H):
 
 def za(svg):
     frame(svg, '#0c1028', '#22143a', (150, 190, 255))
-    cx, ground, H = 512, 1010, 905
+    # the tower stands on the street (an icon has no status strip or front buildings over its foot, as the launcher's
+    # banner does): the whole base and door above it, the beacon below the top edge
+    street = 930
+    cx, ground, H = 512, street, 836
     svg.add('<defs><radialGradient id="glow"><stop offset="0" stop-color="rgb(150,230,90)" stop-opacity="0.32"/>'
-            '<stop offset="1" stop-color="rgb(150,230,90)" stop-opacity="0"/></radialGradient></defs>')
-    svg.add('<circle cx="%d" cy="%d" r="470" fill="url(#glow)"/>' % (cx, int(ground - 0.55 * H)))
+            '<stop offset="1" stop-color="rgb(150,230,90)" stop-opacity="0"/></radialGradient>'
+            '<linearGradient id="street" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="rgb(14,16,30)"/>'
+            '<stop offset="1" stop-color="rgb(8,9,20)"/></linearGradient></defs>')
+    svg.add('<circle cx="%d" cy="%d" r="450" fill="url(#glow)"/>' % (cx, int(ground - 0.55 * H)))
     s = [7]
-    for layer in range(2):  # the city: a back row, the tower, a low front row (lit windows)
+    for layer in range(2):  # the city: a back row, the street and the tower, a low front row beside its foot (lit windows)
         if layer == 1:
+            svg.poly([(0, street), (S, street), (S, S), (0, S)], fill=rgba(10, 12, 24), closed=True)
+            svg.add('<rect x="0" y="%d" width="%d" height="%d" fill="url(#street)"/>' % (street, S, S - street))
+            svg.line((0, street), (S, street), rgba(120, 180, 70, 90), 1.2)
             prism_tower(svg, cx, ground, H)
         x = -20.0
         while x < S:
             bw = 52.0 + rnd(s) % 96
             bh = (0.05 + rnd(s) % 100 * 0.0010) * S if layer else (0.11 + rnd(s) % 100 * 0.0018) * S
-            if layer == 1 and abs(x + bw / 2 - cx) < S * 0.24:
+            if layer == 1 and abs(x + bw / 2 - cx) < S * 0.30:
                 x += bw
                 continue
-            p, q = (x, S - 0.02 * S - bh), (x + bw - 6, S)
+            p, q = (x, street - bh), (x + bw - 6, street)
             svg.poly([p, (q[0], p[1]), q, (p[0], q[1])], fill=rgba(8, 9, 20) if layer else rgba(20, 22, 44), closed=True)
             wy = p[1] + 16
-            while wy < S - 0.02 * S - 12:
+            while wy < street - 12:
                 wx = p[0] + 10
                 while wx < q[0] - 12:
                     r = rnd(s)
