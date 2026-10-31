@@ -8,6 +8,10 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Arceus:
 
+- Windows: vertex data is kept in video memory and copied again only when the game writes it, as on Linux - the page
+  write tracking (runtime/pagewatch.c) was Linux-only, so Windows copied every vertex range at every draw. Lumiose walk
+  on an RTX 4090: 1370 MB -> 214 MB uploaded per 2 s (Linux: 214), the copied ranges 138 thousand -> 0; frame times on
+  that PC unchanged (its PCIe bandwidth wasn't the limit). LARECOMP_PAGEWATCH=0 turns it off.
 - Experimental settings (start screen, Display tab), as in Z-A: frame rates above 60 - 120, 144, Unlimited - only with
   it ticked, in the start screen and the game's Settings (Frame Rate shows 30 / 60 otherwise). An older larecomp.ini
   with a rate above 60 turns it on.

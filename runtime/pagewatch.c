@@ -8,10 +8,11 @@
 // decommits) calls pagewatch_prewrite first: the kernel would fail those with EFAULT instead of faulting. Bitmaps and
 // page protection change together under one lock (a fault racing pagewatch_protect could otherwise leave a read-only
 // page marked writable); it is held for a few bit operations and one mprotect, never by code that writes guest memory.
-// Linux only for now (Windows: the vectored handler only runs with crash reports on; macOS has no Vulkan renderer).
+// Linux and Windows (Windows: VirtualProtect, the faults from the guest window's vectored handler, platform/windows.c);
+// macOS has no Vulkan renderer.
 #include "rt.h"
 
-#if !defined(__linux__)
+#if !defined(__linux__) && !defined(_WIN32)
 bool pagewatch_supported(void) { return false; }
 bool pagewatch_fault(uint64_t addr) { (void)addr; return false; }
 void pagewatch_prewrite(uint64_t addr, uint64_t n) { (void)addr, (void)n; }
@@ -21,8 +22,17 @@ void pagewatch_protect(uint64_t addr, uint64_t n) { (void)addr, (void)n; }
 void pagewatch_reset(void) {}
 #else
 #include <stdatomic.h>
+#ifdef _WIN32
+#include <windows.h>
+// (a range the game hasn't touched all of yet is partly reserved, not committed: VirtualProtect fails for all of it)
+static bool prot_ro(uint64_t lo, uint64_t n) { DWORD old; return VirtualProtect((void *)(uintptr_t)lo, n, PAGE_READONLY, &old) != 0; }
+static void prot_rw(uint64_t lo, uint64_t n) { DWORD old; VirtualProtect((void *)(uintptr_t)lo, n, PAGE_READWRITE, &old); }
+#else
 #include <unistd.h>
 #include <sys/mman.h>
+static bool prot_ro(uint64_t lo, uint64_t n) { return mprotect((void *)(uintptr_t)lo, n, PROT_READ) == 0; }
+static void prot_rw(uint64_t lo, uint64_t n) { mprotect((void *)(uintptr_t)lo, n, PROT_READ | PROT_WRITE); }
+#endif
 
 #define PAGE 4096ull
 #define NPAGES (HEAP_MAX / PAGE)
@@ -44,7 +54,16 @@ static void unlock(void) { atomic_flag_clear_explicit(&g_lock, memory_order_rele
 static inline bool in_heap(uint64_t a) { return a >= HEAP_BASE && a < HEAP_BASE + HEAP_MAX; }
 static inline uint64_t pidx(uint64_t a) { return (a - HEAP_BASE) / PAGE; }
 
+#ifdef _WIN32
+bool pagewatch_supported(void) {
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    const char *v = getenv("LARECOMP_PAGEWATCH");  // (=0: off - every vertex range copied at each draw, as before)
+    return si.dwPageSize == PAGE && !(v && atoi(v) == 0);
+}
+#else
 bool pagewatch_supported(void) { return sysconf(_SC_PAGESIZE) == (long)PAGE; }
+#endif
 
 // A store to one of our read-only pages (signal handler; async-signal-safe): dirty, writable again. A thread that faulted
 // on the same page while another thread unprotected it finds it dirty and no longer ours: it just retries.
@@ -59,7 +78,7 @@ bool pagewatch_fault(uint64_t addr) {
         atomic_fetch_or(&g_dirty[p >> 6], bit);
         atomic_store_explicit(&g_stamp[p], atomic_fetch_add(&g_clock, 1) + 1, memory_order_release);
         atomic_fetch_and(&g_prot[p >> 6], ~bit);
-        mprotect((void *)(uintptr_t)(addr & ~(PAGE - 1)), PAGE, PROT_READ | PROT_WRITE);
+        prot_rw(addr & ~(PAGE - 1), PAGE);
     }
     bool retry = ours || (atomic_load_explicit(&g_dirty[p >> 6], memory_order_relaxed) & bit);
     unlock();
@@ -92,7 +111,16 @@ void pagewatch_protect(uint64_t a, uint64_t n) {
         atomic_fetch_or(&g_dirty[p >> 6], bit);
         atomic_fetch_or(&g_prot[p >> 6], bit);
     }
-    mprotect((void *)(uintptr_t)lo, hi - lo, PROT_READ);
+    if (!prot_ro(lo, hi - lo)) {
+        // Not protected (part of it not committed yet): untracked, and counted as written now - the copy that follows
+        // is never trusted, so the next draw copies again rather than keep vertices the game may have changed
+        uint32_t now = atomic_fetch_add(&g_clock, 1) + 1;
+        for (uint64_t pa = lo; pa < hi; pa += PAGE) {
+            uint64_t p = pidx(pa), bit = 1ull << (p & 63);
+            atomic_fetch_and(&g_prot[p >> 6], ~bit);
+            atomic_store_explicit(&g_stamp[p], now, memory_order_release);
+        }
+    }
     unlock();
 }
 
@@ -102,7 +130,7 @@ void pagewatch_reset(void) {
     for (uint64_t i = 0; i < NPAGES / 64; i++) {
         uint64_t w = atomic_exchange(&g_prot[i], 0);
         for (int k = 0; w && k < 64; k++)
-            if (w >> k & 1) mprotect((void *)(uintptr_t)(HEAP_BASE + (i * 64 + k) * PAGE), PAGE, PROT_READ | PROT_WRITE);
+            if (w >> k & 1) prot_rw(HEAP_BASE + (i * 64 + k) * PAGE, PAGE);
         atomic_store(&g_dirty[i], 0);
     }
     for (uint64_t i = 0; i < NPAGES; i++) atomic_store_explicit(&g_stamp[i], 0, memory_order_relaxed);

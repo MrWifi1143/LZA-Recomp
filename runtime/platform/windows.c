@@ -34,6 +34,7 @@ static bool lazy_commit(uint64_t a) {
 }
 
 static bool g_report_crashes;
+bool pagewatch_fault(uint64_t addr);  // (runtime/pagewatch.c)
 
 static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *ep) {
     EXCEPTION_RECORD *er = ep->ExceptionRecord;
@@ -41,6 +42,8 @@ static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *ep) {
     uint64_t fa = er->ExceptionInformation[1];
     // (an execute fault on a read-write page would be "retried" by lazy_commit forever)
     if (er->ExceptionInformation[0] != 8 && lazy_commit(fa)) return EXCEPTION_CONTINUE_EXECUTION;
+    // a store to a page kept read-only to see it written (runtime/pagewatch.c: vertex data cached in VRAM)
+    if (er->ExceptionInformation[0] == 1 && pagewatch_fault(fa)) return EXCEPTION_CONTINUE_EXECUTION;
     if (g_report_crashes && rt_fault_watch(fa, ep->ContextRecord->Rip)) return EXCEPTION_CONTINUE_EXECUTION;
     return EXCEPTION_CONTINUE_SEARCH;
 }
