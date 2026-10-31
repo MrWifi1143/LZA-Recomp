@@ -517,13 +517,25 @@ bool legends_set_fps(int fps) {
 // A real-time step (pla60_present) from the time since the last present: at least half the frame rate's period (two
 // presents close together), the time a short step took for granted taken off the next ones - the world's time adds up
 // to the real time exactly (clamped to the period, the paced presents' jitter ran the game a few % fast) - and at most
-// 33.3 ms, the game's own step at 30 fps: a longer stall (a loading hitch) is not made up.
+// 33.3 ms, the game's own step at 30 fps. A longer frame's rest is made up over the next frames, each still at most
+// 33.3 ms: the sound runs on the audio device's clock, and a cutscene's picture stayed behind its sound by every hitch
+// it had (a first play's shader stall, a stream encoding beside the game: seconds by the end of Z-A's intro). Up to 1 s
+// is made up (LARECOMP_CATCHUP_MS; 0: none, as before) - a longer stall is a load, and its next scene isn't sped up.
 static uint64_t real_step(uint64_t real) {
-    static uint64_t ahead;  // (the world's time ahead of the real time)
-    uint64_t lo = g_pla60_ns / 2, dt = real > ahead ? real - ahead : 0;
+    static uint64_t ahead, behind;  // (the world's time ahead of / behind the real time)
+    static int64_t max_behind = -1;
+    if (max_behind < 0) max_behind = (getenv("LARECOMP_CATCHUP_MS") ? atoll(getenv("LARECOMP_CATCHUP_MS")) : 1000) * 1000000ll;
+    uint64_t lo = g_pla60_ns / 2, hi = 33333334u, dt = real > ahead ? real - ahead : 0;
     ahead = dt < lo ? lo - dt : 0;
     if (dt < lo) dt = lo;
-    return dt > 33333334u ? 33333334u : dt;
+    dt += behind;
+    behind = dt > hi ? dt - hi : 0;
+    if (behind > (uint64_t)max_behind) {
+        static int logged;
+        if (logged++ < 20) LOG("[fps60] a %.0f ms stall: %.0f ms of it not made up (a load)\n", (double)real / 1e6, (double)(behind - (uint64_t)max_behind) / 1e6);
+        behind = (uint64_t)max_behind;
+    }
+    return dt > hi ? hi : dt;
 }
 
 // each present: the table entry, once the game is loaded (read-only data: the page made writable first)

@@ -4,6 +4,14 @@ Releases are tagged per game: `LegendsA-v*` (PL:A Recomp, branch `LegendsA`) and
 branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 
+## Unreleased (branch `LegendsA`)
+
+Arceus:
+
+- Cutscenes stay in step with their sound after a hitch (Frame Timing "Real time", the default): the rest of a frame
+  longer than 33.3 ms is now made up over the next frames (each still at most 33.3 ms), up to 1 s - before, every hitch
+  put the picture further behind the sound for good. Found in Z-A's intro (2.5 s behind by the station on a first play).
+  `LARECOMP_CATCHUP_MS=0`: as before.
 ## 2026-10-31: LegendsA-v0.6.1-alpha
 
 Arceus:
