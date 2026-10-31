@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -123,6 +124,26 @@ void plat_thread_realtime(uint64_t period_ns) {
 }
 
 // ---- process
+// LOG (rt.h): the line formatted first, then written in one go. The C runtime writes an unbuffered stream (stderr, the
+// log) a piece at a time: an fprintf of the 2 s stats line took ~18 ms, on the present thread - a late frame every 2 s.
+int rt_log(const char *fmt, ...) {
+    char buf[2048], *p = buf;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    if (n < 0) return n;
+    if ((size_t)n >= sizeof buf) {  // (a long one: formatted again into its own buffer)
+        if (!(p = malloc((size_t)n + 1))) return -1;
+        va_start(ap, fmt);
+        vsnprintf(p, (size_t)n + 1, fmt, ap);
+        va_end(ap);
+    }
+    _write(_fileno(stderr), p, (unsigned)n);  // (one write: fwrite on an unbuffered stream still splits it up)
+    if (p != buf) free(p);
+    return n;
+}
+
 // Release builds are GUI-subsystem executables (no console window): stdout / stderr go to lasrecomp.log next to the
 // exe, and a fatal error shows a message box (plat_fatal_notice) instead of vanishing. Processes started by this one
 // (the start screen re-executing itself for the game) append to the same log.

@@ -8,6 +8,10 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Arceus:
 
+- Windows: no more late frame every 2 seconds. The log line the renderer writes every 2 s took ~18 ms to write (the
+  C runtime writes its unbuffered log a piece at a time), on the thread that presents the frames; each log line is
+  now formatted first and written in one go (~0.3 ms). Measured in Z-A (Lumiose walk, 60 cap, RTX 4090): 1% low
+  41-43 -> 59.2 fps, late frames 63-75 -> 0; the same runtime code here.
 - Windows: vertex data is kept in video memory and copied again only when the game writes it, as on Linux - the page
   write tracking (runtime/pagewatch.c) was Linux-only, so Windows copied every vertex range at every draw. Lumiose walk
   on an RTX 4090: 1370 MB -> 214 MB uploaded per 2 s (Linux: 214), the copied ranges 138 thousand -> 0; frame times on
