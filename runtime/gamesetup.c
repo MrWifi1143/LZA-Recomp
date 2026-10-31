@@ -253,6 +253,22 @@ static bool build_code(void) {
     return true;
 }
 
+// <base>/dlc (or <base>/dlc/romfs/: the add-on extracted as a whole title) when it is a folder - with the add-on's
+// keyfile.dat in it when need_key (a folder found beside the game's own folder, not inside it: game/ and dlc/ side by
+// side, the add-on dumped as a title of its own)
+static bool dlc_dir(const char *base, bool need_key, char *out, size_t n) {
+    char d[1200], k[1300];
+    struct stat sb;
+    snprintf(d, sizeof d, "%.1100s/dlc", base);
+    snprintf(k, sizeof k, "%s/romfs", d);
+    if (stat(k, &sb) == 0 && S_ISDIR(sb.st_mode)) snprintf(d, sizeof d, "%s", k);
+    if (stat(d, &sb) != 0 || !S_ISDIR(sb.st_mode)) return false;
+    snprintf(k, sizeof k, "%s/keyfile.dat", d);
+    if (need_key && stat(k, &sb) != 0) return false;
+    snprintf(out, n, "%s", d);
+    return true;
+}
+
 static void *setup_thread(void *arg) {
     (void)arg;
     g_progress = 0;
@@ -311,20 +327,17 @@ static void *setup_thread(void *arg) {
         ok = romfs_build(f.romfs, ROOT "/romfs.bin", copy_progress, why, sizeof why);
         if (!ok) LOG("[setup] romfs image: %s\n", why);
     }
-    if (ok) {  // (optional: a dlc folder beside exefs - Z-A's Mega Dimension RomFS, services/fs.c)
-        char dlc[1100];
+    if (ok) {  // (optional: the add-on's RomFS files - Z-A's Mega Dimension, services/fs.c - made into dlc.bin)
+        char game[1100], up[1100], dlc[1200];
         const char *sl = strrchr(f.exefs, '/');
-        snprintf(dlc, sizeof dlc, "%.*s/dlc", sl ? (int)(sl - f.exefs) : 0, f.exefs);
-        if (!sl) snprintf(dlc, sizeof dlc, "dlc");
-        struct stat sb;
-        char inner[1200];
-        snprintf(inner, sizeof inner, "%s/romfs", dlc);  // (dlc/romfs/: extracted as a whole title)
-        if (stat(inner, &sb) == 0 && S_ISDIR(sb.st_mode)) snprintf(dlc, sizeof dlc, "%s", inner);
-        if (stat(dlc, &sb) == 0 && S_ISDIR(sb.st_mode)) {
+        snprintf(game, sizeof game, "%.*s", sl ? (int)(sl - f.exefs) : 1, sl ? f.exefs : ".");
+        sl = strrchr(game, '/');
+        snprintf(up, sizeof up, "%.*s", sl ? (int)(sl - game) : 2, sl ? game : "..");
+        if (dlc_dir(game, false, dlc, sizeof dlc) || dlc_dir(g_folder, false, dlc, sizeof dlc) || dlc_dir(up, true, dlc, sizeof dlc)) {
             char why[256] = "";
             if (romfs_build(dlc, ROOT "/dlc.bin", NULL, why, sizeof why)) LOG("[setup] add-on content: %s\n", dlc);
             else LOG("[setup] add-on content %s skipped: %s\n", dlc, why);
-        }
+        } else LOG("[setup] add-on content: none (no dlc folder beside exefs, in %s or beside %s)\n", g_folder, game);
     }
     if (!ok) g_state = SETUP_FAIL_COPY;
     else if (build_code()) g_state = setup_ready() ? SETUP_DONE : SETUP_FAIL_BUILD;

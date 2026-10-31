@@ -7,6 +7,10 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- Fixed: the Mega Dimension DLC wasn't found when it was dumped beside the game rather than inside its folder (a
+  `game` folder and a `dlc` folder side by side, the game folder picked on the start screen): the title showed no
+  "Downloadable content ready". Setup now also looks for `dlc` in the folder picked and beside the game's own folder
+  (there only with the DLC's keyfile.dat in it). Already set up? Set the game files up again from the same folder.
 - Windows: no more late frame every 2 seconds. The log line the renderer writes every 2 s took ~18 ms to write (the
   C runtime writes its unbuffered log a piece at a time), on the thread that presents the frames; each log line is
   now formatted first and written in one go (~0.3 ms). Lumiose walk at a 60 cap on an RTX 4090 + i9-12900K: 1% low
