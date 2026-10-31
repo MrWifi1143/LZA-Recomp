@@ -74,32 +74,31 @@ def prism_tower(svg, cx, ground, H):
 
     cup0 = shw(0.80)
 
-    # the base, as the concept art draws it: a sharp stepped pyramid, no curves - a plinth, the big sloping base with the
-    # arched entrance and a dark lattice window either side, a ledge, a tier with a window band, a ledge, a smaller
-    # banded tier and the deck the shaft stands on. (f0, f1, half width at f0, at f1, window band)
-    tiers = ((0.000, 0.028, 0.300, 0.292, False), (0.028, 0.150, 0.270, 0.190, False), (0.150, 0.163, 0.212, 0.212, False),
-             (0.163, 0.213, 0.180, 0.165, True), (0.213, 0.224, 0.178, 0.178, False), (0.224, 0.246, 0.150, 0.135, True),
-             (0.246, 0.258, 0.110, 0.110, False))
-    for f0, f1, w0, w1, band in tiers:
-        a0, a1 = w0 * H, w1 * H
-        svg.poly([(cx - a0, Y(f0)), (cx - a1, Y(f1)), (cx + a1, Y(f1)), (cx + a0, Y(f0))], fill=fill, stroke=c, width=2.0, closed=True)
-        if band:  # (a row of lit panes inside the sloping sides)
+    # the base: a pyramid whose straight sides run up into the shaft's curve with no corner - the line is the shaft's
+    # tangent at FJ, so its foot is as wide as that tangent reaches at the ground. Its steps are lines inside it (ledges,
+    # window bands), the arched entrance and a lattice window either side at the bottom.
+    FJ = 0.24
+    slope = 1.04 * (0.52 - FJ) * H  # (-d shw / df below the waist: how much narrower per unit of height)
+    pw = lambda f: shw(FJ) + slope * (FJ - f)  # (the pyramid's half width at height f)
+    def base_detail():  # (over the outline's fill)
+        for f in (0.075, 0.135, 0.180):  # ledges across it
+            svg.line((cx - pw(f), Y(f)), (cx + pw(f), Y(f)), c, 1.6)
+        for f0, f1 in ((0.135, 0.180), (0.180, 0.218)):  # window bands between them
             fb = (f0 + f1) / 2
-            hb = ((w0 + w1) / 2 - 0.022) * H
-            n = max(1, round(2 * hb / 18))
+            hb = pw(fb) - 0.022 * H
+            n = max(1, round(2 * hb / 16))
             for i in range(n + 1):
                 x = cx - hb + 2 * hb * i / n
                 svg.line((x, Y(fb) - 0.3 * (f1 - f0) * H), (x, Y(fb) + 0.3 * (f1 - f0) * H), dim, 1.2)
-    r = 0.065 * H  # the arched entrance
-    A = [(cx - r, Y(0.028))] + [(cx + r * math.cos(math.pi + math.pi * i / 24), Y(0.028) - 0.025 * H + r * math.sin(math.pi + math.pi * i / 24))
-                                for i in range(25)] + [(cx + r, Y(0.028))]
-    svg.poly(A, fill=rgba(20, 34, 40), stroke=c, width=2.0, closed=True)
-    for k in (-1, 1):  # the lattice windows beside it
-        x0, x1 = cx + k * 0.115 * H, cx + k * 0.175 * H
-        y0, y1 = Y(0.045), Y(0.105)
-        svg.poly([(x0, y0), (x1, y0), (x1, y1), (x0, y1)], fill=rgba(20, 34, 40), stroke=c, width=1.5, closed=True)
-        svg.line((x0, y0), (x1, y1), dim, 1.2)
-        svg.line((x1, y0), (x0, y1), dim, 1.2)
+        for k in (-1, 1):  # the lattice windows beside it
+            x0, x1 = cx + k * 0.068 * H, cx + k * 0.108 * H
+            y0, y1 = Y(0.012), Y(0.058)
+            svg.poly([(x0, y0), (x1, y0), (x1, y1), (x0, y1)], fill=rgba(20, 34, 40), stroke=c, width=1.5, closed=True)
+            svg.line((x0, y0), (x1, y1), dim, 1.2)
+            svg.line((x1, y0), (x0, y1), dim, 1.2)
+    r = 0.048 * H  # the arched entrance
+    A = [(cx - r, Y(0.0))] + [(cx + r * math.cos(math.pi + math.pi * i / 24), Y(0.0) - 0.022 * H + r * math.sin(math.pi + math.pi * i / 24))
+                              for i in range(25)] + [(cx + r, Y(0.0))]
     # the crown: the back fins first, then the shaft and front fins / middle column as one outline
     o, fin = cup0, cup0 + 0.028 * H
     back = []
@@ -108,7 +107,7 @@ def prism_tower(svg, cx, ground, H):
         svg.poly(q, fill=fill, stroke=rgba(150, 210, 85, 190), width=1.8, closed=True)
         svg.line((cx + k * 0.046 * H, Y(0.86)), (cx + k * 0.048 * H, Y(0.962)), dim, 1.0)
         back.append((cx + k * 0.074 * H, Y(0.980)))
-    P = [(cx - shw(0.258 + 0.542 * i / 80), Y(0.258 + 0.542 * i / 80)) for i in range(80)]
+    P = [(cx - pw(0.0), Y(0.0))] + [(cx - shw(FJ + (0.80 - FJ) * i / 80), Y(FJ + (0.80 - FJ) * i / 80)) for i in range(80)]
 
     def bez(p0, p1, p2, k, first):
         for i in range(0 if first else 1, k + 1):
@@ -127,6 +126,8 @@ def prism_tower(svg, cx, ground, H):
     P += [(2 * cx - x, y) for x, y in P[::-1]]
     svg.poly(P, fill=fill, closed=True)
     svg.poly(P, stroke=c, width=2.5)
+    svg.poly(A, fill=rgba(20, 34, 40), stroke=c, width=2.0, closed=True)
+    base_detail()
     for k in (-1, 1):
         svg.line((cx + k * (o + 0.004 * H), Y(0.83)), (cx + k * (fin - 0.014 * H), Y(0.962)), dim, 1.2)
     tips = [(cx - fin, Y(0.970)), (cx + fin, Y(0.970))]
