@@ -7,7 +7,16 @@
 #include "cpu.h"
 #include "platform.h"
 
+#ifdef _WIN32
+// (Windows: formatted first, then written in one go - platform/windows.c)
+#ifdef __cplusplus
+extern "C"
+#endif
+int rt_log(const char *fmt, ...);
+#define LOG(...) rt_log(__VA_ARGS__)
+#else
 #define LOG(...) fprintf(stderr, __VA_ARGS__)
+#endif
 #define FATAL(...) (fprintf(stderr, "FATAL: " __VA_ARGS__), rt_fatal_trace())
 
 // ---- address space layout (guest addresses == host addresses)
