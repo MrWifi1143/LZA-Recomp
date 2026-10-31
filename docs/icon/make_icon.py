@@ -85,15 +85,17 @@ def prism_tower(svg, cx, ground, H):
         svg.poly(L, stroke=c, width=thick)
         svg.poly(R, stroke=c, width=thick)
 
-    for k in range(2):  # the base: two tiers with window bands
-        hw = (0.165 if k else 0.215) * H
-        y0, y1 = Y(0.035 if k else 0.0), Y(0.075 if k else 0.035)
-        svg.poly([(cx - hw, y1), (cx + hw, y1), (cx + hw, y0), (cx - hw, y0)], fill=fill, stroke=c, width=2.0, closed=True)
-        yb = Y(0.056 if k else 0.019)
-        x = cx - hw + 16
-        while x < cx + hw - 16:
-            svg.line((x, yb - 6), (x, yb + 6), dim, 1.2)
-            x += 18
+    # the base: a stepped pedestal of two tiers with sloping sides (as the tower's own), each with a window band; the
+    # upper tier's top is as wide as the legs' foot, so their curves come down onto its corners
+    for f0, f1, w0, w1 in ((0.0, 0.035, 0.235, 0.215), (0.035, 0.075, 0.205, 0.180)):
+        a0, a1 = w0 * H, w1 * H
+        svg.poly([(cx - a0, Y(f0)), (cx - a1, Y(f1)), (cx + a1, Y(f1)), (cx + a0, Y(f0))], fill=fill, stroke=c, width=2.0, closed=True)
+        fb = (f0 + f1) / 2
+        hb = ((w0 + w1) / 2 - 0.028) * H  # (the band, inside the sloping sides)
+        x = cx - hb
+        while x <= cx + hb + 0.5:
+            svg.line((x, Y(fb) - 6), (x, Y(fb) + 6), dim, 1.2)
+            x += 2 * hb / max(1, round(2 * hb / 18))
     door = [(cx + 0.045 * H * math.cos(math.pi + math.pi * i / 24), Y(0.0) + 0.045 * H * math.sin(math.pi + math.pi * i / 24))
             for i in range(25)]
     svg.poly(door, fill=fill, stroke=c, width=2.0, closed=True)

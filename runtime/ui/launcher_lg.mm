@@ -463,14 +463,19 @@ static void prism_tower(ImDrawList *d, float cx, float ground, float H, float t)
         d->Flags = fl;
         d->AddPolyline(L, n + 1, c, 0, thick), d->AddPolyline(R, n + 1, c, 0, thick);
     };
-    // the base: two tiers with window bands, the arched door
+    // the base: a stepped pedestal of two tiers with sloping sides (as the tower's own), each with a window band, the
+    // arched door; the upper tier's top is as wide as the legs' foot, so their curves come down onto its corners
+    static const float tiers[2][4] = {{0.0f, 0.035f, 0.235f, 0.215f}, {0.035f, 0.075f, 0.205f, 0.180f}};  // (f0, f1, half widths)
     for (int k = 0; k < 2; k++) {
-        float hw = (k ? 0.165f : 0.215f) * H, y0 = Y(k ? 0.035f : 0.0f), y1 = Y(k ? 0.075f : 0.035f);
-        d->AddRectFilled(ImVec2(cx - hw, y1), ImVec2(cx + hw, y0), fill);
-        d->AddRect(ImVec2(cx - hw, y1), ImVec2(cx + hw, y0), c, 0, 0, 2.0f);
-        float yb = Y(k ? 0.056f : 0.019f);
-        for (float x = cx - hw + 8; x < cx + hw - 8; x += 9)  // (the window band: a row of lit panes)
+        float a0 = tiers[k][2] * H, a1 = tiers[k][3] * H, y0 = Y(tiers[k][0]), y1 = Y(tiers[k][1]);
+        d->AddQuadFilled(ImVec2(cx - a0, y0), ImVec2(cx - a1, y1), ImVec2(cx + a1, y1), ImVec2(cx + a0, y0), fill);
+        d->AddQuad(ImVec2(cx - a0, y0), ImVec2(cx - a1, y1), ImVec2(cx + a1, y1), ImVec2(cx + a0, y0), c, 2.0f);
+        float yb = Y((tiers[k][0] + tiers[k][1]) / 2), hb = ((tiers[k][2] + tiers[k][3]) / 2 - 0.028f) * H;
+        int nb = (int)fmaxf(1.0f, roundf(2 * hb / 9));
+        for (int i = 0; i <= nb; i++) {  // (the window band: a row of lit panes)
+            float x = cx - hb + 2 * hb * i / nb;
             d->AddLine(ImVec2(x, yb - 3), ImVec2(x, yb + 3), dim, 1.2f);
+        }
     }
     d->PathArcTo(ImVec2(cx, Y(0.0f)), 0.045f * H, 3.14159265f, 6.2831853f, 24);  // the door
     d->PathFillConvex(fill);
