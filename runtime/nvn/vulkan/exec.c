@@ -732,6 +732,7 @@ static struct {
     uint8_t blend[8][8];
     uint32_t channel_mask;
     uint8_t color_state[4], ds[8], ms[0x18], poly[4];
+    float alpha_ref;  // (nvnCommandBufferSetAlphaRef: the alpha test's reference)
     float poly_offset[3];
     uint32_t attrib[16];
     int nattrib;
@@ -3335,6 +3336,12 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
         for (int k = 0; dt && k < nwant; k++) if (want[k] == dt->addr) hit = k;
         static uint64_t done[256]; static int ndone;
         for (int k = 0; dt && k < ndone; k++) if (done[k] == dt->addr) hit = -2;
+        {   // (LARECOMP_DUMP_TEX_SIZE=<w>x<h>: the textures of that size)
+            static int sw = -1, shh;
+            if (sw < 0) { sw = 0; if (getenv("LARECOMP_DUMP_TEX_SIZE")) sscanf(getenv("LARECOMP_DUMP_TEX_SIZE"), "%dx%d", &sw, &shh); }
+            if (!dt && sw && g_debug_frame && st.tpool && tic < (uint32_t)st.tpool->count) dt = ((NvnTexEntry *)st.tpool->entries)[tic].tex;
+            if (dt && sw && hit == -1 && (int)dt->width == sw && (int)dt->height == shh) hit = 98;
+        }
         if (dt && all && hit == -1 && dt->backend && ((TexBackend *)dt->backend)->levels > 1 && dt->width >= 256 && dt->format >= 0x42 && dt->format <= 0x50 && nall < 200) hit = 99, nall++;
         if (dt && hit >= 0 && dt->backend && ndone < 256) {
             done[ndone++] = dt->addr;
@@ -3507,7 +3514,7 @@ static void image_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo *
 // pre_ii: texture descriptors already resolved by the caller (draw: fragment textures, needed earlier for the
 // viewport decision), or NULL.
 static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t set, int stage, ShaderInfo *si, const float *rscale_row0,
-                                 const float tint[8], uint32_t gx, uint32_t gy, uint32_t gz, const VkDescriptorImageInfo *pre_ii) {
+                                 const float tint[12], uint32_t gx, uint32_t gy, uint32_t gz, const VkDescriptorImageInfo *pre_ii) {
     VkDescriptorSet ds = vk_alloc_set(layout);
     VkWriteDescriptorSet w[MAX_BIND];
     VkDescriptorBufferInfo bi[MAX_BIND];
@@ -3558,8 +3565,8 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
             for (int t = 0; t < si->ntex && t < 64; t++) { rs[1 + t][0] = tex_sc[sg][t][0]; rs[1 + t][1] = tex_sc[sg][t][1]; }
             bi[n] = ubo_span(copy_dedupe(sg ? DEDUPE_RSCALE_F : DEDUPE_RSCALE_V, rs, sizeof rs, 256), sizeof rs);
         } else {
-            float zero[8] = {0};
-            bi[n] = ubo_span(copy_dedupe(DEDUPE_TINT, tint ? tint : zero, 32, 256), 32);
+            float zero[12] = {0};
+            bi[n] = ubo_span(copy_dedupe(DEDUPE_TINT, tint ? tint : zero, 48, 256), 48);
         }
         w[n].pBufferInfo = &bi[n];
         n++;
@@ -4013,7 +4020,8 @@ static void draw_(CmdRec *r, bool indexed) {
     float *vp = st.viewport[0];
     float zn = st.depth_range[0][0], zf = st.depth_range[0][1];
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
-    float tint[8] = {0};  // (the per-draw tint the translator can apply to colour target 0: none)
+    float tint[12] = {0};  // (the per-draw tint the translator can apply to colour target 0: none)
+    if (st.color_state[2] && st.color_state[2] != 8) tint[8] = st.color_state[2], tint[9] = st.alpha_ref;  // (the alpha test: not ALWAYS)
     // fragment textures are bound before deciding the viewport (tex_sc / tex_wh), rscale depends on the decision:
     // build the vertex set now and the fragment set after the decision (stage_set fills tex_sc for stage 1).
     if (prof) prof_dyn += SDL_GetTicksNS() - prof_td_;
@@ -4270,6 +4278,9 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
     LOG(" | vp %.0f %.0f %.0f %.0f | attrs %#x blend %#x ds %02x%02x%02x poly %02x%02x off %x (%.3g %.3g %.3g) chmask %08x\n",
         st.viewport[0][0], st.viewport[0][1], st.viewport[0][2], st.viewport[0][3], pr->vi->attr_mask, st.color_state[0], st.ds[0],
         st.ds[1], st.ds[2], st.poly[0], st.poly[1], st.poly[3], st.poly_offset[0], st.poly_offset[1], st.poly_offset[2], st.channel_mask);
+    LOG("[draw]   blend0 src %u dst %u srcA %u dstA %u eq %u eqA %u adv %u | cstate %02x%02x%02x%02x\n", st.blend[0][1], st.blend[0][2],
+        st.blend[0][3], st.blend[0][4], st.blend[0][5], st.blend[0][6], st.blend[0][7], st.color_state[0], st.color_state[1],
+        st.color_state[2], st.color_state[3]);
     LOG("[draw]   attribs:");  // format / stream / offset per attribute, and the streams' strides
     for (int i = 0; i < st.nattrib; i++)
         if ((pr->vi->attr_mask >> i) & 1)
@@ -4370,6 +4381,13 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
             for (int k = 0; k < 96 && k * 4 < (int)st.ubuf[1][c - 3].size; k++) LOG(" %.6g", u[k]);
             LOG("\n");
         }
+        for (int c = 3; c < 21; c++) {  // (the vertex stage's)
+            if (!((pr->vi->cbuf_mask >> c) & 1) || !st.ubuf[0][c - 3].addr) continue;
+            const float *u = (const float *)(uintptr_t)st.ubuf[0][c - 3].addr;
+            LOG("[draw]   vcb%d %llx size %u:", c, (unsigned long long)st.ubuf[0][c - 3].addr, (unsigned)st.ubuf[0][c - 3].size);
+            for (int k = 0; k < 160 && k * 4 < (int)st.ubuf[0][c - 3].size; k++) LOG(" %.6g", u[k]);
+            LOG("\n");
+        }
     }
     for (int i = 0; i < pr->fi->ntex && i < 64; i++) {  // fragment textures: guest size / format, allocation, scale
         NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
@@ -4380,6 +4398,14 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
             b ? b->levels : 0, b ? b->width : 0, b ? b->height : 0, b ? b->sx : 0, b ? b->sy : 0, b && b->scalable ? " scalable" : "",
             t->target, t->flags, t->layout.layers, t->layout.block_height_log2, (unsigned long long)t->addr,
             (unsigned long long)t->stride, b && b->gpu_owned ? " gpu-owned" : "", b && b->dynamic ? " dynamic" : "", t->label);
+        {   // (the swizzle it's sampled with: the texture's, or the pool entry's view's)
+            int slot = ((int)pr->fi->tex[i].handle_offset - 0x20) / 8;
+            uint64_t h = slot >= 0 && slot < 32 ? st.tex[1][slot] : 0;
+            const NvnTexEntry *e = st.tpool && (h & 0xFFFFF) < (uint32_t)st.tpool->count ? &((NvnTexEntry *)st.tpool->entries)[h & 0xFFFFF] : NULL;
+            LOG("[draw]     swizzle tex %u %u %u %u view %s%u %u %u %u setmask %#x\n", t->swizzle[0], t->swizzle[1], t->swizzle[2],
+                t->swizzle[3], e && e->has_view ? "" : "(none) ", e ? e->view.swizzle[0] : 0, e ? e->view.swizzle[1] : 0,
+                e ? e->view.swizzle[2] : 0, e ? e->view.swizzle[3] : 0, e ? e->view.setmask : 0);
+        }
     }
 }
 
@@ -5016,6 +5042,7 @@ static void exec_list(uint64_t handle, int depth) {
                                   (unsigned long long)r->x[0], (unsigned long long)r->x[1]);
             }
             break;
+        case CMD_SET_ALPHA_REF: st.alpha_ref = r->f[0]; break;
         case CMD_SET_PRIMITIVE_RESTART: st.prim_restart = r->x[0] != 0; st.restart_index = (uint32_t)r->x[1]; break;
         case CMD_SET_COPY_STRIDES: st.copy_row_stride = r->x[0]; st.copy_image_stride = r->x[1]; break;
         case CMD_CLEAR_COLOR: {

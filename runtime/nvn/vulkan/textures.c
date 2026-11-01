@@ -963,7 +963,11 @@ static VkSampler sampler_create(NvnSamplerDesc *d, bool cmp) {
     si.mipmapMode = mf == 4 || mf == 5 ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
     VkSamplerAddressMode modes[3];
     bool border = false;
+    static int w7 = -1;  // (research: LARECOMP_WRAP_TEST=<mode>,<vk mode> - one NVN wrap mode sampled another way)
+    static int w7from = -1;
+    if (w7 < 0) { w7 = 99; if (getenv("LARECOMP_WRAP_TEST")) sscanf(getenv("LARECOMP_WRAP_TEST"), "%d,%d", &w7from, &w7); }
     for (int i = 0; i < 3; i++) {
+        if (d->wrap[i] == w7from && w7 != 99) { modes[i] = (VkSamplerAddressMode)w7; if (w7 == 3) border = true; continue; }
         switch (d->wrap[i]) {
         case 0: case 7: modes[i] = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE; break;
         case 1: modes[i] = VK_SAMPLER_ADDRESS_MODE_REPEAT; break;

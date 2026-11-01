@@ -2783,7 +2783,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     }
     bool tint = stage == STAGE_FRAGMENT && !dbg && (c->omap_target & 0x7) == 0x7 && (!key || key->rt_kind[0] == 0);
     if (tint) {
-        sp(&s, "layout(std140, set = %d, binding = 19) uniform Tint { vec4 ltint[2]; };\n", set);
+        sp(&s, "layout(std140, set = %d, binding = 19) uniform Tint { vec4 ltint[3]; };\n", set);
         info->uses_tint = true;
     }
     for (int i = 0; i < info->nimg; i++) {
@@ -2886,6 +2886,10 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
                 r++;
             }
         }
+        if (tint)  // NVN's alpha test (ColorState; no Vulkan state for it): ltint[2] = (function, reference), 0 off
+            sp(&s, "  if (ltint[2].x > 0.5f) { uint af = uint(ltint[2].x); float aa = c0.a, ar = ltint[2].y;\n"
+                   "    if (!(af == 2u ? aa < ar : af == 3u ? aa == ar : af == 4u ? aa <= ar : af == 5u ? aa > ar : af == 6u ? aa != ar :\n"
+                   "          af == 7u ? aa >= ar : af != 1u)) discard; }\n");
         if (tint)
             sp(&s, "  if (ltint[0].w > 0.0f) { vec3 g = c0.rgb; float l = dot(g, vec3(0.299f, 0.587f, 0.114f));\n"
                    "    c0.rgb = mix(g, ltint[0].rgb * pow(l, ltint[1].w) + ltint[1].rgb * l, ltint[0].w); }\n");
