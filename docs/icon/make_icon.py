@@ -6,6 +6,7 @@
 import io, math, os, struct, subprocess, sys
 
 S = 1024  # (the icon's size)
+W = HH = S  # (the picture being drawn: the icon, or a Steam library image - steam_art.py sets these and LW)
 LW = 2.0  # (the launcher's line widths times this)
 
 
@@ -50,16 +51,19 @@ def rnd(s):  # (launcher_lg.mm rnd: the same sequence)
     return s[0] >> 8
 
 
-def frame(svg, top, bottom, dots):
-    # the rounded square: the banner's sky (top colour -> bottom colour) and its faint dot grid
+def frame(svg, top, bottom, dots, rx=200, k=1.0):
+    # the rounded square (rx 0: a plain rectangle): the banner's sky (top colour -> bottom colour) and its faint dot
+    # grid, k = the art's scale against the icon
     svg.add('<defs><linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="%s"/>'
             '<stop offset="1" stop-color="%s"/></linearGradient>'
-            '<clipPath id="tile"><rect x="0" y="0" width="%d" height="%d" rx="200"/></clipPath></defs>' % (top, bottom, S, S))
+            '<clipPath id="tile"><rect x="0" y="0" width="%d" height="%d" rx="%d"/></clipPath></defs>' % (top, bottom, W, HH, rx))
     svg.add('<g clip-path="url(#tile)">')
-    svg.add('<rect x="0" y="0" width="%d" height="%d" fill="url(#sky)"/>' % (S, S))
-    for y in range(24, S, 48):
-        for x in range(24, S, 48):
-            svg.circle((x, y), 2.6, rgba(*dots, int(34 * (1 - y / S) + 6)))
+    svg.add('<rect x="0" y="0" width="%d" height="%d" fill="url(#sky)"/>' % (W, HH))
+    step = 48 * k
+    for j in range(int((HH - 24 * k) / step) + 1):
+        y = 24 * k + j * step
+        for i in range(int((W - 24 * k) / step) + 1):
+            svg.circle((24 * k + i * step, y), 2.6 * k, rgba(*dots, int(34 * (1 - y / HH) + 6)))
 
 
 # ------------------------------------------------------------------ Z-A: Prism Tower (launcher_lg.mm prism_tower)
@@ -176,30 +180,33 @@ def prism_tower(svg, cx, ground, H):
     svg.circle(top, 5, rgba(246, 228, 255, 255))
 
 
-def za(svg):
-    frame(svg, '#0c1028', '#22143a', (150, 190, 255))
+def za(svg, cx=None, street=None, H=None, rx=200):
     # the tower stands on the street, the front row of buildings over the sides of its foot as in the launcher's banner
-    # (only the door's middle clear), the beacon below the top edge
-    street = 930
-    cx, ground, H = 512, street, 836
+    # (only the door's middle clear), the beacon below the top edge. Defaults: the icon's (W x HH, tower centred);
+    # the city fills the width, everything else scales with the tower (k: against the icon's 836)
+    street = 930 * HH / S if street is None else street
+    H = 836 * HH / S if H is None else H
+    cx = W / 2 if cx is None else cx
+    ground, k = street, H / 836
+    frame(svg, '#0c1028', '#22143a', (150, 190, 255), rx, k)
     svg.add('<defs><radialGradient id="glow"><stop offset="0" stop-color="rgb(150,230,90)" stop-opacity="0.32"/>'
             '<stop offset="1" stop-color="rgb(150,230,90)" stop-opacity="0"/></radialGradient>'
             '<linearGradient id="street" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="rgb(14,16,30)"/>'
             '<stop offset="1" stop-color="rgb(8,9,20)"/></linearGradient></defs>')
-    svg.add('<circle cx="%d" cy="%d" r="450" fill="url(#glow)"/>' % (cx, int(ground - 0.55 * H)))
+    svg.add('<circle cx="%d" cy="%d" r="%d" fill="url(#glow)"/>' % (cx, int(ground - 0.55 * H), 450 * k))
     s = [7]
     for layer in range(2):  # the city: a back row, the street and the tower, a low front row over its foot (lit windows)
         if layer == 1:
-            svg.poly([(0, street), (S, street), (S, S), (0, S)], fill=rgba(10, 12, 24), closed=True)
-            svg.add('<rect x="0" y="%d" width="%d" height="%d" fill="url(#street)"/>' % (street, S, S - street))
-            svg.line((0, street), (S, street), rgba(120, 180, 70, 90), 1.2)
+            svg.poly([(0, street), (W, street), (W, HH), (0, HH)], fill=rgba(10, 12, 24), closed=True)
+            svg.add('<rect x="0" y="%d" width="%d" height="%d" fill="url(#street)"/>' % (street, W, HH - street))
+            svg.line((0, street), (W, street), rgba(120, 180, 70, 90), 1.2)
             prism_tower(svg, cx, ground, H)
-        x = -20.0
-        while x < S:
-            bw = 52.0 + rnd(s) % 96
-            bh = (0.05 + rnd(s) % 100 * 0.0010) * S if layer else (0.11 + rnd(s) % 100 * 0.0018) * S
-            low = street + (8 if layer else 0)  # (the front row down over the street line and the tower's base line: not floating)
-            gap = 0 if layer and abs(x + bw / 2 - cx) < 0.30 * H else 6  # (no gap in front of the base: it would show through)
+        x = -20.0 * k
+        while x < W:
+            bw = (52.0 + rnd(s) % 96) * k
+            bh = (0.05 + rnd(s) % 100 * 0.0010) * S * k if layer else (0.11 + rnd(s) % 100 * 0.0018) * S * k
+            low = street + (8 * k if layer else 0)  # (the front row down over the street line and the tower's base line: not floating)
+            gap = 0 if layer and abs(x + bw / 2 - cx) < 0.30 * H else 6 * k  # (no gap in front of the base: it would show through)
             p, q = (x, street - bh), (x + bw - gap, low)
             g = 0.13 * H  # (as the launcher: the front row over the sides of the tower's foot, only its middle - the door - clear)
             if layer == 1 and p[0] < cx + g and q[0] > cx - g:
@@ -209,15 +216,16 @@ def za(svg):
                 bh = max(bh, 0.15 * H)  # (beside the foot: tall enough to hide the legs' feet)
                 p, q = ((x, street - bh), (cx - g, low)) if p[0] < cx - g else ((cx + g, street - bh), (x + bw - gap, low))
             svg.poly([p, (q[0], p[1]), q, (p[0], q[1])], fill=rgba(8, 9, 20) if layer else rgba(20, 22, 44), closed=True)
-            wy = p[1] + 16
-            while wy < street - 12:
-                wx = p[0] + 10
-                while wx < q[0] - 12:
+            wy = p[1] + 16 * k
+            while wy < street - 12 * k:
+                wx = p[0] + 10 * k
+                while wx < q[0] - 12 * k:
                     r = rnd(s)
                     if r % 4 == 0:
-                        svg.poly([(wx, wy), (wx + 8, wy), (wx + 8, wy + 10), (wx, wy + 10)], fill=rgba(255, 214, 120, 60 + r % 150), closed=True)
-                    wx += 18
-                wy += 22
+                        svg.poly([(wx, wy), (wx + 8 * k, wy), (wx + 8 * k, wy + 10 * k), (wx, wy + 10 * k)],
+                                 fill=rgba(255, 214, 120, 60 + r % 150), closed=True)
+                    wx += 18 * k
+                wy += 22 * k
             x += bw
 
 
@@ -265,13 +273,17 @@ def rift(svg, cx, cy, rx):
     svg.circle((cx, cy), 9, rgba(255, 255, 255))
 
 
-def pla(svg):
-    frame(svg, '#16143a', '#6e3c3a', (255, 226, 170))
+def pla(svg, cx=None, u=None, rx=200):
+    # defaults: the icon's (W x HH, the mountain centred); u = the mountain's and the rift's size (the icon's width), the
+    # heights follow HH and the foothills fill the width
+    w, h = W, HH
+    u = S * HH / S if u is None else u
+    cx = w * 0.5 if cx is None else cx
+    frame(svg, '#16143a', '#6e3c3a', (255, 226, 170), rx, u / S)
     fill, c, dim, snow = rgba(26, 20, 40), rgba(240, 196, 92, 235), rgba(200, 160, 80, 110), rgba(236, 228, 255, 210)
-    w = h = S
-    cx, peak, foot = w * 0.5, h * 0.40, h * 0.97
-    rift(svg, cx, h * 0.205, w * 0.40)
-    sw, spread = w * 0.075, w * 0.80
+    peak, foot = h * 0.40, h * 0.97
+    rift(svg, cx, h * 0.205, u * 0.40)
+    sw, spread = u * 0.075, u * 0.80
     jag = [0.0, -0.12, 0.06, -0.22, -0.08, -0.18, 0.04, -0.10, 0.0]
     rim_y = lambda i: peak + jag[i] * sw * 0.5
 
@@ -329,9 +341,9 @@ def pla(svg):
     svg.poly(P, stroke=c, width=2.5)
     for layer in range(2):  # the foothills in front
         base, amp = h - h * (0.16 - 0.07 * layer), h * (0.11 - 0.03 * layer)
-        pts = []
-        for i in range(31):
-            x = -10 + (w + 20) * i / 30
+        pts, n = [], max(30, round(30 * w / u))
+        for i in range(n + 1):
+            x = -10 + (w + 20) * i / n
             pts.append((x, base - amp * (0.35 + 0.65 * (rnd(s) % 100) / 100 * (0.6 + 0.4 * math.sin(i * 0.7 + layer)))))
         svg.poly(pts + [(w + 10, h + 10), (-10, h + 10)], fill=rgba(34, 26, 46) if layer == 0 else rgba(20, 16, 30), closed=True)
         svg.poly(pts, stroke=dim if layer else rgba(220, 176, 86, 160), width=1.5)
