@@ -471,7 +471,7 @@ uint64_t settings_screen_buttons(Cpu *c, uint64_t b) {
 
 // ------------------------------------------------------------------ research
 static _Atomic int g_trace_on, g_trace_gen;
-static struct { uint64_t addr; int gen, n; } g_traced[1024];
+static struct { uint64_t addr; int gen, n; } g_traced[4096];
 static int g_ntraced;
 
 static int trace_hook(Cpu *c, uint64_t addr) {
@@ -480,11 +480,22 @@ static int trace_hook(Cpu *c, uint64_t addr) {
         if (g_traced[i].addr == addr) {
             int gen = atomic_load(&g_trace_gen);
             if (g_traced[i].gen != gen) g_traced[i].gen = gen, g_traced[i].n = 0;
-            if (g_traced[i].n++ >= 40) return 0;
+            if (g_traced[i].n++ >= (getenv("LARECOMP_OPTTRACE_MAX") ? atoi(getenv("LARECOMP_OPTTRACE_MAX")) : 40)) return 0;
             break;
         }
-    LOG("[opttrace] %llx from %llx x0 %llx x1 %llx x2 %llx x3 %llx\n", (unsigned long long)addr, (unsigned long long)c->x[30],
-        (unsigned long long)c->x[0], (unsigned long long)c->x[1], (unsigned long long)c->x[2], (unsigned long long)c->x[3]);
+    char bt[200] = "";  // (the guest frame pointers' chain: the callers above)
+    uint64_t fp = c->x[29];
+    for (int k = 0, n = 0; k < 6 && fp >= 0x7000000000ull && fp < 0x7800000000ull && !(fp & 7); k++) {
+        uint64_t lr = *(const uint64_t *)(uintptr_t)(fp + 8);
+        n += snprintf(bt + n, sizeof bt - n, " %llx", (unsigned long long)lr);
+        fp = *(const uint64_t *)(uintptr_t)fp;
+    }
+    float s0;
+    memcpy(&s0, &c->v[0], 4);
+    extern uint64_t renderer_present_count(void);
+    LOG("[opttrace] %llx from %llx x0 %llx x1 %llx x2 %llx x3 %llx s0 %g @%llu bt%s\n", (unsigned long long)addr, (unsigned long long)c->x[30],
+        (unsigned long long)c->x[0], (unsigned long long)c->x[1], (unsigned long long)c->x[2], (unsigned long long)c->x[3], s0,
+        (unsigned long long)renderer_present_count(), bt);
     return 0;
 }
 
@@ -584,6 +595,6 @@ void pla_options_configure(void) {
     const char *tf = getenv("LARECOMP_ZA_OPTTRACE");
     FILE *f = tf ? fopen(tf, "r") : NULL;
     unsigned long long a;
-    while (f && g_ntraced < 1024 && fscanf(f, "%llx", &a) == 1) g_traced[g_ntraced++].addr = a, rt_register_fnhook_at(a, trace_hook);
+    while (f && g_ntraced < 4096 && fscanf(f, "%llx", &a) == 1) g_traced[g_ntraced++].addr = a, rt_register_fnhook_at(a, trace_hook);
     if (f) fclose(f), LOG("[options] tracing %d functions\n", g_ntraced);
 }

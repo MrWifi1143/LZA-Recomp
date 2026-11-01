@@ -457,6 +457,61 @@ static int pla_mouse_look_hook(Cpu *c, uint64_t addr) {
     return 0;
 }
 
+// The event scripts (Lua coroutines, compiled from Haxe: bin/haxe/release/...blua) count their waits in updates - each
+// update resumes each running script once (f_70015ba460: one step, returns 1 while it still runs). At 60 fps every
+// wait ended twice as early: people in cutscenes vanished mid-walk, Volo's Poke Ball was put away while still in his
+// hand, shots cut early. Above 30 fps a script steps only on the updates where 30 fps time moved on a frame
+// (rt_pla_tick), so scripts keep the game's 30 steps a second; the world they move is at the frame rate as before.
+// LARECOMP_PLA_SCRIPT_TICK=0: every update (as the game).
+#define PLA_SCRIPT_STEP 0x70015ba460ull
+int rt_pla_tick(int site);
+// The buttons go with it (input.c fill_state: pla_input_tick): a script sees a press on the update it lands on, so a
+// press on an update without a script step was lost (dialogue that wouldn't advance). Above 30 fps the buttons the game
+// reads change only on the updates scripts step on (a press waits at most one update); the sticks are read as ever.
+static int g_pla_script_tick = -1;
+static bool pla_script_tick_on(void) {
+    if (g_pla_script_tick < 0) g_pla_script_tick = !(getenv("LARECOMP_PLA_SCRIPT_TICK") && atoi(getenv("LARECOMP_PLA_SCRIPT_TICK")) == 0);
+    return g_pla_script_tick && g_pla60_build;
+}
+int pla_input_tick(void) { return !pla_script_tick_on() || rt_pla_tick(0xa461); }
+static int pla_script_step_hook(Cpu *c, uint64_t addr) {
+    if (!pla_script_tick_on() || rt_pla_tick(0xa460)) return 0;  // (the game's own step)
+    uint64_t state = *(const uint64_t *)(uintptr_t)(c->x[0] + 0x140);
+    c->x[0] = state && *(const uint8_t *)(uintptr_t)(state + 0x191) == 0;  // (still running: what a step returns)
+    (void)addr;
+    return 1;
+}
+
+// A character's scripted move (f_70019b2140, x0 = its navigator, each update while [+0x3e4] == 1): the progress +0x4bc
+// goes up by the step +0x4b4 an update - no frame time - and the move ends at 1 (state 0, the script's "arrived" check
+// f_70019b24dc turns false). At 60 fps moves ended twice as early: Volo removed mid-walk after his battle, people in
+// cutscenes vanishing before they walk off screen. The step is scaled to the frame time for the update (1 at 30 fps).
+#define PLA_SCRIPTED_MOVE 0x70019b2140ull
+uint32_t rt_scale30_f32(uint32_t bits);
+static int pla_scripted_move_hook(Cpu *c, uint64_t addr) {
+    uint64_t nav = c->x[0];
+    if (!nav || *(const uint32_t *)(uintptr_t)(nav + 0x3e4) != 1) return 0;
+    uint32_t *step = (uint32_t *)(uintptr_t)(nav + 0x4b4), was = *step;
+    *step = rt_scale30_f32(was);
+    rt_call_original(c, addr);
+    *step = was;
+    return 1;
+}
+
+// Research (LARECOMP_PLA_STATE_WATCH=1): the event scripts' "arrived" check (f_70019b24dc: [obj+0x3e4] == 1) - a
+// hardware watchpoint on the first object it's asked about names who writes that state.
+static int pla_state_watch_hook(Cpu *c, uint64_t addr) {
+    static uint64_t armed;
+    if (!armed && c->x[0]) {
+        armed = c->x[0];
+        void hwwatch_arm(uint64_t addr, uint64_t len);
+        LOG("[statewatch] obj %llx state %u\n", (unsigned long long)armed, *(const uint32_t *)(uintptr_t)(armed + 0x3e4));
+        hwwatch_arm(armed + 0x3e4, 4);
+    }
+    (void)addr;
+    return 0;
+}
+
 void pla60_configure(const char *exefs) {
     char p[1100];
     snprintf(p, sizeof p, "%s/main", exefs);
@@ -481,6 +536,9 @@ void pla60_configure(const char *exefs) {
             hooked = true;
             g_pla_mouse_look = !getenv("LARECOMP_PLA_MOUSE_LOOK") || atoi(getenv("LARECOMP_PLA_MOUSE_LOOK")) != 0;
             rt_register_fnhook_at(0x700193d16cull, pla_mouse_look_hook);
+            rt_register_fnhook_at(PLA_SCRIPT_STEP, pla_script_step_hook);
+            if (!getenv("LARECOMP_PLA_MOVE_SCALE") || atoi(getenv("LARECOMP_PLA_MOVE_SCALE"))) rt_register_fnhook_at(PLA_SCRIPTED_MOVE, pla_scripted_move_hook);
+            if (getenv("LARECOMP_PLA_STATE_WATCH")) rt_register_fnhook_at(0x70019b24dcull, pla_state_watch_hook);
             // the mouse in the menus (runtime/hle/menu_mouse.c): ui2d's CalculateMtx walk over the panes, each frame
             extern void menu_mouse_configure(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t);
             menu_mouse_configure(0x700014319cull, 0x700272b6d0ull, 0x7002719878ull, 0x910, 0x914);  // (ui2d matrices,

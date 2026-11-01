@@ -977,6 +977,12 @@ static void fill_state(Cpu *c) {
         int32_t m = dx && dy ? 23170 : 32767;  // diagonals: same speed (32767 / sqrt 2)
         if (dx || dy) lx = dx * m, ly = dy * m;
     }
+    {   // (Arceus above 30 fps: the buttons change only on the updates its scripts step on - hle/fps60.c pla_input_tick)
+        extern int pla_input_tick(void);
+        static uint64_t held;
+        if (pla_input_tick()) held = b;
+        else b = held;
+    }
     // stick directions also appear as buttons (bits 16-23)
     if (lx < -16000) b |= 1ull << 16;
     if (ly > 16000) b |= 1ull << 17;

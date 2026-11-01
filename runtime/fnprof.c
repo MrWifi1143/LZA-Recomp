@@ -11,7 +11,8 @@
 volatile int g_fnprof;
 
 #define NSLOT (1 << 18)
-static struct { _Atomic uint64_t addr; _Atomic uint64_t count; uint64_t first, lr; } slots[NSLOT];
+static struct { _Atomic uint64_t addr; _Atomic uint64_t count; uint64_t first, lr, frame; } slots[NSLOT];
+static uint64_t g_cur_frame, g_from_frame;  // (the fifth column: frames from the start to the first entry)
 static _Atomic uint64_t first_seq;  // order of first entry (third column), and the guest lr of that entry (fourth)
 
 // LARECOMP_FNPROF_BT=<hex addr>[,...]: also print the host backtrace (guest functions are f_<addr>) the first time
@@ -54,6 +55,7 @@ void fnprof_hit(uint64_t a, uint64_t lr, uint64_t x0) {
         if (cur == 0 && atomic_compare_exchange_strong(&slots[h].addr, &cur, a)) {
             slots[h].first = atomic_fetch_add_explicit(&first_seq, 1, memory_order_relaxed) + 1;
             slots[h].lr = lr;
+            slots[h].frame = g_cur_frame - g_from_frame;
             atomic_fetch_add_explicit(&slots[h].count, 1, memory_order_relaxed);
             return;
         }
@@ -76,20 +78,27 @@ void fnprof_frame(uint64_t frame) {
         const char *e = getenv("LARECOMP_FNPROF");
         if (e && sscanf(e, "%ld:%ld", &from, &to) != 2) from = -1;
     }
+    g_cur_frame = frame;
+    if (from < 0 && getenv("LARECOMP_FNPROF_LIVE") && getenv("LARECOMP_LIVE")) {  // (=<frames>: from <live>/fnprof_now on)
+        char p[600];
+        snprintf(p, sizeof p, "%s/fnprof_now", getenv("LARECOMP_LIVE"));
+        if (!remove(p)) from = (long)frame, to = from + atol(getenv("LARECOMP_FNPROF_LIVE"));
+    }
     if (from < 0) return;
-    if ((long)frame == from) { g_fnprof = 1; LOG("[fnprof] on at frame %llu\n", (unsigned long long)frame); }
+    if ((long)frame == from) {
+        g_from_frame = frame; g_fnprof = 1; LOG("[fnprof] on at frame %llu\n", (unsigned long long)frame); }
     if ((long)frame != to) return;
     g_fnprof = 0;
-    uint64_t (*rows)[4] = malloc(sizeof(uint64_t[4]) * NSLOT);
+    uint64_t (*rows)[5] = malloc(sizeof(uint64_t[5]) * NSLOT);
     int n = 0;
     for (int i = 0; i < NSLOT; i++)
-        if (slots[i].addr) { rows[n][0] = slots[i].addr; rows[n][1] = slots[i].count; rows[n][2] = slots[i].first; rows[n][3] = slots[i].lr; n++; }
+        if (slots[i].addr) { rows[n][0] = slots[i].addr; rows[n][1] = slots[i].count; rows[n][2] = slots[i].first; rows[n][3] = slots[i].lr; rows[n][4] = slots[i].frame; n++; }
     qsort(rows, n, sizeof rows[0], cmp);
     const char *out = getenv("LARECOMP_FNPROF_OUT") ? getenv("LARECOMP_FNPROF_OUT") : "build/fnprof.txt";  // (parallel runs)
     FILE *f = fopen(out, "w");
     for (int i = 0; f && i < n; i++)
-        fprintf(f, "%llx %llu %llu %llx\n", (unsigned long long)rows[i][0], (unsigned long long)rows[i][1],
-                (unsigned long long)rows[i][2], (unsigned long long)rows[i][3]);
+        fprintf(f, "%llx %llu %llu %llx %llu\n", (unsigned long long)rows[i][0], (unsigned long long)rows[i][1],
+                (unsigned long long)rows[i][2], (unsigned long long)rows[i][3], (unsigned long long)rows[i][4]);
     if (f) fclose(f);
     free(rows);
     LOG("[fnprof] %d functions, written %s (frames %ld-%ld)\n", n, out, from, to);

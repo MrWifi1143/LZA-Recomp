@@ -20,7 +20,7 @@
 uint8_t g_fnhook_bits[1 << 17];  // (runtime/cpu.h FN_HOOKBIT)
 
 typedef int (*FnHook)(Cpu *c, uint64_t addr);
-#define NHOOK 2048
+#define NHOOK 8192
 static struct { uint64_t addr; FnHook fn; } hooks[NHOOK];
 static __thread uint64_t bypass;  // rt_call_original: the next entry of this function is the original running
 
@@ -50,7 +50,7 @@ uint64_t rt_addr(uint64_t eevee) {
     return 0;
 }
 
-#define NREG 1024
+#define NREG 6144
 static struct { uint64_t addr; FnHook fn; bool user; } regs[NREG];
 static int nregs;
 
