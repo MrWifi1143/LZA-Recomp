@@ -469,8 +469,9 @@ int rt_pla_tick(int site);
 // press on an update without a script step was lost (dialogue that wouldn't advance). Above 30 fps the buttons the game
 // reads change only on the updates scripts step on (a press waits at most one update); the sticks are read as ever.
 static int g_pla_script_tick = -1;
-static bool pla_script_tick_on(void) {
-    if (g_pla_script_tick < 0) g_pla_script_tick = !(getenv("LARECOMP_PLA_SCRIPT_TICK") && atoi(getenv("LARECOMP_PLA_SCRIPT_TICK")) == 0);
+static bool pla_script_tick_on(void) {  // (off by default: at 144 fps a battle's result, there for one update, was missed and
+                                        // Volo's battle started over and over; LARECOMP_PLA_SCRIPT_TICK=1: on, research)
+    if (g_pla_script_tick < 0) g_pla_script_tick = getenv("LARECOMP_PLA_SCRIPT_TICK") && atoi(getenv("LARECOMP_PLA_SCRIPT_TICK")) != 0;
     return g_pla_script_tick && g_pla60_build;
 }
 int pla_input_tick(void) { return !pla_script_tick_on() || rt_pla_tick(0xa461); }
@@ -478,6 +479,18 @@ static int pla_script_step_hook(Cpu *c, uint64_t addr) {
     if (!pla_script_tick_on() || rt_pla_tick(0xa460)) return 0;  // (the game's own step)
     uint64_t state = *(const uint64_t *)(uintptr_t)(c->x[0] + 0x140);
     c->x[0] = state && *(const uint8_t *)(uintptr_t)(state + 0x191) == 0;  // (still running: what a step returns)
+    (void)addr;
+    return 1;
+}
+
+// The event scripts' timed commands (WaitFrame, AfterWaitFrame...: 15 of them) count down by the frames the update is
+// worth to their script context (f_7001059a78, [ctx+0x88]): at 60 fps their waits ended twice as early (Volo's
+// challenge shot - his Poke Ball - cut short). They get the frame only on the updates where 30 fps time moved on one.
+// LARECOMP_PLA_WAIT_TICK=0: off.
+#define PLA_SCRIPT_FRAMES 0x7001059a78ull
+static int pla_script_frames_hook(Cpu *c, uint64_t addr) {
+    if (rt_pla_tick(0x9a78)) return 0;
+    c->x[0] = 0;
     (void)addr;
     return 1;
 }
@@ -537,6 +550,7 @@ void pla60_configure(const char *exefs) {
             g_pla_mouse_look = !getenv("LARECOMP_PLA_MOUSE_LOOK") || atoi(getenv("LARECOMP_PLA_MOUSE_LOOK")) != 0;
             rt_register_fnhook_at(0x700193d16cull, pla_mouse_look_hook);
             rt_register_fnhook_at(PLA_SCRIPT_STEP, pla_script_step_hook);
+            if (!getenv("LARECOMP_PLA_WAIT_TICK") || atoi(getenv("LARECOMP_PLA_WAIT_TICK"))) rt_register_fnhook_at(PLA_SCRIPT_FRAMES, pla_script_frames_hook);
             if (!getenv("LARECOMP_PLA_MOVE_SCALE") || atoi(getenv("LARECOMP_PLA_MOVE_SCALE"))) rt_register_fnhook_at(PLA_SCRIPTED_MOVE, pla_scripted_move_hook);
             if (getenv("LARECOMP_PLA_STATE_WATCH")) rt_register_fnhook_at(0x70019b24dcull, pla_state_watch_hook);
             // the mouse in the menus (runtime/hle/menu_mouse.c): ui2d's CalculateMtx walk over the panes, each frame
