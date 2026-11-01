@@ -503,6 +503,70 @@ void pla_options_present(void) {
     atomic_store(&g_trace_on, on);
 }
 
+// ------------------------------------------------------------------ the game's own settings, from the launcher
+// The game's twelve settings live in one u32 at [cfg+0x68] (cfg = [[0x70042a6ee0]+0x230]); the save keeps each part
+// as a block of its own. PLA_CFG_LOAD reads them from the save and pushes the volumes to the sound engine,
+// PLA_CFG_DEFAULTS sets a new game's (also the Settings screen's Restore Defaults), PLA_CFG_SAVE writes them back.
+// Launcher: the values the save had (Settings.game_opts, kept at each load and save) and new ones it chose
+// (game_opts_next), written into the field each time the game loads the save - or starts a new one - until it saves
+// them. Bits (PLA_CFG_BITS; 2-5 the text language and 18 are the game's own, never touched): 0-1 text speed 0..2;
+// 6-9 / 10-13 / 14-17 music / sound effects / cries 0..10; 19 autosave off; 20 / 21 vertical / horizontal camera NOT
+// inverted; 22-23 motion sensitivity 0..3; 24-26 camera sensitivity 0..4 (shown 1..5); 27 HUD toggling off; 28 ZR
+// confirmation off; 29 dynamic range narrow.
+#define PLA_CFG_LOAD 0x7000fea798ull      // (cfg)
+#define PLA_CFG_DEFAULTS 0x7000fea060ull  // (cfg)
+#define PLA_CFG_SAVE 0x7000fea5f4ull      // (cfg)
+#define PLA_CFG_RESTORE_RET 0x700112c804ull  // (the Settings screen's Restore Defaults calling PLA_CFG_DEFAULTS)
+#define PLA_SET_RTPC 0x7002813898ull      // (engine, &name, -1, 0, s0 value)
+#define PLA_SOUND_ENGINE 0x70042a84b8ull  // (the engine, once the sound is up)
+#define PLA_SET_DYNAMIC_RANGE 0x700112cc5cull  // (w0: 1 wide)
+#define PLA_CFG_BITS 0x3ffbffc3u
+
+static void cfg_seen(uint64_t cfg, bool saving) {  // (the save's values, for the launcher)
+    int v = (int)(*(const uint32_t *)(uintptr_t)(cfg + 0x68) & PLA_CFG_BITS);
+    bool done = saving && g_settings.game_opts_next >= 0 && v == (g_settings.game_opts_next & (int)PLA_CFG_BITS);
+    if (v == g_settings.game_opts && !done) return;
+    g_settings.game_opts = v;
+    if (done) g_settings.game_opts_next = -1;
+    settings_save();
+}
+static void cfg_sound(Cpu *c, uint32_t f) {  // (the volumes and the dynamic range as the field has them)
+    uint64_t engine = *(const uint64_t *)(uintptr_t)PLA_SOUND_ENGINE;
+    if (!engine) return;
+    static const struct { uint64_t hash, name, len, zero; } rtpc[3] = {  // (the game's own RTPC names: BGM, SE, PMVOICE)
+        {0x1c56beb784e02b07ull, 0x70037c1cbaull, 13, 0}, {0xe0cb2cb772a51543ull, 0x7003856ebaull, 12, 0},
+        {0x12405c2019b3865aull, 0x70037dedfdull, 17, 0}};
+    for (int i = 0; i < 3; i++) {
+        float v = (float)((f >> (6 + 4 * i)) & 15);
+        uint32_t b;
+        memcpy(&b, &v, 4);
+        c->x[0] = engine, c->x[1] = (uint64_t)(uintptr_t)&rtpc[i], c->x[2] = ~0ull, c->x[3] = 0, c->v[0] = b;
+        guest_call(c, PLA_SET_RTPC);
+    }
+    c->x[0] = !(f >> 29 & 1);
+    guest_call(c, PLA_SET_DYNAMIC_RANGE);
+}
+static int cfg_loaded_hook(Cpu *c, uint64_t addr) {  // (PLA_CFG_LOAD and PLA_CFG_DEFAULTS, after the game's own)
+    uint64_t cfg = c->x[0], ret = c->x[30];
+    rt_call_original(c, addr);
+    uint64_t r0 = c->x[0], r1 = c->x[1];
+    if (cfg && addr == PLA_CFG_LOAD) cfg_seen(cfg, false);
+    int next = g_settings.game_opts_next;
+    if (cfg && next >= 0 && ret != PLA_CFG_RESTORE_RET) {  // (the player's Restore Defaults in the game: theirs)
+        uint32_t *f = (uint32_t *)(uintptr_t)(cfg + 0x68);
+        LOG("[options] the game's settings from the launcher: 0x%08x (the save had 0x%08x)\n", next, *f & PLA_CFG_BITS);
+        *f = (*f & ~PLA_CFG_BITS) | ((uint32_t)next & PLA_CFG_BITS);
+        if (addr == PLA_CFG_LOAD) cfg_sound(c, *f);  // (a new game's: the sound engine may not be up yet)
+    }
+    c->x[0] = r0, c->x[1] = r1;
+    return 1;
+}
+static int cfg_save_hook(Cpu *c, uint64_t addr) {
+    if (c->x[0]) cfg_seen(c->x[0], true);
+    (void)addr;
+    return 0;  // (the game's own runs)
+}
+
 void pla_options_configure(void) {
     const char *e = getenv("LARECOMP_PLA_OPTIONS");
     if (!(e && atoi(e) == 0)) {
@@ -514,6 +578,9 @@ void pla_options_configure(void) {
         rt_register_fnhook_at(OPT_TEXT, text_hook);
         rt_register_fnhook_at(OPT_TEXT_APPLY, text_apply_hook);
     }
+    rt_register_fnhook_at(PLA_CFG_LOAD, cfg_loaded_hook);
+    rt_register_fnhook_at(PLA_CFG_DEFAULTS, cfg_loaded_hook);
+    rt_register_fnhook_at(PLA_CFG_SAVE, cfg_save_hook);
     const char *tf = getenv("LARECOMP_ZA_OPTTRACE");
     FILE *f = tf ? fopen(tf, "r") : NULL;
     unsigned long long a;

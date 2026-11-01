@@ -31,6 +31,8 @@ static const char *settings_file(void) {
     .render_thread = true,                                                  \
     .vertex_read = VREAD_AUTO,                                              \
     .upscaler = UPSCALE_SHARP,                                              \
+    .game_opts = -1,                                                        \
+    .game_opts_next = -1,                                                   \
     .antialias = AA_SMAA,  /* (the game has no anti-aliasing of its own) */ \
 }
 Settings g_settings = SETTINGS_DEFAULTS;
@@ -68,6 +70,8 @@ static void parse_line(const char *line) {
     else if (!strcmp(key, "mouse_invert_y")) g_settings.mouse_invert_y = atoi(val) != 0;
     else if (!strcmp(key, "shadow_smoothing")) g_settings.shadow_smooth = atoi(val) != 0;
     else if (!strcmp(key, "shader_loading")) g_settings.shader_nowait = !strcmp(val, "nowait") || !strcmp(val, "1");
+    else if (!strcmp(key, "game_options")) g_settings.game_opts = (int)(strtol(val, NULL, 0) & 0x3fffffff);
+    else if (!strcmp(key, "game_options_next")) g_settings.game_opts_next = (int)(strtol(val, NULL, 0) & 0x3fffffff);
     else if (!strcmp(key, "pkhex_link")) g_settings.pkhex_link = atoi(val) >= 0 && atoi(val) <= 2 ? atoi(val) : 0;
     else if (!strcmp(key, "background")) g_settings.background = atoi(val) >= BG_KEEP && atoi(val) <= BG_PAUSE ? atoi(val) : BG_KEEP;
     else if (!strcmp(key, "resolution")) {
@@ -150,6 +154,8 @@ void settings_save(void) {
     fprintf(f, "shader_loading = %s\n", g_settings.shader_nowait ? "nowait" : "wait");
     fprintf(f, "shadow_smoothing = %d\n", g_settings.shadow_smooth);
     fprintf(f, "pkhex_link = %d\n", g_settings.pkhex_link);
+    if (g_settings.game_opts >= 0) fprintf(f, "game_options = 0x%08x\n", g_settings.game_opts);
+    if (g_settings.game_opts_next >= 0) fprintf(f, "game_options_next = 0x%08x\n", g_settings.game_opts_next);
     fprintf(f, "background = %d\n", g_settings.background);
     fprintf(f, "upscaler = %s\n", g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");
     if (g_settings.res_mode == RES_DYNAMIC) fprintf(f, "resolution = dynamic\n");

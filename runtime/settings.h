@@ -29,6 +29,8 @@ typedef struct {
     bool shadow_smooth;  // the shadow mask's near taps bilinear - smooth shadow edges (nvn/vulkan/exec.c pla_soft_shadows; at the next start)
     int shader_nowait;   // 1: draws whose shaders are still being built are skipped, not waited for (nvn/vulkan/exec.c wait_built)
     int pkhex_link;      // PKHeX's LiveHeX on port 6000: 0 off, 1 this PC, 2 the local network too (hle/pkm_link.c)
+    int game_opts;       // the game's own settings (text speed, camera, volumes...) as its save last had them, -1 not seen yet
+    int game_opts_next;  // ... as the launcher set them: put in the game when it loads the save, -1 none (hle/pla_options.c)
     float stick_deadzone;  // a controller's sticks: the share of their travel read as rest (runtime/hle/input.c)
     bool reverb;         // room reverb effect
     bool movie_audio;

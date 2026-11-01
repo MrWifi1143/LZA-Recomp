@@ -880,6 +880,11 @@ extern "C" void launcher_lg_run(const char *root) {
     int bg_i = g_settings.background >= 0 && g_settings.background <= 2 ? g_settings.background : 0;
     int pk_i = g_settings.pkhex_link >= 0 && g_settings.pkhex_link <= 2 ? g_settings.pkhex_link : 0;
     int prompts_i = g_settings.button_prompts >= 0 && g_settings.button_prompts <= 4 ? g_settings.button_prompts : 0;
+    // The game's own settings (its Settings menu's: text speed, camera, volumes...), one bit field (hle/pla_options.c
+    // has the bits): shown as the save last had them, put in the game at the next load when changed
+    const int k_gopt_default = 0x2a31ddc2;  // (a new game's, without the text language: the game's own)
+    int gopt = g_settings.game_opts_next >= 0 ? g_settings.game_opts_next : g_settings.game_opts >= 0 ? g_settings.game_opts : k_gopt_default;
+    const int gopt_was = gopt;
     auto restore_defaults = [&]() {  // (the Options' settings as a first start has them; Controls has its own Restore)
         Settings d;
         settings_defaults(&d);
@@ -889,6 +894,7 @@ extern "C" void launcher_lg_run(const char *root) {
         fps_i = d.fps == FPS_UNLIMITED ? 4 : d.fps == 144 ? 3 : d.fps == 120 ? 2 : d.fps == 60 ? 1 : 0;
         wildb = d.wild_battle, prompts_i = d.button_prompts, smooth_sh = d.shadow_smooth, bg_i = d.background, pk_i = d.pkhex_link;
         shl_i = d.shader_nowait;
+        gopt = k_gopt_default;
     };
     // Translation: the folders under mods/ (runtime/mods.h); 0 = none (the game's own English)
     static char mods[MODS_MAX][128];
@@ -991,6 +997,50 @@ extern "C" void launcher_lg_run(const char *root) {
                                          T("Don't wait (may show late the first time)", "Não esperar (pode aparecer atrasado na primeira vez)")};
         ImGui::Combo(T("Shader loading", "Carregamento de shaders"), &shl_i, shl_names, 2);
     };
+    auto game_own_settings = [&]() {
+        auto field = [&](int at, int bits) { return (gopt >> at) & ((1 << bits) - 1); };
+        auto set_field = [&](int at, int bits, int v) { gopt = (gopt & ~(((1 << bits) - 1) << at)) | (v << at); };
+        auto on_off = [&](const char *label, int bit, bool on_is_set) {  // (a checkbox for one bit)
+            bool b = field(bit, 1) == (on_is_set ? 1 : 0);
+            if (ImGui::Checkbox(label, &b)) set_field(bit, 1, b == on_is_set);
+        };
+        ImGui::Spacing();
+        ImGui::SeparatorText(T("The game's own settings", "Configurações do próprio jogo"));
+        const char *const speed_names[] = {T("Slow", "Lenta"), T("Normal", "Normal"), T("Fast", "Rápida")};
+        int v = field(0, 2) <= 2 ? field(0, 2) : 2;
+        if (ImGui::Combo(T("Text speed", "Velocidade do texto"), &v, speed_names, 3)) set_field(0, 2, v);
+        on_off(T("Autosave", "Salvamento automático"), 19, false);
+        on_off(T("HUD toggling", "Alternar a interface (HUD)"), 27, false);
+        on_off(T("ZR button confirmation", "Confirmação com o botão ZR"), 28, false);
+        on_off(T("Invert camera vertically", "Inverter a câmera na vertical"), 20, false);
+        on_off(T("Invert camera horizontally", "Inverter a câmera na horizontal"), 21, false);
+        v = (field(24, 3) <= 4 ? field(24, 3) : 2) + 1;
+        if (ImGui::SliderInt(T("Camera sensitivity", "Sensibilidade da câmera"), &v, 1, 5)) set_field(24, 3, v - 1);
+        v = field(22, 2);
+        if (ImGui::SliderInt(T("Motion sensitivity", "Sensibilidade de movimento"), &v, 0, 3)) set_field(22, 2, v);
+        const struct { const char *en, *pt; int at; } vols[] = {{"Music", "Música", 6}, {"Sound effects", "Efeitos sonoros", 10},
+                                                               {"Pokémon cries", "Gritos dos Pokémon", 14}};
+        for (const auto &o : vols) {
+            v = field(o.at, 4) <= 10 ? field(o.at, 4) : 10;
+            if (ImGui::SliderInt(T(o.en, o.pt), &v, 0, 10)) set_field(o.at, 4, v);
+        }
+        const char *const range_names[] = {T("Wide", "Ampla"), T("Narrow", "Estreita")};
+        v = field(29, 1);
+        if (ImGui::Combo(T("Dynamic range", "Faixa dinâmica"), &v, range_names, 2)) set_field(29, 1, v);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 900);
+        ImGui::TextWrapped("%s", g_settings.game_opts < 0
+                                     ? T("These live in your save. Shown as a new game has them until you've played once; a change here goes "
+                                         "into the game when it loads the save.",
+                                         "Estas ficam no seu save. Aparecem como num jogo novo até você jogar uma vez; uma mudança aqui vai "
+                                         "para o jogo quando ele carregar o save.")
+                                     : T("These live in your save (the game's Settings menu changes them too). A change here goes into the "
+                                         "game when it loads the save.",
+                                         "Estas ficam no seu save (o menu de configurações do jogo também muda). Uma mudança aqui vai para o "
+                                         "jogo quando ele carregar o save."));
+        ImGui::PopTextWrapPos();
+        ImGui::PopStyleColor();
+    };
     auto settings_game = [&]() {
         const char *const bg_names[] = {T("Keep playing", "Continuar jogando"), T("Mute", "Silenciar"), T("Pause", "Pausar")};
         ImGui::Combo(T("In background", "Em segundo plano"), &bg_i, bg_names, 3);
@@ -1000,6 +1050,7 @@ extern "C" void launcher_lg_run(const char *root) {
         const char *const prompt_names[] = {T("Auto (what you play with)", "Automático (o que você usa)"), "Nintendo Switch", "Xbox",
                                             "PlayStation", T("Keyboard and mouse", "Teclado e mouse")};
         ImGui::Combo(T("Button prompts", "Ícones dos botões"), &prompts_i, prompt_names, 5);
+        game_own_settings();
         // Delete save data: the save/ folder emptied (rt_remove_saves), after a warning; Cancel is the default choice
         static char save_msg[160];
         ImGui::Spacing();
@@ -1418,6 +1469,7 @@ extern "C" void launcher_lg_run(const char *root) {
     g_settings.background = bg_i;
     g_settings.pkhex_link = pk_i;
     g_settings.shader_nowait = shl_i;
+    if (gopt != gopt_was) g_settings.game_opts_next = gopt == g_settings.game_opts ? -1 : gopt;  // (back to the save's: nothing to do)
     snprintf(g_settings.mod, sizeof g_settings.mod, "%s", mod ? mods[mod - 1] : "");
     plugins_choose(plugs, plug_on, nplugs);
     settings_save();
