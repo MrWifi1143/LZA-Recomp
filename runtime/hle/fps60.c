@@ -679,8 +679,38 @@ void pla60_present(void) {
         volatile uint64_t *ft = (volatile uint64_t *)(uintptr_t)g_pla60_entry;
         if (dyn && last) {
             uint64_t dt = real_step(now - last);
+            // Whole periods only, the rest carried (the world still keeps to the real time: a long frame's step is two
+            // periods). Some of the game's timers count whole ticks and round up: a step a little over the period
+            // (16.9 ms at 60) counted as two - the Z-A intro's cinematics ran ~1.8x fast (Prism Tower lit before the talk
+            // ended; the train outran the field's tree streaming: bare fields out the window). LARECOMP_DT_QUANT=0: raw.
+            static int quant = -1;
+            if (quant < 0) quant = !(getenv("LARECOMP_DT_QUANT") && atoi(getenv("LARECOMP_DT_QUANT")) == 0);
+            if (quant && g_pla60_ns) {
+                static int64_t bal;
+                bal += (int64_t)dt;
+                int64_t k = (bal + (int64_t)g_pla60_ns / 2) / (int64_t)g_pla60_ns;
+                if (k < 1) k = 1;
+                if ((uint64_t)k * g_pla60_ns > 33333334u) k = 33333334u / g_pla60_ns ? 33333334u / g_pla60_ns : 1;
+                dt = (uint64_t)k * g_pla60_ns;
+                bal -= (int64_t)dt;
+                if (bal < -(int64_t)g_pla60_ns) bal = -(int64_t)g_pla60_ns;
+            }
             *ft = dt;
             g_ui_scale = (float)((double)dt / 33333334.0);
+            static int dtlog = -1;  // (research: LARECOMP_DT_LOG=1 - each second: steps written, their sum against the real time)
+            if (dtlog < 0) dtlog = getenv("LARECOMP_DT_LOG") && atoi(getenv("LARECOMP_DT_LOG")) > 0;
+            if (dtlog) {
+                static uint64_t t0, sum, n, mn = ~0ull, mx;
+                extern uint64_t renderer_present_count(void);
+                static uint64_t p0;
+                if (!t0) t0 = now, p0 = renderer_present_count();
+                sum += dt, n++, mn = dt < mn ? dt : mn, mx = dt > mx ? dt : mx;
+                if (now - t0 >= 1000000000ull) {
+                    LOG("[dt] %llu steps, %llu presents in %.3f s: world %.3f s (step %.1f..%.1f ms)\n", (unsigned long long)n,
+                        (unsigned long long)(renderer_present_count() - p0), (double)(now - t0) / 1e9, (double)sum / 1e9, mn / 1e6, mx / 1e6);
+                    t0 = now, p0 = renderer_present_count(), sum = n = mx = 0, mn = ~0ull;
+                }
+            }
         } else if (was_dyn) {  // (switched to Fixed in game: the period again)
             *ft = g_pla60_ns;
             g_ui_scale = (float)((double)g_pla60_ns / 33333334.0);
