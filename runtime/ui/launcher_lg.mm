@@ -833,6 +833,33 @@ extern "C" void launcher_lg_run(const char *root) {
         const char *const prompt_names[] = {T("Auto (what you play with)", "Automático (o que você usa)"), "Nintendo Switch", "Xbox",
                                             "PlayStation", T("Keyboard and mouse", "Teclado e mouse")};
         ImGui::Combo(T("Button prompts", "Ícones dos botões"), &prompts_i, prompt_names, 5);
+        // Delete save data: the save/ folder emptied (rt_remove_saves), after a warning; Cancel is the default choice
+        static char save_msg[160];
+        ImGui::Spacing();
+        ImGui::SeparatorText(T("Save data", "Dados salvos"));
+        if (ImGui::Button(T("Delete save data...", "Apagar dados salvos..."))) ImGui::OpenPopup("##delsave");
+        ImGui::SameLine();
+        if (ImGui::Button(T("Open the save folder", "Abrir a pasta de saves"))) open_folder("save");
+        if (save_msg[0]) ImGui::TextDisabled("%s", save_msg);
+        if (ImGui::BeginPopupModal("##delsave", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+            ImGui::Text("%s", T("Delete all save data?", "Apagar todos os dados salvos?"));
+            ImGui::Spacing();
+            ImGui::TextColored(k_red, "%s", T("This can't be undone: your progress in this game is gone for good.",
+                                              "Isto não pode ser desfeito: seu progresso neste jogo some para sempre."));
+            ImGui::TextDisabled("%s", T("To keep a copy, cancel and copy the save folder somewhere else first.",
+                                        "Para guardar uma cópia, cancele e copie a pasta de saves para outro lugar antes."));
+            ImGui::Spacing();
+            if (ImGui::Button(T("Delete", "Apagar"), ImVec2(140, 0))) {
+                snprintf(save_msg, sizeof save_msg, "%s", rt_remove_saves() ? T("Save data deleted.", "Dados salvos apagados.")
+                                                                             : T("Couldn't delete all of it (see lasrecomp.log).",
+                                                                                 "Não foi possível apagar tudo (veja o lasrecomp.log)."));
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button(T("Cancel", "Cancelar"), ImVec2(140, 0))) ImGui::CloseCurrentPopup();
+            ImGui::SetItemDefaultFocus();  // (a stray Enter / A press cancels)
+            ImGui::EndPopup();
+        }
     };
     auto settings_mods = [&]() {
         const char *none = T("None", "Nenhum");

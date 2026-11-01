@@ -170,6 +170,21 @@ bool rt_remove_game_file(const char *game_dir, const char *name) {
     return is_dir(p) ? plat_remove_tree(p) : remove(p) == 0;  // (plat_remove_tree doesn't follow links inside)
 }
 
+// The saves (<data root>/save: the start screen's Delete save data): everything in it, the folder itself kept, empty.
+// Not when save is a link (it points somewhere else: left alone); plat_remove_tree doesn't follow links inside.
+bool rt_remove_saves(void) {
+    char p[1100];
+    snprintf(p, sizeof p, "%s" SEP "save", g_root);
+    if (!g_root[0] || is_link(p)) {
+        fprintf(stderr, "[paths] refusing to delete %s (a link, or no data root)\n", p);
+        return false;
+    }
+    bool ok = !exists(p) || (is_dir(p) ? plat_remove_tree(p) : remove(p) == 0);
+    mkdirs(p);
+    fprintf(stderr, "[paths] save data deleted (%s)%s\n", p, ok ? "" : ": not all of it");
+    return ok;
+}
+
 bool rt_remove_game_files(const char *game_dir) {
     if (!game_dir_ok(game_dir)) {
         fprintf(stderr, "[paths] refusing to delete game files in %s (not <data root>/extracted)\n", game_dir);
