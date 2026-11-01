@@ -8,7 +8,8 @@
 // reserved guest range), as the game is handed each part of the window - SetHeapSize, the StandardAllocator block
 // (hle/heaps.c) - before it writes there. Only those parts: Turnip commits an allocation's pages at once.
 // exec.c imports the chunks into the game's device and binds them into one sparse buffer over the whole window, so
-// shaders keep one base address (gmem_ref_info). LARECOMP_DMABUF_HEAP=0 turns it off; =1 tries it on any driver.
+// shaders keep one base address (gmem_ref_info). Also on RADV, where importing costs every submit (see decide).
+// LARECOMP_DMABUF_HEAP=0 turns it off; =1 tries it on any driver.
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -80,7 +81,14 @@ static void decide(void) {
     free(ep);
     VkPhysicalDeviceFeatures f;
     vkGetPhysicalDeviceFeatures(H.phys, &f);
-    if ((host && !(e && *e == '1')) || !dmabuf || !f.sparseBinding || !f.sparseResidencyBuffer) goto off;  // (the import: exec.c)
+    // RADV (AMD on Linux) too, though it imports host memory: the kernel driver revalidates an imported (userptr) buffer's
+    // pages on every queue submit, all 3+ GB of the heap - the render thread spent ~20 of its 24 ms per frame in the
+    // amdgpu submit ioctl (PS5 Linux: main menu 41 -> 60 fps this way)
+    VkPhysicalDeviceDriverProperties drv = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+    VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &drv};
+    vkGetPhysicalDeviceProperties2(H.phys, &p2);
+    bool radv = drv.driverID == VK_DRIVER_ID_MESA_RADV;
+    if ((host && !radv && !(e && *e == '1')) || !dmabuf || !f.sparseBinding || !f.sparseResidencyBuffer) goto off;  // (the import: exec.c)
     VkPhysicalDeviceMemoryProperties mp;
     vkGetPhysicalDeviceMemoryProperties(H.phys, &mp);
     const uint32_t VIS = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
