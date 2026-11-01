@@ -651,12 +651,52 @@ uint32_t rt_step_bits(int i) {
 
 // Legends: Arceus above 30 fps: 1 on the updates where 30 fps time moved on a frame (tools/patches.py _pla_tick_store),
 // 0 on the others; always 1 at 30 fps. LARECOMP_PLA_TICK=0 (research): every update, as the game does.
+// Research (LARECOMP_PLA_PRINT_LOG=1): the message printer printed (tools/patches.py, 0x7002b3186c): each print's time
+// and printer logged, to time a line's typing at different frame rates.
+void rt_pla_printed(uint64_t printer) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_PLA_PRINT_LOG") && atoi(getenv("LARECOMP_PLA_PRINT_LOG")) > 0;
+    if (!on) return;
+    static int force = -2;  // (LARECOMP_PLA_TEXT_SPEED=<n>: the printer's text speed byte set to n, to time a slower text)
+    if (force == -2) force = getenv("LARECOMP_PLA_TEXT_SPEED") ? atoi(getenv("LARECOMP_PLA_TEXT_SPEED")) : -1;
+    uint8_t *speed = (uint8_t *)(uintptr_t)(printer + 0x9d);
+    if (force >= 0) *speed = (uint8_t)force;
+    extern uint64_t renderer_present_count(void);
+    LOG("[print] %.3f s frame %llu printer %llx speed %u\n", (double)plat_now_ns() / 1e9, (unsigned long long)renderer_present_count(),
+        (unsigned long long)printer, (unsigned)*speed);
+}
+
 int rt_pla_tick(int site) {
     static int on = -1;
     if (on < 0) on = getenv("LARECOMP_PLA_TICK") ? atoi(getenv("LARECOMP_PLA_TICK")) : 1;
-    (void)site;
-    if (!on || !g_pla60_patched) return 1;
-    return g_world_now / 33333334u != g_world_prev / 33333334u;  // (the world's time in this update's steps)
+    int r = !on || !g_pla60_patched ? 1 : g_world_now / 33333334u != g_world_prev / 33333334u;  // (the world's time in this
+                                                                                                 // update's steps)
+    static int tlog = -1;  // (research: LARECOMP_PLA_TICK_LOG=1 - each second, per site: calls, ticks, presents)
+    if (tlog < 0) tlog = getenv("LARECOMP_PLA_TICK_LOG") && atoi(getenv("LARECOMP_PLA_TICK_LOG")) > 0;
+    if (tlog) {
+        static struct { int site, calls, ticks; } s[8];
+        static uint64_t t0, p0;
+        extern uint64_t renderer_present_count(void);
+        int k = 0;
+        while (k < 7 && s[k].calls && s[k].site != site) k++;
+        s[k].site = site, s[k].calls++, s[k].ticks += r;
+        static uint64_t hp; static int hn, hist[4];  // (the printer site 0x1864: frames with 1 / 2 / 3 / 4+ calls)
+        uint64_t pc = renderer_present_count();
+        if (site == 0x1864) { if (pc != hp) { if (hn) hist[hn > 4 ? 3 : hn - 1]++; hp = pc, hn = 0; } hn++; }
+        uint64_t now = plat_now_ns();
+        if (!t0) t0 = now, p0 = renderer_present_count();
+        if (now - t0 >= 1000000000ull) {
+            char line[256];
+            int o = snprintf(line, sizeof line, "[tick] %llu presents, patched %d:", (unsigned long long)(renderer_present_count() - p0),
+                             (int)g_pla60_patched);
+            for (int i = 0; i < 8 && s[i].calls; i++) o += snprintf(line + o, sizeof line - o, " site %04x %d/%d", s[i].site, s[i].ticks, s[i].calls);
+            if (hist[0] + hist[1] + hist[2] + hist[3]) o += snprintf(line + o, sizeof line - o, " | printer calls per frame 1:%d 2:%d 3:%d 4+:%d", hist[0], hist[1], hist[2], hist[3]);
+            memset(hist, 0, sizeof hist);
+            LOG("%s\n", line);
+            memset(s, 0, sizeof s), t0 = now, p0 = renderer_present_count();
+        }
+    }
+    return r;
 }
 
 // Research (LARECOMP_DT_PROBE="<addr>[,<addr>...]"): functions shaped like f_700141f208 - this = x0, the clock set = x1:
