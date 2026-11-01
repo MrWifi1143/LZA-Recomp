@@ -555,6 +555,22 @@ void pla60_present(void) {
         static uint64_t last;
         uint64_t now = plat_now_ns(), dt = g_pla60_ns;
         if (dyn && last) dt = real_step(now - last);
+        // Whole periods only, the rest carried (the world still keeps to the real time: a long frame's step is two
+        // periods). Some of the games' timers count whole ticks and round up: a step a little over the period (16.9 ms
+        // at 60) counted as two - Z-A's intro cinematics ran ~1.8x fast (Prism Tower lit before the talk ended, the
+        // train outran the field's tree streaming). LARECOMP_DT_QUANT=0: raw.
+        static int quant = -1;
+        if (quant < 0) quant = !(getenv("LARECOMP_DT_QUANT") && atoi(getenv("LARECOMP_DT_QUANT")) == 0);
+        if (dyn && last && quant && g_pla60_ns) {
+            static int64_t bal;
+            bal += (int64_t)dt;
+            int64_t k = (bal + (int64_t)g_pla60_ns / 2) / (int64_t)g_pla60_ns;
+            if (k < 1) k = 1;
+            if ((uint64_t)k * g_pla60_ns > 33333334u) k = 33333334u / g_pla60_ns ? 33333334u / g_pla60_ns : 1;
+            dt = (uint64_t)k * g_pla60_ns;
+            bal -= (int64_t)dt;
+            if (bal < -(int64_t)g_pla60_ns) bal = -(int64_t)g_pla60_ns;
+        }
         if (dt != g_pla60_dt) *(volatile uint64_t *)(uintptr_t)g_pla60_entry = dt, g_pla60_dt = dt;
         g_world_prev = g_world_now, g_world_now += dt;
         last = now;
