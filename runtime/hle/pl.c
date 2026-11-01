@@ -119,11 +119,14 @@ static void load_fonts(void) {
                          "/System/Library/Fonts/Supplemental/Arial.ttf", "C:/Windows/Fonts/arial.ttf",
                          "C:/Windows/Fonts/tahoma.ttf",
                          // Linux: DejaVu Sans (Debian / Ubuntu, Arch, Fedora), else Noto Sans / Liberation Sans
-                         // (SteamOS has no DejaVu). Not Noto Sans CJK: CFF outlines, which the game's font engine
+                         // (SteamOS has no DejaVu; Bazzite, Fedora without DejaVu, keeps them in google-noto/ and
+                         // liberation-sans-fonts/). Not Noto Sans CJK: CFF outlines, which the game's font engine
                          // crashes on (it wants TrueType)
                          "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf",
                          "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf", "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-                         "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/liberation/LiberationSans-Regular.ttf"};
+                         "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+                         "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+                         "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf"};
     for (size_t i = 0; i < sizeof std / sizeof *std && !fonts[0].addr; i++)
         if (std[i]) load_one(std[i], &fonts[0]);
     if (!fonts[0].addr) FATAL("no usable system font substitute\n");
