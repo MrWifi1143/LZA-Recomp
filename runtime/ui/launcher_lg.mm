@@ -801,7 +801,9 @@ extern "C" void launcher_lg_run(const char *root) {
     io.ConfigInputTrickleEventQueue = false;  // (every input event in its frame: ui_scale_apply scales the mouse's)
     static const char *const fonts[] = {"C:/Windows/Fonts/segoeui.ttf", "/usr/share/fonts/noto/NotoSans-Regular.ttf",
                                         "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf",
-                                        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"};
+                                        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+                                        "/usr/share/fonts/google-noto-vf/NotoSans[wght].ttf",  // (Fedora: Bazzite, the PS5's)
+                                        "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf"};
     for (const char *p : fonts) {
         FILE *f = fopen(p, "rb");  // (a missing file is an assertion in ImGui, not a failure it returns)
         if (!f) continue;
