@@ -38,6 +38,14 @@ extern "C" void vk_imgui_backend_shutdown(void) {
     ImGui_ImplVulkan_Shutdown();
 }
 
+// The font atlas rebuilt (the launcher's fonts at a new size: its window stretched): the old texture freed once the
+// GPU is done with it; the next ImGui_ImplVulkan_NewFrame uploads the new one
+extern "C" void vk_imgui_fonts_changed(void) {
+    if (!ImGui::GetIO().BackendRendererUserData) return;
+    vkDeviceWaitIdle(g_vk.dev);
+    ImGui_ImplVulkan_DestroyFontsTexture();
+}
+
 // A static RGBA8 image for ImGui (start screen background). Returns the ImTextureID.
 extern "C" uint64_t vk_imgui_texture_rgba(const void *rgba, int w, int h) {
     VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};

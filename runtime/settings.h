@@ -32,6 +32,8 @@ typedef struct {
     bool shadow_smooth;  // Z-A: the shadow mask's taps bilinear - smooth shadow edges (nvn/vulkan/exec.c za_soft_shadows; at the next start)
     int shader_nowait;   // 1: draws whose shaders are still being built are skipped, not waited for (nvn/vulkan/exec.c wait_built)
     int pkhex_link;      // PKHeX's LiveHeX on port 6000: 0 off, 1 this PC, 2 the local network too (hle/pkm_link.c)
+    int game_opts;       // the game's own settings (text speed, camera, volumes...) as its save last had them, -1 not seen yet
+    int game_opts_next;  // ... as the launcher set them: put in the save when the game loads it, -1 none (hle/za_options.c)
     float stick_deadzone;  // a controller's sticks: the share of their travel read as rest (runtime/hle/input.c)
     bool reverb;         // room reverb effect
     bool movie_audio;
@@ -57,3 +59,4 @@ extern bool g_settings_fresh;  // no larecomp.ini yet (a first start): the start
 
 void settings_load(void);
 void settings_save(void);
+void settings_defaults(Settings *s);  // (what a first start has)

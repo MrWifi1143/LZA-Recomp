@@ -16,23 +16,28 @@ static const char *settings_file(void) {
     return e && *e ? e : "larecomp.ini";
 }
 
-Settings g_settings = {
-    .fullscreen = false,
-    .fps = 30,
-    .volume = 1.0f,
-    .mouse_sens = 0.1f,
-    .mouse_camera = true,
-    .stick_deadzone = 0.15f,
-    .reverb = true,
-    .shadow_smooth = true,
-    .movie_audio = true,
-    .show_fps = false,
-    .render_thread = true,
-    .vertex_read = VREAD_AUTO,
-    .job_workers = -1,
-    .upscaler = UPSCALE_SHARP,
-    .antialias = AA_SMAA,  // (the game has no anti-aliasing of its own)
-};
+// The defaults (also the launcher's Restore defaults: settings_defaults)
+#define SETTINGS_DEFAULTS {                                                 \
+    .fullscreen = false,                                                    \
+    .fps = 30,                                                              \
+    .volume = 1.0f,                                                         \
+    .mouse_sens = 0.1f,                                                     \
+    .mouse_camera = true,                                                   \
+    .stick_deadzone = 0.15f,                                                \
+    .reverb = true,                                                         \
+    .shadow_smooth = true,                                                  \
+    .movie_audio = true,                                                    \
+    .show_fps = false,                                                      \
+    .render_thread = true,                                                  \
+    .vertex_read = VREAD_AUTO,                                              \
+    .job_workers = -1,                                                      \
+    .upscaler = UPSCALE_SHARP,                                              \
+    .game_opts = -1,                                                        \
+    .game_opts_next = -1,                                                   \
+    .antialias = AA_SMAA,  /* (the game has no anti-aliasing of its own) */ \
+}
+Settings g_settings = SETTINGS_DEFAULTS;
+void settings_defaults(Settings *s) { *s = (Settings)SETTINGS_DEFAULTS; }
 
 // Unknown keys (an older larecomp.ini: Link's Awakening's options from LAS Recomp) are ignored, and dropped at the
 // next save.
@@ -69,6 +74,8 @@ static void parse_line(const char *line) {
     else if (!strcmp(key, "crowd")) g_settings.crowd = atoi(val) >= 0 && atoi(val) <= 3 ? atoi(val) : 0;
     else if (!strcmp(key, "shadows")) g_settings.shadows = atoi(val) >= 0 && atoi(val) <= 2 ? atoi(val) : 0;
     else if (!strcmp(key, "shader_loading")) g_settings.shader_nowait = !strcmp(val, "nowait") || !strcmp(val, "1");
+    else if (!strcmp(key, "game_options")) g_settings.game_opts = (int)strtol(val, NULL, 0) & 0x1fffff;
+    else if (!strcmp(key, "game_options_next")) g_settings.game_opts_next = (int)strtol(val, NULL, 0) & 0x1fffff;
     else if (!strcmp(key, "pkhex_link")) g_settings.pkhex_link = atoi(val) >= 0 && atoi(val) <= 2 ? atoi(val) : 0;
     else if (!strcmp(key, "background")) g_settings.background = atoi(val) >= BG_KEEP && atoi(val) <= BG_PAUSE ? atoi(val) : BG_KEEP;
     else if (!strcmp(key, "resolution")) {
@@ -157,6 +164,8 @@ void settings_save(void) {
     fprintf(f, "shadows = %d\n", g_settings.shadows);
     fprintf(f, "shader_loading = %s\n", g_settings.shader_nowait ? "nowait" : "wait");
     fprintf(f, "pkhex_link = %d\n", g_settings.pkhex_link);
+    if (g_settings.game_opts >= 0) fprintf(f, "game_options = 0x%06x\n", g_settings.game_opts);
+    if (g_settings.game_opts_next >= 0) fprintf(f, "game_options_next = 0x%06x\n", g_settings.game_opts_next);
     fprintf(f, "upscaler = %s\n", g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");
     if (g_settings.res_mode == RES_DYNAMIC) fprintf(f, "resolution = dynamic\n");
     else if (g_settings.res_mode == RES_Q75) fprintf(f, "resolution = 75%%\n");

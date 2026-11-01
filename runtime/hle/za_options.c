@@ -668,6 +668,51 @@ void za_options_present(void) {
     atomic_store(&g_trace_on, on);
 }
 
+// ------------------------------------------------------------------ the game's own settings, from the launcher
+// The game's nine settings (Rumble, Text Speed, Minimap Rotation; camera Vertical / Horizontal invert and Sensitivity; Music,
+// Sound Effects, Pokémon Cries) are one bit field at [cfg+0x40], bits 0..20, in the save ("main", key 0xac6dd22f): its
+// config block loads it (ZA_CFG_LOAD), a new game sets the defaults (ZA_CFG_INIT, 0x1554f2) and saving writes it back
+// (ZA_CFG_SAVE). ZA_CFG_APPLY pushes rumble and the volumes to the sound engine (camera and text read the field live).
+// Launcher: the values the save had (Settings.game_opts, kept at each load and save) and new ones it chose
+// (game_opts_next), written into the field each time the game loads the save - or starts a new one - until it saves them.
+// Bits: 0 rumble off; 1-2 text speed 0..2; 3 minimap rotates; 4 / 5 vertical / horizontal camera NOT inverted;
+// 6-8 camera sensitivity 1..5; 9-12 / 13-16 / 17-20 music / sound effects / cries 0..10.
+#define ZA_CFG_LOAD 0x7000ba34e4ull   // (cfg): the field from the save, then applied
+#define ZA_CFG_INIT 0x7000b20cd4ull   // (cfg): the defaults, applied
+#define ZA_CFG_SAVE 0x7000b20f10ull   // (cfg): the field into the save
+#define ZA_CFG_APPLY 0x7000b20d04ull  // (cfg): rumble and the volumes to the sound engine
+#define ZA_CFG_BITS 0x1fffffull
+
+static void cfg_seen(uint64_t cfg, bool saving) {  // (the save's values, for the launcher)
+    int v = (int)(*(const uint64_t *)(uintptr_t)(cfg + 0x40) & ZA_CFG_BITS);
+    bool done = saving && g_settings.game_opts_next >= 0 && v == g_settings.game_opts_next;  // (in the save now)
+    if (v == g_settings.game_opts && !done) return;
+    g_settings.game_opts = v;
+    if (done) g_settings.game_opts_next = -1;
+    settings_save();
+}
+static int cfg_loaded_hook(Cpu *c, uint64_t addr) {  // (ZA_CFG_LOAD and ZA_CFG_INIT, after the game's own)
+    uint64_t cfg = c->x[0];
+    rt_call_original(c, addr);
+    uint64_t r0 = c->x[0], r1 = c->x[1];
+    if (cfg && addr == ZA_CFG_LOAD) cfg_seen(cfg, false);
+    int next = g_settings.game_opts_next;
+    if (cfg && next >= 0) {
+        uint64_t *f = (uint64_t *)(uintptr_t)(cfg + 0x40);
+        LOG("[options] the game's settings from the launcher: 0x%06x (the save had 0x%06x)\n", next, (int)(*f & ZA_CFG_BITS));
+        *f = (*f & ~ZA_CFG_BITS) | (uint64_t)next;
+        c->x[0] = cfg;
+        guest_call(c, ZA_CFG_APPLY);
+    }
+    c->x[0] = r0, c->x[1] = r1;
+    return 1;
+}
+static int cfg_save_hook(Cpu *c, uint64_t addr) {
+    if (c->x[0]) cfg_seen(c->x[0], true);
+    (void)addr;
+    return 0;  // (the game's own runs)
+}
+
 void za_options_configure(void) {
     { extern void (*g_menu_pane_cb)(uint64_t); g_menu_pane_cb = title_pane; }
     const char *e = getenv("LARECOMP_ZA_OPTIONS");
@@ -682,6 +727,9 @@ void za_options_configure(void) {
         rt_register_fnhook_at(OPT_ROW_INFO, row_info_hook);
         rt_register_fnhook_at(ZA_OODLE_DECOMPRESS, decompress_hook);
     }
+    rt_register_fnhook_at(ZA_CFG_LOAD, cfg_loaded_hook);
+    rt_register_fnhook_at(ZA_CFG_INIT, cfg_loaded_hook);
+    rt_register_fnhook_at(ZA_CFG_SAVE, cfg_save_hook);
     const char *tf = getenv("LARECOMP_ZA_OPTTRACE");
     FILE *f = tf ? fopen(tf, "r") : NULL;
     unsigned long long a;
