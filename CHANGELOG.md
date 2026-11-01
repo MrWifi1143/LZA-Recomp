@@ -6,6 +6,10 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsA`)
 
+- The first-start shader warm-up works on installed copies: it scanned only a `romfs/` folder (a source checkout), and
+  an install - Windows included - has only the `romfs.bin` image the start screen builds, so it found 0 shaders and
+  every first play compiled them as the game drew. It now reads the files straight from the image: 8,427 programs, as
+  from the folder (Z-A got the same fix for its shader packs in 0.6.0).
 Arceus:
 
 - New app icon (window, taskbar, the exe, the release folder): Mount Coronet under the space-time rift, the launcher banner's art, instead

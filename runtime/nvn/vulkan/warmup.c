@@ -232,7 +232,19 @@ static bool skip_ext(const char *name) {  // (audio and video packs: large, neve
     return false;
 }
 
-// A romfs file: the containers in it. A captured one (cache/warm/containers): its guest address, then the container.
+// A romfs file's bytes: the containers in them. A captured one (cache/warm/containers): its guest address, then the
+// container.
+static void scan_buf(uint8_t *d, uint64_t size, bool captured) {
+    uint32_t n;
+    if (captured) {
+        if (container_at(d + 8, size - 8, &n)) scan_container(&g_set, d + 8, n, rd64(d));
+    } else {
+        for (uint8_t *p = d; (p = memchr(p, 'B', size - (size_t)(p - d))); p++)
+            if (container_at(p, size - (size_t)(p - d), &n)) scan_container(&g_set, p, n, 0);
+    }
+    atomic_fetch_add(&g_scanned, size);
+}
+
 static void scan_file(const char *path, uint64_t size, bool captured) {
     if (size < 0x100 || size > (512ull << 20)) return;
     FILE *f = fopen(path, "rb");
@@ -240,15 +252,46 @@ static void scan_file(const char *path, uint64_t size, bool captured) {
     uint8_t *d = malloc(size);
     bool ok = d && fread(d, 1, size, f) == size;
     fclose(f);
-    uint32_t n;
-    if (ok && captured) {
-        if (container_at(d + 8, size - 8, &n)) scan_container(&g_set, d + 8, n, rd64(d));
-    } else if (ok) {
-        for (uint8_t *p = d; (p = memchr(p, 'B', size - (size_t)(p - d))); p++)
-            if (container_at(p, size - (size_t)(p - d), &n)) scan_container(&g_set, p, n, 0);
-    }
+    if (ok) scan_buf(d, size, captured);
     free(d);
-    atomic_fetch_add(&g_scanned, size);
+}
+
+// An install has no romfs/ folder, only the romfs.bin image the start screen built (runtime/romfs_build.c): its files
+// read straight from the image, through its own file table (the fs service's index isn't shared: the game may be
+// opening the image at the same time). Without this the warm-up found nothing on any install (2026-11-01; Z-A's
+// shader packs got the same fix in its extractor, a0ebbe4). Entries: parent, sibling, data offset, size, hash, name
+// length, then the name (padded to 4 bytes).
+#ifdef _WIN32
+#define xseek(f, o) _fseeki64(f, (long long)(o), SEEK_SET)  // (romfs.bin is over 4 GB)
+#else
+#define xseek(f, o) fseeko(f, (off_t)(o), SEEK_SET)
+#endif
+static bool scan_image(const char *img) {
+    FILE *f = fopen(img, "rb");
+    if (!f) return false;
+    uint64_t h[10];
+    uint8_t *meta = NULL;
+    bool ok = fread(h, 1, sizeof h, f) == sizeof h && h[0] == 0x50 && h[8] > 0 && h[8] < (64u << 20);
+    if (ok && (meta = malloc(h[8]))) ok = !xseek(f, h[7]) && fread(meta, 1, h[8], f) == h[8];
+    int files = 0;
+    for (uint64_t e = 0; ok && meta && e + 0x20 <= h[8];) {
+        uint64_t off, size;
+        uint32_t nlen;
+        memcpy(&off, meta + e + 8, 8), memcpy(&size, meta + e + 16, 8), memcpy(&nlen, meta + e + 28, 4);
+        if (e + 0x20 + nlen > h[8]) break;
+        char name[256];
+        snprintf(name, sizeof name, "%.*s", (int)(nlen < 255 ? nlen : 255), (const char *)meta + e + 0x20);
+        e += 0x20 + ((nlen + 3) & ~3u);
+        files++;
+        if (size < 0x100 || size > (512ull << 20) || skip_ext(name)) continue;
+        uint8_t *d = malloc(size);
+        if (d && !xseek(f, h[9] + off) && fread(d, 1, size, f) == size) scan_buf(d, size, false);
+        free(d);
+    }
+    free(meta);
+    fclose(f);
+    LOG("[warmup] romfs.bin: %d files scanned for shaders\n", files);
+    return ok;
 }
 
 static void scan_dir(const char *dir, bool captured) {
@@ -312,7 +355,12 @@ static void *run(void *arg) {
     set_init(&g_set, 1 << 17, 1 << 18);
     char dir[1100];
     snprintf(dir, sizeof dir, "%s/romfs", g_root);
-    scan_dir(dir, false);
+    struct stat sb;
+    if (!stat(dir, &sb) && S_ISDIR(sb.st_mode)) scan_dir(dir, false);  // (a source checkout: the files on their own)
+    else {
+        snprintf(dir, sizeof dir, "%s/romfs.bin", g_root);  // (an install)
+        scan_image(dir);
+    }
     extract_packed_shaders();
     scan_dir("cache/warm/romfs", false);
     int from_romfs = g_set.nprogs;
