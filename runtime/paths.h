@@ -40,6 +40,7 @@ bool rt_resource(const char *name, const char *dev_rel, char *out, size_t n);
 bool rt_remove_game_file(const char *game_dir, const char *name);
 // All the game files set up there (rt_remove_game_file on each, then the empty folder). Saves, seeds, settings stay.
 bool rt_remove_game_files(const char *game_dir);
+bool rt_remove_saves(void);  // <data root>/save emptied (Delete save data); false: refused or not all deleted
 // Bytes taken by the extracted game files in game_dir (links not followed).
 unsigned long long rt_game_files_size(const char *game_dir);
 
