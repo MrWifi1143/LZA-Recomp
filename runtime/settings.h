@@ -53,3 +53,4 @@ extern bool g_settings_fresh;  // no larecomp.ini yet (a first start): the start
 
 void settings_load(void);
 void settings_save(void);
+void settings_defaults(Settings *s);  // (what a first start has)

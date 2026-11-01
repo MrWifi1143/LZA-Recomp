@@ -12,7 +12,10 @@
 // from that folder at once; LARECOMP_MOD_INSTALL=<file or folder> installs a translation at once;
 // LARECOMP_LAUNCHER_KEYS=1 opens the keyboard section, =<slot> also waits for a new key for that input
 // (runtime/input_bind.h BIND_*), and <slot>:<key name> presses that key for it; LARECOMP_LAUNCHER_PAGE=options|
-// controls|files|mods opens that launcher page.
+// controls|files|mods opens that launcher page; LARECOMP_LAUNCHER_SIZE=<w>x<h> makes the launcher's window that size.
+// Any window size: drawn for 1280x720 and scaled to the window (ui_scale_*: a window the desktop stretched, F11 /
+// Alt+Enter fullscreen, a TV). A controller drives all of it: A selects, B goes back, L / R change tabs (the game's
+// own A and B: bindings.c), and the Controller tab's button test is a mode of its own (pad_nav_update).
 #include <SDL3/SDL.h>
 #include <float.h>
 #include <math.h>
@@ -21,6 +24,7 @@
 #include <string.h>
 
 #include "imgui.h"
+#include "imgui_internal.h"  // (the input queue: ui_scale_apply)
 #include "imgui_impl_vulkan.h"
 #include "imgui_impl_sdl3.h"
 
@@ -44,6 +48,7 @@ void vk_frame_end(const char *shot_path);
 void *vk_frame_cmd(void);
 bool vk_imgui_backend_init(void);
 void vk_imgui_backend_shutdown(void);
+void vk_imgui_fonts_changed(void);
 bool warmup_needed(const char *root);  // runtime/nvn/vulkan/warmup.c
 void warmup_start(void);
 int warmup_progress(int *done, int *total);
@@ -93,9 +98,11 @@ static const char *key_name(int sc) {
     }
 }
 
+static void focus_first(void);
 static void keys_section(void) {
     int cap_dev, cap_slot, ms_left;
     bind_capture_active(&cap_dev, &cap_slot, &ms_left);
+    focus_first();
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 2));
     ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(ImGui::GetStyle().CellPadding.x, 1));
     if (ImGui::BeginTable("##keys", 4, ImGuiTableFlags_SizingFixedFit)) {
@@ -165,6 +172,7 @@ static bool host_down(int host) {  // on any connected controller
     return false;
 }
 
+static const ImVec4 k_test_color(1.0f, 0.82f, 0.35f, 1);
 static void lamp(bool on) {  // a round indicator on the current line
     ImVec2 p = ImGui::GetCursorScreenPos();
     float r = ImGui::GetTextLineHeight() * 0.42f;
@@ -197,8 +205,79 @@ static void trigger_view(const char *label, float v) {
     ImGui::EndGroup();
 }
 
+// The menu with a controller. ImGui moves the focus with the d-pad / stick and selects / goes back with the game's own A
+// and B (where the A and B inputs are bound: by position, the right face button A, as in the game and its menus). The
+// Controller tab's button test is a mode: while it's on the buttons light their lamps and move nothing (held + and -
+// end it); after it, and after a new binding, the menu ignores the controller until every button is let go.
+static bool g_pad_test, g_pad_hold;
+static bool pad_any_down(void) {
+    for (int i = 0; i < g_npads; i++) {
+        for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; b++)
+            if (SDL_GetGamepadButton(g_pads[i], (SDL_GamepadButton)b)) return true;
+        if (SDL_GetGamepadAxis(g_pads[i], SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000 || SDL_GetGamepadAxis(g_pads[i], SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000)
+            return true;
+    }
+    return false;
+}
+static void pad_nav_update(ImGuiIO &io, bool test_shown) {  // (each frame, after drawing; test_shown: the Controller section)
+    refresh_pads();
+    if (!test_shown || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) g_pad_test = false;
+    static uint64_t both_since;  // (+ and - held together: the test ends)
+    if (g_pad_test && host_down(SDL_GAMEPAD_BUTTON_START) && host_down(SDL_GAMEPAD_BUTTON_BACK)) {
+        if (!both_since) both_since = SDL_GetTicks();
+        else if (SDL_GetTicks() - both_since >= 800) g_pad_test = false;
+    } else both_since = 0;
+    int dev = -1;
+    bool capture = bind_capture_active(&dev, NULL, NULL) && dev == BIND_DEV_PAD;
+    if (g_pad_test || capture) g_pad_hold = true;
+    else if (g_pad_hold && !pad_any_down()) g_pad_hold = false;
+    if (g_pad_hold) io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
+    else io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+    io.ConfigNavSwapGamepadButtons = g_bind_pad[BIND_A] == SDL_GAMEPAD_BUTTON_EAST;  // (ImGui's "activate" is the south button)
+}
+// A controller button pressed this frame, while the controller drives the menu (ImGui's names: FaceDown the south one)
+static bool pad_pressed(ImGuiKey k) {
+    return (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_NavEnableGamepad) && ImGui::IsKeyPressed(k, false);
+}
+static ImGuiKey pad_cancel_key(void) { return ImGui::GetIO().ConfigNavSwapGamepadButtons ? ImGuiKey_GamepadFaceDown : ImGuiKey_GamepadFaceRight; }
+static bool cancel_pressed(void) { return ImGui::IsKeyPressed(ImGuiKey_Escape, false) || pad_pressed(pad_cancel_key()); }
+// A page's first control focused when it was opened from the keyboard or a controller (not with the mouse)
+static bool g_focus_first, g_focus_wait;  // (wait: a tab chosen with L / R shows from the next frame - not this one's)
+static void focus_first(void) {
+    if (g_focus_first && !g_focus_wait) ImGui::SetKeyboardFocusHere(), g_focus_first = false;
+}
+// L / R between a page's tabs: tab_begin(n) before the tab bar, tab_flags(i) for each tab, tab_shown(i) in its body
+static int g_tab_cur, g_tab_want = -1, g_tab_to = -1;
+static void tab_begin(int n) {
+    g_tab_want = -1;
+    if (g_tab_cur >= n) g_tab_cur = 0;
+    if (pad_pressed(ImGuiKey_GamepadL1)) g_tab_want = (g_tab_cur + n - 1) % n;
+    else if (pad_pressed(ImGuiKey_GamepadR1)) g_tab_want = (g_tab_cur + 1) % n;
+    if (g_tab_want >= 0) g_tab_to = g_tab_want, g_focus_first = true;
+}
+static ImGuiTabItemFlags tab_flags(int i) { return g_tab_want == i ? ImGuiTabItemFlags_SetSelected : 0; }
+static void tab_shown(int i) {
+    g_tab_cur = i;
+    g_focus_wait = g_tab_to >= 0 && i != g_tab_to;
+    if (i == g_tab_to) g_tab_to = -1;
+}
+
 static void controller_section(void) {
     refresh_pads();
+    {  // the button test
+        int fam = bind_label_family();
+        if (!g_pad_test) {
+            focus_first();
+            if (ImGui::Button(T("Test the buttons", "Testar os botões"))) g_pad_test = true;
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", T("(the lamps light up as you press)", "(as luzes acendem ao apertar)"));
+        } else {
+            if (ImGui::Button(T("Stop testing", "Parar o teste"))) g_pad_test = false;
+            ImGui::SameLine();
+            ImGui::TextColored(k_test_color, g_pt ? "Testando: segure %s e %s juntos para parar." : "Testing: hold %s and %s together to stop.",
+                               bind_pad_label(SDL_GAMEPAD_BUTTON_START, fam), bind_pad_label(SDL_GAMEPAD_BUTTON_BACK, fam));
+        }
+    }
     if (!g_npads) {
         ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.40f, 1), "%s", T("No controller detected.", "Nenhum controle detectado."));
         ImGui::TextDisabled("%s", T("Connect one (USB or Bluetooth); it shows up here at once.",
@@ -421,6 +500,85 @@ static ImFont *g_title_font, *g_button_font;  // (Baloo 2, the font of the game'
 static const ImU32 k_accent = IM_COL32(240, 196, 92, 255), k_accent_hi = IM_COL32(252, 216, 128, 255),
                    k_panel = IM_COL32(18, 16, 22, 255);
 
+// The fonts, made at <density> times their size so the text stays sharp when the launcher is drawn bigger (ui_scale)
+static char g_font_path[1100], g_baloo_path[1100];
+static void load_fonts(float density) {
+    ImGuiIO &io = ImGui::GetIO();
+    static const ImWchar ranges[] = {0x20, 0xFF, 0};        // (Latin-1: Portuguese accents)
+    static const ImWchar title_ranges[] = {0x20, 0x7E, 0};  // (the banner's title: ASCII; it's big)
+    io.Fonts->Clear();
+    ImFontConfig cfg;
+    cfg.RasterizerDensity = density;
+    if (!g_font_path[0] || !io.Fonts->AddFontFromFileTTF(g_font_path, 26, &cfg, ranges)) io.Fonts->AddFontDefault(&cfg);
+    g_button_font = g_title_font = NULL;
+    if (g_baloo_path[0]) {
+        g_button_font = io.Fonts->AddFontFromFileTTF(g_baloo_path, 44, &cfg, ranges);
+        g_title_font = io.Fonts->AddFontFromFileTTF(g_baloo_path, 120, &cfg, title_ranges);
+    }
+}
+
+// The launcher is laid out for a 1280x720 window (the classic screen for 1080p). Another size - the desktop or the
+// compositor stretched the window to the screen, F11, a TV - draws all of it bigger (or smaller) to fit: ImGui works
+// in units of the layout's size (io.DisplaySize divided by the scale; a wider or taller window gets the extra room) and
+// draws at the window's real pixels (io.DisplayFramebufferScale times it); the mouse is scaled the same way. The fonts
+// are made again at the new size. ui_scale_begin before the frame's NewFrame calls, ui_scale_apply after the SDL one.
+static float g_ui_scale = 1, g_font_density = 1;
+static void ui_scale_begin(SDL_Window *win, float base_w, float base_h, bool grow_only) {
+    int w = 0, h = 0;
+    SDL_GetWindowSize(win, &w, &h);
+    float s = w > 0 && h > 0 ? fminf((float)w / base_w, (float)h / base_h) : 1;
+    if (grow_only && s < 1) s = 1;
+    s = fminf(fmaxf(s, 0.5f), 4.0f);
+    if (fabsf(s - 1) < 0.03f) s = 1;  // (a few pixels off: as made)
+    g_ui_scale = s;
+    float px = s * SDL_GetWindowPixelDensity(win), q = fminf(fmaxf(roundf(px * 4) / 4, 1.0f), 2.5f);  // (steps of 1/4)
+    if (q != g_font_density) {
+        g_font_density = q;
+        load_fonts(q);
+        vk_imgui_fonts_changed();  // (made again by the next ImGui_ImplVulkan_NewFrame)
+        fprintf(stderr, "[launcher] window %dx%d: drawn at %.2fx, fonts at %.2fx\n", w, h, s, q);
+    }
+}
+static void ui_scale_apply(ImGuiIO &io) {
+    float s = g_ui_scale;
+    if (s == 1) return;
+    io.DisplaySize = ImVec2(io.DisplaySize.x / s, io.DisplaySize.y / s);
+    io.DisplayFramebufferScale = ImVec2(io.DisplayFramebufferScale.x * s, io.DisplayFramebufferScale.y * s);
+    for (ImGuiInputEvent &e : ImGui::GetCurrentContext()->InputEventsQueue)  // (all of this frame's: the queue doesn't trickle)
+        if (e.Type == ImGuiInputEventType_MousePos && e.MousePos.PosX != -FLT_MAX)
+            e.MousePos.PosX /= s, e.MousePos.PosY /= s;
+}
+
+// The controller's buttons for the page: the button's name in a pill, what it does (right-aligned, ending at x)
+static void pad_hints(ImDrawList *d, float x, float y, bool back, bool tabs) {
+    if (!g_npads) return;
+    int fam = bind_label_family();
+    bool swap = ImGui::GetIO().ConfigNavSwapGamepadButtons;
+    char lr[48];
+    snprintf(lr, sizeof lr, "%s %s", bind_pad_label(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, fam), bind_pad_label(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, fam));
+    struct { const char *btn, *what; } h[4];
+    int n = 0;
+    if (g_pad_test) {
+        snprintf(lr, sizeof lr, "%s %s", bind_pad_label(SDL_GAMEPAD_BUTTON_START, fam), bind_pad_label(SDL_GAMEPAD_BUTTON_BACK, fam));
+        h[n++] = {lr, T("hold: stop the test", "segure: parar o teste")};
+    } else {
+        h[n++] = {bind_pad_label(swap ? SDL_GAMEPAD_BUTTON_EAST : SDL_GAMEPAD_BUTTON_SOUTH, fam), T("Select", "Selecionar")};
+        if (back) h[n++] = {bind_pad_label(swap ? SDL_GAMEPAD_BUTTON_SOUTH : SDL_GAMEPAD_BUTTON_EAST, fam), T("Back", "Voltar")};
+        if (tabs) h[n++] = {lr, T("Tabs", "Abas")};
+    }
+    ImFont *f = ImGui::GetFont();
+    float fs = ImGui::GetFontSize() * 0.85f, pad = 7, gap = 22;
+    for (int i = n - 1; i >= 0; i--) {
+        ImVec2 tw = f->CalcTextSizeA(fs, FLT_MAX, 0, h[i].what), bw = f->CalcTextSizeA(fs, FLT_MAX, 0, h[i].btn);
+        x -= tw.x;
+        d->AddText(f, fs, ImVec2(x, y), IM_COL32(200, 206, 222, 255), h[i].what);
+        x -= 8 + bw.x + 2 * pad;
+        d->AddRectFilled(ImVec2(x, y - 2), ImVec2(x + bw.x + 2 * pad, y + fs + 2), k_accent, fs * 0.5f + 2);
+        d->AddText(f, fs, ImVec2(x + pad, y), IM_COL32(16, 18, 24, 255), h[i].btn);
+        x -= gap;
+    }
+}
+
 static uint32_t rnd(uint32_t *s) { return *s = *s * 1664525u + 1013904223u, *s >> 8; }
 
 // Dusk sky and a faint dot grid, shared by the banner and the page headers
@@ -629,7 +787,9 @@ extern "C" void launcher_lg_run(const char *root) {
     bool classic = mode && *mode ? !strcmp(mode, "classic") : RT_CLASSIC_START_SCREEN;
     bool skip_now = g_settings.skip_start && !getenv("LARECOMP_LAUNCHER_SHOT");
     bool sized = !classic && !skip_now;
-    if (sized) ui_window_size_hint(k_launcher_w, k_launcher_h);
+    int lw = k_launcher_w, lh = k_launcher_h;
+    if (getenv("LARECOMP_LAUNCHER_SIZE")) sscanf(getenv("LARECOMP_LAUNCHER_SIZE"), "%dx%d", &lw, &lh);
+    if (sized) ui_window_size_hint(lw, lh);
     ui_window_init();
     SDL_Window *win = ui_window();
     ImGuiContext *prev_ctx = ImGui::GetCurrentContext();  // (the in-game menu's, when back here after a reboot)
@@ -638,24 +798,21 @@ extern "C" void launcher_lg_run(const char *root) {
     ImGuiIO &io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     io.IniFilename = NULL;
-    static const ImWchar ranges[] = {0x20, 0xFF, 0};  // (Latin-1: Portuguese accents)
+    io.ConfigInputTrickleEventQueue = false;  // (every input event in its frame: ui_scale_apply scales the mouse's)
     static const char *const fonts[] = {"C:/Windows/Fonts/segoeui.ttf", "/usr/share/fonts/noto/NotoSans-Regular.ttf",
                                         "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf",
                                         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"};
-    bool font = false;
     for (const char *p : fonts) {
         FILE *f = fopen(p, "rb");  // (a missing file is an assertion in ImGui, not a failure it returns)
         if (!f) continue;
         fclose(f);
-        font = io.Fonts->AddFontFromFileTTF(p, 26, NULL, ranges) != NULL;
-        if (font) break;
+        snprintf(g_font_path, sizeof g_font_path, "%s", p);
+        break;
     }
-    if (!font) io.Fonts->AddFontDefault();
-    char baloo[1100];
-    if (rt_resource("Baloo2-SemiBold.ttf", "third_party/fonts/Baloo2/Baloo2-SemiBold.ttf", baloo, sizeof baloo)) {
-        g_button_font = io.Fonts->AddFontFromFileTTF(baloo, 44, NULL, ranges);
-        g_title_font = io.Fonts->AddFontFromFileTTF(baloo, 120, NULL, ranges);
-    }
+    if (!rt_resource("Baloo2-SemiBold.ttf", "third_party/fonts/Baloo2/Baloo2-SemiBold.ttf", g_baloo_path, sizeof g_baloo_path))
+        g_baloo_path[0] = 0;
+    g_font_density = 1, g_ui_scale = 1;
+    load_fonts(1);
     ImGui::StyleColorsDark();
     ImGui::GetStyle().ScaleAllSizes(1.5f);
     if (!classic) {  // (the launcher's colors: the banner's dusk, the accent for what is on)
@@ -723,6 +880,16 @@ extern "C" void launcher_lg_run(const char *root) {
     int bg_i = g_settings.background >= 0 && g_settings.background <= 2 ? g_settings.background : 0;
     int pk_i = g_settings.pkhex_link >= 0 && g_settings.pkhex_link <= 2 ? g_settings.pkhex_link : 0;
     int prompts_i = g_settings.button_prompts >= 0 && g_settings.button_prompts <= 4 ? g_settings.button_prompts : 0;
+    auto restore_defaults = [&]() {  // (the Options' settings as a first start has them; Controls has its own Restore)
+        Settings d;
+        settings_defaults(&d);
+        res = 0;
+        for (int i = 0; i < 6; i++) if (res_lines[i] == d.res_height) res = i;
+        full = d.fullscreen, smaa = d.antialias == AA_SMAA, showfps = d.show_fps, realtime = !d.fixed_steps, experimental = d.experimental;
+        fps_i = d.fps == FPS_UNLIMITED ? 4 : d.fps == 144 ? 3 : d.fps == 120 ? 2 : d.fps == 60 ? 1 : 0;
+        wildb = d.wild_battle, prompts_i = d.button_prompts, smooth_sh = d.shadow_smooth, bg_i = d.background, pk_i = d.pkhex_link;
+        shl_i = d.shader_nowait;
+    };
     // Translation: the folders under mods/ (runtime/mods.h); 0 = none (the game's own English)
     static char mods[MODS_MAX][128];
     int nmods = mods_list(mods, MODS_MAX), mod = 0;
@@ -770,7 +937,7 @@ extern "C" void launcher_lg_run(const char *root) {
     // that size; resized here when the window was there already - back from the game)
     if (sized) {
         SDL_SetWindowFullscreen(win, false);
-        SDL_SetWindowSize(win, k_launcher_w, k_launcher_h);
+        SDL_SetWindowSize(win, lw, lh);
         SDL_SetWindowResizable(win, false);  // (after the size: on Wayland it pins min = max = the current size)
         SDL_SetWindowPosition(win, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     }
@@ -856,7 +1023,7 @@ extern "C" void launcher_lg_run(const char *root) {
                 ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
-            if (ImGui::Button(T("Cancel", "Cancelar"), ImVec2(140, 0))) ImGui::CloseCurrentPopup();
+            if (ImGui::Button(T("Cancel", "Cancelar"), ImVec2(140, 0)) || cancel_pressed()) ImGui::CloseCurrentPopup();
             ImGui::SetItemDefaultFocus();  // (a stray Enter / A press cancels)
             ImGui::EndPopup();
         }
@@ -875,6 +1042,7 @@ extern "C" void launcher_lg_run(const char *root) {
     auto mods_page = [&]() {
         bool busy = inst == MOD_INSTALL_RUNNING;
         ImGui::BeginDisabled(busy);
+        focus_first();
         if (ImGui::Button(T("Add a mod...", "Adicionar mod..."))) SDL_ShowOpenFileDialog(picked_mod, NULL, win, mod_filters, 1, NULL, false);
         ImGui::EndDisabled();
         ImGui::SameLine();
@@ -957,7 +1125,8 @@ extern "C" void launcher_lg_run(const char *root) {
                     ImGui::CloseCurrentPopup();
                 }
                 ImGui::SameLine();
-                if (ImGui::Button(T("Cancel", "Cancelar"), ImVec2(140, 0))) ImGui::CloseCurrentPopup();
+                if (ImGui::Button(T("Cancel", "Cancelar"), ImVec2(140, 0)) || cancel_pressed()) ImGui::CloseCurrentPopup();
+                ImGui::SetItemDefaultFocus();
             }
             ImGui::EndPopup();
         }
@@ -979,6 +1148,9 @@ extern "C" void launcher_lg_run(const char *root) {
         ImGui::TextDisabled("%s %s", T("Recommended:", "Recomendado:"), rec.text);
         ImGui::SameLine();
         if (ImGui::SmallButton(T("Apply", "Aplicar"))) apply_rec();
+        if (ImGui::SmallButton(T("Restore defaults", "Restaurar padrões"))) restore_defaults();
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", T("(the settings a new install starts with)", "(as configurações de uma instalação nova)"));
     };
 
     // The classic start screen: everything in one centered window (console ports)
@@ -998,9 +1170,6 @@ extern "C" void launcher_lg_run(const char *root) {
         if (getenv("LARECOMP_LAUNCHER_PAD")) ImGui::SetNextItemOpen(true, ImGuiCond_Once);
         bool pad_open = ImGui::CollapsingHeader(T("Controller", "Controle"));
         if (pad_open) controller_section();
-        // (while it is open the controller's buttons are being tested, not driving the menu)
-        if (pad_open) io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
-        else io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
         if (keys_test) ImGui::SetNextItemOpen(true, ImGuiCond_Once);
         if (ImGui::CollapsingHeader(T("Keyboard", "Teclado"))) keys_section();
         ImGui::Spacing();
@@ -1017,6 +1186,7 @@ extern "C" void launcher_lg_run(const char *root) {
                                         "Segure Shift ao iniciar o jogo para ver esta tela de novo."));
         ImGui::TextDisabled("v" RT_APP_VERSION);
         ImGui::End();
+        pad_nav_update(io, pad_open);
     };
 
     // The launcher: the banner and the buttons (home), or a page with a header bar and Back
@@ -1033,6 +1203,7 @@ extern "C" void launcher_lg_run(const char *root) {
         int st = setup_state();
         bool running = setup_running();
         bool pad_page = false;
+        static bool busy_before;  // (a popup open or a control in use last frame: Esc / B closed that, not the page)
         static int last_page = PAGE_HOME;  // (back on the home page: the keyboard / controller focus on the button left from)
         int came_from = page == PAGE_HOME && last_page != PAGE_HOME ? last_page : -1;
         last_page = page;
@@ -1085,7 +1256,8 @@ extern "C" void launcher_lg_run(const char *root) {
                 if (came_from >= 0 && r.to == came_from) ImGui::SetKeyboardFocusHere();  // (Exit's -1 isn't a page)
                 if (big_button(T(r.en, r.pt), bw, 58, false, true)) {
                     if (r.to < 0) exit(0);
-                    page = r.to;
+                    page = r.to, g_tab_cur = 0;
+                    g_focus_first = io.NavVisible;  // (opened from the keyboard / a controller: the focus goes along)
                 }
                 y += 58 + 10;
             }
@@ -1095,6 +1267,7 @@ extern "C" void launcher_lg_run(const char *root) {
                 ImGui::SetTooltip("%s", T("Hold Shift while starting the game to see it again.", "Segure Shift ao iniciar o jogo para ver de novo."));
             ImGui::SetCursorScreenPos(ImVec2(bx, H - 40));
             ImGui::TextDisabled("v" RT_APP_VERSION);
+            pad_hints(d, W - 34, H - 38, false, false);
         } else {
             static const char *const titles_en[] = {"", "Options", "Controls", "Game Files", "Mods"};
             static const char *const titles_pt[] = {"", "Opções", "Controles", "Arquivos do jogo", "Mods"};
@@ -1106,14 +1279,16 @@ extern "C" void launcher_lg_run(const char *root) {
             d->AddText(bf, 44, ImVec2(36, 40), IM_COL32(240, 244, 255, 255), T(titles_en[page], titles_pt[page]));
             ImGui::SetCursorScreenPos(ImVec2(W - 36 - 180, 26));
             if (ImGui::Button(T("Back", "Voltar"), ImVec2(180, 0))) page = PAGE_HOME;
+            pad_hints(d, W - 36 - 180 - 30, 36, true, page == PAGE_OPTIONS || page == PAGE_CONTROLS);
             ImGui::SetCursorScreenPos(ImVec2(36, bar + 18));
             ImGui::BeginChild("##page", ImVec2(W - 72, H - bar - 36));
             ImGui::PushItemWidth(420);
             if (page == PAGE_OPTIONS) {
+                tab_begin(3);
                 if (ImGui::BeginTabBar("##opt")) {
-                    if (ImGui::BeginTabItem(T("Display", "Tela"))) { ImGui::Spacing(); settings_display(); ImGui::EndTabItem(); }
-                    if (ImGui::BeginTabItem(T("Graphics", "Gráficos"))) { ImGui::Spacing(); settings_graphics(); ImGui::EndTabItem(); }
-                    if (ImGui::BeginTabItem(T("Game", "Jogo"))) { ImGui::Spacing(); settings_game(); ImGui::EndTabItem(); }
+                    if (ImGui::BeginTabItem(T("Display", "Tela"), NULL, tab_flags(0))) { tab_shown(0); ImGui::Spacing(); focus_first(); settings_display(); ImGui::EndTabItem(); }
+                    if (ImGui::BeginTabItem(T("Graphics", "Gráficos"), NULL, tab_flags(1))) { tab_shown(1); ImGui::Spacing(); focus_first(); settings_graphics(); ImGui::EndTabItem(); }
+                    if (ImGui::BeginTabItem(T("Game", "Jogo"), NULL, tab_flags(2))) { tab_shown(2); ImGui::Spacing(); focus_first(); settings_game(); ImGui::EndTabItem(); }
                     ImGui::EndTabBar();
                 }
                 ImGui::Spacing();
@@ -1123,10 +1298,11 @@ extern "C" void launcher_lg_run(const char *root) {
                 ImGui::TextDisabled("%s", T("These settings are also in the game: Menu > Help > Settings.",
                                             "Estas configurações também estão no jogo: Menu > Help > Settings."));
             } else if (page == PAGE_CONTROLS) {
+                tab_begin(2);
                 if (ImGui::BeginTabBar("##ctl")) {
                     ImGuiTabItemFlags kf = keys_test && frame < 2 ? ImGuiTabItemFlags_SetSelected : 0;
-                    if (ImGui::BeginTabItem(T("Controller", "Controle"))) { pad_page = true; controller_section(); ImGui::EndTabItem(); }
-                    if (ImGui::BeginTabItem(T("Keyboard", "Teclado"), NULL, kf)) { keys_section(); ImGui::EndTabItem(); }
+                    if (ImGui::BeginTabItem(T("Controller", "Controle"), NULL, tab_flags(0))) { tab_shown(0); pad_page = true; controller_section(); ImGui::EndTabItem(); }
+                    if (ImGui::BeginTabItem(T("Keyboard", "Teclado"), NULL, kf | tab_flags(1))) { tab_shown(1); keys_section(); ImGui::EndTabItem(); }
                     ImGui::EndTabBar();
                 }
             } else if (page == PAGE_FILES) {
@@ -1137,18 +1313,21 @@ extern "C" void launcher_lg_run(const char *root) {
                                            "(.nsp / .xci, com o seu prod.keys) ou o exefs e o romfs extraídos. Eles são preparados uma vez "
                                            "e o código do jogo é recompilado para este PC."));
                 ImGui::Spacing();
+                focus_first();
                 game_files_section(win);
             } else if (page == PAGE_MODS) {
                 mods_page();
             }
             ImGui::PopItemWidth();
             ImGui::EndChild();
-            if (ImGui::IsKeyPressed(ImGuiKey_Escape) && !bind_capture_active(NULL, NULL, NULL)) page = PAGE_HOME;
+            if (cancel_pressed() && !busy_before && !g_pad_test && !bind_capture_active(NULL, NULL, NULL)) {
+                g_focus_first = false;
+                page = PAGE_HOME;
+            }
         }
-        // (while the controller tab is open its buttons are being tested, not driving the launcher)
-        if (pad_page) io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
-        else io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+        busy_before = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) || ImGui::IsAnyItemActive();
         ImGui::End();
+        pad_nav_update(io, pad_page);
     };
 
     // (~60 redraws a second: the frames aren't paced by the display here, and spun at ~3000 a second)
@@ -1164,6 +1343,11 @@ extern "C" void launcher_lg_run(const char *root) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (bind_capture_event(&e)) continue;  // (waiting for a new key: the press is the binding's)
+            if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && !classic &&
+                (e.key.scancode == SDL_SCANCODE_F11 || (e.key.scancode == SDL_SCANCODE_RETURN && (e.key.mod & SDL_KMOD_ALT)))) {
+                SDL_SetWindowFullscreen(win, !(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN));  // (drawn to fit: ui_scale)
+                continue;
+            }
             ImGui_ImplSDL3_ProcessEvent(&e);
             if (e.type == SDL_EVENT_QUIT) exit(0);
         }
@@ -1204,8 +1388,10 @@ extern "C" void launcher_lg_run(const char *root) {
             k.key.down = true;
             SDL_PushEvent(&k);
         }
+        ui_scale_begin(win, classic ? 1920.0f : (float)k_launcher_w, classic ? 1080.0f : (float)k_launcher_h, classic);
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplSDL3_NewFrame();
+        ui_scale_apply(io);
         ImGui::NewFrame();
         if (classic) classic_frame();
         else launcher_frame();
@@ -1255,8 +1441,10 @@ extern "C" void launcher_lg_run(const char *root) {
                 if (e.type == SDL_EVENT_QUIT) exit(0);
             }
             if (!vk_frame_begin(bg)) { SDL_Delay(16); continue; }
+            ui_scale_begin(win, classic ? 1920.0f : (float)k_launcher_w, classic ? 1080.0f : (float)k_launcher_h, classic);
             ImGui_ImplVulkan_NewFrame();
             ImGui_ImplSDL3_NewFrame();
+            ui_scale_apply(io);
             ImGui::NewFrame();
             ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x / 2, io.DisplaySize.y / 2), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
             ImGui::SetNextWindowSize(ImVec2(760, 0));
@@ -1285,6 +1473,7 @@ extern "C" void launcher_lg_run(const char *root) {
     if (sized) {  // the game's window: its usual size, or fullscreen (as runtime/nvn/vulkan/device.c opens it)
         int w = 1280, h = 720;
         if (getenv("LARECOMP_WINDOW")) sscanf(getenv("LARECOMP_WINDOW"), "%dx%d", &w, &h);
+        SDL_SetWindowFullscreen(win, false);  // (the launcher's F11)
         SDL_SetWindowResizable(win, true);
         SDL_SetWindowSize(win, w, h);
         SDL_SetWindowPosition(win, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);

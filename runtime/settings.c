@@ -16,22 +16,25 @@ static const char *settings_file(void) {
     return e && *e ? e : "larecomp.ini";
 }
 
-Settings g_settings = {
-    .fullscreen = false,
-    .fps = 30,
-    .volume = 1.0f,
-    .mouse_sens = 0.1f,
-    .mouse_camera = true,
-    .stick_deadzone = 0.15f,
-    .reverb = true,
-    .shadow_smooth = true,
-    .movie_audio = true,
-    .show_fps = false,
-    .render_thread = true,
-    .vertex_read = VREAD_AUTO,
-    .upscaler = UPSCALE_SHARP,
-    .antialias = AA_SMAA,  // (the game has no anti-aliasing of its own)
-};
+// The defaults (also the launcher's Restore defaults: settings_defaults)
+#define SETTINGS_DEFAULTS {                                                 \
+    .fullscreen = false,                                                    \
+    .fps = 30,                                                              \
+    .volume = 1.0f,                                                         \
+    .mouse_sens = 0.1f,                                                     \
+    .mouse_camera = true,                                                   \
+    .stick_deadzone = 0.15f,                                                \
+    .reverb = true,                                                         \
+    .shadow_smooth = true,                                                  \
+    .movie_audio = true,                                                    \
+    .show_fps = false,                                                      \
+    .render_thread = true,                                                  \
+    .vertex_read = VREAD_AUTO,                                              \
+    .upscaler = UPSCALE_SHARP,                                              \
+    .antialias = AA_SMAA,  /* (the game has no anti-aliasing of its own) */ \
+}
+Settings g_settings = SETTINGS_DEFAULTS;
+void settings_defaults(Settings *s) { *s = (Settings)SETTINGS_DEFAULTS; }
 
 // Unknown keys (an older larecomp.ini: Link's Awakening's options from LAS Recomp) are ignored, and dropped at the
 // next save.
