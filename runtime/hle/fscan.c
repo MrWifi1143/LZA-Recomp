@@ -32,7 +32,36 @@ static bool step_ok(float d) {
     return false;
 }
 
+// (research: <live>/find64 holding a hex value: every aligned 8-byte word of the heap equal to it, logged with the
+// 16 words before it, "[find64]")
+static void find64_present(void) {
+    if (!getenv("LARECOMP_LIVE")) return;
+    char p[600];
+    snprintf(p, sizeof p, "%s/find64", getenv("LARECOMP_LIVE"));
+    FILE *f = fopen(p, "r");
+    if (!f) return;
+    unsigned long long want = 0;
+    int ok = fscanf(f, "%llx", &want) == 1;
+    fclose(f), remove(p);
+    if (!ok) return;
+    extern uint64_t g_stdheap_used;
+    uint64_t top = g_stdheap_used ? STDHEAP_BASE + g_stdheap_used - HEAP_BASE : 0;
+    uint64_t words = (kernel_heap_size() > top ? kernel_heap_size() : top) / 8;
+    const uint64_t *heap = (const uint64_t *)(uintptr_t)HEAP_BASE;
+    int hits = 0;
+    for (uint64_t i = 56; i + 24 < words && hits < 200; i++) {
+        if (heap[i] != want) continue;
+        char line[2048];
+        int n = 0;
+        for (int j = -56; j < 24 && n < 2000; j++) n += snprintf(line + n, sizeof line - n, " %s%llx", j ? "" : "*", (unsigned long long)heap[i + j]);
+        LOG("[find64] %llx:%s\n", (unsigned long long)(HEAP_BASE + i * 8), line);
+        hits++;
+    }
+    LOG("[find64] %llx: %d hits\n", want, hits);
+}
+
 void fscan_present(uint64_t frame) {
+    find64_present();
     static long at = -2;
     if (at == -2) at = getenv("LARECOMP_FSCAN") ? atol(getenv("LARECOMP_FSCAN")) : -1;
     if (at < 0 && getenv("LARECOMP_FSCAN_LIVE") && getenv("LARECOMP_LIVE") && frame % 4 == 0) {  // (or when <live>/scan_now appears)
