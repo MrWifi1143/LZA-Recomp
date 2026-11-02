@@ -632,6 +632,83 @@ static int pla_gate30_hook(Cpu *c, uint64_t addr) {
     return !rt_pla_tick(0x6a30);
 }
 
+// Research (LARECOMP_PLA_AIDUMP=1 + <live>/aidump): the behaviour tree components seen (f_7000a6bc64's x0, up to 8),
+// each with what it points to two levels down, written to <live>/ai_<present>_<n>.bin when the file appears (records:
+// u64 address, u32 size, u32 path length, the path ("+off/+off/"), the bytes) - for comparing runs offline.
+static uint64_t g_ai_seen[64];
+static int pla_ai_seen_hook(Cpu *c, uint64_t addr) {
+    static int watched;  // (LARECOMP_PLA_AI_WATCH=<off>,...,<last off>: a watchpoint on that word of the first component)
+    if (!watched && getenv("LARECOMP_PLA_AI_WATCH") && c->x[0]) {
+        uint64_t a = c->x[0];
+        char *e = getenv("LARECOMP_PLA_AI_WATCH");
+        while (*e) {
+            uint64_t off = strtoull(e, &e, 16);
+            if (*e == ',') { e++; a = *(const uint64_t *)(uintptr_t)(a + off); if (!a) break; }
+            else { a += off; break; }
+        }
+        if (a && !*e) {
+            watched = 1;
+            void hwwatch_arm(uint64_t addr, uint64_t len);
+            LOG("[aiwatch] component %llx: watching %llx\n", (unsigned long long)c->x[0], (unsigned long long)a);
+            hwwatch_arm(a, 4);
+        }
+    }
+    for (int i = 0; i < 64 && c->x[0]; i++) {
+        if (g_ai_seen[i] == c->x[0]) break;
+        if (!g_ai_seen[i]) { g_ai_seen[i] = c->x[0]; break; }
+    }
+    (void)addr;
+    return 0;
+}
+static void aidump_node(FILE *f, uint64_t a, const char *path, int depth, size_t *budget) {
+    uint32_t len = depth ? 0x400 : 0x800;
+    if (a < 0x7200000000ull || a >= 0x7400000000ull || (a & 7) || *budget < len) return;
+    *budget -= len;
+    uint32_t pl = (uint32_t)strlen(path);
+    fwrite(&a, 8, 1, f), fwrite(&len, 4, 1, f), fwrite(&pl, 4, 1, f), fwrite(path, 1, pl, f);
+    fwrite((const void *)(uintptr_t)a, 1, len, f);
+    if (depth >= 2) return;
+    for (uint32_t o = 0; o < len; o += 8) {
+        uint64_t q = *(const uint64_t *)(uintptr_t)(a + o);
+        if (q == a) continue;
+        char sub[96];
+        snprintf(sub, sizeof sub, "%s+%x/", path, o);
+        aidump_node(f, q, sub, depth + 1, budget);
+    }
+}
+void pla_aidump_present(void) {
+    static const char *dir;
+    static int init;
+    if (!init) init = 1, dir = getenv("LARECOMP_PLA_AIDUMP") ? getenv("LARECOMP_LIVE") : NULL;
+    if (!dir) return;
+    char p[600];
+    snprintf(p, sizeof p, "%s/aidump", dir);
+    if (remove(p)) return;
+    extern uint64_t renderer_present_count(void);
+    float nx = 0, nz = 0, nr = -1;  // (LARECOMP_PLA_AIDUMP=<x>,<z>,<r>: only those with a position that close one level down)
+    sscanf(getenv("LARECOMP_PLA_AIDUMP"), "%f,%f,%f", &nx, &nz, &nr);
+    for (int i = 0; i < 64 && g_ai_seen[i]; i++) {
+        if (nr > 0) {
+            bool near = false;
+            const uint64_t *top = (const uint64_t *)(uintptr_t)g_ai_seen[i];
+            for (int k = 0; k < 0x100 && !near; k++) {
+                uint64_t q = top[k];
+                if (q < 0x7200000000ull || q >= 0x7400000000ull || (q & 3)) continue;
+                const float *fv = (const float *)(uintptr_t)q;
+                for (int w = 0; w + 2 < 0x100 && !near; w++)
+                    near = fabsf(fv[w] - nx) < nr && fabsf(fv[w + 2] - nz) < nr && fv[w + 1] > 0 && fv[w + 1] < 200;
+            }
+            if (!near) continue;
+        }
+        snprintf(p, sizeof p, "%s/ai_%llu_%d.bin", dir, (unsigned long long)renderer_present_count(), i);
+        FILE *f = fopen(p, "wb");
+        if (!f) continue;
+        size_t budget = 24u << 20;
+        aidump_node(f, g_ai_seen[i], "", 0, &budget);
+        fclose(f);
+    }
+}
+
 // Research (LARECOMP_PLA_FRAMES_USERS=<presents>): who else asks a clock for its frames (f_70024a84fc, also reached
 // from the thunk above): the callers (lr) and how often, listed once after that many presents of the world.
 static int pla_frames_users_hook(Cpu *c, uint64_t addr) {
@@ -695,6 +772,7 @@ void pla60_configure(const char *exefs) {
                 rt_register_fnhook_at(0x70024a87d4ull, pla_frames_users_hook);
                 rt_register_fnhook_at(0x70024a8cc4ull, pla_frames_users_hook);
             }
+            if (getenv("LARECOMP_PLA_AIDUMP")) rt_register_fnhook_at(0x7000a6bc64ull, pla_ai_seen_hook);
             for (char *e = getenv("LARECOMP_PLA_GATE30"); e && *e;) {
                 uint64_t a = strtoull(e, &e, 16);
                 if (a) rt_register_fnhook_at(a, pla_gate30_hook);
