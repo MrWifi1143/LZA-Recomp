@@ -445,6 +445,16 @@ static int pla_mouse_look_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     extern uint64_t g_field_camera_frame, renderer_game_frame(void);  // (runtime/hle/menu_mouse.c: not in a menu)
     g_field_camera_frame = renderer_game_frame();
+    static int camlog = -1;  // (research, LARECOMP_PLA_CAM_LOG=<every n>: the camera's yaw and pitch, the caller)
+    if (camlog < 0) camlog = getenv("LARECOMP_PLA_CAM_LOG") ? atoi(getenv("LARECOMP_PLA_CAM_LOG")) : 0;
+    if (camlog > 0) {
+        static unsigned n;
+        const uint8_t *cm = (const uint8_t *)(uintptr_t)c->x[0];
+        extern uint64_t renderer_present_count(void);
+        if (n++ % (unsigned)camlog == 0 && n < 4000)
+            LOG("[cam] %llx from %llx present %llu yaw %g pitch %g\n", (unsigned long long)c->x[0], (unsigned long long)c->x[30],
+                (unsigned long long)renderer_present_count(), *(const float *)(cm + 0x360), *(const double *)(cm + 0x700));
+    }
     if (!g_pla_mouse_look) return 0;
     extern bool input_mouse_camera_take(float *dyaw, float *dpitch);
     float dy, dp;
@@ -495,6 +505,68 @@ static int pla_script_frames_hook(Cpu *c, uint64_t addr) {
     return 1;
 }
 
+// Research (LARECOMP_PLA_BALL_LOG=1): a thrown object's flight step (f_7001a7191c state 1, at its velocity read
+// f_7002adbce0 from 0x7001a71b98): the frames it was given ([sp]), its drag (s8) and lift (s9), the velocity read.
+static int pla_ball_log_hook(Cpu *c, uint64_t addr) {
+    if (c->x[30] != 0x7001a71b9cull) return 0;
+    float fr, s8, s9;
+    memcpy(&fr, (const void *)(uintptr_t)c->sp, 4), memcpy(&s8, &c->v[8], 4), memcpy(&s9, &c->v[9], 4);
+    rt_call_original(c, addr);
+    float v[4];
+    memcpy(v, &c->v[0], 16);
+    static int n;
+    extern uint64_t renderer_present_count(void);
+    if (n++ < 400) LOG("[ball] present %llu frames %g drag %g lift %g velocity %g %g %g\n", (unsigned long long)renderer_present_count(), fr, s8, s9, v[0], v[1], v[2]);
+    return 1;
+}
+
+// (and, with it, the clock object f_7001a7236c hands that step: its vtable and the frames getter at +0x30)
+static int pla_ball_clock_hook(Cpu *c, uint64_t addr) {
+    if (c->x[30] != 0x7001a71a28ull) return 0;
+    uint64_t out = c->x[8];
+    rt_call_original(c, addr);
+    uint64_t o = *(const uint64_t *)(uintptr_t)out, vt = o ? *(const uint64_t *)(uintptr_t)o : 0;
+    static int n;
+    if (n++ < 3) LOG("[ball] clock %llx vtable %llx frames getter %llx\n", (unsigned long long)o, (unsigned long long)vt,
+                     vt ? (unsigned long long)*(const uint64_t *)(uintptr_t)(vt + 0x30) : 0ull);
+    return 1;
+}
+
+// Research (LARECOMP_PLA_FLICK_LOG=1): a wild Pokémon's "flick the ball away" check (f_7001aa085c, x0 = its component):
+// each change of its answer is logged with the flags it reads and the frame.
+static int pla_flick_log_hook(Cpu *c, uint64_t addr) {
+    uint64_t o = c->x[0];
+    const uint8_t *m = (const uint8_t *)(uintptr_t)o;
+    rt_call_original(c, addr);
+    static uint64_t last_o; static int last_r = -1;
+    int r = (int)(c->x[0] & 1);
+    if (o != last_o || r != last_r) {
+        extern uint64_t renderer_present_count(void);
+        LOG("[flick] %llx -> %d at present %llu (8d9 %u 821 %u 81d %u 956 %u a90 %u | 8b0 %d 8b4 %d)\n", (unsigned long long)o, r,
+            (unsigned long long)renderer_present_count(), m[0x8d9], m[0x821], m[0x81d], m[0x956], m[0xa90],
+            *(const int *)(m + 0x8b0), *(const int *)(m + 0x8b4));
+        last_o = o, last_r = r;
+    }
+    return 1;
+}
+
+// Research (LARECOMP_PLA_FLICK_LOG=1, with the above): the hit events reaching a wild Pokémon (f_7001911760, x2 = the
+// event, its type at +0xf0; 5 = a ball's hit, which runs the capture checks)
+static int pla_hit_event_hook(Cpu *c, uint64_t addr) {
+    uint64_t ev = c->x[2];
+    int type = ev ? *(const int *)(uintptr_t)(ev + 0xf0) : -1;
+    static int n;
+    if (n++ < 400) {
+        extern uint64_t renderer_present_count(void);
+        LOG("[hitev] obj %llx event %llx type %d at present %llu (event vtable %llx, obj vtable %llx)\n", (unsigned long long)c->x[1],
+            (unsigned long long)ev, type, (unsigned long long)renderer_present_count(),
+            ev ? (unsigned long long)*(const uint64_t *)(uintptr_t)ev : 0ull,
+            c->x[1] ? (unsigned long long)*(const uint64_t *)(uintptr_t)c->x[1] : 0ull);
+    }
+    (void)addr;
+    return 0;
+}
+
 // A character's scripted move (f_70019b2140, x0 = its navigator, each update while [+0x3e4] == 1): the progress +0x4bc
 // goes up by the step +0x4b4 an update - no frame time - and the move ends at 1 (state 0, the script's "arrived" check
 // f_70019b24dc turns false). At 60 fps moves ended twice as early: Volo removed mid-walk after his battle, people in
@@ -525,6 +597,55 @@ static int pla_state_watch_hook(Cpu *c, uint64_t addr) {
     return 0;
 }
 
+// A thrown object's flight (Poke Balls, bait, mud: f_7001a7191c with [+0x5f8] == 1) each update takes the frames the
+// update is worth from its clock (the getter at its vtable +0x30, f_70024a8660: 1 an update, as at 30 fps), then adds
+// them / 30 to its flight time, lifts it by lift * frames * its speed across and keeps (1 - drag * frames) of its
+// velocity (bin/capture/throw_param_table.bin: drag 0.04, lift 0.01). At 144 fps a ball lost 4% of its speed 144 times
+// a second - 0.3% left after a second instead of 29% - and dropped short of the Pokemon it was thrown at (and at 60
+// fps, of far ones). The frames are scaled to the frame time for the update (1 at 30 fps). LARECOMP_PLA_THROW_SCALE=0:
+// off.
+#define PLA_THROW_FRAMES 0x70024a8660ull
+#define PLA_THROW_STEP_RET 0x7001a71a40ull  // (the flight step's call of it)
+static int pla_throw_frames_hook(Cpu *c, uint64_t addr) {
+    if (c->x[30] != PLA_THROW_STEP_RET) return 0;
+    rt_call_original(c, addr);
+    c->v[0] = rt_scale30_f32((uint32_t)c->v[0]);
+    return 1;
+}
+
+// The player's fall time (f_7001713904, s0 = the step: its two callers pass a clock's frames / 30, or 1 / 30 when
+// there is no clock) adds the step each update to [+0x2ac] and hands it, in ms, to the animation as PL_FALLTIME: above
+// 30 fps falls counted 1/30 s an update (4.8x too fast at 144). The step is scaled to the frame time for the update.
+// LARECOMP_PLA_THROW_SCALE=0 turns it off with the throw's.
+#define PLA_FALL_TIME 0x7001713904ull
+static int pla_fall_time_hook(Cpu *c, uint64_t addr) {
+    c->v[0] = rt_scale30_f32((uint32_t)c->v[0]);
+    (void)addr;
+    return 0;
+}
+
+// Research (LARECOMP_PLA_FRAMES_USERS=<presents>): who else asks a clock for its frames (f_70024a84fc, also reached
+// from the thunk above): the callers (lr) and how often, listed once after that many presents of the world.
+static int pla_frames_users_hook(Cpu *c, uint64_t addr) {
+    static struct { uint64_t lr; unsigned n; } u[64];
+    static int nu, done;
+    static uint64_t from;
+    extern uint64_t renderer_present_count(void);
+    uint64_t now = renderer_present_count();
+    if (done) return 0;
+    if (!from) from = now;
+    int i = 0;
+    while (i < nu && u[i].lr != c->x[30]) i++;
+    if (i == nu && nu < 64) u[nu++].lr = c->x[30];
+    if (i < 64) u[i].n++;
+    if (now - from > (uint64_t)atol(getenv("LARECOMP_PLA_FRAMES_USERS"))) {
+        done = 1;
+        for (int k = 0; k < nu; k++) LOG("[frames users] lr %llx: %u calls over %llu presents\n", (unsigned long long)u[k].lr, u[k].n, (unsigned long long)(now - from));
+    }
+    (void)addr;
+    return 0;
+}
+
 void pla60_configure(const char *exefs) {
     char p[1100];
     snprintf(p, sizeof p, "%s/main", exefs);
@@ -550,8 +671,17 @@ void pla60_configure(const char *exefs) {
             g_pla_mouse_look = !getenv("LARECOMP_PLA_MOUSE_LOOK") || atoi(getenv("LARECOMP_PLA_MOUSE_LOOK")) != 0;
             rt_register_fnhook_at(0x700193d16cull, pla_mouse_look_hook);
             rt_register_fnhook_at(PLA_SCRIPT_STEP, pla_script_step_hook);
+            if (getenv("LARECOMP_PLA_FLICK_LOG")) rt_register_fnhook_at(0x7001aa085cull, pla_flick_log_hook);
+            if (getenv("LARECOMP_PLA_FLICK_LOG")) rt_register_fnhook_at(0x7001911760ull, pla_hit_event_hook);
+            if (getenv("LARECOMP_PLA_BALL_LOG")) rt_register_fnhook_at(0x7002adbce0ull, pla_ball_log_hook);
+            if (getenv("LARECOMP_PLA_BALL_LOG")) rt_register_fnhook_at(0x7001a7236cull, pla_ball_clock_hook);
             if (!getenv("LARECOMP_PLA_WAIT_TICK") || atoi(getenv("LARECOMP_PLA_WAIT_TICK"))) rt_register_fnhook_at(PLA_SCRIPT_FRAMES, pla_script_frames_hook);
             if (!getenv("LARECOMP_PLA_MOVE_SCALE") || atoi(getenv("LARECOMP_PLA_MOVE_SCALE"))) rt_register_fnhook_at(PLA_SCRIPTED_MOVE, pla_scripted_move_hook);
+            if (!getenv("LARECOMP_PLA_THROW_SCALE") || atoi(getenv("LARECOMP_PLA_THROW_SCALE"))) {
+                rt_register_fnhook_at(PLA_THROW_FRAMES, pla_throw_frames_hook);
+                rt_register_fnhook_at(PLA_FALL_TIME, pla_fall_time_hook);
+            }
+            if (getenv("LARECOMP_PLA_FRAMES_USERS")) rt_register_fnhook_at(0x70024a84fcull, pla_frames_users_hook);
             if (getenv("LARECOMP_PLA_STATE_WATCH")) rt_register_fnhook_at(0x70019b24dcull, pla_state_watch_hook);
             // the mouse in the menus (runtime/hle/menu_mouse.c): ui2d's CalculateMtx walk over the panes, each frame
             extern void menu_mouse_configure(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t);

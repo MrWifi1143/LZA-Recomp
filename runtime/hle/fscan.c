@@ -38,7 +38,10 @@ void fscan_present(uint64_t frame) {
     if (at < 0 && getenv("LARECOMP_FSCAN_LIVE") && getenv("LARECOMP_LIVE") && frame % 4 == 0) {  // (or when <live>/scan_now appears)
         char p[600];
         snprintf(p, sizeof p, "%s/scan_now", getenv("LARECOMP_LIVE"));
-        if (!remove(p)) at = (long)frame + 1, g_nauto = g_nauto_int = 0, LOG("[fscan] asked at present %llu\n", (unsigned long long)frame);
+        long later = 1;  // (the file may hold how many presents later to scan)
+        FILE *lf = fopen(p, "r");
+        if (lf) { if (fscanf(lf, "%ld", &later) != 1 || later < 1) later = 1; fclose(lf); }
+        if (!remove(p)) at = (long)frame + later, g_nauto = g_nauto_int = 0, LOG("[fscan] asked at present %llu for %ld\n", (unsigned long long)frame, at);
     }
     if (at < 0 || frame < (uint64_t)at || frame > (uint64_t)at + 3) return;
     const uint32_t *heap = (const uint32_t *)(uintptr_t)HEAP_BASE;
@@ -92,6 +95,21 @@ void fscan_present(uint64_t frame) {
             memcpy(&a, &g_a[i], 4), memcpy(&b, &g_b[i], 4), memcpy(&c, &ci, 4);
             if (!isfinite(a) || !isfinite(c) || fabsf(a) > 1e6f) continue;
             float d1 = b - a, d2 = c - b;
+            {   // (LARECOMP_FSCAN_RANGE=<lo>,<hi>,<min step>: any value in [lo, hi] moving that much per frame, same direction)
+                static float rlo = 1, rhi = 0, rmin = 0;
+                static int rinit;
+                if (!rinit) { rinit = 1; if (getenv("LARECOMP_FSCAN_RANGE")) sscanf(getenv("LARECOMP_FSCAN_RANGE"), "%f,%f,%f", &rlo, &rhi, &rmin); }
+                if (rlo <= rhi) {
+                    if (a >= rlo && a <= rhi && fabsf(d1) >= rmin && fabsf(d2) >= rmin && (d1 > 0) == (d2 > 0) && hits < 3000) {
+                        LOG("[fscan] %llx: %g %g %g (moving %g %g)\n", (unsigned long long)(HEAP_BASE + i * 4), a, b, c, d1, d2);
+                        hits++;
+                        static float rauto = -1;  // (LARECOMP_FSCAN_RANGE_AUTO=<step>: with WATCH=auto, the first going up that fast)
+                        if (rauto < 0) rauto = getenv("LARECOMP_FSCAN_RANGE_AUTO") ? (float)atof(getenv("LARECOMP_FSCAN_RANGE_AUTO")) : 0;
+                        if (rauto > 0 && d1 >= rauto && d2 >= rauto * 0.3f && g_nauto < 4) g_auto[g_nauto++] = HEAP_BASE + i * 4;
+                    }
+                    continue;
+                }
+            }
             if (!step_ok(d1) || fabsf(d1 - d2) > fabsf(d1) * 1e-3f) continue;
             LOG("[fscan] %llx: %g %g %g (step %g)\n", (unsigned long long)(HEAP_BASE + i * 4), a, b, c, d1);
             if (getenv("LARECOMP_FSCAN_DUMP") && hits < 12) {  // (research: the words around it, as hex and float)
