@@ -14,6 +14,7 @@
 // LARECOMP_FPS60=1 turns it on (settings: fps = 60). LARECOMP_G1_READERS="<addr>[,<addr>...]" (research): G[1] is
 // 16.67 ms only while those functions run, to find which readers a speed comes from.
 #include <stdatomic.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -624,10 +625,17 @@ static int pla_fall_time_hook(Cpu *c, uint64_t addr) {
     return 0;
 }
 
+// Research (LARECOMP_PLA_GATE30=<addr>[,<addr>...]): those functions run only on the updates where 30 fps time moved
+// on a frame (rt_pla_tick) - which per-update counting a behaviour comes from.
+static int pla_gate30_hook(Cpu *c, uint64_t addr) {
+    (void)c, (void)addr;
+    return !rt_pla_tick(0x6a30);
+}
+
 // Research (LARECOMP_PLA_FRAMES_USERS=<presents>): who else asks a clock for its frames (f_70024a84fc, also reached
 // from the thunk above): the callers (lr) and how often, listed once after that many presents of the world.
 static int pla_frames_users_hook(Cpu *c, uint64_t addr) {
-    static struct { uint64_t lr; unsigned n; } u[64];
+    static struct { uint64_t fn, lr; unsigned n; } u[64];
     static int nu, done;
     static uint64_t from;
     extern uint64_t renderer_present_count(void);
@@ -635,14 +643,15 @@ static int pla_frames_users_hook(Cpu *c, uint64_t addr) {
     if (done) return 0;
     if (!from) from = now;
     int i = 0;
-    while (i < nu && u[i].lr != c->x[30]) i++;
-    if (i == nu && nu < 64) u[nu++].lr = c->x[30];
+    while (i < nu && (u[i].lr != c->x[30] || u[i].fn != addr)) i++;
+    if (i == nu && nu < 64) u[nu].fn = addr, u[nu++].lr = c->x[30];
     if (i < 64) u[i].n++;
     if (now - from > (uint64_t)atol(getenv("LARECOMP_PLA_FRAMES_USERS"))) {
         done = 1;
-        for (int k = 0; k < nu; k++) LOG("[frames users] lr %llx: %u calls over %llu presents\n", (unsigned long long)u[k].lr, u[k].n, (unsigned long long)(now - from));
+        for (int k = 0; k < nu; k++)
+            LOG("[frames users] f_%llx from %llx: %u calls over %llu presents\n", (unsigned long long)u[k].fn, (unsigned long long)u[k].lr, u[k].n,
+                (unsigned long long)(now - from));
     }
-    (void)addr;
     return 0;
 }
 
@@ -681,7 +690,17 @@ void pla60_configure(const char *exefs) {
                 rt_register_fnhook_at(PLA_THROW_FRAMES, pla_throw_frames_hook);
                 rt_register_fnhook_at(PLA_FALL_TIME, pla_fall_time_hook);
             }
-            if (getenv("LARECOMP_PLA_FRAMES_USERS")) rt_register_fnhook_at(0x70024a84fcull, pla_frames_users_hook);
+            if (getenv("LARECOMP_PLA_FRAMES_USERS")) {  // (and the clock's other two getters, vtable +0x38 / +0x40)
+                rt_register_fnhook_at(0x70024a84fcull, pla_frames_users_hook);
+                rt_register_fnhook_at(0x70024a87d4ull, pla_frames_users_hook);
+                rt_register_fnhook_at(0x70024a8cc4ull, pla_frames_users_hook);
+            }
+            for (char *e = getenv("LARECOMP_PLA_GATE30"); e && *e;) {
+                uint64_t a = strtoull(e, &e, 16);
+                if (a) rt_register_fnhook_at(a, pla_gate30_hook);
+                while (*e == ',') e++;
+                if (*e && !isxdigit((unsigned char)*e)) break;
+            }
             if (getenv("LARECOMP_PLA_STATE_WATCH")) rt_register_fnhook_at(0x70019b24dcull, pla_state_watch_hook);
             // the mouse in the menus (runtime/hle/menu_mouse.c): ui2d's CalculateMtx walk over the panes, each frame
             extern void menu_mouse_configure(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t);
