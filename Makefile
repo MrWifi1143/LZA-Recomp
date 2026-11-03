@@ -204,4 +204,18 @@ win-exe:
 dist: win-exe
 	tools/windows/make_zip.sh $(WIN_TAG) $(WIN_EXE)
 
-.PHONY: all gen gen-objs runtime-objs win-exe dist
+# Legends Lua (contrib/legendslua): Lua scripting of the game (hooks, memory, calls; scripts in <game folder>/lua/).
+# In <game folder>/plugins/; off until switched on in the Mods page.
+ifeq ($(PLATFORM),windows)
+LUAMOD := $(B)/plugins/legendslua.dll
+LUAMOD_FLAGS :=
+else
+LUAMOD := $(B)/plugins/liblegendslua.so
+LUAMOD_FLAGS := -fPIC -DLUA_USE_POSIX -lpthread -lm
+endif
+legendslua: $(LUAMOD)
+$(LUAMOD): contrib/legendslua/legendslua.c runtime/plugin.h $(wildcard third_party/lua/*.c third_party/lua/*.h)
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -g -Wall -shared -Iruntime -Ithird_party $(DEPINC) $< $(wildcard third_party/lua/*.c) -o $@ $(LUAMOD_FLAGS)
+
+.PHONY: all gen gen-objs runtime-objs win-exe dist legendslua

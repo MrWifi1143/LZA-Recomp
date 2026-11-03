@@ -58,8 +58,8 @@ static void add_hook(uint64_t addr, FnHook fn) {
     if (!addr) return;
     uint32_t s = (uint32_t)((addr >> 2) * 0x9E3779B1u) & (NHOOK - 1);
     while (hooks[s].addr && hooks[s].addr != addr) s = (s + 1) & (NHOOK - 1);
-    hooks[s].addr = addr;
-    hooks[s].fn = fn;
+    hooks[s].fn = fn;  // (the function before the address: a plugin may add hooks while the game runs)
+    __atomic_store_n(&hooks[s].addr, addr, __ATOMIC_RELEASE);
     g_fnhook_bits[(addr >> 5) & 0x1ffff] |= (uint8_t)(1u << ((addr >> 2) & 7));
 }
 

@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "paths.h"
 #include "plugin.h"
 #include "rt.h"
 #include "settings.h"
@@ -56,11 +57,13 @@ volatile uint32_t g_plugin_render_height;  // (runtime/nvn/output_scale.c)
 static void set_render_height(uint32_t lines) { g_plugin_render_height = lines >= 360 && lines <= 8640 ? lines : 0; }
 
 
+uint64_t renderer_present_count(void);
 static const LarecompPluginApi g_api = {
     .abi = LARECOMP_PLUGIN_ABI, .log = plugin_log, .register_fnhook = rt_register_fnhook_at,
     .call_original = rt_call_original, .title_id = game_title_id, .queue_lock = vk_queue_lock, .queue_unlock = vk_queue_unlock,
     .image_origin_lower_left = origin_lower_left, .set_pad = input_plugin_pad, .set_render_height = set_render_height,
     .ldn_relay_set = NULL, .ldn_relay_local = NULL,  // (Arceus: no local play service - no relay)
+    .guest_call = guest_call, .data_root = rt_data_root, .present_count = renderer_present_count,
 };
 
 volatile int g_plugins_cbuf;
@@ -90,8 +93,8 @@ bool plugin_listed(const char *list, const char *name) {
 }
 
 // Plugins that are off until the player switches them on (the start screen's Mods page): ones that change what the
-// game does with other people or the PC - the Steam relay (Steam shows "Playing Spacewar")
-bool plugin_opt_in(const char *name) { return strstr(name, "steamrelay") != NULL; }
+// game does with other people or the PC - the Steam relay (Steam shows "Playing Spacewar"), Legends Lua (runs scripts)
+bool plugin_opt_in(const char *name) { return strstr(name, "steamrelay") != NULL || strstr(name, "legendslua") != NULL; }
 bool plugin_enabled(const char *name) {
     return plugin_opt_in(name) ? plugin_listed(g_settings.plugins_on, name) : !plugin_listed(g_settings.plugins_off, name);
 }
@@ -216,6 +219,11 @@ void plugins_frame_submitted(void) {
 void plugins_cbuf_bound(int stage, uint64_t addr, uint32_t size) {
     for (int i = 0; i < g_n; i++)
         if (g_hooks[i].cbuf_bound) g_hooks[i].cbuf_bound(stage, addr, size);
+}
+
+void plugins_game_frame(uint64_t frame) {
+    for (int i = 0; i < g_n; i++)
+        if (g_hooks[i].game_frame) g_hooks[i].game_frame(frame);
 }
 
 void plugins_shutdown(void) {

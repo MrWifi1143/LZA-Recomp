@@ -9,9 +9,10 @@
 #include <stdint.h>
 #include <vulkan/vulkan.h>
 
-#define LARECOMP_PLUGIN_ABI 3  // (2: set_pad, set_render_height; 3: ldn_relay_* - a plugin checks abi before using them)
+#define LARECOMP_PLUGIN_ABI 4  // (2: set_pad, set_render_height; 3: ldn_relay_*; 4: guest_call, data_root, present_count,
+                                // hooks.game_frame - a plugin checks abi before using them)
 
-struct Cpu;  // runtime/cpu.h: the guest registers (x[31], sp, pc, v[32]...)
+struct Cpu;  // runtime/cpu.h: the guest registers - x[0..30] at byte 0 (8 each), sp at 256, v[0..31] at 512 (16 each)
 
 typedef struct {
     uint32_t abi;  // LARECOMP_PLUGIN_ABI
@@ -40,6 +41,12 @@ typedef struct {
     // contrib/steamrelay), and where a relay replays what a peer sent - this copy's address (127.0.1.N, host order)
     void (*ldn_relay_set)(const void *relay);
     uint32_t (*ldn_relay_local)(void);
+    // ---- ABI 4
+    // Inside a hook only (the guest thread's registers): run the game's function at addr with c's x0.. as arguments,
+    // as a call from there (x30 kept); its results are in c afterwards
+    void (*guest_call)(struct Cpu *c, uint64_t addr);
+    const char *(*data_root)(void);   // the game folder (absolute): settings, saves, mods, plugins
+    uint64_t (*present_count)(void);  // frames presented so far
 } LarecompPluginApi;
 
 typedef struct {
@@ -59,6 +66,9 @@ typedef struct {
     // A vertex / fragment stage's constant buffer (game memory at addr, size bytes) read for a draw now: what the frame
     // being recorded draws with (the next hooks.frame shows it). Called for every bind - keep it cheap.
     void (*cbuf_bound)(int stage, uint64_t addr, uint32_t size);
+    // ---- ABI 4
+    // Each game frame, before its input is read (the render thread; game memory can be read, not called into)
+    void (*game_frame)(uint64_t frame);
 } LarecompPluginHooks;
 
 typedef int (*LarecompPluginInitFn)(const LarecompPluginApi *api, LarecompPluginHooks *hooks);
@@ -77,6 +87,7 @@ uint32_t plugins_vk_device_extensions(VkPhysicalDevice pd, const char **out, uin
 void plugins_vk_ready(VkInstance instance, VkPhysicalDevice pd, VkDevice dev, uint32_t qfam, VkQueue queue);
 void plugins_frame(VkCommandBuffer cb, VkImage image, VkFormat fmt, uint32_t w, uint32_t h);
 void plugins_frame_submitted(void);
+void plugins_game_frame(uint64_t frame);
 void plugins_shutdown(void);
 extern volatile int g_plugins_cbuf;  // some plugin wants cbuf_bound
 void plugins_cbuf_bound(int stage, uint64_t addr, uint32_t size);
