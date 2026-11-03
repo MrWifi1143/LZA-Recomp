@@ -598,7 +598,115 @@ static int crowd_hook(Cpu *c, uint64_t addr) {
     return 0;
 }
 
+// (research, LARECOMP_ZA_DITHER=<k>: models dissolve between 75 m and 90 m from the camera on the Switch -
+// world/ik_data/gfx/model_dither_fade/model_dither_fade_default_param/default.bin, a 44-byte FlatBuffer {0 FarBegin 75,
+// 1 FarEnd 90, 2 NearBegin 5, 3 NearEnd 2, 4 FadeTime 0.2}: both far distances times k wherever it is read)
+static const uint8_t k_dither_param[44] = {
+    0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x18, 0x00, 0x04, 0x00, 0x08, 0x00, 0x0c, 0x00,
+    0x10, 0x00, 0x14, 0x00, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x96, 0x42, 0x00, 0x00, 0xb4, 0x42,
+    0x00, 0x00, 0xa0, 0x40, 0x00, 0x00, 0x00, 0x40, 0xcd, 0xcc, 0x4c, 0x3e};
+void za_game_data_loaded(uint8_t *data, uint64_t size) {
+    static float k = -1;
+    if (k < 0) k = getenv("LARECOMP_ZA_DITHER") ? (float)atof(getenv("LARECOMP_ZA_DITHER")) : 0;
+    if (k <= 0) return;
+    for (uint8_t *p = data; size >= sizeof k_dither_param;) {
+        uint8_t *hit = memmem(p, size, k_dither_param, sizeof k_dither_param);
+        if (!hit) break;
+        float *far = (float *)(hit + 0x18);
+        far[0] = 75.0f * k, far[1] = 90.0f * k;
+        LOG("[za] model distance fade: %g - %g m\n", far[0], far[1]);
+        size -= (uint64_t)(hit + sizeof k_dither_param - p), p = hit + sizeof k_dither_param;
+    }
+}
+
+// (research: the collision component factory 0x7001108570 (.., x2 -> its FlatBuffer: field 1 shape {0 type, 1 params
+// {1 radius, 2 height}, 9 name}). LARECOMP_ZA_COLLOG=1 logs each shape with the frame; LARECOMP_ZA_TRIG=<name>=<k>
+// scales that trigger's radius (its own scene value remembered, so the factor never compounds))
+static uint64_t fb_field(uint64_t t, int idx) {
+    if (!t) return 0;
+    uint64_t vt = t - (uint64_t)(int64_t)*(const int32_t *)(uintptr_t)t;
+    uint16_t vsize = *(const uint16_t *)(uintptr_t)vt;
+    if (4 + 2 * idx + 2 > vsize) return 0;
+    uint16_t off = *(const uint16_t *)(uintptr_t)(vt + 4 + 2 * idx);
+    return off ? t + off : 0;
+}
+static uint64_t fb_ref(uint64_t f) { return f ? f + *(const uint32_t *)(uintptr_t)f : 0; }
+static int collision_make(Cpu *c, uint64_t addr) {
+    (void)addr;
+    uint64_t p = *(uint64_t *)(uintptr_t)c->x[2];
+    if (!p) return 0;
+    uint64_t t = fb_ref(p), shape = fb_ref(fb_field(t, 1)), nm = fb_ref(fb_field(shape, 9));
+    const char *name = nm ? (const char *)(uintptr_t)(nm + 4) : "-";
+    uint64_t pr = fb_ref(fb_field(shape, 1));
+    if (getenv("LARECOMP_ZA_COLLOG")) {
+        uint64_t ty = fb_field(shape, 0);
+        float v[4] = {0};
+        for (int i = 0; i < 4; i++) { uint64_t f = fb_field(pr, i); if (f) v[i] = *(float *)(uintptr_t)f; }
+        extern uint64_t renderer_present_count(void);
+        LOG("[za] col %s type %u params %g %g %g %g (frame %llu)\n", name, ty ? *(uint8_t *)(uintptr_t)ty : 255, v[0], v[1], v[2], v[3],
+            (unsigned long long)renderer_present_count());
+        static long from = -2;  // (LARECOMP_ZA_COLBT=<frame>: the guest call stack of the first 12 made from that frame on)
+        static int nbt;
+        if (from == -2) from = getenv("LARECOMP_ZA_COLBT") ? atol(getenv("LARECOMP_ZA_COLBT")) : -1;
+        if (from >= 0 && renderer_present_count() >= (uint64_t)from && nbt < 12) {
+            char line[400];
+            int k = snprintf(line, sizeof line, "lr %llx:", (unsigned long long)c->x[30]);
+            uint64_t fp = c->x[29];
+            for (int d = 0; d < 16 && fp >= 0x7200000000ull && fp < 0x7400000000ull && !(fp & 7) && k < 380; d++) {
+                k += snprintf(line + k, sizeof line - k, " %llx", (unsigned long long)((const uint64_t *)(uintptr_t)fp)[1]);
+                fp = ((const uint64_t *)(uintptr_t)fp)[0];
+            }
+            nbt++, LOG("[za] col bt %s\n", line);
+        }
+    }
+    const char *tr = getenv("LARECOMP_ZA_TRIG");
+    const char *eq = tr ? strchr(tr, '=') : NULL;
+    if (!eq || strlen(name) != (size_t)(eq - tr) || strncmp(name, tr, (size_t)(eq - tr))) return 0;
+    float *r = (float *)(uintptr_t)fb_field(pr, 1);
+    if (!r) return 0;
+    static struct { float *at; float v; } orig[1024];
+    unsigned h = (unsigned)(((uintptr_t)r >> 2) * 2654435761u) & 1023u;
+    for (int i = 0; i < 1024 && orig[h].at && orig[h].at != r; i++) h = (h + 1) & 1023u;
+    if (!orig[h].at) orig[h].at = r, orig[h].v = *r;
+    if (orig[h].at == r) *r = orig[h].v * (float)atof(eq + 1);
+    return 0;
+}
+
+// (research: 0x70008f0680 reads an area's FieldAreaInfo; its streamingConfig lands at +0x108..+0x11c: grid realize /
+// unrealize, override-sensor realize / unrealize, conditional realize / unrealize offsets. LARECOMP_ZA_AREALOG=1 logs
+// them, LARECOMP_ZA_REALIZE=<f> adds f to all six)
+static int area_info_read(Cpu *c, uint64_t addr) {
+    uint64_t a = c->x[0];
+    rt_call_original(c, addr);
+    float *o = (float *)(uintptr_t)(a + 0x108);
+    static int n;
+    if (n++ < 64) LOG("[za] area %llx streaming offsets: grid %g / %g, sensor %g / %g, conditional %g / %g\n", (unsigned long long)a,
+                      o[0], o[1], o[2], o[3], o[4], o[5]);
+    const char *f = getenv("LARECOMP_ZA_REALIZE");
+    if (f) for (int i = 0; i < 6; i++) o[i] += (float)atof(f);
+    return 1;
+}
+// (research: a scene's GridStreamingGroup realizes what it holds within a distance of the player; its factory
+// 0x70010e4ae0 (result via x8: u8 made, the group at +8) sets +0x240 realize, +0x244 unrealize. LARECOMP_ZA_SGDIST=<k>)
+static int stream_group_make(Cpu *c, uint64_t addr) {
+    uint64_t res = c->x[8];
+    rt_call_original(c, addr);
+    if (!res || !*(uint8_t *)(uintptr_t)res) return 1;
+    uint64_t g = *(uint64_t *)(uintptr_t)(res + 8);
+    if (!g) return 1;
+    float *d = (float *)(uintptr_t)(g + 0x240);
+    float k = getenv("LARECOMP_ZA_SGDIST") ? (float)atof(getenv("LARECOMP_ZA_SGDIST")) : 1.0f;
+    static int n;
+    if (n++ < 40) LOG("[za] streaming group %llx: realize %g m, unrealize %g m (x%g)\n", (unsigned long long)g, d[0], d[1], k);
+    d[0] *= k, d[1] *= k;
+    return 1;
+}
+
 void za_fixes_configure(const char *exefs) {
+    if (getenv("LARECOMP_ZA_AREALOG") || getenv("LARECOMP_ZA_REALIZE")) rt_register_fnhook_at(0x70008f0680ull, area_info_read);
+    if (getenv("LARECOMP_ZA_AREALOG") || getenv("LARECOMP_ZA_SGDIST")) rt_register_fnhook_at(0x70010e4ae0ull, stream_group_make);
+    if (getenv("LARECOMP_ZA_COLLOG") || getenv("LARECOMP_ZA_TRIG")) rt_register_fnhook_at(0x7001108570ull, collision_make);
+    if (getenv("LARECOMP_ZA_DITHER")) { extern void (*g_romfs_read_hook)(uint8_t *, uint64_t); g_romfs_read_hook = za_game_data_loaded; }
     static const uint8_t ZA_MAIN[8] = {0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a};  // 2.0.2 (any other build: none of this)
     static bool done;
     char p[1100];
