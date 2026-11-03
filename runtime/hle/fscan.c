@@ -74,6 +74,11 @@ void fscan_present(uint64_t frame) {
                 if (down && HEAP_BASE + i * 4 >= dfloor && g_a[i] >= dlo && g_a[i] <= dhi && g_nauto_int < 4) g_auto_int[g_nauto_int++] = HEAP_BASE + i * 4;
                 continue;
             }
+            if (g_b[i] - g_a[i] == 2 && ci - g_b[i] == 2 && g_a[i] < 100000 && ints < 400 && getenv("LARECOMP_FSCAN_INT2")) {  // (60 Hz frames)
+                LOG("[fscan] %llx: int2 %u %u %u\n", (unsigned long long)(HEAP_BASE + i * 4), g_a[i], g_b[i], ci);
+                ints++;
+                continue;
+            }
             if (g_b[i] - g_a[i] == 1 && ci - g_b[i] == 1 && g_a[i] < 10000000 && ints < 400) {  // (an integer frame counter)
                 LOG("[fscan] %llx: int %u %u %u\n", (unsigned long long)(HEAP_BASE + i * 4), g_a[i], g_b[i], ci);
                 ints++;
