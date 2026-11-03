@@ -2,18 +2,19 @@
 // mods that need code: hook any game function, read and write game memory, call the game's functions, run something
 // every frame. Built into <game folder>/plugins/ (make legendslua); off until switched on in the Mods page.
 //
-// Scripts: <game folder>/lua/*.lua, run in name order at the first game frame (the runtime's own hooks set by then),
-// run again when one of them changes (hot reload: the hooks they set are dropped first). A live console: a file
+// Scripts: <game folder>/lua/*.lua, run in name order as the game starts (the runtime's own hooks set by then), run
+// again when one of them changes (hot reload: the hooks they set are dropped first). A live console: a file
 // <dir>/lua_run.lua (dir: LARECOMP_LIVE, else the game folder) is run once and removed; what it prints goes to the log
 // and to <dir>/lua_out.txt.
 //
 // The API (addresses as the running game has them, main at 0x7000000000):
 //   log(...) / print(...)              -> the log ("[lua] ...")
 //   hook(addr, fn)                     fn(c) when the game calls addr; return true to skip the game's function (set
-//                                      c's x0 first). hook(addr, nil) drops it.
+//                                      c's x0 first). Several on one address run in order (one skipping ends it);
+//                                      hook(addr, nil) drops them all.
 //   on_frame(fn)                       fn(frame) every game frame (render thread: memory yes, calls no)
 //   c:x(n) c:setx(n, v)                registers x0..x30 (integers, 64-bit)
-//   c:s(n) c:sets(n, v) c:d(n) c:setd(n, v)   float / double in v0..v31
+//   c:s(n) c:sets(n, v) c:d(n) c:setd(n, v)   float / double in v0..v31; c:vf(n, lane) a vector's float 0..3
 //   c.lr c.sp c.addr                   return address, stack pointer, the hooked function
 //   c:original()                       run the game's function now (its result in c's x0 / v0 after)
 //   c:call(addr, x0, x1, ...)          call a game function from inside a hook; returns its x0 (registers put back)
@@ -23,6 +24,8 @@
 //   mem.str(addr[, max]) mem.bytes(addr, n) mem.valid(addr, n) mem.dump(addr, n)
 //   mem.find(lo, hi, bytes[, max])     where bytes (a Lua string, string.pack) occur in [lo, hi): a table of addresses
 //   game.title game.root game.frame()  program id (hex), game folder, frames presented
+//   watch(addr[, len]) watch_reset()   hardware watchpoints (research, Linux): each writer logged once ("[hwwatch]";
+//                                      LARECOMP_HWWATCH_RW=1: readers too), up to 4
 // Hooks run on the game's own threads, one at a time (one lock): keep them short. A hook that calls into the game
 // while another thread's hook waits can stall both - call sparingly.
 #define _GNU_SOURCE
@@ -108,17 +111,22 @@ static int dispatch(struct Cpu *c, uint64_t addr) {
     int skip = 0;
     if (L) {
         lua_getfield(L, LUA_REGISTRYINDEX, "hooks");
-        lua_rawgeti(L, -1, (lua_Integer)addr);
-        if (lua_isfunction(L, -1)) {
+        lua_rawgeti(L, -1, (lua_Integer)addr);  // (a list: every script's function on this address, in order)
+        if (lua_istable(L, -1)) {
             CpuRef *r = (CpuRef *)lua_newuserdata(L, sizeof *r);
             r->c = c, r->addr = addr;
             luaL_setmetatable(L, "legends.cpu");
-            if (lua_pcall(L, 1, 1, 0)) {
-                int i = hook_index(addr);
-                if (i >= 0 && g_errs[i]++ < 3) A->log("[lua] hook %" PRIx64 ": %s\n", addr, lua_tostring(L, -1));
-            } else skip = lua_toboolean(L, -1);
+            for (lua_Integer k = 1, n = (lua_Integer)lua_rawlen(L, -2); k <= n && !skip; k++) {
+                lua_rawgeti(L, -2, k);
+                lua_pushvalue(L, -2);
+                if (lua_pcall(L, 1, 1, 0)) {
+                    int i = hook_index(addr);
+                    if (i >= 0 && g_errs[i]++ < 3) A->log("[lua] hook %" PRIx64 ": %s\n", addr, lua_tostring(L, -1));
+                } else skip = lua_toboolean(L, -1);
+                lua_pop(L, 1);
+            }
             r->c = NULL;  // (the registers belong to this call only)
-            lua_pop(L, 2);
+            lua_pop(L, 3);
         } else lua_pop(L, 2);
     }
     pthread_mutex_unlock(&g_lock);
@@ -127,9 +135,21 @@ static int dispatch(struct Cpu *c, uint64_t addr) {
 
 static int l_hook(lua_State *s) {
     uint64_t addr = (uint64_t)luaL_checkinteger(s, 1);
+    if (!lua_isnil(s, 2)) luaL_checktype(s, 2, LUA_TFUNCTION);
     lua_getfield(s, LUA_REGISTRYINDEX, "hooks");
+    if (lua_isnil(s, 2)) {  // (nil: every function on it dropped)
+        lua_pushnil(s);
+        lua_rawseti(s, -2, (lua_Integer)addr);
+        return 0;
+    }
+    if (lua_rawgeti(s, -1, (lua_Integer)addr) != LUA_TTABLE) {
+        lua_pop(s, 1);
+        lua_newtable(s);
+        lua_pushvalue(s, -1);
+        lua_rawseti(s, -3, (lua_Integer)addr);
+    }
     lua_pushvalue(s, 2);
-    lua_rawseti(s, -2, (lua_Integer)addr);
+    lua_rawseti(s, -2, (lua_Integer)lua_rawlen(s, -2) + 1);
     if (!lua_isnil(s, 2) && hook_index(addr) < 0) {
         if (g_nhooked == MAXHOOK) return luaL_error(s, "too many hooked functions");
         g_errs[g_nhooked] = 0, g_hooked[g_nhooked++] = addr;
@@ -156,6 +176,13 @@ static int c_x(lua_State *s) { int n = (int)luaL_checkinteger(s, 2); luaL_argche
 static int c_setx(lua_State *s) { int n = (int)luaL_checkinteger(s, 2); luaL_argcheck(s, n >= 0 && n <= 30, 2, "x0..x30"); reg_x(live_cpu(s))[n] = (uint64_t)luaL_checkinteger(s, 3); return 0; }
 static int c_s(lua_State *s) { int n = (int)luaL_checkinteger(s, 2) & 31; float f; memcpy(&f, reg_v(live_cpu(s), n), 4); lua_pushnumber(s, f); return 1; }
 static int c_sets(lua_State *s) { int n = (int)luaL_checkinteger(s, 2) & 31; float f = (float)luaL_checknumber(s, 3); unsigned char *v = reg_v(live_cpu(s), n); memset(v, 0, 16); memcpy(v, &f, 4); return 0; }
+static int c_vf(lua_State *s) {
+    int n = (int)luaL_checkinteger(s, 2) & 31, lane = (int)luaL_optinteger(s, 3, 0) & 3;
+    float f;
+    memcpy(&f, reg_v(live_cpu(s), n) + 4 * lane, 4);
+    lua_pushnumber(s, f);
+    return 1;
+}
 static int c_d(lua_State *s) { int n = (int)luaL_checkinteger(s, 2) & 31; double d; memcpy(&d, reg_v(live_cpu(s), n), 8); lua_pushnumber(s, d); return 1; }
 static int c_setd(lua_State *s) { int n = (int)luaL_checkinteger(s, 2) & 31; double d = luaL_checknumber(s, 3); unsigned char *v = reg_v(live_cpu(s), n); memset(v, 0, 16); memcpy(v, &d, 8); return 0; }
 static int c_original(lua_State *s) { CpuRef *r = check_cpu(s); A->call_original(live_cpu(s), r->addr); return 0; }
@@ -282,6 +309,14 @@ static int m_find(lua_State *s) {
 }
 
 static int l_frame(lua_State *s) { lua_pushinteger(s, (lua_Integer)A->present_count()); return 1; }
+static int l_watch(lua_State *s) {
+    uint64_t a = (uint64_t)luaL_checkinteger(s, 1), n = (uint64_t)luaL_optinteger(s, 2, 4);
+    luaL_argcheck(s, n == 1 || n == 2 || n == 4 || n == 8, 2, "1, 2, 4 or 8 bytes");
+    if (A->abi < 5) return luaL_error(s, "watch needs a newer game build (plugin ABI 5)");
+    A->watch(a, n);
+    return 0;
+}
+static int l_watch_reset(lua_State *s) { (void)s; if (A->abi >= 5) A->watch_reset(); return 0; }
 
 static void new_state(void) {
     L = luaL_newstate();
@@ -298,7 +333,9 @@ static void new_state(void) {
     lua_register(L, "print", l_log);
     lua_register(L, "hook", l_hook);
     lua_register(L, "on_frame", l_on_frame);
-    static const luaL_Reg cm[] = {{"x", c_x}, {"setx", c_setx}, {"s", c_s}, {"sets", c_sets}, {"d", c_d}, {"setd", c_setd},
+    lua_register(L, "watch", l_watch);
+    lua_register(L, "watch_reset", l_watch_reset);
+    static const luaL_Reg cm[] = {{"x", c_x}, {"setx", c_setx}, {"s", c_s}, {"sets", c_sets}, {"vf", c_vf}, {"d", c_d}, {"setd", c_setd},
                                   {"original", c_original}, {"call", c_call}, {"bt", c_bt}, {NULL, NULL}};
     luaL_newmetatable(L, "legends.cpu");
     luaL_newlib(L, cm), lua_setfield(L, -2, "methods");
@@ -358,9 +395,15 @@ static void load_scripts(void) {
     }
 }
 
+static void game_start(void) {  // (before the game's first instruction: boot-time calls can be hooked too)
+    pthread_mutex_lock(&g_lock);
+    load_scripts();
+    pthread_mutex_unlock(&g_lock);
+}
+
 static void game_frame(uint64_t frame) {
     pthread_mutex_lock(&g_lock);
-    if (!L) load_scripts();  // (the first frame: the runtime's own hooks are all set by now - ours chain in front)
+    if (!L) load_scripts();  // (a build without hooks.game_start: the first frame - the runtime's hooks are set by now)
     if (frame % 30 == 0) {  // (twice a second: the scripts changed? the console?)
         static long long last = -1;
         static char names[128][256];
@@ -411,6 +454,7 @@ int larecomp_plugin_init(const LarecompPluginApi *api, LarecompPluginHooks *hook
     const char *live = getenv("LARECOMP_LIVE");
     snprintf(g_live, sizeof g_live, "%s", live && *live ? live : api->data_root());
     hooks->game_frame = game_frame;
+    if (api->abi >= 5) hooks->game_start = game_start;
     A->log("[lua] Legends Lua ready (%s)\n", LUA_RELEASE);
     return 0;
 }

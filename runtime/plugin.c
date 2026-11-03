@@ -80,12 +80,15 @@ static void plugin_register_fnhook(uint64_t addr, FnHook fn) {
 }
 
 uint64_t renderer_present_count(void);
+void hwwatch_arm(uint64_t addr, uint64_t len);  // (runtime/hle/hwwatch.c)
+void hwwatch_reset(void);
 static const LarecompPluginApi g_api = {
     .abi = LARECOMP_PLUGIN_ABI, .log = plugin_log, .register_fnhook = plugin_register_fnhook,
     .call_original = rt_call_original, .title_id = game_title_id, .queue_lock = vk_queue_lock, .queue_unlock = vk_queue_unlock,
     .image_origin_lower_left = origin_lower_left, .set_pad = input_plugin_pad, .set_render_height = set_render_height,
     .ldn_relay_set = NULL, .ldn_relay_local = NULL,  // (Arceus: no local play service - no relay)
     .guest_call = guest_call, .data_root = rt_data_root, .present_count = renderer_present_count,
+    .watch = hwwatch_arm, .watch_reset = hwwatch_reset,
 };
 
 volatile int g_plugins_cbuf;
@@ -241,6 +244,11 @@ void plugins_frame_submitted(void) {
 void plugins_cbuf_bound(int stage, uint64_t addr, uint32_t size) {
     for (int i = 0; i < g_n; i++)
         if (g_hooks[i].cbuf_bound) g_hooks[i].cbuf_bound(stage, addr, size);
+}
+
+void plugins_game_start(void) {
+    for (int i = 0; i < g_n; i++)
+        if (g_hooks[i].game_start) g_hooks[i].game_start();
 }
 
 void plugins_game_frame(uint64_t frame) {

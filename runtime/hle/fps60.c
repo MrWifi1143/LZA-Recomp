@@ -22,7 +22,6 @@
 
 #include "../hle.h"
 #include "../settings.h"
-#include "../kernel.h"
 
 void rt_register_fnhook(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));  // runtime/fnhook.c
 void rt_call_original(Cpu *c, uint64_t addr);
@@ -507,68 +506,6 @@ static int pla_script_frames_hook(Cpu *c, uint64_t addr) {
     return 1;
 }
 
-// Research (LARECOMP_PLA_BALL_LOG=1): a thrown object's flight step (f_7001a7191c state 1, at its velocity read
-// f_7002adbce0 from 0x7001a71b98): the frames it was given ([sp]), its drag (s8) and lift (s9), the velocity read.
-static int pla_ball_log_hook(Cpu *c, uint64_t addr) {
-    if (c->x[30] != 0x7001a71b9cull) return 0;
-    float fr, s8, s9;
-    memcpy(&fr, (const void *)(uintptr_t)c->sp, 4), memcpy(&s8, &c->v[8], 4), memcpy(&s9, &c->v[9], 4);
-    rt_call_original(c, addr);
-    float v[4];
-    memcpy(v, &c->v[0], 16);
-    static int n;
-    extern uint64_t renderer_present_count(void);
-    if (n++ < 400) LOG("[ball] present %llu frames %g drag %g lift %g velocity %g %g %g\n", (unsigned long long)renderer_present_count(), fr, s8, s9, v[0], v[1], v[2]);
-    return 1;
-}
-
-// (and, with it, the clock object f_7001a7236c hands that step: its vtable and the frames getter at +0x30)
-static int pla_ball_clock_hook(Cpu *c, uint64_t addr) {
-    if (c->x[30] != 0x7001a71a28ull) return 0;
-    uint64_t out = c->x[8];
-    rt_call_original(c, addr);
-    uint64_t o = *(const uint64_t *)(uintptr_t)out, vt = o ? *(const uint64_t *)(uintptr_t)o : 0;
-    static int n;
-    if (n++ < 3) LOG("[ball] clock %llx vtable %llx frames getter %llx\n", (unsigned long long)o, (unsigned long long)vt,
-                     vt ? (unsigned long long)*(const uint64_t *)(uintptr_t)(vt + 0x30) : 0ull);
-    return 1;
-}
-
-// Research (LARECOMP_PLA_FLICK_LOG=1): a wild Pokémon's "flick the ball away" check (f_7001aa085c, x0 = its component):
-// each change of its answer is logged with the flags it reads and the frame.
-static int pla_flick_log_hook(Cpu *c, uint64_t addr) {
-    uint64_t o = c->x[0];
-    const uint8_t *m = (const uint8_t *)(uintptr_t)o;
-    rt_call_original(c, addr);
-    static uint64_t last_o; static int last_r = -1;
-    int r = (int)(c->x[0] & 1);
-    if (o != last_o || r != last_r) {
-        extern uint64_t renderer_present_count(void);
-        LOG("[flick] %llx -> %d at present %llu (8d9 %u 821 %u 81d %u 956 %u a90 %u | 8b0 %d 8b4 %d)\n", (unsigned long long)o, r,
-            (unsigned long long)renderer_present_count(), m[0x8d9], m[0x821], m[0x81d], m[0x956], m[0xa90],
-            *(const int *)(m + 0x8b0), *(const int *)(m + 0x8b4));
-        last_o = o, last_r = r;
-    }
-    return 1;
-}
-
-// Research (LARECOMP_PLA_FLICK_LOG=1, with the above): the hit events reaching a wild Pokémon (f_7001911760, x2 = the
-// event, its type at +0xf0; 5 = a ball's hit, which runs the capture checks)
-static int pla_hit_event_hook(Cpu *c, uint64_t addr) {
-    uint64_t ev = c->x[2];
-    int type = ev ? *(const int *)(uintptr_t)(ev + 0xf0) : -1;
-    static int n;
-    if (n++ < 400) {
-        extern uint64_t renderer_present_count(void);
-        LOG("[hitev] obj %llx event %llx type %d at present %llu (event vtable %llx, obj vtable %llx)\n", (unsigned long long)c->x[1],
-            (unsigned long long)ev, type, (unsigned long long)renderer_present_count(),
-            ev ? (unsigned long long)*(const uint64_t *)(uintptr_t)ev : 0ull,
-            c->x[1] ? (unsigned long long)*(const uint64_t *)(uintptr_t)c->x[1] : 0ull);
-    }
-    (void)addr;
-    return 0;
-}
-
 // A character's scripted move (f_70019b2140, x0 = its navigator, each update while [+0x3e4] == 1): the progress +0x4bc
 // goes up by the step +0x4b4 an update - no frame time - and the move ends at 1 (state 0, the script's "arrived" check
 // f_70019b24dc turns false). At 60 fps moves ended twice as early: Volo removed mid-walk after his battle, people in
@@ -583,20 +520,6 @@ static int pla_scripted_move_hook(Cpu *c, uint64_t addr) {
     rt_call_original(c, addr);
     *step = was;
     return 1;
-}
-
-// Research (LARECOMP_PLA_STATE_WATCH=1): the event scripts' "arrived" check (f_70019b24dc: [obj+0x3e4] == 1) - a
-// hardware watchpoint on the first object it's asked about names who writes that state.
-static int pla_state_watch_hook(Cpu *c, uint64_t addr) {
-    static uint64_t armed;
-    if (!armed && c->x[0]) {
-        armed = c->x[0];
-        void hwwatch_arm(uint64_t addr, uint64_t len);
-        LOG("[statewatch] obj %llx state %u\n", (unsigned long long)armed, *(const uint32_t *)(uintptr_t)(armed + 0x3e4));
-        hwwatch_arm(armed + 0x3e4, 4);
-    }
-    (void)addr;
-    return 0;
 }
 
 // A thrown object's flight (Poke Balls, bait, mud: f_7001a7191c with [+0x5f8] == 1) each update takes the frames the
@@ -633,185 +556,6 @@ static int pla_gate30_hook(Cpu *c, uint64_t addr) {
     return !rt_pla_tick(0x6a30);
 }
 
-// Research (LARECOMP_PLA_AIDUMP=1 + <live>/aidump): the behaviour tree components seen (f_7000a6bc64's x0, up to 8),
-// each with what it points to two levels down, written to <live>/ai_<present>_<n>.bin when the file appears (records:
-// u64 address, u32 size, u32 path length, the path ("+off/+off/"), the bytes) - for comparing runs offline.
-// Research (LARECOMP_PLA_BT=<addr>,...): the guest call stack (frame-pointer chain) the first 3 times each is called
-static uint64_t g_bt_addr[8];
-static int g_bt_n[8];
-static int pla_bt_hook(Cpu *c, uint64_t addr) {
-    for (int i = 0; i < 8; i++) {
-        if (g_bt_addr[i] != addr) continue;
-        if (g_bt_n[i]++ >= 3) return 0;
-        char line[512];
-        int n = snprintf(line, sizeof line, "lr %llx x0 %llx:", (unsigned long long)c->x[30], (unsigned long long)c->x[0]);
-        uint64_t fp = c->x[29];
-        for (int k = 0; k < 14 && fp >= 0x7200000000ull && fp < 0x7400000000ull && !(fp & 7) && n < 480; k++) {
-            n += snprintf(line + n, sizeof line - n, " %llx", (unsigned long long)((const uint64_t *)(uintptr_t)fp)[1]);
-            fp = ((const uint64_t *)(uintptr_t)fp)[0];
-        }
-        LOG("[bt] %llx: %s\n", (unsigned long long)addr, line);
-    }
-    return 0;
-}
-static uint64_t g_ai_seen[64];
-static int pla_ai_watch(uint64_t comp) {  // (the word LARECOMP_PLA_AI_WATCH names in that component, watched)
-    uint64_t a = comp;
-    char *e = getenv("LARECOMP_PLA_AI_WATCH");
-    while (*e) {
-        uint64_t off = strtoull(e, &e, 16);
-        if (*e == ',') { e++; a = *(const uint64_t *)(uintptr_t)(a + off); if (!a) break; }
-        else { a += off; break; }
-    }
-    if (!a || *e) return 0;
-    void hwwatch_arm(uint64_t addr, uint64_t len);
-    LOG("[aiwatch] component %llx: watching %llx\n", (unsigned long long)comp, (unsigned long long)a);
-    hwwatch_arm(a, 4);
-    return 1;
-}
-static int pla_ai_seen_hook(Cpu *c, uint64_t addr) {
-    static int watched;  // (LARECOMP_PLA_AI_WATCH=<off>,...,<last off>: a watchpoint on that word of the first component)
-    if (!watched && getenv("LARECOMP_PLA_AI_WATCH") && !getenv("LARECOMP_PLA_AIDUMP") && c->x[0]) watched = pla_ai_watch(c->x[0]);
-    for (int i = 0; i < 64 && c->x[0]; i++) {
-        if (g_ai_seen[i] == c->x[0]) break;
-        if (!g_ai_seen[i]) { g_ai_seen[i] = c->x[0]; break; }
-    }
-    (void)addr;
-    return 0;
-}
-static void aidump_node(FILE *f, uint64_t a, const char *path, int depth, size_t *budget) {
-    uint32_t len = depth ? 0x400 : 0x800;
-    if (a < 0x7200000000ull || a >= 0x7400000000ull || (a & 7) || *budget < len) return;
-    *budget -= len;
-    uint32_t pl = (uint32_t)strlen(path);
-    fwrite(&a, 8, 1, f), fwrite(&len, 4, 1, f), fwrite(&pl, 4, 1, f), fwrite(path, 1, pl, f);
-    fwrite((const void *)(uintptr_t)a, 1, len, f);
-    if (depth >= 2) return;
-    for (uint32_t o = 0; o < len; o += 8) {
-        uint64_t q = *(const uint64_t *)(uintptr_t)(a + o);
-        if (q == a) continue;
-        char sub[96];
-        snprintf(sub, sizeof sub, "%s+%x/", path, o);
-        aidump_node(f, q, sub, depth + 1, budget);
-    }
-}
-void pla_aidump_present(void) {
-    static const char *dir;
-    static int init;
-    if (!init) init = 1, dir = getenv("LARECOMP_PLA_AIDUMP") ? getenv("LARECOMP_LIVE") : NULL;
-    if (!dir) return;
-    char p[600];
-    snprintf(p, sizeof p, "%s/pwatch", dir);
-    if (!remove(p)) {  // (<live>/pwatch: a watchpoint on the player's body position x - with LARECOMP_HWWATCH_RW=1 its readers)
-        uint64_t warp_player_body(void);
-        void hwwatch_arm(uint64_t addr, uint64_t len);
-        uint64_t b = warp_player_body();
-        LOG("[pwatch] body %llx\n", (unsigned long long)b);
-        if (b) hwwatch_arm(b + 0x90, 4);
-    }
-    static uint64_t g_pf[2048];
-    static int g_npf;
-    FILE *rf;
-    snprintf(p, sizeof p, "%s/pfind", dir);
-    if (!remove(p)) {  // (<live>/pfind: every copy of the player's position in the heap - 3 floats within 1e-3)
-        bool warp_player_pos(float out[3]);
-        float q[3];
-        extern uint64_t g_stdheap_used;
-        uint64_t top = g_stdheap_used ? STDHEAP_BASE + g_stdheap_used - HEAP_BASE : 0;
-        uint64_t words = (kernel_heap_size() > top ? kernel_heap_size() : top) / 4;
-        const float *h = (const float *)(uintptr_t)HEAP_BASE;
-        int hits = 0;
-        if (warp_player_pos(q))
-            for (uint64_t i = 0; i + 2 < words && hits < 2000; i++)
-                if (fabsf(h[i] - q[0]) < 1e-3f && fabsf(h[i + 1] - q[1]) < 1e-3f && fabsf(h[i + 2] - q[2]) < 1e-3f)
-                    LOG("[pfind] %llx\n", (unsigned long long)(HEAP_BASE + i * 4)), g_pf[hits++] = HEAP_BASE + i * 4;
-        g_npf = 0;  // (kept for <live>/rwcycle, without dense runs - a history buffer: more than 6 in 64 KB)
-        for (int i = 0; i < hits; i++) {
-            int near = 0;
-            for (int j = 0; j < hits; j++) near += g_pf[j] >> 16 == g_pf[i] >> 16;
-            if (near <= 6) g_pf[g_npf++] = g_pf[i];
-        }
-        LOG("[pfind] %.3f %.3f %.3f: %d copies (%d kept)\n", q[0], q[1], q[2], hits, g_npf);
-    }
-    snprintf(p, sizeof p, "%s/rwcycle", dir);
-    static int cyc = -1, period = 36, cnt;
-    rf = fopen(p, "r");
-    if (rf) {  // (<live>/rwcycle [presents]: the kept copies watched 4 at a time, the next 4 every that many presents)
-        if (fscanf(rf, "%d", &period) != 1 || period < 1) period = 36;
-        fclose(rf), remove(p), cyc = 0, cnt = 0;
-    }
-    if (cyc >= 0 && cnt++ % period == 0) {
-        void hwwatch_arm(uint64_t addr, uint64_t len);
-        void hwwatch_reset(void);
-        hwwatch_reset();
-        if (cyc >= g_npf) { fprintf(stderr, "[rwcycle] done\n"), cyc = -1; }
-        else {
-            fprintf(stderr, "[rwcycle] group %d:", cyc / 4);
-            for (int k = 0; k < 4 && cyc < g_npf; k++, cyc++) fprintf(stderr, " %llx", (unsigned long long)g_pf[cyc]), hwwatch_arm(g_pf[cyc], 4);
-            fprintf(stderr, "\n");
-        }
-    }
-    snprintf(p, sizeof p, "%s/rwatch", dir);
-    rf = fopen(p, "r");
-    if (rf) {  // (<live>/rwatch: hex addresses, each watched)
-        void hwwatch_arm(uint64_t addr, uint64_t len);
-        unsigned long long a;
-        while (fscanf(rf, "%llx", &a) == 1) { LOG("[rwatch] %llx\n", a); hwwatch_arm(a, 4); }
-        fclose(rf), remove(p);
-    }
-    snprintf(p, sizeof p, "%s/aiwatch", dir);
-    bool watch = getenv("LARECOMP_PLA_AI_WATCH") && !remove(p);  // (<live>/aiwatch: the watch armed in the near ones)
-    snprintf(p, sizeof p, "%s/aidump", dir);
-    if (!watch && remove(p)) return;
-    extern uint64_t renderer_present_count(void);
-    float nx = 0, nz = 0, nr = -1;  // (LARECOMP_PLA_AIDUMP=<x>,<z>,<r>: only those with a position that close one level down)
-    sscanf(getenv("LARECOMP_PLA_AIDUMP"), "%f,%f,%f", &nx, &nz, &nr);
-    for (int i = 0; i < 64 && g_ai_seen[i]; i++) {
-        if (nr > 0) {
-            bool near = false;
-            const uint64_t *top = (const uint64_t *)(uintptr_t)g_ai_seen[i];
-            for (int k = 0; k < 0x100 && !near; k++) {
-                uint64_t q = top[k];
-                if (q < 0x7200000000ull || q >= 0x7400000000ull || (q & 3)) continue;
-                const float *fv = (const float *)(uintptr_t)q;
-                for (int w = 0; w + 2 < 0x100 && !near; w++)
-                    near = fabsf(fv[w] - nx) < nr && fabsf(fv[w + 2] - nz) < nr && fv[w + 1] > 0 && fv[w + 1] < 200;
-            }
-            if (!near) continue;
-        }
-        if (watch) { pla_ai_watch(g_ai_seen[i]); continue; }
-        snprintf(p, sizeof p, "%s/ai_%llu_%d.bin", dir, (unsigned long long)renderer_present_count(), i);
-        FILE *f = fopen(p, "wb");
-        if (!f) continue;
-        size_t budget = 24u << 20;
-        aidump_node(f, g_ai_seen[i], "", 0, &budget);
-        fclose(f);
-    }
-}
-
-// Research (LARECOMP_PLA_FRAMES_USERS=<presents>): who else asks a clock for its frames (f_70024a84fc, also reached
-// from the thunk above): the callers (lr) and how often, listed once after that many presents of the world.
-static int pla_frames_users_hook(Cpu *c, uint64_t addr) {
-    static struct { uint64_t fn, lr; unsigned n; } u[64];
-    static int nu, done;
-    static uint64_t from;
-    extern uint64_t renderer_present_count(void);
-    uint64_t now = renderer_present_count();
-    if (done) return 0;
-    if (!from) from = now;
-    int i = 0;
-    while (i < nu && (u[i].lr != c->x[30] || u[i].fn != addr)) i++;
-    if (i == nu && nu < 64) u[nu].fn = addr, u[nu++].lr = c->x[30];
-    if (i < 64) u[i].n++;
-    if (now - from > (uint64_t)atol(getenv("LARECOMP_PLA_FRAMES_USERS"))) {
-        done = 1;
-        for (int k = 0; k < nu; k++)
-            LOG("[frames users] f_%llx from %llx: %u calls over %llu presents\n", (unsigned long long)u[k].fn, (unsigned long long)u[k].lr, u[k].n,
-                (unsigned long long)(now - from));
-    }
-    return 0;
-}
-
 void pla60_configure(const char *exefs) {
     char p[1100];
     snprintf(p, sizeof p, "%s/main", exefs);
@@ -837,46 +581,18 @@ void pla60_configure(const char *exefs) {
             g_pla_mouse_look = !getenv("LARECOMP_PLA_MOUSE_LOOK") || atoi(getenv("LARECOMP_PLA_MOUSE_LOOK")) != 0;
             rt_register_fnhook_at(0x700193d16cull, pla_mouse_look_hook);
             rt_register_fnhook_at(PLA_SCRIPT_STEP, pla_script_step_hook);
-            if (getenv("LARECOMP_PLA_FLICK_LOG")) rt_register_fnhook_at(0x7001aa085cull, pla_flick_log_hook);
-            if (getenv("LARECOMP_PLA_FLICK_LOG")) rt_register_fnhook_at(0x7001911760ull, pla_hit_event_hook);
-            if (getenv("LARECOMP_PLA_BALL_LOG")) rt_register_fnhook_at(0x7002adbce0ull, pla_ball_log_hook);
-            if (getenv("LARECOMP_PLA_BALL_LOG")) rt_register_fnhook_at(0x7001a7236cull, pla_ball_clock_hook);
             if (!getenv("LARECOMP_PLA_WAIT_TICK") || atoi(getenv("LARECOMP_PLA_WAIT_TICK"))) rt_register_fnhook_at(PLA_SCRIPT_FRAMES, pla_script_frames_hook);
             if (!getenv("LARECOMP_PLA_MOVE_SCALE") || atoi(getenv("LARECOMP_PLA_MOVE_SCALE"))) rt_register_fnhook_at(PLA_SCRIPTED_MOVE, pla_scripted_move_hook);
             if (!getenv("LARECOMP_PLA_THROW_SCALE") || atoi(getenv("LARECOMP_PLA_THROW_SCALE"))) {
                 rt_register_fnhook_at(PLA_THROW_FRAMES, pla_throw_frames_hook);
                 rt_register_fnhook_at(PLA_FALL_TIME, pla_fall_time_hook);
             }
-            if (getenv("LARECOMP_PLA_FRAMES_USERS")) {  // (and the clock's other two getters, vtable +0x38 / +0x40)
-                rt_register_fnhook_at(0x70024a84fcull, pla_frames_users_hook);
-                rt_register_fnhook_at(0x70024a87d4ull, pla_frames_users_hook);
-                rt_register_fnhook_at(0x70024a8cc4ull, pla_frames_users_hook);
-            }
-            if (getenv("LARECOMP_PLA_AIDUMP")) {  // (LARECOMP_PLA_AIDUMP_FN=<addr>,...: the x0 of those instead)
-                const char *fl = getenv("LARECOMP_PLA_AIDUMP_FN");
-                if (!fl) rt_register_fnhook_at(0x7000a6bc64ull, pla_ai_seen_hook);
-                for (char *e = (char *)fl; e && *e;) {
-                    uint64_t a = strtoull(e, &e, 16);
-                    if (a) rt_register_fnhook_at(a, pla_ai_seen_hook);
-                    if (*e != ',') break;
-                    e++;
-                }
-            }
-            if (getenv("LARECOMP_PLA_BT"))
-                for (char *e = getenv("LARECOMP_PLA_BT"); *e;) {
-                    static int nb;
-                    uint64_t a = strtoull(e, &e, 16);
-                    if (a && nb < 8) g_bt_addr[nb++] = a, rt_register_fnhook_at(a, pla_bt_hook);
-                    if (*e != ',') break;
-                    e++;
-                }
             for (char *e = getenv("LARECOMP_PLA_GATE30"); e && *e;) {
                 uint64_t a = strtoull(e, &e, 16);
                 if (a) rt_register_fnhook_at(a, pla_gate30_hook);
                 while (*e == ',') e++;
                 if (*e && !isxdigit((unsigned char)*e)) break;
             }
-            if (getenv("LARECOMP_PLA_STATE_WATCH")) rt_register_fnhook_at(0x70019b24dcull, pla_state_watch_hook);
             // the mouse in the menus (runtime/hle/menu_mouse.c): ui2d's CalculateMtx walk over the panes, each frame
             extern void menu_mouse_configure(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t);
             menu_mouse_configure(0x700014319cull, 0x700272b6d0ull, 0x7002719878ull, 0x910, 0x914);  // (ui2d matrices,

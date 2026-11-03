@@ -214,8 +214,6 @@ __attribute__((constructor)) static void warp_init(void) {
     rt_register_fnhook_at(0x7002fee4e0ull, body_hook);
 }
 
-uint64_t warp_player_body(void) { return g_seen_body; }  // (research: fps60.c's <live>/pwatch)
-
 // where the player is (LARECOMP_LIVE's state file): false before the body is found
 bool warp_player_pos(float out[3]) {
     uint64_t b = g_seen_body;
