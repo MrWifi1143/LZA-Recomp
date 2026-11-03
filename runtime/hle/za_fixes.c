@@ -707,7 +707,34 @@ static int stream_group_make(Cpu *c, uint64_t addr) {
     return 1;
 }
 
+// (research, LARECOMP_ZA_JOBLOG=<frame>: the realize jobs 0x70010e1540 runs from that frame on (x0: +0x10 the task):
+// the task's vtable and any C strings its first words point to)
+static int realize_job_log(Cpu *c, uint64_t addr) {
+    (void)addr;
+    extern uint64_t renderer_present_count(void);
+    static long from = -2;
+    static int n;
+    if (from == -2) from = atol(getenv("LARECOMP_ZA_JOBLOG"));
+    if (renderer_present_count() < (uint64_t)from || n >= 40) return 0;
+    uint64_t t = *(const uint64_t *)(uintptr_t)(c->x[0] + 0x10);
+    if (!t) return 0;
+    char line[700];
+    int k = snprintf(line, sizeof line, "task %llx vt %llx:", (unsigned long long)t, (unsigned long long)*(const uint64_t *)(uintptr_t)t);
+    for (int i = 1; i < 24 && k < 640; i++) {
+        uint64_t q = ((const uint64_t *)(uintptr_t)t)[i];
+        if (q >= 0x7000000000ull && q < 0x7400000000ull && !(q & 7)) {
+            const char *str = (const char *)(uintptr_t)q;
+            int ok = 1;
+            for (int j = 0; j < 4; j++) if (str[j] < 0x20 || str[j] > 0x7e) ok = 0;
+            if (ok) k += snprintf(line + k, sizeof line - k, " +%x \"%.40s\"", i * 8, str);
+        }
+    }
+    n++, LOG("[za] job (frame %llu) %s\n", (unsigned long long)renderer_present_count(), line);
+    return 0;
+}
+
 void za_fixes_configure(const char *exefs) {
+    if (getenv("LARECOMP_ZA_JOBLOG")) rt_register_fnhook_at(0x70010e1540ull, realize_job_log);
     if (getenv("LARECOMP_ZA_AREALOG") || getenv("LARECOMP_ZA_REALIZE")) rt_register_fnhook_at(0x70008f0680ull, area_info_read);
     if (getenv("LARECOMP_ZA_AREALOG") || getenv("LARECOMP_ZA_SGDIST") || getenv("LARECOMP_ZA_SGFLOOR")) rt_register_fnhook_at(0x70010e4ae0ull, stream_group_make);
     if (getenv("LARECOMP_ZA_COLLOG") || getenv("LARECOMP_ZA_TRIG")) rt_register_fnhook_at(0x7001108570ull, collision_make);
