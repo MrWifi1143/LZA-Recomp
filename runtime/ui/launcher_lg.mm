@@ -361,7 +361,8 @@ static void SDLCALL picked_mod(void *, const char *const *files, int) {
 }
 // The Mods page's helpers: what a plugin is, a folder deleted, a folder opened, a plugin file added
 static const char *plugin_title(const char *file) {
-    return strstr(file, "steamrelay") ? T("Steam relay", "Relay Steam") : strstr(file, "vrmod") ? "LegendsVR" : file;
+    return strstr(file, "steamrelay") ? T("Steam relay", "Relay Steam") : strstr(file, "vrmod") ? "LegendsVR"
+         : strstr(file, "legendslua") ? "Legends Lua" : file;
 }
 static const char *plugin_about(const char *file) {
     return strstr(file, "steamrelay") ? T("Link Trades and Private Battles with your Steam friends, anywhere (Steam shows \"Playing Spacewar\" "
@@ -369,6 +370,10 @@ static const char *plugin_about(const char *file) {
                                           "Trocas e batalhas privadas com seus amigos da Steam, de qualquer lugar (a Steam mostra \"Jogando "
                                           "Spacewar\" enquanto o jogo roda).")
          : strstr(file, "vrmod") ? T("Play in a VR headset.", "Jogue com um headset de RV.")
+         : strstr(file, "legendslua") ? T("Lua scripting: runs the .lua scripts in the game folder's lua/ folder (for mod makers; "
+                                          "scripts can change anything the game does - only use ones you trust).",
+                                          "Scripts em Lua: roda os scripts .lua da pasta lua/ do jogo (para quem faz mods; scripts "
+                                          "podem mudar tudo no jogo - use só os que você confia).")
                                  : T("A plugin (code that runs with the game).", "Um plugin (código que roda com o jogo).");
 }
 static SDL_EnumerationResult SDLCALL remove_entry(void *, const char *dir, const char *name) {
