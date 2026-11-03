@@ -47,10 +47,11 @@ cp runtime/{cpu.h,simd.h,simd_fp.h,gamelib.h} tools/gamelib_entry.c runtime/hle/
 cp docs/icon/icon_1024.png "$D/icon.png"
 cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$D/"
 cp data/shader_manifest.txt "$D/"  # (the warm-up's first programs: runtime/nvn/vulkan/warmup.c)
-# the Steam relay plugin (contrib/steamrelay): shipped, off until switched on in the start screen's Mods page
+# the Steam relay plugin (contrib/steamrelay) and Legends Lua (contrib/legendslua): shipped, off until switched on in
+# the start screen's Mods page
 T=$R/tools/windows
-make -s PLATFORM=windows B=build/win CC=$T/zcc DEPS=$W/deps steamrelay
-mkdir -p "$D/plugins" && cp build/win/plugins/steamrelay.dll "$D/plugins/"
+make -s PLATFORM=windows B=build/win CC=$T/zcc DEPS=$W/deps steamrelay legendslua
+mkdir -p "$D/plugins" && cp build/win/plugins/steamrelay.dll build/win/plugins/legendslua.dll "$D/plugins/"
 cp docs/release-README.txt "$D/README.txt"
 # licenses: this project's, then every bundled component's (THIRD-PARTY-NOTICES.md says which is which)
 cp LICENSE "$D/LICENSE.txt"
