@@ -168,7 +168,7 @@ static const Row k_rows[] = {  // (per tab in this order; Gameplay's first is th
      get_full, set_full},
     {1, "Anti-Aliasing", "Choose whether to smooth jagged edges (SMAA).", CHOICE, 2, {"On", "Off"}, get_aa, set_aa},
     {1, "Draw Distance (People)", "Choose how many people and Pokémon are drawn at once. More costs performance.", CHOICE, 4, {"Switch", "2x", "4x", "Max"}, get_crowd, set_crowd},
-    {1, "Draw Distance (Detail)", "Choose how far away trees, buildings and Pokémon keep their full detail. Farther costs performance.", CHOICE, 4, {"Switch", "2x", "4x", "Max"}, get_detail, set_detail},
+    {1, "Draw Distance (Detail)", "Choose how far away trees, buildings and Pokémon keep their detail and small props appear. Farther costs performance.", CHOICE, 4, {"Switch", "2x", "4x", "Max"}, get_detail, set_detail},
     {1, "Shadows (Next Start)", "Choose how sharp shadows are. Higher shows the shapes of people and Pokémon.", CHOICE, 3, {"Switch", "High", "Ultra"}, get_shadows, set_shadows},
     {1, "Shadow Smoothing (Next Start)", "Choose whether shadow edges are smoothed or show the shadow map's steps.", CHOICE, 2, {"On", "Off"}, get_smooth, set_smooth},
     {1, "Shader Loading", "Wait for new things to load (may stutter), or show them a moment later.",

@@ -733,7 +733,30 @@ static int realize_job_log(Cpu *c, uint64_t addr) {
     return 0;
 }
 
+// Small props' draw distance. Lumiose's props (rocks, pots, item lights ...) come in per-block scenes streamed by a
+// GridStreamingGroup whose OverrideSensorData says how near the player they appear: 70 m (gone at 75). That is the
+// rock seen through the hotel arch at the start only once you reach the gate (Eden too). Its factory 0x70010e3ed0
+// (x2 -> {0 realize, 1 unrealize, ..}) reads them times the Draw Distance (Detail) factor, at most 4, for groups under
+// 150 m only (the far ones - 200 to 600 m - would bring in the whole city); the scene's own values are put back.
+// Applies to what streams in after the change. LARECOMP_ZA_SENSOR=<k> sets the factor (any group).
+static int sensor_make(Cpu *c, uint64_t addr) {
+    uint64_t t = fb_ref(*(uint64_t *)(uintptr_t)c->x[2]);
+    float *f0 = (float *)(uintptr_t)fb_field(t, 0), *f1 = (float *)(uintptr_t)fb_field(t, 1);
+    if (!f0) return 0;
+    const char *e = getenv("LARECOMP_ZA_SENSOR");
+    float o0 = *f0, o1 = f1 ? *f1 : 0, k = e ? (float)atof(e) : detail_k();
+    if (!e && (k > 4 || o0 >= 150)) k = o0 >= 150 ? 1 : 4;
+    if (k <= 0 || k == 1) return 0;
+    *f0 = o0 * k;
+    if (f1 && o1 < 9999) *f1 = o1 * k;
+    rt_call_original(c, addr);
+    *f0 = o0;
+    if (f1) *f1 = o1;
+    return 1;
+}
+
 void za_fixes_configure(const char *exefs) {
+    rt_register_fnhook_at(0x70010e3ed0ull, sensor_make);
     if (getenv("LARECOMP_ZA_JOBLOG")) rt_register_fnhook_at(0x70010e1540ull, realize_job_log);
     if (getenv("LARECOMP_ZA_AREALOG") || getenv("LARECOMP_ZA_REALIZE")) rt_register_fnhook_at(0x70008f0680ull, area_info_read);
     if (getenv("LARECOMP_ZA_AREALOG") || getenv("LARECOMP_ZA_SGDIST") || getenv("LARECOMP_ZA_SGFLOOR")) rt_register_fnhook_at(0x70010e4ae0ull, stream_group_make);
