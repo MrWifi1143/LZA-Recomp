@@ -14,7 +14,7 @@
 //                                      hook(addr, nil) drops them all.
 //   on_frame(fn)                       fn(frame) every game frame (render thread: memory yes, calls no)
 //   c:x(n) c:setx(n, v)                registers x0..x30 (integers, 64-bit)
-//   c:s(n) c:sets(n, v) c:d(n) c:setd(n, v)   float / double in v0..v31; c:vf(n, lane) a vector's float 0..3
+//   c:s(n) c:sets(n, v) c:d(n) c:setd(n, v)   float / double in v0..v31; c:vf(n, lane) c:setvf(n, lane, v) a vector's float 0..3
 //   c.lr c.sp c.addr                   return address, stack pointer, the hooked function
 //   c:original()                       run the game's function now (its result in c's x0 / v0 after)
 //   c:call(addr, x0, x1, ...)          call a game function from inside a hook; returns its x0 (registers put back)
@@ -183,6 +183,12 @@ static int c_vf(lua_State *s) {
     lua_pushnumber(s, f);
     return 1;
 }
+static int c_setvf(lua_State *s) {
+    int n = (int)luaL_checkinteger(s, 2) & 31, lane = (int)luaL_checkinteger(s, 3) & 3;
+    float f = (float)luaL_checknumber(s, 4);
+    memcpy(reg_v(live_cpu(s), n) + 4 * lane, &f, 4);
+    return 0;
+}
 static int c_d(lua_State *s) { int n = (int)luaL_checkinteger(s, 2) & 31; double d; memcpy(&d, reg_v(live_cpu(s), n), 8); lua_pushnumber(s, d); return 1; }
 static int c_setd(lua_State *s) { int n = (int)luaL_checkinteger(s, 2) & 31; double d = luaL_checknumber(s, 3); unsigned char *v = reg_v(live_cpu(s), n); memset(v, 0, 16); memcpy(v, &d, 8); return 0; }
 static int c_original(lua_State *s) { CpuRef *r = check_cpu(s); A->call_original(live_cpu(s), r->addr); return 0; }
@@ -228,7 +234,7 @@ static int c_index(lua_State *s) {
 }
 
 // ---- memory
-#define RD(name, T, push) static int m_##name(lua_State *s) { T v; if (!mem_read((uint64_t)luaL_checkinteger(s, 1), &v, sizeof v)) return 0; push; return 1; }
+#define RD(name, T, push) static int m_##name(lua_State *s) { T v; if (!mem_read((uint64_t)luaL_checkinteger(s, 1), &v, sizeof v)) { lua_pushnil(s); return 1; } push; return 1; }
 RD(u8, uint8_t, lua_pushinteger(s, v))
 RD(u16, uint16_t, lua_pushinteger(s, v))
 RD(u32, uint32_t, lua_pushinteger(s, v))
@@ -254,7 +260,7 @@ static int m_bytes(lua_State *s) {
     size_t n = (size_t)luaL_checkinteger(s, 2);
     if (n > (64u << 20)) return luaL_error(s, "at most 64 MB");
     char *b = malloc(n ? n : 1);
-    if (!b || !mem_read(a, b, n)) { free(b); return 0; }
+    if (!b || !mem_read(a, b, n)) { free(b); lua_pushnil(s); return 1; }
     lua_pushlstring(s, b, n);
     free(b);
     return 1;
@@ -287,6 +293,11 @@ static int m_dump(lua_State *s) {
     luaL_pushresult(&out);
     return 1;
 }
+static char *find_bytes(char *h, size_t hn, const char *n, size_t nn) {  // (memmem: not on Windows)
+    for (size_t i = 0; nn && i + nn <= hn; i++)
+        if (h[i] == n[0] && !memcmp(h + i, n, nn)) return h + i;
+    return NULL;
+}
 static int m_find(lua_State *s) {
     uint64_t lo = (uint64_t)luaL_checkinteger(s, 1), hi = (uint64_t)luaL_checkinteger(s, 2);
     size_t pn;
@@ -299,7 +310,7 @@ static int m_find(lua_State *s) {
     for (uint64_t a = lo; b && a < hi && found < max; a += chunk) {
         size_t n = (size_t)(hi - a < chunk ? hi - a : chunk) + pn - 1;
         if (!mem_read(a, b, n) && !mem_read(a, b, n -= pn - 1)) continue;  // (unmapped: skipped)
-        for (char *p = b; found < max && (p = memmem(p, (size_t)(b + n - p), pat, pn)); p++) {
+        for (char *p = b; found < max && (p = find_bytes(p, (size_t)(b + n - p), pat, pn)); p++) {
             lua_pushinteger(s, (lua_Integer)(a + (uint64_t)(p - b)));
             lua_rawseti(s, -2, ++found);
         }
@@ -335,7 +346,7 @@ static void new_state(void) {
     lua_register(L, "on_frame", l_on_frame);
     lua_register(L, "watch", l_watch);
     lua_register(L, "watch_reset", l_watch_reset);
-    static const luaL_Reg cm[] = {{"x", c_x}, {"setx", c_setx}, {"s", c_s}, {"sets", c_sets}, {"vf", c_vf}, {"d", c_d}, {"setd", c_setd},
+    static const luaL_Reg cm[] = {{"x", c_x}, {"setx", c_setx}, {"s", c_s}, {"sets", c_sets}, {"vf", c_vf}, {"setvf", c_setvf}, {"d", c_d}, {"setd", c_setd},
                                   {"original", c_original}, {"call", c_call}, {"bt", c_bt}, {NULL, NULL}};
     luaL_newmetatable(L, "legends.cpu");
     luaL_newlib(L, cm), lua_setfield(L, -2, "methods");
