@@ -699,12 +699,17 @@ static int stream_group_make(Cpu *c, uint64_t addr) {
     static int n;
     if (n++ < 40) LOG("[za] streaming group %llx: realize %g m, unrealize %g m (x%g)\n", (unsigned long long)g, d[0], d[1], k);
     d[0] *= k, d[1] *= k;
+    if (getenv("LARECOMP_ZA_SGFLOOR")) {  // (=<m>: no group realizes nearer than m (unrealize 15 m further))
+        float m = (float)atof(getenv("LARECOMP_ZA_SGFLOOR"));
+        if (d[0] < m) d[0] = m;
+        if (d[1] < d[0] + 15) d[1] = d[0] + 15;
+    }
     return 1;
 }
 
 void za_fixes_configure(const char *exefs) {
     if (getenv("LARECOMP_ZA_AREALOG") || getenv("LARECOMP_ZA_REALIZE")) rt_register_fnhook_at(0x70008f0680ull, area_info_read);
-    if (getenv("LARECOMP_ZA_AREALOG") || getenv("LARECOMP_ZA_SGDIST")) rt_register_fnhook_at(0x70010e4ae0ull, stream_group_make);
+    if (getenv("LARECOMP_ZA_AREALOG") || getenv("LARECOMP_ZA_SGDIST") || getenv("LARECOMP_ZA_SGFLOOR")) rt_register_fnhook_at(0x70010e4ae0ull, stream_group_make);
     if (getenv("LARECOMP_ZA_COLLOG") || getenv("LARECOMP_ZA_TRIG")) rt_register_fnhook_at(0x7001108570ull, collision_make);
     if (getenv("LARECOMP_ZA_DITHER")) { extern void (*g_romfs_read_hook)(uint8_t *, uint64_t); g_romfs_read_hook = za_game_data_loaded; }
     static const uint8_t ZA_MAIN[8] = {0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a};  // 2.0.2 (any other build: none of this)
