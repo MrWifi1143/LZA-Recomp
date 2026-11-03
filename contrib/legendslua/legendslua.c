@@ -2,8 +2,8 @@
 // mods that need code: hook any game function, read and write game memory, call the game's functions, run something
 // every frame. Built into <game folder>/plugins/ (make legendslua); off until switched on in the Mods page.
 //
-// Scripts: <game folder>/lua/*.lua, run in name order at the first game frame (the runtime's own hooks set by then),
-// run again when one of them changes (hot reload: the hooks they set are dropped first). A live console: a file
+// Scripts: <game folder>/lua/*.lua, run in name order as the game starts (the runtime's own hooks set by then), run
+// again when one of them changes (hot reload: the hooks they set are dropped first). A live console: a file
 // <dir>/lua_run.lua (dir: LARECOMP_LIVE, else the game folder) is run once and removed; what it prints goes to the log
 // and to <dir>/lua_out.txt.
 //
@@ -23,6 +23,8 @@
 //   mem.str(addr[, max]) mem.bytes(addr, n) mem.valid(addr, n) mem.dump(addr, n)
 //   mem.find(lo, hi, bytes[, max])     where bytes (a Lua string, string.pack) occur in [lo, hi): a table of addresses
 //   game.title game.root game.frame()  program id (hex), game folder, frames presented
+//   watch(addr[, len]) watch_reset()   hardware watchpoints (research, Linux): each writer logged once ("[hwwatch]";
+//                                      LARECOMP_HWWATCH_RW=1: readers too), up to 4
 // Hooks run on the game's own threads, one at a time (one lock): keep them short. A hook that calls into the game
 // while another thread's hook waits can stall both - call sparingly.
 #define _GNU_SOURCE
@@ -282,6 +284,14 @@ static int m_find(lua_State *s) {
 }
 
 static int l_frame(lua_State *s) { lua_pushinteger(s, (lua_Integer)A->present_count()); return 1; }
+static int l_watch(lua_State *s) {
+    uint64_t a = (uint64_t)luaL_checkinteger(s, 1), n = (uint64_t)luaL_optinteger(s, 2, 4);
+    luaL_argcheck(s, n == 1 || n == 2 || n == 4 || n == 8, 2, "1, 2, 4 or 8 bytes");
+    if (A->abi < 5) return luaL_error(s, "watch needs a newer game build (plugin ABI 5)");
+    A->watch(a, n);
+    return 0;
+}
+static int l_watch_reset(lua_State *s) { (void)s; if (A->abi >= 5) A->watch_reset(); return 0; }
 
 static void new_state(void) {
     L = luaL_newstate();
@@ -298,6 +308,8 @@ static void new_state(void) {
     lua_register(L, "print", l_log);
     lua_register(L, "hook", l_hook);
     lua_register(L, "on_frame", l_on_frame);
+    lua_register(L, "watch", l_watch);
+    lua_register(L, "watch_reset", l_watch_reset);
     static const luaL_Reg cm[] = {{"x", c_x}, {"setx", c_setx}, {"s", c_s}, {"sets", c_sets}, {"d", c_d}, {"setd", c_setd},
                                   {"original", c_original}, {"call", c_call}, {"bt", c_bt}, {NULL, NULL}};
     luaL_newmetatable(L, "legends.cpu");
@@ -358,9 +370,15 @@ static void load_scripts(void) {
     }
 }
 
+static void game_start(void) {  // (before the game's first instruction: boot-time calls can be hooked too)
+    pthread_mutex_lock(&g_lock);
+    load_scripts();
+    pthread_mutex_unlock(&g_lock);
+}
+
 static void game_frame(uint64_t frame) {
     pthread_mutex_lock(&g_lock);
-    if (!L) load_scripts();  // (the first frame: the runtime's own hooks are all set by now - ours chain in front)
+    if (!L) load_scripts();  // (a build without hooks.game_start: the first frame - the runtime's hooks are set by now)
     if (frame % 30 == 0) {  // (twice a second: the scripts changed? the console?)
         static long long last = -1;
         static char names[128][256];
@@ -411,6 +429,7 @@ int larecomp_plugin_init(const LarecompPluginApi *api, LarecompPluginHooks *hook
     const char *live = getenv("LARECOMP_LIVE");
     snprintf(g_live, sizeof g_live, "%s", live && *live ? live : api->data_root());
     hooks->game_frame = game_frame;
+    if (api->abi >= 5) hooks->game_start = game_start;
     A->log("[lua] Legends Lua ready (%s)\n", LUA_RELEASE);
     return 0;
 }

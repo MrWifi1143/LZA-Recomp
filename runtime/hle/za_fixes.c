@@ -314,49 +314,6 @@ static int config_read(Cpu *c, uint64_t addr) {
     return 1;
 }
 
-// (research, LARECOMP_ZA_VPWATCH=<width>: the render state's viewport flush (0x70018b7390: viewports at x0+0xc4) - the
-// first time one is that wide, a hardware watchpoint on its width names who writes it)
-static int vp_flush_watch(Cpu *c, uint64_t addr) {
-    (void)addr;
-    static int armed;
-    static float want = -1;
-    if (want < 0) want = (float)atof(getenv("LARECOMP_ZA_VPWATCH"));
-    float w;
-    memcpy(&w, (const void *)(uintptr_t)(c->x[0] + 0xc4 + 8), 4);
-    if (!armed && w == want) {
-        armed = 1;
-        extern void hwwatch_arm(uint64_t addr, uint64_t len);
-        LOG("[za] viewport %g in state %llx: watching\n", w, (unsigned long long)c->x[0]);
-        hwwatch_arm(c->x[0] + 0xc4 + 8, 4);
-    }
-    return 0;
-}
-
-// (research, LARECOMP_ZA_RTWATCH=<width>: the render target lookup 0x70018a4da4 (its object: +0x68 / +0x70 the size the
-// viewport is set to) - the first object that wide gets a hardware watchpoint on its width, and is logged)
-static int rt_lookup_watch(Cpu *c, uint64_t addr) {
-    static int armed;
-    static uint64_t want;
-    if (!want) want = strtoull(getenv("LARECOMP_ZA_RTWATCH"), NULL, 0);
-    // (0x70018b7088 (state, slot, target handle, ..): the handle {u8 valid, u64 object} -> the object, as 0x70018a4da4)
-    uint64_t hnd = addr == 0x70018b7088ull ? c->x[2] : c->x[1];
-    uint64_t o = hnd >= GUEST_LO && hnd < GUEST_HI && *(uint8_t *)(uintptr_t)hnd ? *(uint64_t *)(uintptr_t)(hnd + 8) : 0;
-    static int nlog;
-    if (nlog < 30 && o >= GUEST_LO && o < GUEST_HI)
-        nlog++, LOG("[za] bind %llx: target %llx size %llu x %llu\n", (unsigned long long)addr, (unsigned long long)o,
-                    (unsigned long long)*(uint64_t *)(uintptr_t)(o + 0x68), (unsigned long long)*(uint64_t *)(uintptr_t)(o + 0x70));
-    if (!armed && o >= GUEST_LO && o < GUEST_HI && *(uint64_t *)(uintptr_t)(o + 0x68) == want) {
-        armed = 1;
-        const uint64_t *q = (const uint64_t *)(uintptr_t)o;
-        LOG("[za] render target %llx: size %llu x %llu; words %llx %llx %llx %llx %llx %llx %llx %llx\n", (unsigned long long)o,
-            (unsigned long long)q[13], (unsigned long long)q[14], (unsigned long long)q[8], (unsigned long long)q[9], (unsigned long long)q[10],
-            (unsigned long long)q[11], (unsigned long long)q[12], (unsigned long long)q[15], (unsigned long long)q[16], (unsigned long long)q[17]);
-        extern void hwwatch_arm(uint64_t addr, uint64_t len);
-        hwwatch_arm(o + 0x68, 8);
-    }
-    return 0;
-}
-
 // The renderer's setup (0x70017faa10 (renderer, desc)): desc+0x48 / +0x50 = its screen size (u64), what its render
 // targets and the scene's 0.65 viewport are sized from. LARECOMP_ZA_RES=<w>x<h> sets it too.
 #define ZA_RENDERER_SETUP 0x70017faa10ull
@@ -366,45 +323,6 @@ static int renderer_setup(Cpu *c, uint64_t addr) {
     const char *r = getenv("LARECOMP_ZA_RES");
     LOG("[za] renderer setup: screen %llu x %llu\n", (unsigned long long)d[0], (unsigned long long)d[1]);
     if (r && strchr(r, 'x')) d[0] = strtoull(r, NULL, 10), d[1] = strtoull(strchr(r, 'x') + 1, NULL, 10);
-    return 0;
-}
-
-// (research, LARECOMP_ZA_PERFLOG=1: who asks nn::oe::GetPerformanceMode (sdk 0x70083f70e0), each caller once)
-static int perfmode_log(Cpu *c, uint64_t addr) {
-    (void)addr;
-    static uint64_t seen[32];
-    static int n;
-    for (int i = 0; i < n; i++) if (seen[i] == c->x[30]) return 0;
-    if (n < 32) seen[n++] = c->x[30];
-    uint64_t fp = c->x[29], up1 = fp >= GUEST_LO && fp < GUEST_HI ? ((uint64_t *)(uintptr_t)fp)[1] : 0;
-    LOG("[za] GetPerformanceMode from %llx (its caller %llx)\n", (unsigned long long)c->x[30], (unsigned long long)up1);
-    return 0;
-}
-
-// (research: the render pipeline's per-mode sizes - 0x7000ed2dc0 (pipeline): +0x288 + mode * 4 width, +0x290 + mode * 4
-// height, mode at +0x2b4 (0 normal / handheld, 1 boost / docked))
-static int pipeline_sizes(Cpu *c, uint64_t addr) {
-    (void)addr;
-    const uint32_t *w = (const uint32_t *)(uintptr_t)(c->x[0] + 0x288), *h = (const uint32_t *)(uintptr_t)(c->x[0] + 0x290);
-    static int n;
-    if (n++ < 4)
-        LOG("[za] pipeline %llx sizes: mode 0 %ux%u, mode 1 %ux%u (mode %d)\n", (unsigned long long)c->x[0], w[0], h[0], w[1], h[1],
-            *(int32_t *)(uintptr_t)(c->x[0] + 0x2b4));
-    return 0;
-}
-
-// (research, LARECOMP_ZA_RTLOG=1: render target creation 0x700044e390 (?, desc, ...) - the descriptions holding 1920)
-static int rt_create_log(Cpu *c, uint64_t addr) {
-    (void)addr;
-    const uint32_t *d = (const uint32_t *)(uintptr_t)c->x[1];
-    int at = -1;
-    for (int i = 0; i < 24; i++) if (d[i] == 1920) { at = i; break; }
-    static int n;
-    if (at >= 0 && n < 30) {
-        n++;
-        LOG("[za] rt create from %llx: desc %llx, 1920 at +0x%x: %x %x %x %x %x %x %x %x %x %x %x %x\n", (unsigned long long)c->x[30],
-            (unsigned long long)c->x[1], at * 4, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11]);
-    }
     return 0;
 }
 
@@ -598,30 +516,7 @@ static int crowd_hook(Cpu *c, uint64_t addr) {
     return 0;
 }
 
-// (research, LARECOMP_ZA_DITHER=<k>: models dissolve between 75 m and 90 m from the camera on the Switch -
-// world/ik_data/gfx/model_dither_fade/model_dither_fade_default_param/default.bin, a 44-byte FlatBuffer {0 FarBegin 75,
-// 1 FarEnd 90, 2 NearBegin 5, 3 NearEnd 2, 4 FadeTime 0.2}: both far distances times k wherever it is read)
-static const uint8_t k_dither_param[44] = {
-    0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x18, 0x00, 0x04, 0x00, 0x08, 0x00, 0x0c, 0x00,
-    0x10, 0x00, 0x14, 0x00, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x96, 0x42, 0x00, 0x00, 0xb4, 0x42,
-    0x00, 0x00, 0xa0, 0x40, 0x00, 0x00, 0x00, 0x40, 0xcd, 0xcc, 0x4c, 0x3e};
-void za_game_data_loaded(uint8_t *data, uint64_t size) {
-    static float k = -1;
-    if (k < 0) k = getenv("LARECOMP_ZA_DITHER") ? (float)atof(getenv("LARECOMP_ZA_DITHER")) : 0;
-    if (k <= 0) return;
-    for (uint8_t *p = data; size >= sizeof k_dither_param;) {
-        uint8_t *hit = memmem(p, size, k_dither_param, sizeof k_dither_param);
-        if (!hit) break;
-        float *far = (float *)(hit + 0x18);
-        far[0] = 75.0f * k, far[1] = 90.0f * k;
-        LOG("[za] model distance fade: %g - %g m\n", far[0], far[1]);
-        size -= (uint64_t)(hit + sizeof k_dither_param - p), p = hit + sizeof k_dither_param;
-    }
-}
-
-// (research: the collision component factory 0x7001108570 (.., x2 -> its FlatBuffer: field 1 shape {0 type, 1 params
-// {1 radius, 2 height}, 9 name}). LARECOMP_ZA_COLLOG=1 logs each shape with the frame; LARECOMP_ZA_TRIG=<name>=<k>
-// scales that trigger's radius (its own scene value remembered, so the factor never compounds))
+// (FlatBuffers in game memory: a table's field address, 0 when absent; what a reference points to)
 static uint64_t fb_field(uint64_t t, int idx) {
     if (!t) return 0;
     uint64_t vt = t - (uint64_t)(int64_t)*(const int32_t *)(uintptr_t)t;
@@ -631,107 +526,6 @@ static uint64_t fb_field(uint64_t t, int idx) {
     return off ? t + off : 0;
 }
 static uint64_t fb_ref(uint64_t f) { return f ? f + *(const uint32_t *)(uintptr_t)f : 0; }
-static int collision_make(Cpu *c, uint64_t addr) {
-    (void)addr;
-    uint64_t p = *(uint64_t *)(uintptr_t)c->x[2];
-    if (!p) return 0;
-    uint64_t t = fb_ref(p), shape = fb_ref(fb_field(t, 1)), nm = fb_ref(fb_field(shape, 9));
-    const char *name = nm ? (const char *)(uintptr_t)(nm + 4) : "-";
-    uint64_t pr = fb_ref(fb_field(shape, 1));
-    if (getenv("LARECOMP_ZA_COLLOG")) {
-        uint64_t ty = fb_field(shape, 0);
-        float v[4] = {0};
-        for (int i = 0; i < 4; i++) { uint64_t f = fb_field(pr, i); if (f) v[i] = *(float *)(uintptr_t)f; }
-        extern uint64_t renderer_present_count(void);
-        LOG("[za] col %s type %u params %g %g %g %g (frame %llu)\n", name, ty ? *(uint8_t *)(uintptr_t)ty : 255, v[0], v[1], v[2], v[3],
-            (unsigned long long)renderer_present_count());
-        static long from = -2;  // (LARECOMP_ZA_COLBT=<frame>: the guest call stack of the first 12 made from that frame on)
-        static int nbt;
-        if (from == -2) from = getenv("LARECOMP_ZA_COLBT") ? atol(getenv("LARECOMP_ZA_COLBT")) : -1;
-        if (from >= 0 && renderer_present_count() >= (uint64_t)from && nbt < 12) {
-            char line[400];
-            int k = snprintf(line, sizeof line, "lr %llx:", (unsigned long long)c->x[30]);
-            uint64_t fp = c->x[29];
-            for (int d = 0; d < 16 && fp >= 0x7200000000ull && fp < 0x7400000000ull && !(fp & 7) && k < 380; d++) {
-                k += snprintf(line + k, sizeof line - k, " %llx", (unsigned long long)((const uint64_t *)(uintptr_t)fp)[1]);
-                fp = ((const uint64_t *)(uintptr_t)fp)[0];
-            }
-            nbt++, LOG("[za] col bt %s\n", line);
-        }
-    }
-    const char *tr = getenv("LARECOMP_ZA_TRIG");
-    const char *eq = tr ? strchr(tr, '=') : NULL;
-    if (!eq || strlen(name) != (size_t)(eq - tr) || strncmp(name, tr, (size_t)(eq - tr))) return 0;
-    float *r = (float *)(uintptr_t)fb_field(pr, 1);
-    if (!r) return 0;
-    static struct { float *at; float v; } orig[1024];
-    unsigned h = (unsigned)(((uintptr_t)r >> 2) * 2654435761u) & 1023u;
-    for (int i = 0; i < 1024 && orig[h].at && orig[h].at != r; i++) h = (h + 1) & 1023u;
-    if (!orig[h].at) orig[h].at = r, orig[h].v = *r;
-    if (orig[h].at == r) *r = orig[h].v * (float)atof(eq + 1);
-    return 0;
-}
-
-// (research: 0x70008f0680 reads an area's FieldAreaInfo; its streamingConfig lands at +0x108..+0x11c: grid realize /
-// unrealize, override-sensor realize / unrealize, conditional realize / unrealize offsets. LARECOMP_ZA_AREALOG=1 logs
-// them, LARECOMP_ZA_REALIZE=<f> adds f to all six)
-static int area_info_read(Cpu *c, uint64_t addr) {
-    uint64_t a = c->x[0];
-    rt_call_original(c, addr);
-    float *o = (float *)(uintptr_t)(a + 0x108);
-    static int n;
-    if (n++ < 64) LOG("[za] area %llx streaming offsets: grid %g / %g, sensor %g / %g, conditional %g / %g\n", (unsigned long long)a,
-                      o[0], o[1], o[2], o[3], o[4], o[5]);
-    const char *f = getenv("LARECOMP_ZA_REALIZE");
-    if (f) for (int i = 0; i < 6; i++) o[i] += (float)atof(f);
-    return 1;
-}
-// (research: a scene's GridStreamingGroup realizes what it holds within a distance of the player; its factory
-// 0x70010e4ae0 (result via x8: u8 made, the group at +8) sets +0x240 realize, +0x244 unrealize. LARECOMP_ZA_SGDIST=<k>)
-static int stream_group_make(Cpu *c, uint64_t addr) {
-    uint64_t res = c->x[8];
-    rt_call_original(c, addr);
-    if (!res || !*(uint8_t *)(uintptr_t)res) return 1;
-    uint64_t g = *(uint64_t *)(uintptr_t)(res + 8);
-    if (!g) return 1;
-    float *d = (float *)(uintptr_t)(g + 0x240);
-    float k = getenv("LARECOMP_ZA_SGDIST") ? (float)atof(getenv("LARECOMP_ZA_SGDIST")) : 1.0f;
-    static int n;
-    if (n++ < 40) LOG("[za] streaming group %llx: realize %g m, unrealize %g m (x%g)\n", (unsigned long long)g, d[0], d[1], k);
-    d[0] *= k, d[1] *= k;
-    if (getenv("LARECOMP_ZA_SGFLOOR")) {  // (=<m>: no group realizes nearer than m (unrealize 15 m further))
-        float m = (float)atof(getenv("LARECOMP_ZA_SGFLOOR"));
-        if (d[0] < m) d[0] = m;
-        if (d[1] < d[0] + 15) d[1] = d[0] + 15;
-    }
-    return 1;
-}
-
-// (research, LARECOMP_ZA_JOBLOG=<frame>: the realize jobs 0x70010e1540 runs from that frame on (x0: +0x10 the task):
-// the task's vtable and any C strings its first words point to)
-static int realize_job_log(Cpu *c, uint64_t addr) {
-    (void)addr;
-    extern uint64_t renderer_present_count(void);
-    static long from = -2;
-    static int n;
-    if (from == -2) from = atol(getenv("LARECOMP_ZA_JOBLOG"));
-    if (renderer_present_count() < (uint64_t)from || n >= 40) return 0;
-    uint64_t t = *(const uint64_t *)(uintptr_t)(c->x[0] + 0x10);
-    if (!t) return 0;
-    char line[700];
-    int k = snprintf(line, sizeof line, "task %llx vt %llx:", (unsigned long long)t, (unsigned long long)*(const uint64_t *)(uintptr_t)t);
-    for (int i = 1; i < 24 && k < 640; i++) {
-        uint64_t q = ((const uint64_t *)(uintptr_t)t)[i];
-        if (q >= 0x7000000000ull && q < 0x7400000000ull && !(q & 7)) {
-            const char *str = (const char *)(uintptr_t)q;
-            int ok = 1;
-            for (int j = 0; j < 4; j++) if (str[j] < 0x20 || str[j] > 0x7e) ok = 0;
-            if (ok) k += snprintf(line + k, sizeof line - k, " +%x \"%.40s\"", i * 8, str);
-        }
-    }
-    n++, LOG("[za] job (frame %llu) %s\n", (unsigned long long)renderer_present_count(), line);
-    return 0;
-}
 
 // Small props' draw distance. Lumiose's props (rocks, pots, item lights ...) come in per-block scenes streamed by a
 // GridStreamingGroup whose OverrideSensorData says how near the player they appear: 70 m (gone at 75). That is the
@@ -757,11 +551,6 @@ static int sensor_make(Cpu *c, uint64_t addr) {
 
 void za_fixes_configure(const char *exefs) {
     rt_register_fnhook_at(0x70010e3ed0ull, sensor_make);
-    if (getenv("LARECOMP_ZA_JOBLOG")) rt_register_fnhook_at(0x70010e1540ull, realize_job_log);
-    if (getenv("LARECOMP_ZA_AREALOG") || getenv("LARECOMP_ZA_REALIZE")) rt_register_fnhook_at(0x70008f0680ull, area_info_read);
-    if (getenv("LARECOMP_ZA_AREALOG") || getenv("LARECOMP_ZA_SGDIST") || getenv("LARECOMP_ZA_SGFLOOR")) rt_register_fnhook_at(0x70010e4ae0ull, stream_group_make);
-    if (getenv("LARECOMP_ZA_COLLOG") || getenv("LARECOMP_ZA_TRIG")) rt_register_fnhook_at(0x7001108570ull, collision_make);
-    if (getenv("LARECOMP_ZA_DITHER")) { extern void (*g_romfs_read_hook)(uint8_t *, uint64_t); g_romfs_read_hook = za_game_data_loaded; }
     static const uint8_t ZA_MAIN[8] = {0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a};  // 2.0.2 (any other build: none of this)
     static bool done;
     char p[1100];
@@ -783,7 +572,6 @@ void za_fixes_configure(const char *exefs) {
         menu_mouse_configure(0x700264424cull, 0x7000fe5720ull, 0x7000fc2630ull, 0x690, 0x694);
     }
     { extern void za_qstats_configure(void); za_qstats_configure(); }
-    { extern void za_passq_configure(void); za_passq_configure(); }
     { extern void za_jobq_configure(void); za_jobq_configure(); }
     {   // Unscaled: the internal resolution option sizes the game's 1920x1080 targets for the window (1440p: x1.33), but
         // the rscale fix-ups only cover what shaders read by frag coord, and Z-A addresses many pixels as integers
@@ -815,11 +603,6 @@ void za_fixes_configure(const char *exefs) {
                                                 (unsigned long long)sh, (unsigned long long)(g_stdheap_size >> 20));
     }
     rt_register_fnhook_at(ZA_RENDERER_SETUP, renderer_setup);
-    if (getenv("LARECOMP_ZA_PERFLOG")) rt_register_fnhook_at(0x7000ed2dc0ull, pipeline_sizes);
-    if (getenv("LARECOMP_ZA_RTLOG")) rt_register_fnhook_at(0x700044e390ull, rt_create_log);
-    if (getenv("LARECOMP_ZA_PERFLOG")) rt_register_fnhook_at(0x70083f70e0ull, perfmode_log);
-    if (getenv("LARECOMP_ZA_RTWATCH")) rt_register_fnhook_at(0x70018b7088ull, rt_lookup_watch), rt_register_fnhook_at(0x70018b71a4ull, rt_lookup_watch);
-    if (getenv("LARECOMP_ZA_VPWATCH")) rt_register_fnhook_at(0x70018b7390ull, vp_flush_watch);
     {
         const char *cs = getenv("LARECOMP_ZA_CUTSCENE_SPEED");
         if (!(cs && atoi(cs) == 0)) rt_register_fnhook_at(ZA_TIMELINE_SET_TIME, timeline_step);
@@ -869,32 +652,6 @@ static int queue_lookup_hook(Cpu *c, uint64_t addr) {
 void za_qstats_configure(void);
 void za_qstats_configure(void) {
     if (getenv("LARECOMP_ZA_QSTATS")) rt_register_fnhook_at(0x7001802c90ull, queue_lookup_hook);
-}
-
-// (research, LARECOMP_ZA_PASSQ=1: each render pass's queue walk 0x700180ee10 - the pass object and its queue length)
-static int passq_hook(Cpu *c, uint64_t addr) {
-    static uint64_t seen[64], last_frame;
-    static int nseen;
-    extern uint64_t renderer_game_frame(void);
-    uint64_t f = renderer_game_frame();
-    uint64_t p = c->x[0];
-    uint64_t b = *(uint64_t *)(uintptr_t)(p + 0x168), e = *(uint64_t *)(uintptr_t)(p + 0x170);
-    if (f % 600 == 0 && f != last_frame) { last_frame = f; nseen = 0; }
-    int i = 0;
-    while (i < nseen && seen[i] != p) i++;
-    if (i == nseen && nseen < 64) {
-        seen[nseen++] = p;
-        uint64_t nm = *(uint64_t *)(uintptr_t)(p + 0x40);
-        const char *name = nm >= 0x7000000000ull && nm < 0x8000000000ull ? (const char *)(uintptr_t)nm : "?";
-        LOG("[za] f%llu pass %llx %.40s queue %llu items (lr %llx)\n", (unsigned long long)f, (unsigned long long)p, name,
-            (unsigned long long)((e - b) / 16), (unsigned long long)c->x[30]);
-    }
-    (void)addr;
-    return 0;
-}
-void za_passq_configure(void);
-void za_passq_configure(void) {
-    if (getenv("LARECOMP_ZA_PASSQ")) rt_register_fnhook_at(0x700180ec2cull, passq_hook);
 }
 
 // (research, LARECOMP_ZA_JOBQ=1: would more job workers help? The job system (scheduler at 0x7001cf5680's x0: workers

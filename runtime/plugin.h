@@ -9,8 +9,8 @@
 #include <stdint.h>
 #include <vulkan/vulkan.h>
 
-#define LARECOMP_PLUGIN_ABI 4  // (2: set_pad, set_render_height; 3: ldn_relay_*; 4: guest_call, data_root, present_count,
-                                // hooks.game_frame - a plugin checks abi before using them)
+#define LARECOMP_PLUGIN_ABI 5  // (2: set_pad, set_render_height; 3: ldn_relay_*; 4: guest_call, data_root, present_count,
+                                // hooks.game_frame; 5: watch, watch_reset, hooks.game_start - a plugin checks abi first)
 
 struct Cpu;  // runtime/cpu.h: the guest registers - x[0..30] at byte 0 (8 each), sp at 256, v[0..31] at 512 (16 each)
 
@@ -48,6 +48,12 @@ typedef struct {
     void (*guest_call)(struct Cpu *c, uint64_t addr);
     const char *(*data_root)(void);   // the game folder (absolute): settings, saves, mods, plugins
     uint64_t (*present_count)(void);  // frames presented so far
+    // ---- ABI 5
+    // Research: a hardware watchpoint on len (1, 2, 4, 8) bytes at addr, on every thread: each writer (LARECOMP_HWWATCH_RW=1:
+    // reader too) is logged once, "[hwwatch]" with the guest function and registers. Up to 4; watch_reset frees them.
+    // Linux only (elsewhere: nothing).
+    void (*watch)(uint64_t addr, uint64_t len);
+    void (*watch_reset)(void);
 } LarecompPluginApi;
 
 typedef struct {
@@ -70,6 +76,10 @@ typedef struct {
     // ---- ABI 4
     // Each game frame, before its input is read (the render thread; game memory can be read, not called into)
     void (*game_frame)(uint64_t frame);
+    // ---- ABI 5
+    // The game is about to start (again, after a reboot to the start screen): the runtime's own hooks are registered,
+    // none of the game's code has run yet - where to set hooks (a plugin's chain in front of the runtime's)
+    void (*game_start)(void);
 } LarecompPluginHooks;
 
 typedef int (*LarecompPluginInitFn)(const LarecompPluginApi *api, LarecompPluginHooks *hooks);
@@ -89,6 +99,7 @@ void plugins_vk_ready(VkInstance instance, VkPhysicalDevice pd, VkDevice dev, ui
 void plugins_frame(VkCommandBuffer cb, VkImage image, VkFormat fmt, uint32_t w, uint32_t h);
 void plugins_frame_submitted(void);
 void plugins_game_frame(uint64_t frame);
+void plugins_game_start(void);
 void plugins_shutdown(void);
 extern volatile int g_plugins_cbuf;  // some plugin wants cbuf_bound
 void plugins_cbuf_bound(int stage, uint64_t addr, uint32_t size);

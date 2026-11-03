@@ -619,7 +619,6 @@ static int decompress_hook(Cpu *c, uint64_t addr) {
     uint64_t raw = c->x[2];
     rt_call_original(c, addr);
     int64_t n = (int64_t)c->x[0];
-    if (n > 0 && getenv("LARECOMP_ZA_DITHER")) { extern void za_game_data_loaded(uint8_t *p, uint64_t n); za_game_data_loaded((uint8_t *)(uintptr_t)raw, (uint64_t)n); }
     if (n < 0x20 || memcmp((const void *)(uintptr_t)raw, "SARC", 4)) return 1;
     uint8_t *arc = (uint8_t *)(uintptr_t)raw;
     size_t head = (size_t)(n < 0x10000 ? n : 0x10000);  // (the file names)
