@@ -57,9 +57,31 @@ volatile uint32_t g_plugin_render_height;  // (runtime/nvn/output_scale.c)
 static void set_render_height(uint32_t lines) { g_plugin_render_height = lines >= 360 && lines <= 8640 ? lines : 0; }
 
 
+// A plugin's hook where the runtime has one already (a fix): the plugin's first, then - when it doesn't skip the
+// function - the runtime's, so a script never switches a fix off by hooking the same function
+FnHook rt_fnhook_get(uint64_t addr);
+#define NCHAIN 256
+static struct { uint64_t addr; FnHook plugin, runtime; } g_chain[NCHAIN];
+static int g_nchain;
+static int chained(struct Cpu *c, uint64_t addr) {
+    for (int i = 0; i < g_nchain; i++)
+        if (g_chain[i].addr == addr) return g_chain[i].plugin(c, addr) ? 1 : g_chain[i].runtime(c, addr);
+    return 0;
+}
+static void plugin_register_fnhook(uint64_t addr, FnHook fn) {
+    for (int i = 0; i < g_nchain; i++)
+        if (g_chain[i].addr == addr) { g_chain[i].plugin = fn; return; }
+    FnHook was = rt_fnhook_get(addr);
+    if (was && g_nchain < NCHAIN) {
+        g_chain[g_nchain].addr = addr, g_chain[g_nchain].plugin = fn, g_chain[g_nchain].runtime = was;
+        __atomic_store_n(&g_nchain, g_nchain + 1, __ATOMIC_RELEASE);
+        rt_register_fnhook_at(addr, chained);
+    } else rt_register_fnhook_at(addr, fn);
+}
+
 uint64_t renderer_present_count(void);
 static const LarecompPluginApi g_api = {
-    .abi = LARECOMP_PLUGIN_ABI, .log = plugin_log, .register_fnhook = rt_register_fnhook_at,
+    .abi = LARECOMP_PLUGIN_ABI, .log = plugin_log, .register_fnhook = plugin_register_fnhook,
     .call_original = rt_call_original, .title_id = game_title_id, .queue_lock = vk_queue_lock, .queue_unlock = vk_queue_unlock,
     .image_origin_lower_left = origin_lower_left, .set_pad = input_plugin_pad, .set_render_height = set_render_height,
     .ldn_relay_set = NULL, .ldn_relay_local = NULL,  // (Arceus: no local play service - no relay)

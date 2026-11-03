@@ -91,6 +91,16 @@ void rt_fnhook_set_build(int build) {
     for (int i = 0; i < n; i++) reg(regs[i].addr, regs[i].fn, regs[i].user);
 }
 
+// The hook at addr now (the running build's address), NULL when none: plugins chain in front of it (runtime/plugin.c)
+FnHook rt_fnhook_get(uint64_t addr) {
+    uint32_t s = (uint32_t)((addr >> 2) * 0x9E3779B1u) & (NHOOK - 1);
+    while (hooks[s].addr) {
+        if (hooks[s].addr == addr) return hooks[s].fn;
+        s = (s + 1) & (NHOOK - 1);
+    }
+    return NULL;
+}
+
 int rt_fnhook(Cpu *c, uint64_t addr) {
     if (bypass == addr) { bypass = 0; return 0; }
     uint32_t s = (uint32_t)((addr >> 2) * 0x9E3779B1u) & (NHOOK - 1);

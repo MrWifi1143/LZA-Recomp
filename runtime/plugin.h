@@ -18,7 +18,8 @@ typedef struct {
     uint32_t abi;  // LARECOMP_PLUGIN_ABI
     void (*log)(const char *fmt, ...);
     // A guest function hook: fn runs when the guest calls addr; returning 1 skips the function (fn set x0 itself),
-    // 0 runs it as usual. Addresses as the recompiled game has them (main at 0x7000000000).
+    // 0 runs it as usual. Addresses as the recompiled game has them (main at 0x7000000000). Where the runtime hooks
+    // the function itself (a fix), fn runs first and the runtime's hook after it (unless fn skipped the function).
     void (*register_fnhook)(uint64_t addr, int (*fn)(struct Cpu *c, uint64_t addr));
     // ... and running the original from inside such a hook (the arguments as in c)
     void (*call_original)(struct Cpu *c, uint64_t addr);

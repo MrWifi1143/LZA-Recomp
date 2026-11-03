@@ -2,9 +2,10 @@
 // mods that need code: hook any game function, read and write game memory, call the game's functions, run something
 // every frame. Built into <game folder>/plugins/ (make legendslua); off until switched on in the Mods page.
 //
-// Scripts: <game folder>/lua/*.lua, run in name order at start, run again when one of them changes (hot reload: the
-// hooks they set are dropped first). A live console: a file <dir>/lua_run.lua (dir: LARECOMP_LIVE, else the game
-// folder) is run once and removed; what it prints goes to the log and to <dir>/lua_out.txt.
+// Scripts: <game folder>/lua/*.lua, run in name order at the first game frame (the runtime's own hooks set by then),
+// run again when one of them changes (hot reload: the hooks they set are dropped first). A live console: a file
+// <dir>/lua_run.lua (dir: LARECOMP_LIVE, else the game folder) is run once and removed; what it prints goes to the log
+// and to <dir>/lua_out.txt.
 //
 // The API (addresses as the running game has them, main at 0x7000000000):
 //   log(...) / print(...)              -> the log ("[lua] ...")
@@ -359,6 +360,7 @@ static void load_scripts(void) {
 
 static void game_frame(uint64_t frame) {
     pthread_mutex_lock(&g_lock);
+    if (!L) load_scripts();  // (the first frame: the runtime's own hooks are all set by now - ours chain in front)
     if (frame % 30 == 0) {  // (twice a second: the scripts changed? the console?)
         static long long last = -1;
         static char names[128][256];
@@ -408,9 +410,6 @@ int larecomp_plugin_init(const LarecompPluginApi *api, LarecompPluginHooks *hook
     snprintf(g_dir, sizeof g_dir, "%s/lua", api->data_root());
     const char *live = getenv("LARECOMP_LIVE");
     snprintf(g_live, sizeof g_live, "%s", live && *live ? live : api->data_root());
-    pthread_mutex_lock(&g_lock);
-    load_scripts();
-    pthread_mutex_unlock(&g_lock);
     hooks->game_frame = game_frame;
     A->log("[lua] Legends Lua ready (%s)\n", LUA_RELEASE);
     return 0;
