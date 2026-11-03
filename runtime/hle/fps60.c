@@ -709,6 +709,9 @@ void pla_aidump_present(void) {
         LOG("[pwatch] body %llx\n", (unsigned long long)b);
         if (b) hwwatch_arm(b + 0x90, 4);
     }
+    static uint64_t g_pf[2048];
+    static int g_npf;
+    FILE *rf;
     snprintf(p, sizeof p, "%s/pfind", dir);
     if (!remove(p)) {  // (<live>/pfind: every copy of the player's position in the heap - 3 floats within 1e-3)
         bool warp_player_pos(float out[3]);
@@ -719,13 +722,37 @@ void pla_aidump_present(void) {
         const float *h = (const float *)(uintptr_t)HEAP_BASE;
         int hits = 0;
         if (warp_player_pos(q))
-            for (uint64_t i = 0; i + 2 < words && hits < 100; i++)
+            for (uint64_t i = 0; i + 2 < words && hits < 2000; i++)
                 if (fabsf(h[i] - q[0]) < 1e-3f && fabsf(h[i + 1] - q[1]) < 1e-3f && fabsf(h[i + 2] - q[2]) < 1e-3f)
-                    LOG("[pfind] %llx\n", (unsigned long long)(HEAP_BASE + i * 4)), hits++;
-        LOG("[pfind] %.3f %.3f %.3f: %d copies\n", q[0], q[1], q[2], hits);
+                    LOG("[pfind] %llx\n", (unsigned long long)(HEAP_BASE + i * 4)), g_pf[hits++] = HEAP_BASE + i * 4;
+        g_npf = 0;  // (kept for <live>/rwcycle, without dense runs - a history buffer: more than 6 in 64 KB)
+        for (int i = 0; i < hits; i++) {
+            int near = 0;
+            for (int j = 0; j < hits; j++) near += g_pf[j] >> 16 == g_pf[i] >> 16;
+            if (near <= 6) g_pf[g_npf++] = g_pf[i];
+        }
+        LOG("[pfind] %.3f %.3f %.3f: %d copies (%d kept)\n", q[0], q[1], q[2], hits, g_npf);
+    }
+    snprintf(p, sizeof p, "%s/rwcycle", dir);
+    static int cyc = -1, period = 36, cnt;
+    rf = fopen(p, "r");
+    if (rf) {  // (<live>/rwcycle [presents]: the kept copies watched 4 at a time, the next 4 every that many presents)
+        if (fscanf(rf, "%d", &period) != 1 || period < 1) period = 36;
+        fclose(rf), remove(p), cyc = 0, cnt = 0;
+    }
+    if (cyc >= 0 && cnt++ % period == 0) {
+        void hwwatch_arm(uint64_t addr, uint64_t len);
+        void hwwatch_reset(void);
+        hwwatch_reset();
+        if (cyc >= g_npf) { fprintf(stderr, "[rwcycle] done\n"), cyc = -1; }
+        else {
+            fprintf(stderr, "[rwcycle] group %d:", cyc / 4);
+            for (int k = 0; k < 4 && cyc < g_npf; k++, cyc++) fprintf(stderr, " %llx", (unsigned long long)g_pf[cyc]), hwwatch_arm(g_pf[cyc], 4);
+            fprintf(stderr, "\n");
+        }
     }
     snprintf(p, sizeof p, "%s/rwatch", dir);
-    FILE *rf = fopen(p, "r");
+    rf = fopen(p, "r");
     if (rf) {  // (<live>/rwatch: hex addresses, each watched)
         void hwwatch_arm(uint64_t addr, uint64_t len);
         unsigned long long a;
@@ -825,7 +852,16 @@ void pla60_configure(const char *exefs) {
                 rt_register_fnhook_at(0x70024a87d4ull, pla_frames_users_hook);
                 rt_register_fnhook_at(0x70024a8cc4ull, pla_frames_users_hook);
             }
-            if (getenv("LARECOMP_PLA_AIDUMP")) rt_register_fnhook_at(0x7000a6bc64ull, pla_ai_seen_hook);
+            if (getenv("LARECOMP_PLA_AIDUMP")) {  // (LARECOMP_PLA_AIDUMP_FN=<addr>,...: the x0 of those instead)
+                const char *fl = getenv("LARECOMP_PLA_AIDUMP_FN");
+                if (!fl) rt_register_fnhook_at(0x7000a6bc64ull, pla_ai_seen_hook);
+                for (char *e = (char *)fl; e && *e;) {
+                    uint64_t a = strtoull(e, &e, 16);
+                    if (a) rt_register_fnhook_at(a, pla_ai_seen_hook);
+                    if (*e != ',') break;
+                    e++;
+                }
+            }
             if (getenv("LARECOMP_PLA_BT"))
                 for (char *e = getenv("LARECOMP_PLA_BT"); *e;) {
                     static int nb;
