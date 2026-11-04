@@ -718,8 +718,8 @@ void input_frame(uint64_t frame) {
             FILE *f = fopen(path, "r");
             if (f) {
                 fseek(f, off, SEEK_SET);
-                while (fgets(line, sizeof line, f) && strchr(line, '\n')) {
-                    off = ftell(f);
+                while ((qt + 1) % 256 != qh && fgets(line, sizeof line, f) && strchr(line, '\n')) {  // (a full queue: the
+                    off = ftell(f);                                                                   // rest read later)
                     long len;
                     char keys[120];
                     if (sscanf(line, "%ld %119s", &len, keys) == 2 && (qt + 1) % 256 != qh) q[qt].len = len, snprintf(q[qt].keys, 120, "%s", keys), qt = (qt + 1) % 256;

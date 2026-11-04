@@ -506,6 +506,20 @@ static int pla_script_frames_hook(Cpu *c, uint64_t addr) {
     return 1;
 }
 
+// The effect sequences' player (f_70009dbeac, x0 = a sequence: frame +0xe8, length +0xec, speed +0xf0; runs the
+// frame-timed commands of bin/effect/battle/sequence/*.wbin and the like, then frame += speed): one frame an update,
+// sized for 30 fps. At 144 fps a battle's opening ran 4.8 times too fast - Volo had his Poke Ball out during his salute
+// and the shot of the hillside was cut. Above 30 fps a sequence plays only on the updates where 30 fps time moved on a
+// frame (its commands see each frame once, as at 30 fps); on the others it is still running (returns 0) and waits.
+// LARECOMP_PLA_SEQ_TICK=0: every update (as the game).
+#define PLA_SEQ_STEP 0x70009dbeacull
+static int pla_seq_step_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    if (!*(const uint8_t *)(uintptr_t)(c->x[0] + 0x302) || rt_pla_tick(0xbeac)) return 0;  // (not playing: the game's answer)
+    c->x[0] = 0;
+    return 1;
+}
+
 // A character's scripted move (f_70019b2140, x0 = its navigator, each update while [+0x3e4] == 1): the progress +0x4bc
 // goes up by the step +0x4b4 an update - no frame time - and the move ends at 1 (state 0, the script's "arrived" check
 // f_70019b24dc turns false). At 60 fps moves ended twice as early: Volo removed mid-walk after his battle, people in
@@ -582,6 +596,7 @@ void pla60_configure(const char *exefs) {
             rt_register_fnhook_at(0x700193d16cull, pla_mouse_look_hook);
             rt_register_fnhook_at(PLA_SCRIPT_STEP, pla_script_step_hook);
             if (!getenv("LARECOMP_PLA_WAIT_TICK") || atoi(getenv("LARECOMP_PLA_WAIT_TICK"))) rt_register_fnhook_at(PLA_SCRIPT_FRAMES, pla_script_frames_hook);
+            if (!getenv("LARECOMP_PLA_SEQ_TICK") || atoi(getenv("LARECOMP_PLA_SEQ_TICK"))) rt_register_fnhook_at(PLA_SEQ_STEP, pla_seq_step_hook);
             if (!getenv("LARECOMP_PLA_MOVE_SCALE") || atoi(getenv("LARECOMP_PLA_MOVE_SCALE"))) rt_register_fnhook_at(PLA_SCRIPTED_MOVE, pla_scripted_move_hook);
             if (!getenv("LARECOMP_PLA_THROW_SCALE") || atoi(getenv("LARECOMP_PLA_THROW_SCALE"))) {
                 rt_register_fnhook_at(PLA_THROW_FRAMES, pla_throw_frames_hook);
