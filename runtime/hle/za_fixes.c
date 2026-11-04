@@ -549,8 +549,21 @@ static int sensor_make(Cpu *c, uint64_t addr) {
     return 1;
 }
 
+// Details drawn only near the camera: a scene's trinity_ModelCullingSetting (its factory passes two floats to
+// 0x70010930d4 as x3: 65 / 130 m in Lumiose, 106 / 60 m) - past them the game stops drawing a model it has loaded
+// (the chimneys on the rooftops, benches: there, popping in as you walk up, nothing streamed). Read as a scene loads.
+// The Detail factor too, at most x4 like the props. LARECOMP_ZA_MCULL=<k>: that factor instead.
+static int model_cull_set(Cpu *c, uint64_t addr) {
+    (void)addr;
+    float *v = (float *)(uintptr_t)c->x[3];
+    const char *e = getenv("LARECOMP_ZA_MCULL");
+    float k = e ? (float)atof(e) : detail_k();
+    if (!e && k > 4) k = 4;
+    if (v && k > 0 && k != 1) v[0] *= k, v[1] *= k;
+    return 0;
+}
+
 void za_fixes_configure(const char *exefs) {
-    rt_register_fnhook_at(0x70010e3ed0ull, sensor_make);
     static const uint8_t ZA_MAIN[8] = {0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a};  // 2.0.2 (any other build: none of this)
     static bool done;
     char p[1100];
@@ -564,6 +577,8 @@ void za_fixes_configure(const char *exefs) {
     }
     if (done || memcmp(id, ZA_MAIN, 8)) return;
     done = true;
+    rt_register_fnhook_at(0x70010e3ed0ull, sensor_make);  // (the props' streaming distances)
+    rt_register_fnhook_at(0x70010930d4ull, model_cull_set);  // (models' culling distances)
     g_mouse_look = !getenv("LARECOMP_ZA_MOUSE_LOOK") || atoi(getenv("LARECOMP_ZA_MOUSE_LOOK")) != 0;
     rt_register_fnhook_at(ZA_CAM_ANGLES, mouse_look_hook);
     { extern void za_options_configure(void); za_options_configure(); }
