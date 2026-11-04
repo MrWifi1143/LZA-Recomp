@@ -37,7 +37,7 @@ CXX      := clang++ $(CROSS)
 IMGUI    := third_party/imgui
 # -fdenormal-fp-math=dynamic: the guest's FPCR.FZ runs as the host's own flush to zero (MXCSR FTZ/DAZ, simd.h), so the
 # compiler must not assume IEEE denormals (it turned a bit test into a compare with 0.0, which DAZ makes true)
-GENFLAGS := -O1 -fno-strict-aliasing -fdenormal-fp-math=dynamic -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
+GENFLAGS := -O2 -fno-strict-aliasing -fdenormal-fp-math=dynamic -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
 
 # The game code (made by `make gen` from your own game files) is its own library next to the app (runtime/gamelib.h);
 # the app itself holds none of it
@@ -106,12 +106,23 @@ GENFLAGS += -DSTORE_TRACE
 GENTRACE := --trace-stores
 endif
 
+# Profile-guided optimisation of the game code (data/pgo): what ran in two walks of the game (Lumiose by day at Max people
+# and detail, and by night) steers inlining and code layout - Z-A's daytime walk 82 -> 88 fps uncapped, 1% lows +6%
+# (2026-11-04; -O2 alone was no faster than -O1). Sparse profiles: code the walks never ran gets plain -O2, not code
+# optimised for size. One per compiler family - clang 23 identifies functions differently from 21 / 22 (zig's, which
+# builds the players' copy: runtime/gamebuild.c). Another game version's functions don't match it (no effect). PGO=0: off.
+PGO_NAME  ?= za
+PGO_CLANG := $(shell v=$$($(CC) -dumpversion 2>/dev/null | cut -d. -f1); [ "$${v:-0}" -ge 23 ] && echo 23 || echo 21)
+PGO_ZST   := $(if $(filter 0,$(PGO)),,$(wildcard data/pgo/$(PGO_NAME).clang$(PGO_CLANG).profdata.zst))
+PGO_DATA  := $(if $(PGO_ZST),$(B)/pgo.profdata)
+PGOFLAGS  := $(if $(PGO_DATA),-fprofile-instr-use=$(PGO_DATA) -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin)
+
 # GAMELIB_ID: what the game code library is built from (the generator, the headers it is compiled against, the
-# flags). A library with another id is rebuilt by the start screen, never loaded.
+# flags, the profile). A library with another id is rebuilt by the start screen, never loaded.
 GAMELIB_SRCS := tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/patches.py \
                 tools/simd_c.py tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
                 runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h $(if $(filter aarch64,$(ARCH)),runtime/sj_aarch64.h)
-GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(GENFLAGS)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
+GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS) $(PGO_ZST); echo '$(GENFLAGS)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
 
 RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
 RTFLAGS  := -O2 -g -fno-strict-aliasing -fdenormal-fp-math=dynamic -Wall -Wno-unused-function -Iruntime -Iruntime/nvn -Ithird_party $(DEPINC) $(OSFLAGS) $(ARMARCH)
@@ -119,9 +130,13 @@ CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime
 
 all: $(EXE) $(if $(strip $(GEN_SRC)),$(GAMELIB))  # (strip: an empty wildcard list is spaces, which $(if) took as true)
 
-$(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h runtime/simd.h runtime/simd_fp.h
+$(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h runtime/simd.h runtime/simd_fp.h $(PGO_DATA)
 	@mkdir -p $(dir $@)
-	@$(CC) $(GENFLAGS) -c $< -o $@
+	@$(CC) $(GENFLAGS) $(PGOFLAGS) -c $< -o $@
+
+$(B)/pgo.profdata: $(PGO_ZST)
+	@mkdir -p $(dir $@)
+	zstd -q -d -f $< -o $@
 
 $(B)/obj/tools/gamelib_entry.o: tools/gamelib_entry.c $(GAMELIB_SRCS)
 	@mkdir -p $(dir $@)
