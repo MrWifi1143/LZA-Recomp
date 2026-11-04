@@ -14,7 +14,7 @@ enum { PROMPTS_AUTO, PROMPTS_SWITCH, PROMPTS_XBOX, PROMPTS_PLAYSTATION, PROMPTS_
 
 typedef struct {
     bool fullscreen;
-    int fps;  // 30 (the game's own), 60 (Let's Go: interpolated, exec.c), or 60 / 120 / 144 / FPS_UNLIMITED (the Legends: hle/fps60.c)
+    int fps;  // 30 (the game's own), 60 (Let's Go: interpolated, exec.c), or 60 / 72 / 120 / 144 / FPS_UNLIMITED (the Legends: hle/fps60.c)
     bool fixed_steps;    // the Legends above 30 fps: the world steps the frame rate's period each frame (a dip slows the
                          // game down), not the time that really passed (the default; FPS_UNLIMITED always: hle/fps60.c)
     int res_mode;        // RES_MATCH, 1..4 (N x the Switch's 1080p), RES_DYNAMIC, RES_Q75/50/25 (share of the display)
