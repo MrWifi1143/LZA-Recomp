@@ -727,8 +727,8 @@ void input_frame(uint64_t frame) {
             FILE *f = fopen(path, "r");
             if (f) {
                 fseek(f, off, SEEK_SET);
-                while (fgets(line, sizeof line, f) && strchr(line, '\n')) {
-                    off = ftell(f);
+                while ((qt + 1) % 256 != qh && fgets(line, sizeof line, f) && strchr(line, '\n')) {  // (a full queue: the
+                    off = ftell(f);                                                                   // rest read later)
                     long len;
                     char keys[120], unit[8] = "";
                     bool ms = sscanf(line, "%ld%7[ms] %119s", &len, unit, keys) == 3 && !strcmp(unit, "ms");
