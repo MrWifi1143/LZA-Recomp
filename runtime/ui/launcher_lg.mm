@@ -859,7 +859,10 @@ extern "C" void launcher_lg_run(const char *root) {
     int res = 0;
     for (int i = 0; i < 6; i++) if (res_lines[i] == g_settings.res_height) res = i;
     bool full = g_settings.fullscreen, smaa = g_settings.antialias == AA_SMAA, wildb = g_settings.wild_battle, showfps = g_settings.show_fps, realtime = !g_settings.fixed_steps;
-    int fps_i = g_settings.fps == FPS_UNLIMITED ? 4 : g_settings.fps == 144 ? 3 : g_settings.fps == 120 ? 2 : g_settings.fps == 60 ? 1 : 0;
+    // (72: half a 144 Hz screen's refresh - every frame shown for exactly 2 refreshes, where 60 alternates 2 and 3)
+    static const int fps_vals[] = {30, 60, 72, 120, 144, FPS_UNLIMITED};
+    auto fps_index = [](int f) { for (int i = 0; i < 6; i++) if (fps_vals[i] == f) return i; return 0; };
+    int fps_i = fps_index(g_settings.fps);
     bool experimental = g_settings.experimental;
     // Recommended settings for this PC (from Z-A's start screen; by the GPU, the CPU threads and the RAM): shown with an
     // Apply button, and applied at once on a first start (no larecomp.ini yet)
@@ -898,7 +901,7 @@ extern "C" void launcher_lg_run(const char *root) {
         res = 0;
         for (int i = 0; i < 6; i++) if (res_lines[i] == d.res_height) res = i;
         full = d.fullscreen, smaa = d.antialias == AA_SMAA, showfps = d.show_fps, realtime = !d.fixed_steps, experimental = d.experimental;
-        fps_i = d.fps == FPS_UNLIMITED ? 4 : d.fps == 144 ? 3 : d.fps == 120 ? 2 : d.fps == 60 ? 1 : 0;
+        fps_i = fps_index(d.fps);
         wildb = d.wild_battle, prompts_i = d.button_prompts, smooth_sh = d.shadow_smooth, bg_i = d.background, pk_i = d.pkhex_link;
         shl_i = d.shader_nowait;
         gopt = k_gopt_default;
@@ -972,18 +975,18 @@ extern "C" void launcher_lg_run(const char *root) {
         ImGui::Combo(T("Resolution", "Resolução"), &res, g_pt ? res_pt : res_en, 6);
         if (ImGui::Checkbox(T("Fullscreen", "Tela cheia"), &full) && classic) SDL_SetWindowFullscreen(win, full);  // (launcher: at Play)
         ImGui::Checkbox(T("Anti-aliasing (SMAA)", "Suavizar serrilhado (SMAA)"), &smaa);
-        static const char *const fps_names_en[] = {"30 fps", "60 fps", "120 fps", "144 fps", "Unlimited"};  // (above 60: Experimental settings)
-        static const char *const fps_names_pt[] = {"30 fps", "60 fps", "120 fps", "144 fps", "Ilimitada"};
+        static const char *const fps_names_en[] = {"30 fps", "60 fps", "72 fps", "120 fps", "144 fps", "Unlimited"};  // (above 60: Experimental settings)
+        static const char *const fps_names_pt[] = {"30 fps", "60 fps", "72 fps", "120 fps", "144 fps", "Ilimitada"};
         if (!experimental && fps_i > 1) fps_i = 1;
-        ImGui::Combo(T("Frame rate", "Taxa de quadros"), &fps_i, g_pt ? fps_names_pt : fps_names_en, experimental ? 5 : 2);
-        if (fps_i >= 1 && fps_i <= 3)  // (Unlimited: always real time, hle/fps60.c)
+        ImGui::Combo(T("Frame rate", "Taxa de quadros"), &fps_i, g_pt ? fps_names_pt : fps_names_en, experimental ? 6 : 2);
+        if (fps_i >= 1 && fps_i <= 4)  // (Unlimited: always real time, hle/fps60.c)
             ImGui::Checkbox(T("Keep full speed when the frame rate dips", "Manter a velocidade total quando a taxa de quadros cai"), &realtime);
-        if (fps_i >= 2)  // (120 / 144 / Unlimited: the game's own logic was made for 30; some of it counts frames)
+        if (fps_i >= 2)  // (72 / 120 / 144 / Unlimited: the game's own logic was made for 30; some of it counts frames)
             ImGui::TextColored(k_yellow, "%s",
-                               T("120 fps and above are experimental. Some scripted scenes can stall at these rates\n"
+                               T("Above 60 fps is experimental. Some scripted scenes can stall at these rates\n"
                                               "(a cutscene that walks you somewhere may never let go of you). If that happens,\n"
                                               "set 60 or 30 fps in the game's Settings and step into the scene again.",
-                                              "120 fps ou mais são experimentais. Algumas cenas com script podem travar nessas taxas\n"
+                                              "Acima de 60 fps é experimental. Algumas cenas com script podem travar nessas taxas\n"
                                               "(uma cena que leva você a algum lugar pode nunca soltar o controle). Se acontecer,\n"
                                               "escolha 60 ou 30 fps nas configurações do jogo e entre na cena de novo."));
         ImGui::Checkbox(T("Show FPS counter", "Mostrar contador de FPS"), &showfps);
@@ -991,9 +994,9 @@ extern "C" void launcher_lg_run(const char *root) {
         ImGui::Checkbox(T("Experimental settings", "Configurações experimentais"), &experimental);
         ImGui::Indent(ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x);
         ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-        ImGui::TextWrapped("%s", T("Settings that aren't finished yet: frame rates above 60 (120, 144, Unlimited). Shown here and in "
+        ImGui::TextWrapped("%s", T("Settings that aren't finished yet: frame rates above 60 (72, 120, 144, Unlimited). Shown here and in "
                                    "the game's Settings only while this is on.",
-                                   "Configurações ainda não terminadas: taxas de quadros acima de 60 (120, 144, Ilimitada). Aparecem "
+                                   "Configurações ainda não terminadas: taxas de quadros acima de 60 (72, 120, 144, Ilimitada). Aparecem "
                                    "aqui e nas configurações do jogo só com isto ligado."));
         ImGui::PopStyleColor();
         ImGui::Unindent(ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x);
@@ -1466,7 +1469,7 @@ extern "C" void launcher_lg_run(const char *root) {
     g_settings.antialias = smaa ? AA_SMAA : AA_OFF;
     if (!experimental && fps_i > 1) fps_i = 1;
     g_settings.experimental = experimental;
-    g_settings.fps = fps_i == 4 ? FPS_UNLIMITED : fps_i == 3 ? 144 : fps_i == 2 ? 120 : fps_i == 1 ? 60 : 30;
+    g_settings.fps = fps_vals[fps_i >= 0 && fps_i < 6 ? fps_i : 0];
     g_settings.wild_battle = wildb;
     g_settings.show_fps = showfps;
     g_settings.fixed_steps = !realtime;
