@@ -15,11 +15,11 @@ never ran are left out and get plain -O2. A profile from another game version si
 
 ## Recording them again (after a generator change that alters many functions, or a new game version)
 
-1. Instrumented library, per family (`CC=/usr/lib/llvm21/bin/clang` for the 21 family). Keep the Makefile's own flags
-   (`-march`, `-fPIC`): set GENFLAGS through `make -p`'s value plus the profiling flags, not a bare override.
+1. Instrumented library, per family (`CC=/usr/lib/llvm21/bin/clang` for the 21 family). Pass the profiling flags as
+   PGOFLAGS - overriding GENFLAGS on the command line drops the Makefile's own `-march` / `-fPIC`:
 
-       make -j20 B=build/pgogen GENFLAGS="<GENFLAGS> -fprofile-instr-generate -mllvm -runtime-counter-relocation" \
-            GAMELIB_LDFLAGS="-shared -fuse-ld=lld -fprofile-instr-generate -latomic" all
+       make -j20 B=build/pgogen PGO=0 PGOFLAGS="-fprofile-instr-generate -mllvm -runtime-counter-relocation" \
+            GAMELIB_LDFLAGS="-shared -fuse-ld=lld -fprofile-instr-generate" all
 
 2. Play the walks with `LLVM_PROFILE_FILE=<dir>/walk-%p%c.profraw` (`%c`: written as it runs, so a killed game keeps
    its counts). The bench kit's day and night walks (claude-handoff/za-bench-kit) were used.
