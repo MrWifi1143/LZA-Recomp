@@ -8,7 +8,7 @@
 #
 # Needs LZA_WINBUILD (or --winbuild) with deps/bin, python-embed.zip, wheels/ and zig-windows.zip (tools/windows/README.md).
 # Run from the repository root.
-import argparse, glob, os, re, shutil, struct, sys, zipfile
+import argparse, glob, os, re, shutil, struct, subprocess, sys, zipfile
 
 B = 'build/win-native'
 
@@ -135,6 +135,8 @@ def main():
     for f in ('runtime/cpu.h', 'runtime/simd.h', 'runtime/simd_fp.h', 'runtime/gamelib.h', 'tools/gamelib_entry.c',
               'runtime/hle/hle_symbols.txt'):
         shutil.copy(f, G)
+    for z in glob.glob('data/pgo/*.clang21.profdata.zst'):  # (the optimiser's profile, zig's family: Makefile PGO)
+        subprocess.run(['zstd', '-q', '-d', '-f', z, '-o', os.path.join(G, 'pgo.profdata')], check=True)
     shutil.copy('docs/icon/icon_1024.png', os.path.join(D, 'icon.png'))
     shutil.copy('third_party/fonts/Baloo2/Baloo2-SemiBold.ttf', D)
     if os.path.isfile('data/shader_manifest.txt'):  # (the warm-up's first programs: runtime/nvn/vulkan/warmup.c)

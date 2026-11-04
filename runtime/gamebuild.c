@@ -106,6 +106,7 @@ typedef struct {
     char cc[1100];                     // compiler: zig (as `zig cc`), or LARECOMP_CC / clang
     bool zig;
     char inc[1100], entry[1100], hle[1100];  // headers the game code includes, tools/gamelib_entry.c, HLE names
+    char pgo[1100];  // the profile that guides the optimiser (Makefile PGO: a release's is zig's family), "" = none
 #ifdef _WIN32
     char implib[1100];  // the .exe's import library (the runtime functions the game code calls)
     char zig_rt[1100];  // the release's zig: its runtime built ahead of time (zig/rt, letsgo-recomp's tools/zig_slim.sh), "" = none
@@ -139,6 +140,8 @@ static bool find_tools(Tools *t) {
         !rt_resource("gamelib-src" SEP "gamelib_entry.c", "tools/gamelib_entry.c", t->entry, sizeof t->entry) ||
         !rt_resource("gamelib-src" SEP "hle_symbols.txt", "runtime/hle/hle_symbols.txt", t->hle, sizeof t->hle))
         return false;
+    if (!getenv("LARECOMP_NO_PGO") && !rt_resource("gamelib-src" SEP "pgo.profdata", "build" SEP "pgo.profdata", t->pgo, sizeof t->pgo))
+        t->pgo[0] = 0;
     char *s = strrchr(t->inc, '/'), *b = strrchr(t->inc, '\\');
     if (b > s) s = b;
     if (s) *s = 0;
@@ -259,6 +262,14 @@ static PlatProc start_compile(const Tools *t, const Unit *u) {
     Args a = {0};
     compiler(&a, t);
     add_cflags(&a, t);
+    if (t->pgo[0]) {
+        char pf[1200];
+        snprintf(pf, sizeof pf, "-fprofile-instr-use=%s", t->pgo);
+        add(&a, pf);
+        add(&a, "-Wno-profile-instr-unprofiled");
+        add(&a, "-Wno-profile-instr-out-of-date");
+        add(&a, "-Wno-backend-plugin");
+    }
     char inc[1200];
     snprintf(inc, sizeof inc, "-I%s", t->inc);
     add(&a, inc);
@@ -301,8 +312,8 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         setenv("ZIG_LOCAL_CACHE_DIR", zc, 1);
 #endif
     }
-    LOG("[gamebuild] generator %s%s%s, compiler %s%s, %d jobs\n", t.gen, t.gen_script[0] ? " " : "", t.gen_script,
-        t.cc, t.zig ? " cc" : "", o->jobs);
+    LOG("[gamebuild] generator %s%s%s, compiler %s%s, %d jobs, profile %s\n", t.gen, t.gen_script[0] ? " " : "", t.gen_script,
+        t.cc, t.zig ? " cc" : "", o->jobs, t.pgo[0] ? t.pgo : "none");
 
     // 1. the generator, every module at once; their finished files are compiled while it goes on (bases: rt.h)
     enum { NGEN = 4 };
