@@ -566,14 +566,16 @@ static int model_cull_set(Cpu *c, uint64_t addr) {
 // People's draw distance, the spawn side: NPC spawners (placement / traffic / trainer templates) create their people
 // when the player enters their OuterPlayerTrigger (a collision shape: radius 50 / 60 / 70 / 100 m) - created ~48 m
 // away, kept until ~75 m, so they popped in close (user report). The collision factory 0x7001108570 (x2 -> its
-// FlatBuffer: field 1 shape {1 params {1 radius}, 9 name}) gets that radius times the People factor (x1 / x1.5 / x2 / x3),
+// FlatBuffer: field 1 shape {1 params {1 radius}, 9 name}) gets that radius times the People factor (x1 / 1.1 / 1.2 / 1.25),
 // in place - the shape is built from that data later, not in the call - and remembered (address -> the value written),
 // so a template's data shared by many spawners is scaled once, and data loaded again over it is scaled anew. Measured
 // on the user's Rouge save at x3:
 // people created ~58 m instead of ~48 (something near 60 m limits it beyond that - the spawners' own streaming), still
 // inside the ~75 m they are kept to, so nothing pops back out. LARECOMP_ZA_TRIGDIST=<k>: that factor instead.
 static int collision_make(Cpu *c, uint64_t addr) {
-    static const float k_mul[4] = {1.0f, 1.5f, 2.0f, 3.0f};
+    // (people show from ~58-60 m at most - their bodies are made only that near - so a 50 m trigger needs only x1.25:
+    // more brings spawners in for nothing to see and costs (Lumiose walk, contended: x3 -7%, x1.25 -4%))
+    static const float k_mul[4] = {1.0f, 1.1f, 1.2f, 1.25f};
     const char *e = getenv("LARECOMP_ZA_TRIGDIST");
     float k = e ? (float)atof(e) : (g_settings.crowd >= 0 && g_settings.crowd <= 3 ? k_mul[g_settings.crowd] : 1.0f);
     if (k <= 0 || k == 1) return 0;
