@@ -563,6 +563,41 @@ static int model_cull_set(Cpu *c, uint64_t addr) {
     return 0;
 }
 
+// People's draw distance, the spawn side: NPC spawners (placement / traffic / trainer templates) create their people
+// when the player enters their OuterPlayerTrigger (a collision shape: radius 50 / 60 / 70 / 100 m) - created ~48 m
+// away, kept until ~75 m, so they popped in close (user report). The collision factory 0x7001108570 (x2 -> its
+// FlatBuffer: field 1 shape {1 params {1 radius}, 9 name}) gets that radius times the People factor (x1 / x1.5 / x2 / x3),
+// in place - the shape is built from that data later, not in the call - and remembered (address -> the value written),
+// so a template's data shared by many spawners is scaled once, and data loaded again over it is scaled anew. Measured
+// on the user's Rouge save at x3:
+// people created ~58 m instead of ~48 (something near 60 m limits it beyond that - the spawners' own streaming), still
+// inside the ~75 m they are kept to, so nothing pops back out. LARECOMP_ZA_TRIGDIST=<k>: that factor instead.
+static int collision_make(Cpu *c, uint64_t addr) {
+    static const float k_mul[4] = {1.0f, 1.5f, 2.0f, 3.0f};
+    const char *e = getenv("LARECOMP_ZA_TRIGDIST");
+    float k = e ? (float)atof(e) : (g_settings.crowd >= 0 && g_settings.crowd <= 3 ? k_mul[g_settings.crowd] : 1.0f);
+    if (k <= 0 || k == 1) return 0;
+    uint64_t t = fb_ref(*(uint64_t *)(uintptr_t)c->x[2]);
+    uint64_t shape = fb_ref(fb_field(t, 1));
+    uint64_t nm = fb_ref(fb_field(shape, 9));
+    if (!nm) return 0;
+    static const char want[] = "OuterPlayerTrigger";
+    if (*(const uint32_t *)(uintptr_t)nm != sizeof want - 1 || memcmp((const char *)(uintptr_t)(nm + 4), want, sizeof want - 1)) return 0;
+    float *r = (float *)(uintptr_t)fb_field(fb_ref(fb_field(shape, 1)), 1);
+    if (!r || !(*r > 0 && *r < 1000)) return 0;
+    static struct { float *at; float set; } done[4096];
+    static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&lk);
+    uint32_t h = (uint32_t)(((uintptr_t)r >> 2) * 0x9E3779B1u) & 4095;
+    for (int n = 0; n < 4096 && done[h].at && done[h].at != r; n++) h = (h + 1) & 4095;
+    if (done[h].at != r || done[h].set != *r) {  // (new, or new data at the same place: scale it)
+        *r *= k;
+        done[h].at = r, done[h].set = *r;
+    }
+    pthread_mutex_unlock(&lk);
+    return 0;
+}
+
 void za_fixes_configure(const char *exefs) {
     static const uint8_t ZA_MAIN[8] = {0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a};  // 2.0.2 (any other build: none of this)
     static bool done;
@@ -579,6 +614,7 @@ void za_fixes_configure(const char *exefs) {
     done = true;
     rt_register_fnhook_at(0x70010e3ed0ull, sensor_make);  // (the props' streaming distances)
     rt_register_fnhook_at(0x70010930d4ull, model_cull_set);  // (models' culling distances)
+    rt_register_fnhook_at(0x7001108570ull, collision_make);  // (NPC spawners' trigger radius)
     g_mouse_look = !getenv("LARECOMP_ZA_MOUSE_LOOK") || atoi(getenv("LARECOMP_ZA_MOUSE_LOOK")) != 0;
     rt_register_fnhook_at(ZA_CAM_ANGLES, mouse_look_hook);
     { extern void za_options_configure(void); za_options_configure(); }
