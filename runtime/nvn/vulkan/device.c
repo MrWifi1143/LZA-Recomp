@@ -151,6 +151,7 @@ void vk_device_fault_report(void) {
             (unsigned long long)vend[i].vendorFaultData);
 }
 
+static bool g_display_csv;
 static void create_device(void) {
     uint32_t ne = 0;
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
@@ -204,6 +205,11 @@ static void create_device(void) {
     if (g_pipe_exec_stats) ext[n_ext++] = VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;
     else if (ENV("LARECOMP_PIPE_STATS")) LOG("[vk] LARECOMP_PIPE_STATS: the driver has no VK_KHR_pipeline_executable_properties\n");
     g_fault_ext = fault;
+    // LARECOMP_DISPLAY_CSV=<file> (research): when each frame reached the screen (present ids + a thread waiting on them)
+    g_display_csv = ENV("LARECOMP_DISPLAY_CSV") && has_ext(ep, ne, VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
+                    has_ext(ep, ne, VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
+    if (g_display_csv) ext[n_ext++] = VK_KHR_PRESENT_ID_EXTENSION_NAME, ext[n_ext++] = VK_KHR_PRESENT_WAIT_EXTENSION_NAME;
+    else if (ENV("LARECOMP_DISPLAY_CSV")) LOG("[vk] LARECOMP_DISPLAY_CSV: no VK_KHR_present_id / present_wait\n");
     {   // plugins' device extensions, once each and only those the device has
         const char *pe[24];
         uint32_t np = plugins_vk_device_extensions(g_vk.phys, pe, 24);
@@ -257,6 +263,11 @@ static void create_device(void) {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT, .graphicsPipelineLibrary = VK_TRUE, .pNext = f.pNext};
     if (gpl) f.pNext = &gplf;
     g_vk.gpl = gpl;
+    VkPhysicalDevicePresentIdFeaturesKHR pidf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR, .presentId = VK_TRUE,
+                                                 .pNext = f.pNext};
+    VkPhysicalDevicePresentWaitFeaturesKHR pwf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR,
+                                                  .presentWait = VK_TRUE, .pNext = &pidf};
+    if (g_display_csv) f.pNext = &pwf;
     {   // subgroup size control (vk_sg32): only where 32 is possible but not the only size
         extern bool g_maxwell_warp_slices;  // (LARECOMP_WARP_SLICES=1: the sliced warp operations anywhere - a 32-wide
         g_maxwell_warp_slices = ENV("LARECOMP_WARP_SLICES") != NULL;  // subgroup is one slice: the same results, a test)
@@ -569,6 +580,45 @@ static void save_window_image(VkCommandBuffer cb, VkSpan *out) {
     image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 }
 
+// LARECOMP_DISPLAY_CSV=<file> (research): "<present id>,<ns presented by us>,<ns shown>,<game frame>" per present. A thread
+// waits for each id (vkWaitForPresentKHR returns once that present, or a later one, is on the screen): ids shown at the
+// same time as the next one were replaced before a refresh showed them (mailbox), and the gaps between shown times are
+// what the screen did - whole refreshes.
+static uint64_t g_pid_next, g_pid_presented;
+static uint64_t g_pid_t[4096], g_pid_frame[4096];
+static uint64_t display_log_id(void) { return ++g_pid_next; }
+static void *display_log_thread(void *arg) {
+    (void)arg;
+    FILE *f = fopen(ENV("LARECOMP_DISPLAY_CSV"), "w");
+    if (!f) return NULL;
+    fprintf(f, "id,presented_ns,shown_ns,game_frame\n");
+    for (uint64_t id = 1;; id++) {
+        while (__atomic_load_n(&g_pid_presented, __ATOMIC_ACQUIRE) < id) plat_sleep_until_ns(plat_now_ns() + 200000);
+        VkSwapchainKHR sc = g_vk.swapchain;
+        static PFN_vkWaitForPresentKHR wait;
+        if (!wait) wait = (PFN_vkWaitForPresentKHR)vkGetDeviceProcAddr(g_vk.dev, "vkWaitForPresentKHR");
+        VkResult r = wait(g_vk.dev, sc, id, 1000000000ull);
+        uint64_t t = plat_now_ns();
+        fprintf(f, "%llu,%llu,%llu,%llu%s\n", (unsigned long long)id, (unsigned long long)g_pid_t[id % 4096],
+                r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR ? (unsigned long long)t : 0ull, (unsigned long long)g_pid_frame[id % 4096],
+                r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR ? "" : ",fail");
+        if (id % 64 == 0) fflush(f);
+    }
+    return NULL;
+}
+static void display_log_presented(uint64_t id) {
+    extern uint64_t renderer_game_frame(void);
+    g_pid_t[id % 4096] = plat_now_ns(), g_pid_frame[id % 4096] = renderer_game_frame();
+    __atomic_store_n(&g_pid_presented, id, __ATOMIC_RELEASE);
+    static bool started;
+    if (!started) {
+        started = true;
+        pthread_t th;
+        pthread_create(&th, NULL, display_log_thread, NULL);
+        pthread_detach(th);
+    }
+}
+
 // End rendering into the window image and present it. shot_path: also save the window image as PNG.
 void vk_frame_end(const char *shot_path) {
     if (!cur_frame.ok) return;
@@ -583,11 +633,15 @@ void vk_frame_end(const char *shot_path) {
     vk_submit_extra(cur_frame.acquired, done_sem[img], VK_NULL_HANDLE);
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &done_sem[img],
                            .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
+    uint64_t pid = 0;
+    VkPresentIdKHR pidi = {.sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR, .swapchainCount = 1, .pPresentIds = &pid};
+    if (g_display_csv) pid = display_log_id(), pi.pNext = &pidi;
     vk_queue_lock();
     rt_trace('Q', 0);
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
     rt_trace('q', 0);
     vk_queue_unlock();
+    if (g_display_csv) display_log_presented(pid);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) recreate_swapchain();
     cur_frame.ok = false;
     if (shot_path) {
