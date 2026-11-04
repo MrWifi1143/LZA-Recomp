@@ -42,9 +42,18 @@ static void on_hit(int sig, siginfo_t *si, void *ctx) {
     static int nseen;
     char key[64];
     snprintf(key, sizeof key, "%.40s+%llx", nm ? nm : "?", (unsigned long long)off);
-    for (int i = 0; i < nseen; i++) if (!strcmp(seen[i], key)) return;
-    if (nseen < 96) snprintf(seen[nseen++], 64, "%s", key);
+    static int all = -1, nall;  // (LARECOMP_HWWATCH_ALL=<n>: every hit, up to n, with the game frame - not only each pc's first)
+    if (all < 0) all = getenv("LARECOMP_HWWATCH_ALL") ? atoi(getenv("LARECOMP_HWWATCH_ALL")) : 0;
+    if (all) {
+        if (nall >= all) return;
+        nall++;
+    } else {
+        for (int i = 0; i < nseen; i++) if (!strcmp(seen[i], key)) return;
+        if (nseen < 96) snprintf(seen[nseen++], 64, "%s", key);
+    }
     Cpu *c = kernel_current_cpu();
+    extern uint64_t renderer_game_frame(void);
+    if (all) fprintf(stderr, "[hwwatch] f%llu", (unsigned long long)renderer_game_frame());
     fprintf(stderr, "[hwwatch] %s by %s (host pc %llx)", getenv("LARECOMP_HWWATCH_RW") ? "access" : "write", key, (unsigned long long)pc);
     if (c)
         fprintf(stderr, " guest lr %llx x0 %llx x1 %llx x8 %llx x19 %llx x20 %llx", (unsigned long long)c->x[30], (unsigned long long)c->x[0],
