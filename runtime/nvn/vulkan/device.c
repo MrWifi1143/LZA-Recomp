@@ -679,9 +679,10 @@ const float *vk_shot_crop(void) { return g_shot_crop; }
 void backend_present(NvnTexture *t);
 void backend_represent(void);
 static void represent_job(void *unused) { (void)unused; backend_represent(); }
+static bool g_representing;  // (backend_present of the last frame again: stereo hands the plugins nothing then)
 void backend_represent(void) {
     if (rt_active() && !rt_on_render_thread()) { rt_call(represent_job, NULL); return; }  // (the keyboard dialog: game thread)
-    if (g_last_presented) backend_present(g_last_presented);
+    if (g_last_presented) g_representing = true, backend_present(g_last_presented), g_representing = false;
     else SDL_Delay(16);
 }
 
@@ -718,7 +719,9 @@ void backend_present(NvnTexture *t) {
     extern bool vk_interp_enabled(void);
     extern void vk_stereo_present_size(uint32_t w, uint32_t h);
     vk_stereo_present_size(t->width, t->height);  // (the interface's tests in exec.c draw_)
-    bool stereo = g_plugin_stereo && !vk_interp_enabled();  // (frame interpolation - Let's Go's 60 fps menus - shares the recorder)
+    // (the last frame shown again - the keyboard dialog: its texture holds eye 1 after the replay, so with stereo on the
+    // plugins get nothing; the headset keeps the pair it has)
+    bool stereo = g_plugin_stereo && !vk_interp_enabled() && !g_representing;  // (frame interpolation - Let's Go's 60 fps menus - shares the recorder)
     if (stereo) {
         extern void renderer_save_texture_tex(TexBackend *b, const char *path);
         char sp[96];
@@ -747,7 +750,7 @@ void backend_present(NvnTexture *t) {
         if (due > now) SDL_DelayPrecise(due - now);
         b = hold;
     }
-    if (final && plugins_count() && !stereo) plugins_frame(vk_cmd(), b->image, b->format, b->width, b->height);
+    if (final && plugins_count() && !stereo && !(g_representing && g_plugin_stereo)) plugins_frame(vk_cmd(), b->image, b->format, b->width, b->height);
     bool have = vk_frame_begin(black);
     uint64_t nd = SDL_GetTicksNS() - t0;
     if (nd > 30000000) {
