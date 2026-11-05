@@ -782,7 +782,8 @@ void backend_present(NvnTexture *t) {
         if (st_step < 1) st_step = 1;
         if (st_env) g_plugin_stereo = 1;
     }
-    bool stereo = g_plugin_stereo;
+    extern bool vk_interp_enabled(void);
+    bool stereo = g_plugin_stereo && !vk_interp_enabled();  // (frame interpolation - Let's Go's 60 fps menus - shares the recorder)
     if (stereo) {
         extern void renderer_save_texture_tex(TexBackend *b, const char *path);
         char sp[96];
