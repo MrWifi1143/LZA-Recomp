@@ -9,9 +9,9 @@
 #include <stdint.h>
 #include <vulkan/vulkan.h>
 
-#define LARECOMP_PLUGIN_ABI 6  // (2: set_pad, set_render_height; 3: ldn_relay_*; 4: guest_call, data_root, present_count,
+#define LARECOMP_PLUGIN_ABI 7  // (2: set_pad, set_render_height; 3: ldn_relay_*; 4: guest_call, data_root, present_count,
                                 // hooks.game_frame; 5: watch, watch_reset, hooks.game_start; 6: set_stereo, hooks.frame_eye,
-                                // hooks.stereo_cbuf - a plugin checks abi first)
+                                // hooks.stereo_cbuf; 7: set_render_shape - a plugin checks abi first)
 
 struct Cpu;  // runtime/cpu.h: the guest registers - x[0..30] at byte 0 (8 each), sp at 256, v[0..31] at 512 (16 each)
 
@@ -63,6 +63,11 @@ typedef struct {
     // results of it. hooks.frame_eye gets each eye's image. A frame that can't be run again (its lists overwritten,
     // an object destroyed) has eye 0 only. Takes effect at the next frame; costs the renderer's work twice.
     void (*set_stereo)(int on);
+    // ---- ABI 7
+    // The render targets' shape (width / height; 0: the window's): a VR mod's eye, near square. The game still draws its
+    // 1920 x 1080 frame, squeezed into that shape - a camera whose frustum has the same shape comes out undistorted (its
+    // 2D overlay squeezed). The window shows the image in its own shape, fitted. Takes effect at the next frame.
+    void (*set_render_shape)(float w_over_h);
 } LarecompPluginApi;
 
 typedef struct {

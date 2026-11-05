@@ -108,13 +108,14 @@ uint64_t renderer_present_count(void);
 void hwwatch_arm(uint64_t addr, uint64_t len);  // (runtime/hle/hwwatch.c)
 void hwwatch_reset(void);
 static void set_stereo(int on);
+static void set_render_shape(float w_over_h);
 static const LarecompPluginApi g_api = {
     .abi = LARECOMP_PLUGIN_ABI, .log = plugin_log, .register_fnhook = plugin_register_fnhook,
     .call_original = plugin_call_original, .title_id = game_title_id, .queue_lock = vk_queue_lock, .queue_unlock = vk_queue_unlock,
     .image_origin_lower_left = origin_lower_left, .set_pad = input_plugin_pad, .set_render_height = set_render_height,
     .ldn_relay_set = NULL, .ldn_relay_local = NULL,  // (Arceus: no local play service - no relay)
     .guest_call = guest_call, .data_root = rt_data_root, .present_count = renderer_present_count,
-    .watch = hwwatch_arm, .watch_reset = hwwatch_reset, .set_stereo = set_stereo,
+    .watch = hwwatch_arm, .watch_reset = hwwatch_reset, .set_stereo = set_stereo, .set_render_shape = set_render_shape,
 };
 
 volatile int g_plugins_cbuf;
@@ -264,6 +265,8 @@ void plugins_frame(VkCommandBuffer cb, VkImage image, VkFormat fmt, uint32_t w, 
 
 volatile int g_plugin_stereo;
 static void set_stereo(int on) { g_plugin_stereo = on != 0; }
+volatile float g_plugin_render_shape;  // (nvn/output_scale.c)
+static void set_render_shape(float w_over_h) { g_plugin_render_shape = w_over_h > 0.2f && w_over_h < 5.0f ? w_over_h : 0; }
 void plugins_frame_eye(VkCommandBuffer cb, VkImage image, VkFormat fmt, uint32_t w, uint32_t h, int eye) {
     for (int i = 0; i < g_n; i++)
         if (g_hooks[i].frame_eye) g_hooks[i].frame_eye(cb, image, fmt, w, h, eye);
