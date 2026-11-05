@@ -98,12 +98,18 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
         else if (mode == RES_Q50) h *= 0.5;
     }
     h = fmax(h, 0.1);  // (.25x of a small window)
+    extern volatile float g_plugin_render_shape;  // (runtime/plugin.c: a VR mod's eye)
+    bool plug_shape = g_plugin_render_shape > 0;
+    if (plug_shape) shape = g_plugin_render_shape / (16.0 / 9.0);
     double sx = h * shape, sy = h;
     double cap = fmin(MAX_TEX / (1920.0 * sx), MAX_TEX / (1080.0 * sy));
     if (cap < 1.0) { sx *= cap; sy *= cap; }
     o->sx = sx; o->sy = sy; o->shape = shape;
-    // where the image goes in the window: fills it when reshaped, else a fitted 16:9 box
-    if (reshape) { o->vw = dw; o->vh = dh; }
+    // where the image goes in the window: fills it when reshaped, else a fitted 16:9 box (a plugin's shape: fitted)
+    if (plug_shape) {
+        double a = g_plugin_render_shape, f2 = fmin(dw / a, dh);
+        o->vw = a * f2, o->vh = f2;
+    } else if (reshape) { o->vw = dw; o->vh = dh; }
     else { o->vw = 1920.0 * fit; o->vh = 1080.0 * fit; }
     if (wide_test > 0) {
         double f2 = fmin(dw / (1920.0 * wide_test), dh / 1080.0);
