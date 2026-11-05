@@ -94,6 +94,7 @@ typedef struct NvnSync {
     volatile int signaled;
     volatile uint64_t seq;  // GPU submission this fence belongs to (renderer_fence_seq), 0 = none
     volatile uint64_t ticket;  // with the render thread: the jobs queued when the game fenced (rt_fence_ticket), 0 = none
+    volatile uint64_t pres;    // stereo: the present that draws the fenced frame again (rt_next_present), 0 = none
 } NvnSync;
 
 // ---- command recording (stored in guest command memory)

@@ -701,7 +701,31 @@ void backend_present(NvnTexture *t) {
     // later (the period: the game's present rhythm, smoothed).
     TexBackend *hold = NULL;
     extern bool vk_interp_render(TexBackend *b, TexBackend **hold);
-    bool two = vk_interp_render(b, &hold);
+    extern bool vk_stereo_render(TexBackend *b);
+    // Stereo (plugin.h set_stereo, a VR mod): the plugins take this frame's image as eye 0, the frame is drawn again
+    // for eye 1 (exec.c vk_stereo_render) and they take that too; the window shows eye 1
+    // (research: LARECOMP_STEREO=1 without a plugin; LARECOMP_STEREO_SHOT=<present>: both eyes of that one saved,
+    // build/frames/eye{0,1}_<present>.png)
+    static int st_env = -1;
+    static long st_shot;
+    if (st_env < 0) {
+        st_env = getenv("LARECOMP_STEREO") && atoi(getenv("LARECOMP_STEREO")) != 0;
+        st_shot = getenv("LARECOMP_STEREO_SHOT") ? atol(getenv("LARECOMP_STEREO_SHOT")) : 0;
+        if (st_env) g_plugin_stereo = 1;
+    }
+    bool stereo = g_plugin_stereo;
+    if (stereo) {
+        extern void renderer_save_texture_tex(TexBackend *b, const char *path);
+        char sp[96];
+        bool shot = st_shot && (long)total_frames + 1 == st_shot;
+        if (shot) mkdir("build/frames", 0755), snprintf(sp, sizeof sp, "build/frames/eye0_%ld.png", st_shot), renderer_save_texture_tex(b, sp);
+        plugins_frame_eye(vk_cmd(), b->image, b->format, b->width, b->height, 0);
+        if (vk_stereo_render(b)) {
+            plugins_frame_eye(vk_cmd(), b->image, b->format, b->width, b->height, 1);
+            if (shot) snprintf(sp, sizeof sp, "build/frames/eye1_%ld.png", st_shot), renderer_save_texture_tex(b, sp);
+        }
+    }
+    bool two = !stereo && vk_interp_render(b, &hold);
     static uint64_t last_present, period = 33333333;
     if (last_present && t0 - last_present > 5000000 && t0 - last_present < 100000000) period = (period * 7 + (t0 - last_present)) / 8;
     last_present = t0;
@@ -717,7 +741,7 @@ void backend_present(NvnTexture *t) {
         if (due > now) SDL_DelayPrecise(due - now);
         b = hold;
     }
-    if (final && plugins_count()) plugins_frame(vk_cmd(), b->image, b->format, b->width, b->height);
+    if (final && plugins_count() && !stereo) plugins_frame(vk_cmd(), b->image, b->format, b->width, b->height);
     bool have = vk_frame_begin(black);
     uint64_t nd = SDL_GetTicksNS() - t0;
     if (nd > 30000000) {

@@ -133,13 +133,21 @@ static NvnSync *sync_of(uint64_t guest) {
 }
 uint64_t renderer_fence_seq(void);
 void renderer_wait_seq(uint64_t seq);
+extern volatile int g_plugin_stereo;  // (runtime/plugin.c: plugin.h set_stereo)
+uint64_t rt_next_present(void);
+void rt_wait_present(uint64_t p, uint64_t ticket);
 NVN(nvnQueueFenceSync) {
     NvnSync *s = sync_of(A(1));
     s->signaled = 1;
     if (rt_active()) { s->seq = 0; s->ticket = rt_fence_ticket(); }  // (the jobs queued so far; the GPU seq is theirs once they have run)
     else { s->ticket = 0; s->seq = renderer_fence_seq(); }
+    s->pres = rt_active() && g_plugin_stereo ? rt_next_present() : 0;  // (stereo: the frame is drawn again at its present)
 }
-void nvn_sync_set_seq(uint64_t guest, uint64_t seq) { NvnSync *s = sync_of(guest); s->signaled = 1; s->ticket = 0; s->seq = seq; }  // (a fence inside a list: runs on the render thread)
+void nvn_sync_set_seq(uint64_t guest, uint64_t seq) {  // (a fence inside a list: runs on the render thread)
+    NvnSync *s = sync_of(guest);
+    s->signaled = 1; s->ticket = 0; s->seq = seq;
+    s->pres = rt_active() && g_plugin_stereo ? rt_next_present() : 0;
+}
 NVN(nvnQueueWaitSync) { RET(1); }
 
 // ================================================================== sync / event
@@ -158,7 +166,8 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     else if (whole) { rt_drain(); renderer_sync(); }
     else {
         NvnSync *s = sync_of(A(0));
-        if (s->ticket) rt_wait_ticket(s->ticket);  // only the work up to this fence
+        if (s->pres) rt_wait_present(s->pres, s->ticket);  // (stereo: and the frame's second drawing)
+        else if (s->ticket) rt_wait_ticket(s->ticket);  // only the work up to this fence
         else { if (s->seq) rt_drain(); renderer_wait_seq(s->seq); }  // (a fence inside a list is set once the list has run)
     }
     RET(0);

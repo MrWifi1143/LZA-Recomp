@@ -775,6 +775,12 @@ static bool ip_enabled(void) {
 }
 static const void *ip_cbuf(int stage, int k, uint64_t addr, uint32_t size);
 static void ip_note_list(uint64_t handle);
+// Stereo (plugin.h set_stereo: a VR mod's both eyes of one frame, vk_stereo_render): records like frame interpolation
+static bool st_on(void) { return g_plugin_stereo && !ip_enabled(); }
+static bool ip_rec(void) { return ip_enabled() || g_plugin_stereo; }
+static uint64_t ip_key(int stage, int k);
+static const void *st_cbuf_replay(uint64_t key, int stage, uint64_t addr, uint32_t size);
+static void ip_record(uint64_t key, const void *data, uint32_t size);
 static bool ip_skip_op(uint32_t op) {  // what the replay must not do again: it writes guest memory or signals the game
     switch (op) {
     case CMD_DISPATCH: case CMD_DISPATCH_INDIRECT: case CMD_COPY_BUFFER_TO_BUFFER: case CMD_COPY_TEXTURE_TO_BUFFER:
@@ -2960,7 +2966,16 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
         g_exp_count[0]++;
         return ubo_span(vk_transient_copy(ident, size, 256), size);
     }
-    if (g_plugins_cbuf) plugins_cbuf_bound(stage, r.addr, (uint32_t)size);  // (plugins see every bind, in place or copied)
+    if (g_plugins_cbuf && !ip_replaying) plugins_cbuf_bound(stage, r.addr, (uint32_t)size);  // (plugins see every bind, in place or copied)
+    // Stereo, eye 1 (vk_stereo_render): what the plugin puts in a buffer's place, else the copy eye 0 bound (a range the
+    // game updates inside its lists holds only the last value now), else the same as eye 0 - game memory in place, the
+    // game's fences covering this second drawing (renderthread.c rt_wait_present)
+    uint64_t st_key = 0;
+    if (st_on() && stage <= 1) {
+        st_key = ip_key(stage, k);
+        const void *d = ip_replaying ? st_cbuf_replay(st_key, stage, r.addr, (uint32_t)size) : NULL;
+        if (d) return ubo_span(vk_transient_copy(d, size, 256), size);
+    }
     // Bound in place in the imported guest heap, read when the GPU runs - as on the console (the game's NVN fences wait
     // for the GPU: nvnSyncWait, rt_wait_ticket), and no per-draw copy (Legends: Arceus copied 6 MB of constants a
     // frame). Ranges the game updates inline are copied (g_inline). LARECOMP_VK_UBO_DIRECT=0: always copy.
@@ -2980,6 +2995,7 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
         const void *d = ip_cbuf(stage, k, r.addr, (uint32_t)size);
         if (d) return ubo_span(vk_transient_copy(d, size, 256), size);
     }
+    if (st_key && !ip_replaying) ip_record(st_key, (const void *)(uintptr_t)r.addr, (uint32_t)size);  // (stereo: a copied bind, for eye 1)
     // snapshot: later CPU writes must not leak in. Shared by the draws of one submission binding the same range:
     // within a command list nothing writes guest memory (no inline UpdateUniformBuffer: that writes through below
     // and drops the shared copies).
@@ -3762,7 +3778,7 @@ static uint64_t prof_tp_;
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
     if (!st.program) { SKIP(0); return; }
-    if (ip_enabled()) {  // (frame interpolation: what identifies this draw from one frame to the next)
+    if (ip_rec()) {  // (frame interpolation, stereo: what identifies this draw from one frame to the next)
         // what the draw is (program, vertex buffer, parameters), and which game object it belongs to: the same mesh
         // drawn for two objects (bushes, Pidgeys) is told apart by the object, not by the order the game drew them in
         uint64_t h = 0xcbf29ce484222325ull ^ (uint64_t)(uintptr_t)st.program ^ ((uint64_t)indexed << 63);
@@ -5185,7 +5201,7 @@ static bool batch_lists(void) {
 void backend_execute(uint64_t handle) {
     if (ENV("LARECOMP_EXP_NOEXEC")) return;  // (research: the game's chain without the backend's work; the picture stays blank)
     PROF_T0();
-    if (ip_enabled()) ip_note_list(handle);
+    if (ip_rec()) ip_note_list(handle);
     exec_list(handle, 0);
     PROF_ADD(prof_exec);
     if (prof) cum_exec += SDL_GetTicksNS() - prof_t0_;
@@ -5228,6 +5244,7 @@ static float ip_t = 0.5f;
 static uint32_t ip_occ[IP_TAB];  // occurrences of each base key in this frame / replay (by slot)
 static uint64_t ip_occ_key[IP_TAB];
 static uint64_t ip_stats[4];  // blended, kept (no match), words kept, frames replayed
+static uint64_t st_stats[4];  // stereo eye 1: buffers as recorded, from the plugin, without a recording; frames run again
 // LARECOMP_INTERP_DIAG=1: what the in-between image is made of (letsgo-recomp's docs/PESQUISA-60FPS.md, "Diagnóstico da interpolação")
 typedef struct { int stage, k; uint32_t size; uint64_t draws, nomatch, tagged, words, changed, blended, jumps, nonfloat; } IpDiag;
 static IpDiag ip_diag[96];
@@ -5402,10 +5419,15 @@ static uint64_t ip_list_hash(uint64_t handle, int depth) {
     return 0;
 }
 
+static bool st_check(void) {  // (research, LARECOMP_STEREO_CHECK=1: stereo hashes the lists too, as interpolation does)
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_STEREO_CHECK") && atoi(getenv("LARECOMP_STEREO_CHECK")) != 0;
+    return on;
+}
 static void ip_note_list(uint64_t handle) {
     IpFrame *f = &ipf[ipc];
     if (f->nlists >= 256) { f->overflow = true; return; }
-    f->hashes[f->nlists] = ip_list_hash(handle, 0);
+    f->hashes[f->nlists] = st_on() && !st_check() ? 1 : ip_list_hash(handle, 0);  // (stereo: the fences keep the lists)
     f->lists[f->nlists++] = handle;
 }
 
@@ -5438,6 +5460,62 @@ static TexBackend *ip_hold_copy(TexBackend *src) {
     vkCmdCopyImage(cb, src->image, VK_IMAGE_LAYOUT_GENERAL, d->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
     vk_full_barrier(cb);
     return d;
+}
+
+// Stereo, eye 1's run (cbuf_info): what the plugin puts in a buffer's place, else the copy eye 0 bound, else NULL (in place)
+static const void *st_cbuf_replay(uint64_t key, int stage, uint64_t addr, uint32_t size) {
+    const IpEntry *e = ip_find(&ipf[ipc], key);
+    const void *in = e && e->size == size ? ipf[ipc].data + e->off : (const void *)(uintptr_t)addr;
+    static uint8_t out[0x10000];
+    if (size <= sizeof out && plugins_stereo_cbuf(stage, addr, size, in, out)) { st_stats[1]++; return out; }
+    if (e && e->size == size) { st_stats[0]++; return in; }
+    st_stats[2]++;
+    return NULL;
+}
+
+// Stereo (plugin.h set_stereo), at the present of a frame whose image b holds eye 0 (the plugins have it already): its
+// lists run again from the state it started with, the constant buffers as recorded (ip_cbuf, with the plugin's
+// replacements), what writes game memory skipped (ip_skip_op) - b then holds eye 1. False: the frame can't be run again
+// (not recorded from its start, its lists' memory reused, an object destroyed). Recording moves on to the next frame.
+bool vk_stereo_render(TexBackend *b) {
+    IpFrame *cur = &ipf[ipc];
+    bool ok = cur->valid && cur->nlists > 0 && !cur->overflow && b && b->image && b->aspect == VK_IMAGE_ASPECT_COLOR_BIT &&
+              b->samples <= 1 && cur->destroyed == g_nvn_destroyed;
+    int why = !cur->valid || !cur->nlists ? 0 : cur->overflow ? 1 : cur->destroyed != g_nvn_destroyed ? 2 : 3;
+    for (int i = 0; ok && st_check() && i < cur->nlists; i++)
+        if (!cur->hashes[i] || ip_list_hash(cur->lists[i], 0) != cur->hashes[i]) ok = false, why = 4;
+    if (ok) {
+        vk_end_pass();
+        __typeof__(st) end = st;
+        st = cur->start;
+        st.rt_dirty = true;
+        ip_replaying = true;
+        ip_occ_reset();
+        uint64_t d0 = g_draws_total;
+        for (int i = 0; i < cur->nlists; i++) {
+            exec_list(cur->lists[i], 0);
+            if (g_draws_total - d0 >= 2000) vk_end_pass(), renderer_submit(), d0 = g_draws_total;
+        }
+        vk_end_pass();
+        ip_replaying = false;
+        st = end;
+        st.rt_dirty = true;
+        st_stats[3]++;
+    } else ip_rej[why]++;
+    static uint64_t logged;
+    if (st_stats[3] + ip_rej[0] + ip_rej[1] + ip_rej[2] + ip_rej[3] + ip_rej[4] >= logged + 600) {
+        logged = st_stats[3] + ip_rej[0] + ip_rej[1] + ip_rej[2] + ip_rej[3] + ip_rej[4];
+        LOG("[stereo] eye 1 drawn for %llu frames (not: unrecorded %llu, overflow %llu, destroyed %llu, list reused %llu); "
+            "buffers: copies %llu, from the plugin %llu, in place %llu\n", (unsigned long long)st_stats[3],
+            (unsigned long long)ip_rej[0], (unsigned long long)ip_rej[1], (unsigned long long)ip_rej[2], (unsigned long long)ip_rej[4],
+            (unsigned long long)st_stats[0], (unsigned long long)st_stats[1], (unsigned long long)st_stats[2]);
+    }
+    ip_frame_clear(cur);
+    cur->start = st;
+    cur->destroyed = g_nvn_destroyed;
+    cur->valid = true;
+    ip_occ_reset();
+    return ok;
 }
 
 // At the present of frame N (presented texture b): when frame N-1 was recorded too and N's lists are intact, renders

@@ -52,6 +52,7 @@ static pthread_cond_t c_work = PTHREAD_COND_INITIALIZER, c_done = PTHREAD_COND_I
 static uint64_t enq, fin;              // tickets: jobs queued / finished
 static uint64_t seq_after[1024];       // the GPU submission count after each finished job (by ticket)
 static uint64_t pres_enq, pres_fin;
+static uint64_t pres_seq[1024];        // the GPU submission count after each finished present (by present number)
 static uint64_t game_frames;
 static bool started, busy, dropping;
 static __thread bool on_render_thread;
@@ -122,7 +123,7 @@ static void *render_main(void *arg) {
         qhead++;
         fin++;
         seq_after[fin & 1023] = seq;
-        if (j.kind == RJ_PRESENT) pres_fin++;
+        if (j.kind == RJ_PRESENT) pres_fin++, pres_seq[pres_fin & 1023] = seq;
         if (j.done) *j.done = 1;
         busy = false;
         pthread_cond_broadcast(&c_done);
@@ -231,6 +232,33 @@ void rt_wait_ticket(uint64_t ticket) {
     while (fin < ticket)
         if (!wait_done()) { lk_unlock(); return; }
     uint64_t seq = seq_after[ticket & 1023];
+    lk_unlock();
+    renderer_wait_seq(seq);
+}
+
+// Stereo (plugin.h set_stereo): a frame is drawn again at its present (exec.c vk_stereo_render) from the same game
+// memory - its command lists, constant buffers, vertices, textures read in place. So a fence the game sets stands for
+// the next present too: the game reuses that memory only once it's been drawn both times. rt_next_present: that
+// present's number (game thread: the next one queued; render thread: the next one it runs); rt_wait_present: waits for
+// it and its GPU work - when it isn't queued yet (the game waits for this frame's own work before presenting it), for
+// the jobs up to `ticket` as before (0: everything queued), the frame's memory not being reused then.
+uint64_t rt_next_present(void) {
+    pthread_mutex_lock(&lk);
+    uint64_t p = on_render_thread ? pres_fin + 1 : pres_enq + 1;
+    pthread_mutex_unlock(&lk);
+    return p;
+}
+void rt_wait_present(uint64_t p, uint64_t ticket) {
+    pthread_mutex_lock(&lk);
+    if (pres_enq < p) {
+        lk_unlock();
+        if (ticket) rt_wait_ticket(ticket);
+        else rt_drain();
+        return;
+    }
+    while (pres_fin < p)
+        if (!wait_done()) { lk_unlock(); return; }
+    uint64_t seq = pres_seq[p & 1023];
     lk_unlock();
     renderer_wait_seq(seq);
 }

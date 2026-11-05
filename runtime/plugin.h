@@ -9,8 +9,9 @@
 #include <stdint.h>
 #include <vulkan/vulkan.h>
 
-#define LARECOMP_PLUGIN_ABI 5  // (2: set_pad, set_render_height; 3: ldn_relay_*; 4: guest_call, data_root, present_count,
-                                // hooks.game_frame; 5: watch, watch_reset, hooks.game_start - a plugin checks abi first)
+#define LARECOMP_PLUGIN_ABI 6  // (2: set_pad, set_render_height; 3: ldn_relay_*; 4: guest_call, data_root, present_count,
+                                // hooks.game_frame; 5: watch, watch_reset, hooks.game_start; 6: set_stereo, hooks.frame_eye,
+                                // hooks.stereo_cbuf - a plugin checks abi first)
 
 struct Cpu;  // runtime/cpu.h: the guest registers - x[0..30] at byte 0 (8 each), sp at 256, v[0..31] at 512 (16 each)
 
@@ -54,6 +55,14 @@ typedef struct {
     // Linux only (elsewhere: nothing).
     void (*watch)(uint64_t addr, uint64_t len);
     void (*watch_reset)(void);
+    // ---- ABI 6
+    // Stereo (a VR mod's both eyes of one moment): on, each presented frame is drawn twice - as the game drew it (eye 0),
+    // then its command lists run again from the state the frame started with (eye 1), with the constant buffers the
+    // draws read then (copies, so the game's later writes don't leak in) and whatever hooks.stereo_cbuf puts in their
+    // place. Work that writes game memory (compute, buffer copies, counters, syncs) isn't done again: eye 1 has eye 0's
+    // results of it. hooks.frame_eye gets each eye's image. A frame that can't be run again (its lists overwritten,
+    // an object destroyed) has eye 0 only. Takes effect at the next frame; costs the renderer's work twice.
+    void (*set_stereo)(int on);
 } LarecompPluginApi;
 
 typedef struct {
@@ -80,6 +89,12 @@ typedef struct {
     // The game is about to start (again, after a reboot to the start screen): the runtime's own hooks are registered,
     // none of the game's code has run yet - where to set hooks (a plugin's chain in front of the runtime's)
     void (*game_start)(void);
+    // ---- ABI 6 (stereo: api.set_stereo)
+    // Each eye's image of a presented frame, as hooks.frame (which isn't called while stereo is on); eye 1 may not come
+    void (*frame_eye)(VkCommandBuffer cb, VkImage image, VkFormat fmt, uint32_t w, uint32_t h, int eye);
+    // Running a frame again for eye 1: a vertex / fragment stage's constant buffer (game memory addr, size bytes) as the
+    // draw read it the first time (in); write what eye 1's draw reads instead to out (size bytes) and return 1, or 0
+    int (*stereo_cbuf)(int stage, uint64_t addr, uint32_t size, const void *in, void *out);
 } LarecompPluginHooks;
 
 typedef int (*LarecompPluginInitFn)(const LarecompPluginApi *api, LarecompPluginHooks *hooks);
@@ -98,6 +113,9 @@ uint32_t plugins_vk_device_extensions(VkPhysicalDevice pd, const char **out, uin
 void plugins_vk_ready(VkInstance instance, VkPhysicalDevice pd, VkDevice dev, uint32_t qfam, VkQueue queue);
 void plugins_frame(VkCommandBuffer cb, VkImage image, VkFormat fmt, uint32_t w, uint32_t h);
 void plugins_frame_submitted(void);
+void plugins_frame_eye(VkCommandBuffer cb, VkImage image, VkFormat fmt, uint32_t w, uint32_t h, int eye);
+int plugins_stereo_cbuf(int stage, uint64_t addr, uint32_t size, const void *in, void *out);
+extern volatile int g_plugin_stereo;  // api.set_stereo (the renderer: nvn/vulkan/exec.c vk_stereo_render)
 void plugins_game_frame(uint64_t frame);
 void plugins_game_start(void);
 void plugins_shutdown(void);
