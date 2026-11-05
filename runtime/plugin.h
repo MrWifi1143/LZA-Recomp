@@ -9,9 +9,9 @@
 #include <stdint.h>
 #include <vulkan/vulkan.h>
 
-#define LARECOMP_PLUGIN_ABI 7  // (2: set_pad, set_render_height; 3: ldn_relay_*; 4: guest_call, data_root, present_count,
+#define LARECOMP_PLUGIN_ABI 8  // (2: set_pad, set_render_height; 3: ldn_relay_*; 4: guest_call, data_root, present_count,
                                 // hooks.game_frame; 5: watch, watch_reset, hooks.game_start; 6: set_stereo, hooks.frame_eye,
-                                // hooks.stereo_cbuf; 7: set_render_shape - a plugin checks abi first)
+                                // hooks.stereo_cbuf; 7: set_render_shape; 8: set_overlay_parallax - a plugin checks abi first)
 
 struct Cpu;  // runtime/cpu.h: the guest registers - x[0..30] at byte 0 (8 each), sp at 256, v[0..31] at 512 (16 each)
 
@@ -68,6 +68,11 @@ typedef struct {
     // 1920 x 1080 frame, squeezed into that shape - a camera whose frustum has the same shape comes out undistorted (its
     // 2D overlay squeezed). The window shows the image in its own shape, fitted. Takes effect at the next frame.
     void (*set_render_shape)(float w_over_h);
+    // ---- ABI 8
+    // Stereo: eye 1's 2D overlay (the game's interface drawn into its final image - not its full-screen passes) this many
+    // pixels to the left: drawn the same in both eyes it sits at infinity, behind everything; a VR mod gives it the
+    // disparity of a distance (its eyes' separation x the image's focal length / the distance). 0: none.
+    void (*set_overlay_parallax)(float pixels);
 } LarecompPluginApi;
 
 typedef struct {
@@ -121,6 +126,7 @@ void plugins_frame_submitted(void);
 void plugins_frame_eye(VkCommandBuffer cb, VkImage image, VkFormat fmt, uint32_t w, uint32_t h, int eye);
 int plugins_stereo_cbuf(int stage, uint64_t addr, uint32_t size, const void *in, void *out);
 extern volatile int g_plugin_stereo;  // api.set_stereo (the renderer: nvn/vulkan/exec.c vk_stereo_render)
+extern volatile float g_plugin_overlay_px;  // api.set_overlay_parallax (exec.c draw_)
 void plugins_game_frame(uint64_t frame);
 void plugins_game_start(void);
 void plugins_shutdown(void);

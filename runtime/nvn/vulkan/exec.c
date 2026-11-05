@@ -825,6 +825,7 @@ static void ip_note_list(uint64_t handle);
 // Stereo (plugin.h set_stereo: a VR mod's both eyes of one frame, vk_stereo_render): records like frame interpolation
 static bool st_on(void) { return g_plugin_stereo && !ip_enabled(); }
 static bool ip_rec(void) { return ip_enabled() || g_plugin_stereo; }
+static uint32_t st_pres_w = 1920, st_pres_h = 1080;  // (stereo: the presented image's size, the game's units - the overlay's test)
 static uint64_t ip_key(int stage, int k);
 static const void *st_cbuf_replay(uint64_t key, int stage, uint64_t addr, uint32_t size);
 static void ip_record(uint64_t key, const void *data, uint32_t size);
@@ -4793,6 +4794,16 @@ static void draw_(CmdRec *r, bool indexed) {
             if (g_cur_fs_hash == want) n++;
         }
     }
+    if (ip_replaying && st_on() && g_plugin_overlay_px != 0 && st.rt.ncolor && st.rt.color[0]) {
+        // Stereo, eye 1: the 2D overlay drawn g_plugin_overlay_px to the left (its parallax: plugin.h set_overlay_parallax).
+        // The overlay: blended, no depth test, reading no screen-sized image (that is a composite or a post pass), into a
+        // target the size of the presented image - Legends: Arceus' interface sprites into its 1920x1080 scene target.
+        NvnTexture *rt = st.rt.color[0];
+        bool overlay = (st.color_state[0] & 1) && !(st.rt.depth && st.ds[0]) && rt->width * 2 >= st_pres_w && rt->height * 2 >= st_pres_h;
+        for (int i = 0; overlay && i < pr->fi->ntex && i < 64; i++)
+            if (tex_sc[1][i][0] != 1 || tex_sc[1][i][1] != 1 || (tex_wh[1][i][0] == rt->width && tex_wh[1][i][1] == rt->height)) overlay = false;
+        if (overlay) vp_ox -= g_plugin_overlay_px;  // (pixels of the image as drawn, as vp_ox)
+    }
     {
         float vx = vp[0] * vp_sx + vp_ox, vw = vp[2] * vp_sx;
         set_viewport(vx, vp[1] * vp_sy + vp_oy, vw, vp[3] * vp_sy, zn, zf);
@@ -6574,6 +6585,7 @@ static const void *st_cbuf_replay(uint64_t key, int stage, uint64_t addr, uint32
 // lists run again from the state it started with, the constant buffers as recorded (ip_cbuf, with the plugin's
 // replacements), what writes game memory skipped (ip_skip_op) - b then holds eye 1. False: the frame can't be run again
 // (not recorded from its start, its lists' memory reused, an object destroyed). Recording moves on to the next frame.
+void vk_stereo_present_size(uint32_t w, uint32_t h) { st_pres_w = w, st_pres_h = h; }
 bool vk_stereo_render(TexBackend *b) {
     IpFrame *cur = &ipf[ipc];
     bool ok = cur->valid && cur->nlists > 0 && !cur->overflow && b && b->image && b->aspect == VK_IMAGE_ASPECT_COLOR_BIT &&
