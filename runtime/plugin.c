@@ -60,23 +60,48 @@ static void set_render_height(uint32_t lines) { g_plugin_render_height = lines >
 // A plugin's hook where the runtime has one already (a fix): the plugin's first, then - when it doesn't skip the
 // function - the runtime's, so a script never switches a fix off by hooking the same function
 FnHook rt_fnhook_get(uint64_t addr);
+// Several plugins on one function (the VR mod and a Lua script): each in the order they hooked it, and a plugin's
+// call_original from inside its hook runs the next plugin's hook first - the game's function runs once, after all of
+// them (it used to be the last plugin's hook only: a Lua script on the VR mod's camera turn switched snap turns off).
 #define NCHAIN 256
-static struct { uint64_t addr; FnHook plugin, runtime; } g_chain[NCHAIN];
+#define NPLUG 8
+static struct { uint64_t addr; FnHook plugin[NPLUG], runtime; int n; } g_chain[NCHAIN];
 static int g_nchain;
+static __thread int t_entry = -1, t_pos;  // (the chain and the plugin hook running on this thread)
+static int chain_from(struct Cpu *c, uint64_t addr, int e, int k) {
+    int pe = t_entry, pp = t_pos, r = 0;
+    for (int i = k; i < g_chain[e].n && !r; i++) t_entry = e, t_pos = i, r = g_chain[e].plugin[i](c, addr);
+    t_entry = pe, t_pos = pp;
+    return r ? 1 : g_chain[e].runtime ? g_chain[e].runtime(c, addr) : 0;
+}
 static int chained(struct Cpu *c, uint64_t addr) {
-    for (int i = 0; i < g_nchain; i++)
-        if (g_chain[i].addr == addr) return g_chain[i].plugin(c, addr) ? 1 : g_chain[i].runtime(c, addr);
+    for (int i = 0; i < __atomic_load_n(&g_nchain, __ATOMIC_ACQUIRE); i++)
+        if (g_chain[i].addr == addr) return chain_from(c, addr, i, 0);
     return 0;
+}
+// (runtime/fnhook.c: the runtime's own hook on a chained address - registered before or after the plugins')
+static void chain_runtime(uint64_t addr, FnHook fn) {
+    for (int i = 0; i < g_nchain; i++)
+        if (g_chain[i].addr == addr) { g_chain[i].runtime = fn; return; }
+}
+extern FnHook g_plugin_chain_fn;
+extern void (*g_plugin_chain_runtime)(uint64_t addr, FnHook fn);
+static void plugin_call_original(struct Cpu *c, uint64_t addr) {
+    if (t_entry >= 0 && g_chain[t_entry].addr == addr && chain_from(c, addr, t_entry, t_pos + 1)) return;
+    rt_call_original(c, addr);
 }
 static void plugin_register_fnhook(uint64_t addr, FnHook fn) {
     for (int i = 0; i < g_nchain; i++)
-        if (g_chain[i].addr == addr) { g_chain[i].plugin = fn; return; }
-    FnHook was = rt_fnhook_get(addr);
-    if (was && g_nchain < NCHAIN) {
-        g_chain[g_nchain].addr = addr, g_chain[g_nchain].plugin = fn, g_chain[g_nchain].runtime = was;
-        __atomic_store_n(&g_nchain, g_nchain + 1, __ATOMIC_RELEASE);
-        rt_register_fnhook_at(addr, chained);
-    } else rt_register_fnhook_at(addr, fn);
+        if (g_chain[i].addr == addr) {
+            for (int k = 0; k < g_chain[i].n; k++) if (g_chain[i].plugin[k] == fn) return;
+            if (g_chain[i].n < NPLUG) g_chain[i].plugin[g_chain[i].n++] = fn;
+            return;
+        }
+    if (g_nchain == NCHAIN) return;
+    g_plugin_chain_fn = chained, g_plugin_chain_runtime = chain_runtime;
+    g_chain[g_nchain].addr = addr, g_chain[g_nchain].plugin[0] = fn, g_chain[g_nchain].n = 1, g_chain[g_nchain].runtime = rt_fnhook_get(addr);
+    __atomic_store_n(&g_nchain, g_nchain + 1, __ATOMIC_RELEASE);
+    rt_register_fnhook_at(addr, chained);
 }
 
 uint64_t renderer_present_count(void);
@@ -84,7 +109,7 @@ void hwwatch_arm(uint64_t addr, uint64_t len);  // (runtime/hle/hwwatch.c)
 void hwwatch_reset(void);
 static const LarecompPluginApi g_api = {
     .abi = LARECOMP_PLUGIN_ABI, .log = plugin_log, .register_fnhook = plugin_register_fnhook,
-    .call_original = rt_call_original, .title_id = game_title_id, .queue_lock = vk_queue_lock, .queue_unlock = vk_queue_unlock,
+    .call_original = plugin_call_original, .title_id = game_title_id, .queue_lock = vk_queue_lock, .queue_unlock = vk_queue_unlock,
     .image_origin_lower_left = origin_lower_left, .set_pad = input_plugin_pad, .set_render_height = set_render_height,
     .ldn_relay_set = NULL, .ldn_relay_local = NULL,  // (Arceus: no local play service - no relay)
     .guest_call = guest_call, .data_root = rt_data_root, .present_count = renderer_present_count,
