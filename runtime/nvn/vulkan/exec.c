@@ -779,6 +779,7 @@ static void ip_note_list(uint64_t handle);
 static bool st_on(void) { return g_plugin_stereo && !ip_enabled(); }
 static bool ip_rec(void) { return ip_enabled() || g_plugin_stereo; }
 static uint32_t st_pres_w = 1920, st_pres_h = 1080;  // (stereo: the presented image's size, the game's units - the overlay's test)
+extern volatile float g_plugin_render_shape;  // (runtime/plugin.c: a VR mod's eye shape)
 static uint64_t ip_key(int stage, int k);
 static const void *st_cbuf_replay(uint64_t key, int stage, uint64_t addr, uint32_t size);
 static void ip_record(uint64_t key, const void *data, uint32_t size);
@@ -4053,7 +4054,12 @@ static void draw_(CmdRec *r, bool indexed) {
         tex_sc[1][i][0] = sc[0]; tex_sc[1][i][1] = sc[1]; tex_wh[1][i][0] = wh[0]; tex_wh[1][i][1] = wh[1];
     }
     if (prof) prof_tex += SDL_GetTicksNS() - prof_tx_;
-    if (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && renderer_texture_presented(st.rt.color[0])) {
+    // (the scene's final target, the presented image's size, takes the box too for the interface drawn into it: Legends:
+    // Arceus' sprites go there and a last pass copies it to the window - in a VR mod's eye shape they came out squeezed)
+    bool final_rt = st.rt.ncolor && st.rt.color[0] && !renderer_texture_presented(st.rt.color[0]) &&
+                    st.rt.color[0]->width == st_pres_w && st.rt.color[0]->height == st_pres_h && !(st.rt.depth && st.ds[0]) &&
+                    (st.color_state[0] & 1) && g_plugin_render_shape > 0;
+    if (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && (renderer_texture_presented(st.rt.color[0]) || final_rt)) {
         // Draws into the swapchain image (see renderer.m): composites fill the window, UI goes in a centred 16:9 box.
         bool reads_scene = false;
         for (int i = 0; i < pr->fi->ntex && i < 64; i++)

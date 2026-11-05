@@ -716,6 +716,8 @@ void backend_present(NvnTexture *t) {
         if (st_env) g_plugin_stereo = 1;
     }
     extern bool vk_interp_enabled(void);
+    extern void vk_stereo_present_size(uint32_t w, uint32_t h);
+    vk_stereo_present_size(t->width, t->height);  // (the interface's tests in exec.c draw_)
     bool stereo = g_plugin_stereo && !vk_interp_enabled();  // (frame interpolation - Let's Go's 60 fps menus - shares the recorder)
     if (stereo) {
         extern void renderer_save_texture_tex(TexBackend *b, const char *path);
@@ -724,8 +726,6 @@ void backend_present(NvnTexture *t) {
         bool shot = st_shot && fr >= st_shot && (fr - st_shot) % st_step == 0 && (fr - st_shot) / st_step < st_count;
         if (shot) mkdir("build/frames", 0755), snprintf(sp, sizeof sp, "build/frames/eye0_%ld.png", fr), renderer_save_texture_tex(b, sp);
         plugins_frame_eye(vk_cmd(), b->image, b->format, b->width, b->height, 0);
-        extern void vk_stereo_present_size(uint32_t w, uint32_t h);
-        vk_stereo_present_size(t->width, t->height);
         if (vk_stereo_render(b)) {
             plugins_frame_eye(vk_cmd(), b->image, b->format, b->width, b->height, 1);
             if (shot && st_count == 1) snprintf(sp, sizeof sp, "build/frames/eye1_%ld.png", fr), renderer_save_texture_tex(b, sp);
