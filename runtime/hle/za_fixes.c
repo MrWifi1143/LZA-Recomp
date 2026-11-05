@@ -212,7 +212,8 @@ static int timeline_step(Cpu *c, uint64_t addr) {
 // the docked entry of the render pipeline's screen sizes and the size its targets are made at (two constants), all
 // before the renderer is made. Every pass then agrees on it, as on the Switch 2. The internal resolution option picks
 // it: render_height lines (1440: 2560x1440, scene 1664x936), 1080 x the multiplier, or the display's height (Match
-// display; the 75 / 50 / 25 % choices of it); 16:9, multiples of 8. LARECOMP_ZA_RES=<w>x<h> sets it directly.
+// display; the 75 / 50 / 25 % choices of it); 16:9 (a VR plugin's: its eye's shape), multiples of 8. LARECOMP_ZA_RES=<w>x<h>
+// sets it directly.
 static void za_screen_size(uint64_t *w, uint64_t *h) {
     const char *r = getenv("LARECOMP_ZA_RES");
     if (r && strchr(r, 'x') && atoi(r) >= 640 && atoi(strchr(r, 'x') + 1) >= 360) {
@@ -221,7 +222,13 @@ static void za_screen_size(uint64_t *w, uint64_t *h) {
     }
     double lines = 1080;
     int mode = g_settings.res_mode;
-    if (g_settings.res_height > 0) lines = g_settings.res_height;
+    // a plugin's (a VR mod's headset, plugin.h set_render_height / set_render_shape) comes first - asked for when it
+    // loads: the screen size is fixed before the renderer is made
+    extern volatile uint32_t g_plugin_render_height;
+    extern volatile float g_plugin_render_shape;
+    double shape = g_plugin_render_shape > 0 ? g_plugin_render_shape : 16.0 / 9.0;
+    if (g_plugin_render_height) lines = g_plugin_render_height;
+    else if (g_settings.res_height > 0) lines = g_settings.res_height;
     else if (mode >= 1 && mode <= 8) lines = 1080.0 * mode;
     else {
         int dh = 0;
@@ -237,7 +244,7 @@ static void za_screen_size(uint64_t *w, uint64_t *h) {
     if (lines < 720) lines = 720;
     if (lines > 4320) lines = 4320;
     *h = (uint64_t)lines & ~7ull;
-    *w = ((uint64_t)(lines * 16.0 / 9.0 + 0.5)) & ~7ull;
+    *w = ((uint64_t)(lines * shape + 0.5)) & ~7ull;
 }
 
 // The scene's resolution scale: 0x7000f59970 ([x0] = the scene renderer) reads the engine values ResolutionWidth /
