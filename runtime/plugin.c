@@ -71,9 +71,11 @@ static int g_nchain;
 static __thread int t_entry = -1, t_pos;  // (the chain and the plugin hook running on this thread)
 static int chain_from(struct Cpu *c, uint64_t addr, int e, int k) {
     int pe = t_entry, pp = t_pos, r = 0;
-    for (int i = k; i < g_chain[e].n && !r; i++) t_entry = e, t_pos = i, r = g_chain[e].plugin[i](c, addr);
+    int n = __atomic_load_n(&g_chain[e].n, __ATOMIC_ACQUIRE);
+    for (int i = k; i < n && !r; i++) t_entry = e, t_pos = i, r = g_chain[e].plugin[i](c, addr);
     t_entry = pe, t_pos = pp;
-    return r ? 1 : g_chain[e].runtime ? g_chain[e].runtime(c, addr) : 0;
+    FnHook rt = __atomic_load_n(&g_chain[e].runtime, __ATOMIC_ACQUIRE);
+    return r ? 1 : rt ? rt(c, addr) : 0;
 }
 static int chained(struct Cpu *c, uint64_t addr) {
     for (int i = 0; i < __atomic_load_n(&g_nchain, __ATOMIC_ACQUIRE); i++)
@@ -83,7 +85,7 @@ static int chained(struct Cpu *c, uint64_t addr) {
 // (runtime/fnhook.c: the runtime's own hook on a chained address - registered before or after the plugins')
 static void chain_runtime(uint64_t addr, FnHook fn) {
     for (int i = 0; i < g_nchain; i++)
-        if (g_chain[i].addr == addr) { g_chain[i].runtime = fn; return; }
+        if (g_chain[i].addr == addr) { __atomic_store_n(&g_chain[i].runtime, fn, __ATOMIC_RELEASE); return; }
 }
 extern FnHook g_plugin_chain_fn;
 extern void (*g_plugin_chain_runtime)(uint64_t addr, FnHook fn);
@@ -95,12 +97,14 @@ static void plugin_register_fnhook(uint64_t addr, FnHook fn) {
     for (int i = 0; i < g_nchain; i++)
         if (g_chain[i].addr == addr) {
             for (int k = 0; k < g_chain[i].n; k++) if (g_chain[i].plugin[k] == fn) return;
-            if (g_chain[i].n < NPLUG) g_chain[i].plugin[g_chain[i].n++] = fn;
+            int k = g_chain[i].n;  // (the hook stored before the count is published: readers on game threads)
+            if (k < NPLUG) g_chain[i].plugin[k] = fn, __atomic_store_n(&g_chain[i].n, k + 1, __ATOMIC_RELEASE);
             return;
         }
     if (g_nchain == NCHAIN) return;
     g_plugin_chain_fn = chained, g_plugin_chain_runtime = chain_runtime;
-    g_chain[g_nchain].addr = addr, g_chain[g_nchain].plugin[0] = fn, g_chain[g_nchain].n = 1, g_chain[g_nchain].runtime = rt_fnhook_get(addr);
+    g_chain[g_nchain].plugin[0] = fn, g_chain[g_nchain].n = 1, g_chain[g_nchain].runtime = rt_fnhook_get(addr);
+    g_chain[g_nchain].addr = addr;  // (published by g_nchain's release store below)
     __atomic_store_n(&g_nchain, g_nchain + 1, __ATOMIC_RELEASE);
     rt_register_fnhook_at(addr, chained);
 }

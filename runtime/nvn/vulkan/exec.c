@@ -5500,6 +5500,11 @@ bool vk_stereo_render(TexBackend *b) {
     bool ok = cur->valid && cur->nlists > 0 && !cur->overflow && b && b->image && b->aspect == VK_IMAGE_ASPECT_COLOR_BIT &&
               b->samples <= 1 && cur->destroyed == g_nvn_destroyed;
     int why = !cur->valid || !cur->nlists ? 0 : cur->overflow ? 1 : cur->destroyed != g_nvn_destroyed ? 2 : 3;
+    extern volatile uint64_t g_st_released_early;
+    extern uint64_t rt_running_present(void);
+    extern bool rt_on_render_thread(void);
+    if (ok && rt_on_render_thread() && __atomic_load_n(&g_st_released_early, __ATOMIC_ACQUIRE) == rt_running_present())
+        ok = false, why = 5;  // (a fence released this frame's memory before its present: not drawn again)
     for (int i = 0; ok && st_check() && i < cur->nlists; i++)
         if (!cur->hashes[i] || ip_list_hash(cur->lists[i], 0) != cur->hashes[i]) ok = false, why = 4;
     if (ok) {
@@ -5521,11 +5526,13 @@ bool vk_stereo_render(TexBackend *b) {
         st_stats[3]++;
     } else ip_rej[why]++;
     static uint64_t logged;
-    if (st_stats[3] + ip_rej[0] + ip_rej[1] + ip_rej[2] + ip_rej[3] + ip_rej[4] >= logged + 600) {
-        logged = st_stats[3] + ip_rej[0] + ip_rej[1] + ip_rej[2] + ip_rej[3] + ip_rej[4];
-        LOG("[stereo] eye 1 drawn for %llu frames (not: unrecorded %llu, overflow %llu, destroyed %llu, list reused %llu); "
+    if (st_stats[3] + ip_rej[0] + ip_rej[1] + ip_rej[2] + ip_rej[3] + ip_rej[4] + ip_rej[5] >= logged + 600) {
+        logged = st_stats[3] + ip_rej[0] + ip_rej[1] + ip_rej[2] + ip_rej[3] + ip_rej[4] + ip_rej[5];
+        LOG("[stereo] eye 1 drawn for %llu frames (not: unrecorded %llu, overflow %llu, destroyed %llu, list reused %llu, "
+            "released early %llu); "
             "buffers: copies %llu, from the plugin %llu, in place %llu\n", (unsigned long long)st_stats[3],
             (unsigned long long)ip_rej[0], (unsigned long long)ip_rej[1], (unsigned long long)ip_rej[2], (unsigned long long)ip_rej[4],
+            (unsigned long long)ip_rej[5],
             (unsigned long long)st_stats[0], (unsigned long long)st_stats[1], (unsigned long long)st_stats[2]);
     }
     ip_frame_clear(cur);
