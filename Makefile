@@ -132,13 +132,22 @@ $(B)/pgo.profdata: $(PGO_ZST)
 	@mkdir -p $(dir $@)
 	zstd -q -d -f $< -o $@
 
-$(B)/obj/tools/gamelib_entry.o: tools/gamelib_entry.c $(GAMELIB_SRCS)
+# The id in a file, rewritten only when it changes. What has the id compiled in (the library's entry, the runtime's
+# gamelib.o and gamebuild.o) depends on it: the profile and the flags change the id without touching a source file (the
+# PGO commit left a play build whose runtime still expected the old id - "built for another version" at start)
+$(B)/gamelib_id.txt: FORCE
+	@mkdir -p $(dir $@)
+	@[ "$$(cat $@ 2>/dev/null)" = "$(GAMELIB_ID)" ] || echo $(GAMELIB_ID) > $@
+.PHONY: FORCE
+FORCE:
+
+$(B)/obj/tools/gamelib_entry.o: tools/gamelib_entry.c $(GAMELIB_SRCS) $(B)/gamelib_id.txt
 	@mkdir -p $(dir $@)
 	$(CC) $(GENFLAGS) -DGAMELIB_ID='"$(GAMELIB_ID)"' -c $< -o $@
-$(B)/rt/gamelib.o: $(GAMELIB_SRCS)
+$(B)/rt/gamelib.o: $(GAMELIB_SRCS) $(B)/gamelib_id.txt
 $(B)/rt/gamelib.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"'
 # the start screen's build of it (runtime/gamebuild.c) uses the same flags
-$(B)/rt/gamebuild.o: $(GAMELIB_SRCS) Makefile
+$(B)/rt/gamebuild.o: $(GAMELIB_SRCS) Makefile $(B)/gamelib_id.txt
 $(B)/rt/gamebuild.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"' -DGAMELIB_CFLAGS='"$(strip $(filter-out -Iruntime,$(GENFLAGS)))"' \
                                 -DGAMELIB_SHARED='"$(GAMELIB_SHARED)"'
 
