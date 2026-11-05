@@ -54,10 +54,19 @@ uint64_t rt_addr(uint64_t eevee) {
 static struct { uint64_t addr; FnHook fn; bool user; } regs[NREG];
 static int nregs;
 
+// Plugins' hooks (runtime/plugin.c): one function runs every plugin's hook on an address, then the runtime's. Whichever
+// was registered first, the runtime's own hook on such an address goes into the chain rather than replacing it (a VR
+// mod hooks at load, before the runtime's fixes are registered at boot: its snap turns never ran)
+FnHook g_plugin_chain_fn;
+void (*g_plugin_chain_runtime)(uint64_t addr, FnHook fn);
+
 static void add_hook(uint64_t addr, FnHook fn) {
     if (!addr) return;
     uint32_t s = (uint32_t)((addr >> 2) * 0x9E3779B1u) & (NHOOK - 1);
     while (hooks[s].addr && hooks[s].addr != addr) s = (s + 1) & (NHOOK - 1);
+    FnHook was = hooks[s].addr == addr ? hooks[s].fn : NULL;
+    if (g_plugin_chain_fn && was == g_plugin_chain_fn && fn != g_plugin_chain_fn) { g_plugin_chain_runtime(addr, fn); return; }
+    if (g_plugin_chain_fn && fn == g_plugin_chain_fn && was && was != fn) g_plugin_chain_runtime(addr, was);
     hooks[s].fn = fn;  // (the function before the address: a plugin may add hooks while the game runs)
     __atomic_store_n(&hooks[s].addr, addr, __ATOMIC_RELEASE);
     g_fnhook_bits[(addr >> 5) & 0x1ffff] |= (uint8_t)(1u << ((addr >> 2) & 7));
