@@ -705,24 +705,27 @@ void backend_present(NvnTexture *t) {
     // Stereo (plugin.h set_stereo, a VR mod): the plugins take this frame's image as eye 0, the frame is drawn again
     // for eye 1 (exec.c vk_stereo_render) and they take that too; the window shows eye 1
     // (research: LARECOMP_STEREO=1 without a plugin; LARECOMP_STEREO_SHOT=<present>: both eyes of that one saved,
-    // build/frames/eye{0,1}_<present>.png)
+    // build/frames/eye{0,1}_<present>.png; <present>:<every>:<how many>: a series, eye 0 only)
     static int st_env = -1;
-    static long st_shot;
+    static long st_shot, st_step = 1, st_count = 1;  // (LARECOMP_STEREO_SHOT=<present>[:<every>:<how many>])
     if (st_env < 0) {
         st_env = getenv("LARECOMP_STEREO") && atoi(getenv("LARECOMP_STEREO")) != 0;
-        st_shot = getenv("LARECOMP_STEREO_SHOT") ? atol(getenv("LARECOMP_STEREO_SHOT")) : 0;
+        const char *sh = getenv("LARECOMP_STEREO_SHOT");
+        if (sh) sscanf(sh, "%ld:%ld:%ld", &st_shot, &st_step, &st_count);
+        if (st_step < 1) st_step = 1;
         if (st_env) g_plugin_stereo = 1;
     }
     bool stereo = g_plugin_stereo;
     if (stereo) {
         extern void renderer_save_texture_tex(TexBackend *b, const char *path);
         char sp[96];
-        bool shot = st_shot && (long)total_frames + 1 == st_shot;
-        if (shot) mkdir("build/frames", 0755), snprintf(sp, sizeof sp, "build/frames/eye0_%ld.png", st_shot), renderer_save_texture_tex(b, sp);
+        long fr = (long)total_frames + 1;
+        bool shot = st_shot && fr >= st_shot && (fr - st_shot) % st_step == 0 && (fr - st_shot) / st_step < st_count;
+        if (shot) mkdir("build/frames", 0755), snprintf(sp, sizeof sp, "build/frames/eye0_%ld.png", fr), renderer_save_texture_tex(b, sp);
         plugins_frame_eye(vk_cmd(), b->image, b->format, b->width, b->height, 0);
         if (vk_stereo_render(b)) {
             plugins_frame_eye(vk_cmd(), b->image, b->format, b->width, b->height, 1);
-            if (shot) snprintf(sp, sizeof sp, "build/frames/eye1_%ld.png", st_shot), renderer_save_texture_tex(b, sp);
+            if (shot && st_count == 1) snprintf(sp, sizeof sp, "build/frames/eye1_%ld.png", fr), renderer_save_texture_tex(b, sp);
         }
     }
     bool two = !stereo && vk_interp_render(b, &hold);
