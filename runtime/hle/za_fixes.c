@@ -245,6 +245,7 @@ static void za_screen_size(uint64_t *w, uint64_t *h) {
     if (lines > 4320) lines = 4320;
     *h = (uint64_t)lines & ~7ull;
     *w = ((uint64_t)(lines * shape + 0.5)) & ~7ull;
+    if (*w > 16384) *h = (uint64_t)((double)*h * 16384.0 / (double)*w) & ~7ull, *w = 16384;  // (the GPU's texture limit)
 }
 
 // The scene's resolution scale: 0x7000f59970 ([x0] = the scene renderer) reads the engine values ResolutionWidth /

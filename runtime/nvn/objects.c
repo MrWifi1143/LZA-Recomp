@@ -137,7 +137,7 @@ uint64_t renderer_fence_seq(void);
 void renderer_wait_seq(uint64_t seq);
 extern volatile int g_plugin_stereo;  // (runtime/plugin.c: plugin.h set_stereo)
 uint64_t rt_next_present(void);
-void rt_wait_present(uint64_t p, uint64_t ticket);
+void rt_wait_present(uint64_t p, uint64_t ticket, uint64_t seq_of_list);
 NVN(nvnQueueFenceSync) {
     NvnSync *s = sync_of(A(1));
     s->signaled = 1;
@@ -223,7 +223,7 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     else if (whole) { rt_drain(); renderer_sync(); }
     else {
         NvnSync *s = sync_of(A(0));
-        if (s->pres) rt_wait_present(s->pres, s->ticket);  // (stereo: and the frame's second drawing)
+        if (s->pres) rt_wait_present(s->pres, s->ticket, s->seq);  // (stereo: and the frame's second drawing)
         else if (s->ticket) rt_wait_ticket(s->ticket);  // only the work up to this fence
         else { if (s->seq) rt_drain(); renderer_wait_seq(s->seq); }  // (a fence inside a list is set once the list has run)
     }

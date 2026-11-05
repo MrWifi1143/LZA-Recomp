@@ -72,9 +72,15 @@ static void add_hook(uint64_t addr, FnHook fn) {
     g_fnhook_bits[(addr >> 5) & 0x1ffff] |= (uint8_t)(1u << ((addr >> 2) & 7));
 }
 
+extern FnHook g_plugin_chain_fn;
 static void reg(uint64_t addr, FnHook fn, bool user) {
+    // (an address's entry is replaced - but the plugins' chain keeps its own: the runtime's hook on that address gets an
+    // entry of its own, so a rebuild for another game build puts back both, the chain first)
     for (int i = 0; i < nregs; i++)
-        if (regs[i].addr == addr && regs[i].user == user) { regs[i].fn = fn; goto add; }
+        if (regs[i].addr == addr && regs[i].user == user && (regs[i].fn == fn || (regs[i].fn != g_plugin_chain_fn && fn != g_plugin_chain_fn))) {
+            regs[i].fn = fn;
+            goto add;
+        }
     if (nregs == NREG) { LOG("[fnhook] too many hooks\n"); return; }
     regs[nregs].addr = addr, regs[nregs].fn = fn, regs[nregs].user = user, nregs++;
 add:

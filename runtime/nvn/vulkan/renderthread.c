@@ -331,12 +331,17 @@ uint64_t rt_next_present(void) {
     pthread_mutex_unlock(&lk);
     return p;
 }
-void rt_wait_present(uint64_t p, uint64_t ticket) {
+volatile uint64_t g_st_released_early;  // (a present whose memory a fence gave back before it was queued: exec.c)
+uint64_t rt_running_present(void) { return __atomic_load_n(&pres_fin, __ATOMIC_RELAXED) + 1; }  // (render thread: the present job running)
+void rt_wait_present(uint64_t p, uint64_t ticket, uint64_t seq_of_list) {
     pthread_mutex_lock(&lk);
     if (pres_enq < p) {
         lk_unlock();
+        // (the game waits before its present is queued: the work up to the fence, the GPU's too - and that frame isn't
+        // drawn again, its memory may be rewritten before its present: exec.c vk_stereo_render skips it)
+        __atomic_store_n(&g_st_released_early, p, __ATOMIC_RELEASE);
         if (ticket) rt_wait_ticket(ticket);
-        else rt_drain();
+        else { rt_drain(); renderer_wait_seq(seq_of_list); }
         return;
     }
     while (pres_fin < p)
