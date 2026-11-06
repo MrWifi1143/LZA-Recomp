@@ -658,6 +658,10 @@ void za_fixes_configure(const char *exefs) {
         // (and the characters Draw Distance lets in: Max at 1440p with Ultra shadows ran out opening the menu)
         static const uint64_t k_crowd_mb[4] = {0, 256, 512, 1280};
         if (!e && g_settings.crowd > 0 && g_settings.crowd <= 3) g_stdheap_size += k_crowd_mb[g_settings.crowd] << 20;
+        // (and the models Draw Distance (Detail) keeps loaded farther out: none was added for it - a player at 1440p,
+        // Ultra shadows, People 2x, Detail 4x ran out registering his starter, a 4 MB allocation failing at 3.5 GB)
+        static const uint64_t k_detail_mb[4] = {0, 512, 1024, 1536};
+        if (!e && g_settings.detail > 0 && g_settings.detail <= 3) g_stdheap_size += k_detail_mb[g_settings.detail] << 20;
         // (Shaders reach the game's memory through its GPU address since 2026-10-28 - exec.c gmem_ref_info: no 4 GB
         // limit any more. As a storage buffer it was capped at 4 GB, maxStorageBufferRange: past that every text was gone.)
         if (g_stdheap_size != STDHEAP_SIZE) LOG("[za] screen %llux%llu: %llu MB for the game's allocator\n", (unsigned long long)sw,
