@@ -8,5 +8,8 @@ if [ -n "$PLA_MONITOR" ] && command -v hyprctl >/dev/null 2>&1 && [ -n "$HYPRLAN
     hyprctl eval "hl.window_rule({ name = \"plarecomp\", match = { title = \"^(PL:A Recomp)\$\" }, monitor = \"$PLA_MONITOR\", float = true, no_initial_focus = true })" >/dev/null
 fi
 # The game's log (frame times, errors, crash reports) also goes to play.log; the run before is kept in play-prev.log
+# Started from Steam (a non-Steam game shortcut): an X11 window (XWayland). Steam hands its controllers to the game whose
+# window is focused, and it can't see a Wayland window: the Steam Controller stayed a mouse + keyboard (desktop layout).
+[ -n "$SteamGameId" ] && [ -z "$SDL_VIDEO_DRIVER" ] && export SDL_VIDEO_DRIVER=x11
 [ -f play.log ] && mv -f play.log play-prev.log
 ./build/lasrecomp extracted "$@" 2>&1 | tee play.log
