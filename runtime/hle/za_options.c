@@ -417,6 +417,16 @@ static int row_set_hook(Cpu *c, uint64_t addr) {
         v = v == (was + 1) % 3 ? (cur + 1) % n : (cur + n - 1) % n;
         keep_shown(r, v);
     }
+    if (w->get == get_fps) {
+        // Changing the frame rate changes the menu's own step: the frame it takes effect, the game handles the same
+        // press a second time (~35 ms later at 30 -> 60) and set it straight back - 60 couldn't be chosen in here
+        // (mouse, keyboard or controller alike). A change back within 250 ms is that echo, not a press.
+        static uint64_t changed_ms;
+        static int before = -1;
+        uint64_t now = plat_now_ns() / 1000000;
+        if (v == before && now - changed_ms < 250) return 1;
+        before = w->get(), changed_ms = now;
+    }
     w->set(v);
     settings_save();
     if (w->get == get_fps) g_info_pending = (int)(uint32_t)c->x[1];
