@@ -167,7 +167,16 @@ static void log_to_file_without_console(void) {
         DeleteFileA(prev);
         MoveFileA(g_log_path, prev);
     }
-    if (!freopen(g_log_path, append ? "ab" : "wb", stderr)) { g_log_path[0] = 0; return; }
+    if (!freopen(g_log_path, append ? "ab" : "wb", stderr)) {
+        // The game folder can't be written (a protected or synced folder): %LOCALAPPDATA%\LZA-Recomp instead, so a
+        // crash still leaves a log
+        const char *la = getenv("LOCALAPPDATA");
+        char dir[MAX_PATH];
+        if (!la || snprintf(dir, sizeof dir, "%s\\LZA-Recomp", la) >= (int)sizeof dir) { g_log_path[0] = 0; return; }
+        CreateDirectoryA(dir, NULL);
+        snprintf(g_log_path, sizeof g_log_path, "%s\\lasrecomp.log", dir);
+        if (!freopen(g_log_path, append ? "ab" : "wb", stderr)) { g_log_path[0] = 0; return; }
+    }
     setvbuf(stderr, NULL, _IONBF, 0);
     _dup2(_fileno(stderr), _fileno(stdout));
     _putenv("LASRECOMP_LOG_APPEND=1");

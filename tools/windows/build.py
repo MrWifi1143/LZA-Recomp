@@ -191,7 +191,7 @@ def main():
     a = line[line.index('lld-link'):].split()
     keep = []
     for x in a:
-        if x == '-DEBUG' or x.startswith('-PDB:') or x.startswith('-PDBALTPATH:'):
+        if x == '-DEBUG' or x.startswith('-PDB:') or x.startswith('-PDBALTPATH:') or x.upper().startswith('-SUBSYSTEM:'):
             continue
         if x.startswith('-IMPLIB:'):
             keep += ['-IMPLIB:' + B + '/lasrecomp.dll.a', '-export-all-symbols']
@@ -199,7 +199,7 @@ def main():
         if x.startswith('-OUT:'):
             x = '-OUT:' + B + '/%s.exe' % exe_name
         keep.append(x)
-    keep.append(res)
+    keep += [res, '-SUBSYSTEM:windows']  # (a windowed program: no console window, the log in lasrecomp.log; build_exe.sh)
     ok, out = run([zig] + keep, tries=1)
     if not ok:
         die('relink failed:\n' + out[-3000:])
