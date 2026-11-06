@@ -295,7 +295,11 @@ static bool load_steam(void) {
         LOG("[steamrelay] no usable " STEAM_API " (%d found; Steam installed? or LARECOMP_STEAM_API=<path>)\n", n);
         return false;
     }
-    env_set("SteamAppId", "480"), env_set("SteamGameId", "480");  // (Spacewar)
+    // (Spacewar.) Launched from Steam (a non-Steam game shortcut: SteamGameId set), the game id is kept: Steam takes the
+    // controller layout from it, and as Spacewar's (an action set the game never reads) the controller did nothing -
+    // the Steam Controller, which reaches the game only through Steam Input, didn't work at all.
+    env_set("SteamAppId", "480");
+    if (!getenv("SteamGameId")) env_set("SteamGameId", "480");
     if (!S.InitSafe()) { LOG("[steamrelay] Steam isn't running (or not logged in): no relay\n"); return false; }
     S.MD_Init();  // (after the init: callbacks are taken by the pump thread)
     g_msgs = S.Messages(), g_friends = S.Friends();
