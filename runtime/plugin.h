@@ -9,9 +9,10 @@
 #include <stdint.h>
 #include <vulkan/vulkan.h>
 
-#define LARECOMP_PLUGIN_ABI 8  // (2: set_pad, set_render_height; 3: ldn_relay_*; 4: guest_call, data_root, present_count,
+#define LARECOMP_PLUGIN_ABI 9  // (2: set_pad, set_render_height; 3: ldn_relay_*; 4: guest_call, data_root, present_count,
                                 // hooks.game_frame; 5: watch, watch_reset, hooks.game_start; 6: set_stereo, hooks.frame_eye,
-                                // hooks.stereo_cbuf; 7: set_render_shape; 8: set_overlay_parallax - a plugin checks abi first)
+                                // hooks.stereo_cbuf; 7: set_render_shape; 8: set_overlay_parallax; 9: set_overlay_scale -
+                                // a plugin checks abi first)
 
 struct Cpu;  // runtime/cpu.h: the guest registers - x[0..30] at byte 0 (8 each), sp at 256, v[0..31] at 512 (16 each)
 
@@ -73,6 +74,11 @@ typedef struct {
     // pixels to the left: drawn the same in both eyes it sits at infinity, behind everything; a VR mod gives it the
     // disparity of a distance (its eyes' separation x the image's focal length / the distance). 0: none.
     void (*set_overlay_parallax)(float pixels);
+    // ---- ABI 9
+    // In another shape than 16:9 (set_render_shape) the game's interface goes in a centred 16:9 box as wide as the image:
+    // in a VR eye that box spans the whole field of view, its edges at the lenses' rim. This scales it about the image's
+    // centre (0.2 .. 1; 1 or 0: as wide as the image). Takes effect at the next frame.
+    void (*set_overlay_scale)(float scale);
 } LarecompPluginApi;
 
 typedef struct {

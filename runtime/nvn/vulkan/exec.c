@@ -4101,7 +4101,8 @@ static void draw_(CmdRec *r, bool indexed) {
         if (!composite) {
             int pw, ph;
             pass_size(&pw, &ph);
-            float u = fminf(pass_sx, pass_sy);
+            extern volatile float g_plugin_overlay_scale;  // (runtime/plugin.c: a VR mod's interface size)
+            float u = fminf(pass_sx, pass_sy) * (g_plugin_render_shape > 0 && g_plugin_overlay_scale > 0 ? g_plugin_overlay_scale : 1.0f);
             vp_sx = vp_sy = u;
             vp_ox = (pw - st.rt.color[0]->width * u) * 0.5f;
             vp_oy = (ph - st.rt.color[0]->height * u) * 0.5f;

@@ -116,13 +116,15 @@ void hwwatch_reset(void);
 static void set_stereo(int on);
 static void set_render_shape(float w_over_h);
 static void set_overlay_parallax(float px);
+volatile float g_plugin_overlay_scale;  // (nvn/vulkan/exec.c: the interface box's scale; 0 none)
+static void set_overlay_scale(float s) { g_plugin_overlay_scale = s >= 0.2f && s < 1.0f ? s : 0; }
 static const LarecompPluginApi g_api = {
     .abi = LARECOMP_PLUGIN_ABI, .log = plugin_log, .register_fnhook = plugin_register_fnhook,
     .call_original = plugin_call_original, .title_id = game_title_id, .queue_lock = vk_queue_lock, .queue_unlock = vk_queue_unlock,
     .image_origin_lower_left = origin_lower_left, .set_pad = input_plugin_pad, .set_render_height = set_render_height,
     .ldn_relay_set = NULL, .ldn_relay_local = NULL,  // (Arceus: no local play service - no relay)
     .guest_call = guest_call, .data_root = rt_data_root, .present_count = renderer_present_count,
-    .watch = hwwatch_arm, .watch_reset = hwwatch_reset, .set_stereo = set_stereo, .set_render_shape = set_render_shape, .set_overlay_parallax = set_overlay_parallax,
+    .watch = hwwatch_arm, .watch_reset = hwwatch_reset, .set_stereo = set_stereo, .set_render_shape = set_render_shape, .set_overlay_parallax = set_overlay_parallax, .set_overlay_scale = set_overlay_scale,
 };
 
 volatile int g_plugins_cbuf;
