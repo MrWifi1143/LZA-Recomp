@@ -18,8 +18,8 @@ LZ&A Recomp has one branch per game:
 
 ## Playing on Windows
 
-1. Download `LZA-Recomp-PLA-windows.zip` from the [releases](../../releases) and unzip it somewhere you can write to
-   (not Program Files).
+1. Download `LZA-Recomp-PLA-windows-v<version>.zip` from the [releases](https://gitlab.com/mr.wifi1143/LZA-Recomp/-/releases)
+   and unzip it somewhere you can write to, on a short path (e.g. `C:\Games\`; not Program Files, not a deeply nested folder).
 2. Put your dumped game files in one folder: the base game and the 1.1.1 update (`.nsp` / `.xci`, below).
 3. Run `PLARecomp.exe` (not code-signed: "More info" -> "Run anyway" if Windows asks), click **Set up game** ->
    **Select game folder...** and pick that folder.
@@ -37,14 +37,13 @@ downloads this branch, installs what it needs (asks for your password only if so
 program and starts it.
 
 ```sh
-git clone -b LegendsA https://github.com/MrWifi1143/LZA-Recomp.git PLA-Recomp && cd PLA-Recomp && ./tools/linux/install.sh && ./play.sh
+git clone -b LegendsA https://gitlab.com/mr.wifi1143/LZA-Recomp.git PLA-Recomp && cd PLA-Recomp && ./tools/linux/install.sh && ./play.sh
 ```
 
 In the launcher click **Set up game** -> **Select game folder...** and pick the folder with your dumped `.nsp` / `.xci` files
 (below); the game code is built for your PC once. Later, start it again with `./play.sh` in that folder. To update:
 `git pull && ./tools/linux/install.sh`.
 
-The repository is private for now: you need access to it (`gh auth login`, or a GitHub token as the password).
 
 Requirements: x86-64 with AVX2, a GPU with a Vulkan 1.3 driver (Mesa or NVIDIA), ~25 GB free during setup.
 
