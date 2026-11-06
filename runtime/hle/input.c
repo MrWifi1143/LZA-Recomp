@@ -512,13 +512,14 @@ static _Atomic int32_t plugin_lx, plugin_ly, plugin_rx, plugin_ry;
 extern bool menu_input_captured(void);  // runtime/ui/menu.mm
 void input_plugin_pad(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     plugin_buttons = buttons, plugin_lx = lx, plugin_ly = ly, plugin_rx = rx, plugin_ry = ry;
-    static uint64_t prev;
+    static uint64_t prev, sent;  // (sent: buttons pressed into a menu - their release goes too, the menu closed or not)
     uint64_t now = buttons;
     if (lx < -20000) now |= 1ull << BTN_LEFT;
     if (lx > 20000) now |= 1ull << BTN_RIGHT;
     if (ly > 20000) now |= 1ull << BTN_UP;
     if (ly < -20000) now |= 1ull << BTN_DOWN;
-    if (now != prev && menu_input_captured()) {
+    bool cap = menu_input_captured();
+    if (now != prev && (cap || (sent & (prev & ~now)))) {
         static const int map[][2] = {{BTN_A, SDL_GAMEPAD_BUTTON_EAST}, {BTN_B, SDL_GAMEPAD_BUTTON_SOUTH}, {BTN_X, SDL_GAMEPAD_BUTTON_NORTH},
                                      {BTN_Y, SDL_GAMEPAD_BUTTON_WEST}, {BTN_L, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER},
                                      {BTN_R, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER}, {BTN_PLUS, SDL_GAMEPAD_BUTTON_START},
@@ -530,6 +531,8 @@ void input_plugin_pad(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int3
             if ((now ^ prev) & bit) {
                 SDL_Event ev = {0};
                 bool down = (now & bit) != 0;
+                if (down ? !cap : !(sent & bit)) continue;
+                sent = down ? sent | bit : sent & ~bit;
                 ev.type = down ? SDL_EVENT_GAMEPAD_BUTTON_DOWN : SDL_EVENT_GAMEPAD_BUTTON_UP;
                 ev.gbutton.button = (Uint8)map[i][1], ev.gbutton.down = down;
                 SDL_PushEvent(&ev);

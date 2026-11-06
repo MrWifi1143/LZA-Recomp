@@ -560,13 +560,14 @@ static void save_window_image(VkCommandBuffer cb, VkSpan *out) {
 
 // End rendering into the window image and present it. shot_path: also save the window image as PNG.
 static bool g_window_to_plugins;  // (backend_present: the runtime's menu / keyboard dialog is up)
+static bool g_window_final;       // (the frame's final image - not an interpolated one in between)
 void vk_frame_end(const char *shot_path) {
     if (!cur_frame.ok) return;
     VkCommandBuffer cb = vk_cmd();
     vkCmdEndRendering(cb);
     VkSpan shot = {0};
     if (shot_path) save_window_image(cb, &shot);
-    if (g_window_to_plugins) {  // (the window's image, the menu on it, to the plugins: a VR mod's screen shows the dialog)
+    if (g_window_to_plugins && g_window_final) {  // (the window's image, the menu on it, to the plugins: a VR mod's screen shows the dialog)
         VkImage wi = g_vk.sc_images[cur_frame.image];
         image_barrier(cb, wi, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
         plugins_window_frame(cb, wi, g_vk.sc_format, g_vk.sc_extent.width, g_vk.sc_extent.height);
@@ -761,6 +762,7 @@ void backend_present(NvnTexture *t) {
         b = hold;
     }
     if (final && plugins_count() && !stereo && !g_window_to_plugins) plugins_frame(vk_cmd(), b->image, b->format, b->width, b->height);
+    g_window_final = final;
     bool have = vk_frame_begin(black);
     uint64_t nd = SDL_GetTicksNS() - t0;
     if (nd > 30000000) {
