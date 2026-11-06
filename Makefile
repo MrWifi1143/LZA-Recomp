@@ -243,10 +243,21 @@ else
 RELAY := $(B)/plugins/libsteamrelay.so
 RELAY_LIBS := -fPIC -lpthread -ldl
 endif
-steamrelay: $(RELAY)
+# Its helper (the Steam API in a process of its own: the game keeps its own Steam Input controller setup) beside it.
+ifeq ($(PLATFORM),windows)
+RELAYH := $(B)/plugins/steamrelay-helper.exe
+RELAYH_LIBS := -ladvapi32
+else
+RELAYH := $(B)/plugins/steamrelay-helper
+RELAYH_LIBS := -lpthread -ldl
+endif
+steamrelay: $(RELAY) $(RELAYH)
 $(RELAY): contrib/steamrelay/steamrelay.c runtime/plugin.h
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -Wall -shared -Iruntime -Ithird_party $(DEPINC) $< -o $@ $(RELAY_LIBS)
+$(RELAYH): contrib/steamrelay/steamrelay.c
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -g -Wall -DRELAY_HELPER $< -o $@ $(RELAYH_LIBS)
 
 # Legends Lua (contrib/legendslua): Lua scripting of the game (hooks, memory, calls; scripts in <game folder>/lua/).
 # In <game folder>/plugins/; off until switched on in the Mods page.

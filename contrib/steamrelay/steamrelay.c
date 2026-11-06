@@ -4,6 +4,14 @@
 // page switches it on and off. It runs as Spacewar (app 480, Valve's test app every
 // Steam account has): Steam shows "Playing Spacewar" while the game runs.
 //
+// The Steam API runs in a helper program beside the plugin (plugins/steamrelay-helper[.exe], this file built with
+// RELAY_HELPER), not in the game: a process registered as Spacewar gets Spacewar's Steam Input controller setup, which
+// sends the game nothing - every controller going through Steam Input (a Steam Controller, an Xbox pad with Steam Input
+// on) lost its buttons while online play was on. The plugin and the helper talk over its stdin / stdout: frames
+// [type][u32 length][data] - plugin -> helper 'S' send (u64 to + message), 'P' hosting (u8); helper -> plugin 'R' ready
+// (u64 own id), 'F' failed (text), 'M' a friend's message (u64 from + message), 'H' the friends hosting (u64 id, u8 name
+// length, name)... The helper ends when its stdin closes (the game quit).
+//
 // How: runtime/services/ldn.c treats a relay peer as a player at 127.0.4.<k> (ldn_relay_set). What the game sends there
 // comes here and goes to that friend as a Steam networking message (port numbers first: [from port][to port][data]);
 // what a friend sends is replayed over loopback from 127.0.4.<k>:<their port> to this copy, where ldn.c receives it as
@@ -15,6 +23,7 @@
 // messages go over UDP on 127.0.0.1 between two copies of the game, the peer at 127.0.4.1.
 #define _GNU_SOURCE
 #include <pthread.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -24,16 +33,18 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <io.h>
+#include <fcntl.h>
 typedef SOCKET sock_t;
 #define NO_SOCK INVALID_SOCKET
 #define sock_close closesocket
 #define strcasecmp _stricmp
-static void *lib_open(const char *p) { return (void *)LoadLibraryA(p); }
-static void *lib_sym(void *h, const char *n) { return (void *)GetProcAddress((HMODULE)h, n); }
-static void lib_close(void *h) { FreeLibrary((HMODULE)h); }
+static __attribute__((unused)) void *lib_open(const char *p) { return (void *)LoadLibraryA(p); }
+static __attribute__((unused)) void *lib_sym(void *h, const char *n) { return (void *)GetProcAddress((HMODULE)h, n); }
+static __attribute__((unused)) void lib_close(void *h) { FreeLibrary((HMODULE)h); }
 static void nap_ms(unsigned ms) { Sleep(ms); }
-static void env_set(const char *k, const char *v) { SetEnvironmentVariableA(k, v), _putenv_s(k, v); }
-static void nonblocking(sock_t s) { u_long on = 1; ioctlsocket(s, FIONBIO, &on); }
+static __attribute__((unused)) void env_set(const char *k, const char *v) { SetEnvironmentVariableA(k, v), _putenv_s(k, v); }
+static __attribute__((unused)) void nonblocking(sock_t s) { u_long on = 1; ioctlsocket(s, FIONBIO, &on); }
 #define STEAM_API "steam_api64.dll"
 #else
 #include <arpa/inet.h>
@@ -44,18 +55,32 @@ static void nonblocking(sock_t s) { u_long on = 1; ioctlsocket(s, FIONBIO, &on);
 #include <strings.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <spawn.h>
+#include <sys/wait.h>
+extern char **environ;
 typedef int sock_t;
 #define NO_SOCK (-1)
 #define sock_close close
-static void *lib_open(const char *p) { return dlopen(p, RTLD_NOW | RTLD_LOCAL); }
-static void *lib_sym(void *h, const char *n) { return dlsym(h, n); }
-static void lib_close(void *h) { dlclose(h); }
+static __attribute__((unused)) void *lib_open(const char *p) { return dlopen(p, RTLD_NOW | RTLD_LOCAL); }
+static __attribute__((unused)) void *lib_sym(void *h, const char *n) { return dlsym(h, n); }
+static __attribute__((unused)) void lib_close(void *h) { dlclose(h); }
 static void nap_ms(unsigned ms) { usleep(ms * 1000); }
-static void env_set(const char *k, const char *v) { setenv(k, v, 1); }
-static void nonblocking(sock_t s) { fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK); }
+static __attribute__((unused)) void env_set(const char *k, const char *v) { setenv(k, v, 1); }
+static __attribute__((unused)) void nonblocking(sock_t s) { fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK); }
 #define STEAM_API "libsteam_api.so"
 #endif
 
+
+#ifdef RELAY_HELPER
+#define LOG(...) (fprintf(stderr, __VA_ARGS__), fflush(stderr))
+#ifdef _WIN32
+#define fd_read _read
+#define fd_write _write
+#else
+#define fd_read read
+#define fd_write write
+#endif
+#else
 #include "../../runtime/plugin.h"
 
 static const LarecompPluginApi *A;
@@ -133,6 +158,9 @@ static void replay(int k, uint16_t from_port, uint16_t to_port, const void *p, s
     sendto(fd, (const char *)p, (int)n, 0, (struct sockaddr *)&to, sizeof to);
 }
 
+#endif
+
+#ifdef RELAY_HELPER
 // ---- the Steam API (its flat C interface, loaded at run time)
 typedef struct { int32_t type, size; union { uint64_t steamid; uint8_t raw[128]; }; } Identity;  // SteamNetworkingIdentity
 typedef struct {  // SteamNetworkingMessage_t (the fields used)
@@ -165,6 +193,7 @@ static struct {
     uint64_t (*MySteamID)(void *);
 } S;
 static void *g_msgs, *g_friends;
+static volatile int g_quit;
 #define FRIEND_IMMEDIATE 4
 #define SEND_UNRELIABLE_NO_NAGLE_AUTORESTART (1 | 32)
 
@@ -295,11 +324,7 @@ static bool load_steam(void) {
         LOG("[steamrelay] no usable " STEAM_API " (%d found; Steam installed? or LARECOMP_STEAM_API=<path>)\n", n);
         return false;
     }
-    // (Spacewar.) Launched from Steam (a non-Steam game shortcut: SteamGameId set), the game id is kept: Steam takes the
-    // controller layout from it, and as Spacewar's (an action set the game never reads) the controller did nothing -
-    // the Steam Controller, which reaches the game only through Steam Input, didn't work at all.
-    env_set("SteamAppId", "480");
-    if (!getenv("SteamGameId")) env_set("SteamGameId", "480");
+    env_set("SteamAppId", "480"), env_set("SteamGameId", "480");  // (Spacewar - this helper's own process only)
     if (!S.InitSafe()) { LOG("[steamrelay] Steam isn't running (or not logged in): no relay\n"); return false; }
     S.MD_Init();  // (after the init: callbacks are taken by the pump thread)
     g_msgs = S.Messages(), g_friends = S.Friends();
@@ -308,76 +333,74 @@ static bool load_steam(void) {
     return g_msgs && g_friends;
 }
 
-// ---- the fake relay (LARECOMP_RELAY_FAKE=<this port>,<peer port>): UDP on 127.0.0.1, the peer id = its port
-static sock_t g_fake = NO_SOCK;
-static uint16_t g_fake_peer;
 
-// ---- the relay
-static void relay_send(uint32_t to, uint16_t from_port, uint16_t to_port, const void *p, size_t n) {
-    int k = peer_k(to);
-    uint64_t id = k ? g_peer[k] : 0;
-    if (!id || n > 65000) return;
-    to_port = real_port(k, to_port);
-    uint8_t *m = malloc(n + 4);
-    if (!m) return;
-    m[0] = (uint8_t)(from_port >> 8), m[1] = (uint8_t)from_port, m[2] = (uint8_t)(to_port >> 8), m[3] = (uint8_t)to_port;
-    memcpy(m + 4, p, n);
-    if (g_fake != NO_SOCK) {
-        struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)id), .sin_addr.s_addr = htonl(0x7F000001u)};
-        sendto(g_fake, (const char *)m, (int)(n + 4), 0, (struct sockaddr *)&a, sizeof a);
-    } else {
-        Identity who;
-        memset(&who, 0, sizeof who);
-        S.SetSteamID64(&who, id);
-        S.Send(g_msgs, &who, m, (uint32_t)(n + 4), SEND_UNRELIABLE_NO_NAGLE_AUTORESTART, 0);
-    }
-    free(m);
-}
-static int relay_targets(uint32_t *out, int max) {
-    int n = 0;
-    if (g_fake != NO_SOCK) {
-        if (max > 0) out[n++] = peer_addr(peer_of(g_fake_peer));
-        return n;
-    }
-    int nf = S.FriendCount(g_friends, FRIEND_IMMEDIATE);
-    for (int i = 0; i < nf && n < max; i++) {
-        uint64_t f = S.FriendByIndex(g_friends, i, FRIEND_IMMEDIATE);
-        const char *rp = S.FriendRichPresence(g_friends, f, "lzarecomp");
-        if (rp && !strcmp(rp, "hosting")) {
-            out[n++] = peer_addr(peer_of(f));
-            LOG("[steamrelay] %s is hosting\n", S.FriendName(g_friends, f));
+// ---- the helper's side of the pipe
+static pthread_mutex_t g_out_lock = PTHREAD_MUTEX_INITIALIZER, g_steam_lock = PTHREAD_MUTEX_INITIALIZER;
+static void out_frame(char type, const void *a, size_t an, const void *b, size_t bn) {
+    uint8_t h[5] = {(uint8_t)type};
+    uint32_t n = (uint32_t)(an + bn);
+    memcpy(h + 1, &n, 4);
+    pthread_mutex_lock(&g_out_lock);
+    const void *part[3] = {h, a, b};
+    size_t len[3] = {5, an, bn};
+    for (int i = 0; i < 3; i++)
+        for (size_t done = 0; done < len[i];) {
+            int w = (int)fd_write(1, (const char *)part[i] + done, (unsigned)(len[i] - done));
+            if (w <= 0) { g_quit = 1; break; }
+            done += (size_t)w;
         }
+    pthread_mutex_unlock(&g_out_lock);
+}
+static bool in_full(void *p, size_t n) {
+    for (size_t done = 0; done < n;) {
+        int r = (int)fd_read(0, (char *)p + done, (unsigned)(n - done));
+        if (r <= 0) return false;
+        done += (size_t)r;
     }
-    return n;
+    return true;
 }
-static void relay_hosting(int on) {
-    if (g_fake == NO_SOCK) S.SetRichPresence(g_friends, "lzarecomp", on ? "hosting" : "");
-    LOG("[steamrelay] %s\n", on ? "hosting: friends see this network when they look for one" : "not hosting");
-}
-static uint64_t relay_id_of(uint32_t addr) { int k = peer_k(addr); return k ? g_peer[k] : 0; }
-static uint32_t relay_addr_of(uint64_t id) { int k = peer_of(id); return k ? peer_addr(k) : 0; }
-static const LdnRelay k_relay = {relay_send, relay_targets, relay_hosting, relay_id_of, relay_addr_of};
-
-static void deliver(uint64_t from, const uint8_t *m, size_t n) {
-    if (n < 4) return;
-    int k = peer_of(from);
-    if (k) replay(k, (uint16_t)(m[0] << 8 | m[1]), (uint16_t)(m[2] << 8 | m[3]), m + 4, n - 4);
-}
-
-static volatile int g_quit;
-static void *pump(void *arg) {
+static void *from_game(void *arg) {  // (the plugin's frames: sends and the hosting flag; its pipe closing ends the helper)
     (void)arg;
-    int32_t pipe = g_fake == NO_SOCK ? S.GetHSteamPipe() : 0;
-    for (unsigned tick = 0; !g_quit; tick++) {
-        if (g_fake != NO_SOCK) {
-            uint8_t m[66000];
-            struct sockaddr_in a;
-            socklen_t al = sizeof a;
-            int n;
-            while ((n = (int)recvfrom(g_fake, (char *)m, sizeof m, 0, (struct sockaddr *)&a, &al)) > 0) deliver(ntohs(a.sin_port), m, (size_t)n);
-            nap_ms(1);
-            continue;
+    static uint8_t buf[70000];
+    for (;;) {
+        uint8_t h[5];
+        uint32_t n;
+        if (!in_full(h, 5)) break;
+        memcpy(&n, h + 1, 4);
+        if (n > sizeof buf || !in_full(buf, n)) break;
+        pthread_mutex_lock(&g_steam_lock);
+        if (h[0] == 'S' && n > 8) {
+            uint64_t id;
+            memcpy(&id, buf, 8);
+            Identity who;
+            memset(&who, 0, sizeof who);
+            S.SetSteamID64(&who, id);
+            S.Send(g_msgs, &who, buf + 8, n - 8, SEND_UNRELIABLE_NO_NAGLE_AUTORESTART, 0);
+        } else if (h[0] == 'P' && n >= 1) {
+            S.SetRichPresence(g_friends, "lzarecomp", buf[0] ? "hosting" : "");
         }
+        pthread_mutex_unlock(&g_steam_lock);
+    }
+    g_quit = 1;
+    return NULL;
+}
+
+int main(void) {
+#ifdef _WIN32
+    _setmode(0, _O_BINARY), _setmode(1, _O_BINARY);
+#endif
+    if (!load_steam()) {
+        static const char why[] = "Steam isn't running (or not logged in)";
+        out_frame('F', why, sizeof why - 1, NULL, 0);
+        return 1;
+    }
+    uint64_t me = S.MySteamID(S.User());
+    out_frame('R', &me, 8, NULL, 0);
+    pthread_t t;
+    pthread_create(&t, NULL, from_game, NULL);
+    int32_t pipe = S.GetHSteamPipe();
+    for (unsigned tick = 0; !g_quit; tick++) {
+        pthread_mutex_lock(&g_steam_lock);
         S.MD_RunFrame(pipe);
         CallbackMsg cb;
         while (S.MD_Next(pipe, &cb)) {
@@ -393,25 +416,250 @@ static void *pump(void *arg) {
         int32_t n = S.Receive(g_msgs, 0, msg, 64);
         for (int i = 0; i < n; i++) {
             uint64_t id = S.GetSteamID64(&msg[i]->peer);
-            if (S.HasFriend(g_friends, id, FRIEND_IMMEDIATE)) deliver(id, msg[i]->data, (size_t)msg[i]->size);
+            if (S.HasFriend(g_friends, id, FRIEND_IMMEDIATE)) out_frame('M', &id, 8, msg[i]->data, (size_t)msg[i]->size);
             S.Release(msg[i]);
         }
-        if (tick % 4000 == 0) {  // (~every 4 s: friends' rich presence kept fresh for the next scan)
+        if (tick % 4000 == 0) {  // (~every 4 s: friends' rich presence kept fresh)
             int nf = S.FriendCount(g_friends, FRIEND_IMMEDIATE);
             for (int i = 0; i < nf; i++) S.RequestRichPresence(g_friends, S.FriendByIndex(g_friends, i, FRIEND_IMMEDIATE));
         }
+        if (tick % 500 == 0) {  // (~every 0.5 s: who is hosting, for the game's scans)
+            static uint8_t list[64 * 300];
+            size_t k = 0;
+            int nf = S.FriendCount(g_friends, FRIEND_IMMEDIATE);
+            for (int i = 0; i < nf && k + 300 <= sizeof list; i++) {
+                uint64_t f = S.FriendByIndex(g_friends, i, FRIEND_IMMEDIATE);
+                const char *rp = S.FriendRichPresence(g_friends, f, "lzarecomp");
+                if (!rp || strcmp(rp, "hosting")) continue;
+                const char *name = S.FriendName(g_friends, f);
+                size_t nl = name ? strlen(name) : 0;
+                if (nl > 255) nl = 255;
+                memcpy(list + k, &f, 8), list[k + 8] = (uint8_t)nl, memcpy(list + k + 9, name, nl);
+                k += 9 + nl;
+            }
+            out_frame('H', list, k, NULL, 0);
+        }
+        pthread_mutex_unlock(&g_steam_lock);
         if (!n) nap_ms(1);
     }
+    // (Steam asserts - and sends Valve a crash report - when a process leaves with its networking sockets open)
+    S.Shutdown();
+    return 0;
+}
+
+#else
+// ---- the fake relay (LARECOMP_RELAY_FAKE=<this port>,<peer port>): UDP on 127.0.0.1, the peer id = its port
+static sock_t g_fake = NO_SOCK;
+static uint16_t g_fake_peer;
+
+// ---- the helper (plugins/steamrelay-helper[.exe]): started with pipes for its stdin / stdout, its stderr the game's log
+#ifdef _WIN32
+static HANDLE g_to_helper = INVALID_HANDLE_VALUE, g_from_helper = INVALID_HANDLE_VALUE, g_helper_proc;
+static bool to_helper_raw(const void *p, size_t n) {
+    DWORD w;
+    return WriteFile(g_to_helper, p, (DWORD)n, &w, NULL) && w == n;
+}
+static bool from_helper(void *p, size_t n) {
+    for (size_t done = 0; done < n;) {
+        DWORD r = 0;
+        if (!ReadFile(g_from_helper, (char *)p + done, (DWORD)(n - done), &r, NULL) || !r) return false;
+        done += r;
+    }
+    return true;
+}
+static bool helper_start(void) {
+    HMODULE m = NULL;
+    char path[MAX_PATH];
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCSTR)(void *)helper_start, &m) || !GetModuleFileNameA(m, path, sizeof path)) return false;
+    char *slash = strrchr(path, '\\');
+    if (!slash || (size_t)(slash - path) + 32 > sizeof path) return false;
+    strcpy(slash + 1, "steamrelay-helper.exe");
+    SECURITY_ATTRIBUTES sa = {sizeof sa, NULL, TRUE};
+    HANDLE in_r, out_w, err = NULL;
+    if (!CreatePipe(&in_r, &g_to_helper, &sa, 0)) return false;
+    if (!CreatePipe(&g_from_helper, &out_w, &sa, 0)) return false;
+    SetHandleInformation(g_to_helper, HANDLE_FLAG_INHERIT, 0), SetHandleInformation(g_from_helper, HANDLE_FLAG_INHERIT, 0);
+    HANDLE log = (HANDLE)_get_osfhandle(_fileno(stderr));
+    if (log != INVALID_HANDLE_VALUE) DuplicateHandle(GetCurrentProcess(), log, GetCurrentProcess(), &err, 0, TRUE, DUPLICATE_SAME_ACCESS);
+    STARTUPINFOA si = {.cb = sizeof si, .dwFlags = STARTF_USESTDHANDLES, .hStdInput = in_r, .hStdOutput = out_w, .hStdError = err};
+    PROCESS_INFORMATION pi;
+    char cmd[MAX_PATH + 4];
+    snprintf(cmd, sizeof cmd, "\"%s\"", path);
+    BOOL ok = CreateProcessA(path, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    CloseHandle(in_r), CloseHandle(out_w);
+    if (err) CloseHandle(err);
+    if (!ok) { LOG("[steamrelay] can't start %s (error %lu)\n", path, GetLastError()); return false; }
+    CloseHandle(pi.hThread);
+    g_helper_proc = pi.hProcess;
+    return true;
+}
+static void helper_stop(void) {
+    if (g_to_helper != INVALID_HANDLE_VALUE) CloseHandle(g_to_helper), g_to_helper = INVALID_HANDLE_VALUE;
+    if (g_helper_proc) WaitForSingleObject(g_helper_proc, 3000), CloseHandle(g_helper_proc), g_helper_proc = NULL;
+}
+#else
+static int g_to_helper = -1, g_from_helper = -1;
+static pid_t g_helper_pid;
+static bool to_helper_raw(const void *p, size_t n) {
+    for (size_t done = 0; done < n;) {
+        ssize_t w = write(g_to_helper, (const char *)p + done, n - done);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) return false;
+        done += (size_t)w;
+    }
+    return true;
+}
+static bool from_helper(void *p, size_t n) {
+    for (size_t done = 0; done < n;) {
+        ssize_t r = read(g_from_helper, (char *)p + done, n - done);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) return false;
+        done += (size_t)r;
+    }
+    return true;
+}
+static bool helper_start(void) {
+    Dl_info info;
+    if (!dladdr((void *)helper_start, &info) || !info.dli_fname) return false;
+    char path[4096];
+    snprintf(path, sizeof path, "%s", info.dli_fname);
+    char *slash = strrchr(path, '/');
+    if (slash) snprintf(slash + 1, sizeof path - (size_t)(slash + 1 - path), "steamrelay-helper");
+    else snprintf(path, sizeof path, "./steamrelay-helper");
+    int in[2], out[2];
+    if (pipe2(in, O_CLOEXEC) || pipe2(out, O_CLOEXEC)) return false;
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, in[0], 0);
+    posix_spawn_file_actions_adddup2(&fa, out[1], 1);
+    char *argv[] = {path, NULL};
+    int e = posix_spawn(&g_helper_pid, path, &fa, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    close(in[0]), close(out[1]);
+    if (e) { LOG("[steamrelay] can't start %s: %s\n", path, strerror(e)); close(in[1]), close(out[0]); return false; }
+    g_to_helper = in[1], g_from_helper = out[0];
+    return true;
+}
+static void helper_stop(void) {
+    if (g_to_helper >= 0) close(g_to_helper), g_to_helper = -1;
+    for (int i = 0; i < 300 && g_helper_pid; i++) {  // (up to 3 s for it to shut Steam down)
+        if (waitpid(g_helper_pid, NULL, WNOHANG) == g_helper_pid) g_helper_pid = 0;
+        else nap_ms(10);
+    }
+}
+#endif
+static pthread_mutex_t g_to_lock = PTHREAD_MUTEX_INITIALIZER;
+static void to_helper(char type, const void *a, size_t an, const void *b, size_t bn) {
+    uint8_t h[5] = {(uint8_t)type};
+    uint32_t n = (uint32_t)(an + bn);
+    memcpy(h + 1, &n, 4);
+    pthread_mutex_lock(&g_to_lock);
+    if (to_helper_raw(h, 5) && an) to_helper_raw(a, an);
+    if (bn) to_helper_raw(b, bn);
+    pthread_mutex_unlock(&g_to_lock);
+}
+
+// ---- the friends hosting, as the helper last listed them
+static struct { uint64_t id; char name[64]; } g_hosts[64];
+static int g_nhosts;
+static pthread_mutex_t g_hosts_lock = PTHREAD_MUTEX_INITIALIZER;
+
+// ---- the relay
+static void relay_send(uint32_t to, uint16_t from_port, uint16_t to_port, const void *p, size_t n) {
+    int k = peer_k(to);
+    uint64_t id = k ? g_peer[k] : 0;
+    if (!id || n > 65000) return;
+    to_port = real_port(k, to_port);
+    uint8_t *m = malloc(n + 4);
+    if (!m) return;
+    m[0] = (uint8_t)(from_port >> 8), m[1] = (uint8_t)from_port, m[2] = (uint8_t)(to_port >> 8), m[3] = (uint8_t)to_port;
+    memcpy(m + 4, p, n);
+    if (g_fake != NO_SOCK) {
+        struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)id), .sin_addr.s_addr = htonl(0x7F000001u)};
+        sendto(g_fake, (const char *)m, (int)(n + 4), 0, (struct sockaddr *)&a, sizeof a);
+    } else {
+        to_helper('S', &id, 8, m, n + 4);
+    }
+    free(m);
+}
+static int relay_targets(uint32_t *out, int max) {
+    int n = 0;
+    if (g_fake != NO_SOCK) {
+        if (max > 0) out[n++] = peer_addr(peer_of(g_fake_peer));
+        return n;
+    }
+    pthread_mutex_lock(&g_hosts_lock);
+    for (int i = 0; i < g_nhosts && n < max; i++) {
+        out[n++] = peer_addr(peer_of(g_hosts[i].id));
+        LOG("[steamrelay] %s is hosting\n", g_hosts[i].name);
+    }
+    pthread_mutex_unlock(&g_hosts_lock);
+    return n;
+}
+static void relay_hosting(int on) {
+    if (g_fake == NO_SOCK) {
+        uint8_t b = on ? 1 : 0;
+        to_helper('P', &b, 1, NULL, 0);
+    }
+    LOG("[steamrelay] %s\n", on ? "hosting: friends see this network when they look for one" : "not hosting");
+}
+static uint64_t relay_id_of(uint32_t addr) { int k = peer_k(addr); return k ? g_peer[k] : 0; }
+static uint32_t relay_addr_of(uint64_t id) { int k = peer_of(id); return k ? peer_addr(k) : 0; }
+static const LdnRelay k_relay = {relay_send, relay_targets, relay_hosting, relay_id_of, relay_addr_of};
+
+static void deliver(uint64_t from, const uint8_t *m, size_t n) {
+    if (n < 4) return;
+    int k = peer_of(from);
+    if (k) replay(k, (uint16_t)(m[0] << 8 | m[1]), (uint16_t)(m[2] << 8 | m[3]), m + 4, n - 4);
+}
+
+static volatile int g_quit;
+static void *pump(void *arg) {
+    (void)arg;
+    static uint8_t m[70000];
+    while (!g_quit) {
+        if (g_fake != NO_SOCK) {
+            struct sockaddr_in a;
+            socklen_t al = sizeof a;
+            int n;
+            while ((n = (int)recvfrom(g_fake, (char *)m, sizeof m, 0, (struct sockaddr *)&a, &al)) > 0) deliver(ntohs(a.sin_port), m, (size_t)n);
+            nap_ms(1);
+            continue;
+        }
+        uint8_t h[5];
+        uint32_t n;
+        if (!from_helper(h, 5)) break;  // (the helper ended)
+        memcpy(&n, h + 1, 4);
+        if (n > sizeof m || !from_helper(m, n)) break;
+        if (h[0] == 'M' && n >= 8) {
+            uint64_t from;
+            memcpy(&from, m, 8);
+            deliver(from, m + 8, n - 8);
+        } else if (h[0] == 'H') {
+            pthread_mutex_lock(&g_hosts_lock);
+            g_nhosts = 0;
+            for (uint32_t k = 0; k + 9 <= n && g_nhosts < 64;) {
+                size_t nl = m[k + 8];
+                if (k + 9 + nl > n) break;
+                memcpy(&g_hosts[g_nhosts].id, m + k, 8);
+                size_t c = nl < 63 ? nl : 63;
+                memcpy(g_hosts[g_nhosts].name, m + k + 9, c), g_hosts[g_nhosts].name[c] = 0;
+                g_nhosts++, k += 9 + (uint32_t)nl;
+            }
+            pthread_mutex_unlock(&g_hosts_lock);
+        }
+    }
+    if (g_fake == NO_SOCK && !g_quit) LOG("[steamrelay] the Steam helper ended: online play off until the game starts again\n");
     return NULL;
 }
 
-// At exit: the pump stopped, then Steam shut down (Steam asserts - and sends Valve a crash report - when a process
-// leaves with its networking sockets open)
+// At exit: the helper told to stop (its stdin closed: it shuts Steam down and ends), then the pump
 static pthread_t g_pump;
 static void quit(void) {  // (hooks.shutdown: from exit())
     g_quit = 1;
+    if (g_fake == NO_SOCK) helper_stop();
     pthread_join(g_pump, NULL);
-    if (g_fake == NO_SOCK) S.Shutdown();
 }
 
 int larecomp_plugin_init(const LarecompPluginApi *api, LarecompPluginHooks *hooks) {
@@ -434,9 +682,26 @@ int larecomp_plugin_init(const LarecompPluginApi *api, LarecompPluginHooks *hook
         nonblocking(g_fake);
         g_fake_peer = (uint16_t)peer;
         LOG("[steamrelay] fake relay (tests): port %u, the peer at %u is 127.0.4.%d\n", mine, peer, peer_of(peer));
-    } else if (!load_steam()) return 1;
+    } else {
+        if (!helper_start()) { LOG("[steamrelay] no Steam helper (plugins/steamrelay-helper): no relay\n"); return 1; }
+        uint8_t h[5], b[256];
+        uint32_t n = 0;
+        bool got = from_helper(h, 5);
+        if (got) memcpy(&n, h + 1, 4);
+        if (!got || n > sizeof b - 1 || !from_helper(b, n) || h[0] != 'R' || n < 8) {
+            b[got && n < sizeof b ? n : 0] = 0;
+            LOG("[steamrelay] %s: no relay\n", got && h[0] == 'F' ? (const char *)b : "the Steam helper didn't start");
+            helper_stop();
+            return 1;
+        }
+        uint64_t me;
+        memcpy(&me, b, 8);
+        LOG("[steamrelay] online play with friends on, as Spacewar (in the helper: the game keeps its own Steam Input "
+            "controller setup) - id %llu\n", (unsigned long long)me);
+    }
     api->ldn_relay_set(&k_relay);
     hooks->shutdown = quit;
     pthread_create(&g_pump, NULL, pump, NULL);
     return 0;
 }
+#endif
