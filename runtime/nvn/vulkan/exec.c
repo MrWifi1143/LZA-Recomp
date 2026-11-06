@@ -4061,6 +4061,24 @@ static void draw_(CmdRec *r, bool indexed) {
                     (st.color_state[0] & 1) && g_plugin_render_shape > 0;
     if (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && (renderer_texture_presented(st.rt.color[0]) || final_rt)) {
         // Draws into the swapchain image (see renderer.m): composites fill the window, UI goes in a centred 16:9 box.
+        {   // (research, LARECOMP_LOG_BOXHASH=1: the fragment shaders drawn into the box, counted, every 300 presents)
+            static int on = -1;
+            if (on < 0) on = getenv("LARECOMP_LOG_BOXHASH") != NULL;
+            if (on) {
+                static uint64_t hs[64]; static unsigned cnt[64]; static int nh; static uint64_t frame0;
+                uint64_t f = renderer_present_count();
+                if (f >= frame0 + 300) {
+                    char line[4096]; int n = 0;
+                    for (int i = 0; i < nh && n < 4000; i++) n += snprintf(line + n, sizeof line - n, " %016llx:%u", (unsigned long long)hs[i], cnt[i]);
+                    if (nh) LOG("[boxhash] presents %llu-%llu:%s\n", (unsigned long long)frame0, (unsigned long long)f, line);
+                    nh = 0, frame0 = f;
+                }
+                int k = 0;
+                for (; k < nh; k++) if (hs[k] == g_cur_fs_hash) break;
+                if (k == nh && nh < 64) hs[nh] = g_cur_fs_hash, cnt[nh] = 0, nh++;
+                if (k < 64) cnt[k]++;
+            }
+        }
         bool reads_scene = false;
         for (int i = 0; i < pr->fi->ntex && i < 64; i++)
             if ((tex_sc[1][i][0] != 1 || tex_sc[1][i][1] != 1) && tex_wh[1][i][0] == st.rt.color[0]->width &&
