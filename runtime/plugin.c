@@ -48,9 +48,10 @@ static void plugin_log(const char *fmt, ...) {
     va_end(ap);
 }
 
+static volatile int g_window_frame;  // (plugins_window_frame running: the window's image - upright, not the game's)
 static int origin_lower_left(void) {
     bool renderer_origin_lower_left(void);  // runtime/nvn/renderer.h
-    return renderer_origin_lower_left();
+    return g_window_frame ? 0 : renderer_origin_lower_left();
 }
 
 void input_plugin_pad(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry);  // runtime/hle/input.c
@@ -267,6 +268,14 @@ void plugins_vk_ready(VkInstance instance, VkPhysicalDevice pd, VkDevice dev, ui
 void plugins_frame(VkCommandBuffer cb, VkImage image, VkFormat fmt, uint32_t w, uint32_t h) {
     for (int i = 0; i < g_n; i++)
         if (g_hooks[i].frame) g_hooks[i].frame(cb, image, fmt, w, h);
+}
+
+// The window's own image (GENERAL layout) as the frame, while the runtime's menu or the keyboard dialog is up - a VR
+// mod shows what the window shows then (the game's last frame with the dialog over it), not nothing
+void plugins_window_frame(VkCommandBuffer cb, VkImage image, VkFormat fmt, uint32_t w, uint32_t h) {
+    g_window_frame = 1;
+    plugins_frame(cb, image, fmt, w, h);
+    g_window_frame = 0;
 }
 
 volatile int g_plugin_stereo;

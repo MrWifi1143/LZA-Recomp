@@ -122,6 +122,7 @@ VkPhysicalDevice plugins_vk_physical_device(VkInstance instance);
 uint32_t plugins_vk_device_extensions(VkPhysicalDevice pd, const char **out, uint32_t max);
 void plugins_vk_ready(VkInstance instance, VkPhysicalDevice pd, VkDevice dev, uint32_t qfam, VkQueue queue);
 void plugins_frame(VkCommandBuffer cb, VkImage image, VkFormat fmt, uint32_t w, uint32_t h);
+void plugins_window_frame(VkCommandBuffer cb, VkImage image, VkFormat fmt, uint32_t w, uint32_t h);  // (the menu / keyboard up)
 void plugins_frame_submitted(void);
 void plugins_frame_eye(VkCommandBuffer cb, VkImage image, VkFormat fmt, uint32_t w, uint32_t h, int eye);
 int plugins_stereo_cbuf(int stage, uint64_t addr, uint32_t size, const void *in, void *out);

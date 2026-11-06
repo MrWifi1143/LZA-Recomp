@@ -559,12 +559,19 @@ static void save_window_image(VkCommandBuffer cb, VkSpan *out) {
 }
 
 // End rendering into the window image and present it. shot_path: also save the window image as PNG.
+static bool g_window_to_plugins;  // (backend_present: the runtime's menu / keyboard dialog is up)
 void vk_frame_end(const char *shot_path) {
     if (!cur_frame.ok) return;
     VkCommandBuffer cb = vk_cmd();
     vkCmdEndRendering(cb);
     VkSpan shot = {0};
     if (shot_path) save_window_image(cb, &shot);
+    if (g_window_to_plugins) {  // (the window's image, the menu on it, to the plugins: a VR mod's screen shows the dialog)
+        VkImage wi = g_vk.sc_images[cur_frame.image];
+        image_barrier(cb, wi, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+        plugins_window_frame(cb, wi, g_vk.sc_format, g_vk.sc_extent.width, g_vk.sc_extent.height);
+        image_barrier(cb, wi, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    }
     image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     uint32_t img = cur_frame.image;
     if (!done_sem[img]) done_sem[img] = binary_semaphore();
@@ -721,7 +728,10 @@ void backend_present(NvnTexture *t) {
     vk_stereo_present_size(t->width, t->height);  // (the interface's tests in exec.c draw_)
     // (the last frame shown again - the keyboard dialog: its texture holds eye 1 after the replay, so with stereo on the
     // plugins get nothing; the headset keeps the pair it has)
-    bool stereo = g_plugin_stereo && !vk_interp_enabled() && !g_representing;  // (frame interpolation - Let's Go's 60 fps menus - shares the recorder)
+    // (the runtime's menu or the keyboard dialog up: the plugins get the window's image, menu drawn - vk_frame_end)
+    extern bool menu_is_open(void);
+    g_window_to_plugins = plugins_count() && (g_representing || menu_is_open());
+    bool stereo = g_plugin_stereo && !vk_interp_enabled() && !g_representing && !g_window_to_plugins;  // (frame interpolation - Let's Go's 60 fps menus - shares the recorder)
     if (stereo) {
         extern void renderer_save_texture_tex(TexBackend *b, const char *path);
         char sp[96];
@@ -750,7 +760,7 @@ void backend_present(NvnTexture *t) {
         if (due > now) SDL_DelayPrecise(due - now);
         b = hold;
     }
-    if (final && plugins_count() && !stereo && !(g_representing && g_plugin_stereo)) plugins_frame(vk_cmd(), b->image, b->format, b->width, b->height);
+    if (final && plugins_count() && !stereo && !g_window_to_plugins) plugins_frame(vk_cmd(), b->image, b->format, b->width, b->height);
     bool have = vk_frame_begin(black);
     uint64_t nd = SDL_GetTicksNS() - t0;
     if (nd > 30000000) {

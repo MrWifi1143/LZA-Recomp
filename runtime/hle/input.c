@@ -506,8 +506,37 @@ static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
 // A plugin's controller (plugin.h set_pad: a VR mod's motion controllers), added to the player's own
 static _Atomic uint64_t plugin_buttons;
 static _Atomic int32_t plugin_lx, plugin_ly, plugin_rx, plugin_ry;
+// A plugin's controller (a VR mod's: its controllers aren't a gamepad SDL sees) reaches the overlay menu and the name
+// entry's on-screen keyboard too: while one is up, its presses go to them as the gamepad events a real controller
+// makes (Switch layout: A activates = SDL east, B back = south; the left stick as the d-pad)
+extern bool menu_input_captured(void);  // runtime/ui/menu.mm
 void input_plugin_pad(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     plugin_buttons = buttons, plugin_lx = lx, plugin_ly = ly, plugin_rx = rx, plugin_ry = ry;
+    static uint64_t prev;
+    uint64_t now = buttons;
+    if (lx < -20000) now |= 1ull << BTN_LEFT;
+    if (lx > 20000) now |= 1ull << BTN_RIGHT;
+    if (ly > 20000) now |= 1ull << BTN_UP;
+    if (ly < -20000) now |= 1ull << BTN_DOWN;
+    if (now != prev && menu_input_captured()) {
+        static const int map[][2] = {{BTN_A, SDL_GAMEPAD_BUTTON_EAST}, {BTN_B, SDL_GAMEPAD_BUTTON_SOUTH}, {BTN_X, SDL_GAMEPAD_BUTTON_NORTH},
+                                     {BTN_Y, SDL_GAMEPAD_BUTTON_WEST}, {BTN_L, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER},
+                                     {BTN_R, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER}, {BTN_PLUS, SDL_GAMEPAD_BUTTON_START},
+                                     {BTN_MINUS, SDL_GAMEPAD_BUTTON_BACK}, {BTN_LEFT, SDL_GAMEPAD_BUTTON_DPAD_LEFT},
+                                     {BTN_UP, SDL_GAMEPAD_BUTTON_DPAD_UP}, {BTN_RIGHT, SDL_GAMEPAD_BUTTON_DPAD_RIGHT},
+                                     {BTN_DOWN, SDL_GAMEPAD_BUTTON_DPAD_DOWN}};
+        for (size_t i = 0; i < sizeof map / sizeof *map; i++) {
+            uint64_t bit = 1ull << map[i][0];
+            if ((now ^ prev) & bit) {
+                SDL_Event ev = {0};
+                bool down = (now & bit) != 0;
+                ev.type = down ? SDL_EVENT_GAMEPAD_BUTTON_DOWN : SDL_EVENT_GAMEPAD_BUTTON_UP;
+                ev.gbutton.button = (Uint8)map[i][1], ev.gbutton.down = down;
+                SDL_PushEvent(&ev);
+            }
+        }
+    }
+    prev = now;
 }
 
 // Tests of the bindings, through them like a real player:
