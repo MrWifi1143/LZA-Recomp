@@ -136,12 +136,16 @@ HLE_FUNC("_ZN2nn4lmem21AllocateFromFrameHeapEPNS0_6detail8HeapHeadEmi", heap_all
 }
 
 uint64_t g_stdheap_used;  // bytes of the heap window given to StandardAllocators from STDHEAP_BASE (exec.c: GPU import)
+// The block's size: the Switch-like 2.75 GB, more where the game's settings need it (hle/pla_cmdpool.c: the bigger
+// command memory pool); at most what the heap window has above STDHEAP_BASE
+uint64_t g_stdheap_size = STDHEAP_SIZE;
 
 // Initialize(NULL, size): the allocator reserves virtual address space and backs it on demand (nn::os virtual address
 // memory). Shaders read the game's data through the imported heap window only, so it gets a fixed block there instead.
 static void std_virtual_to_block(Cpu *c) {
     if (c->x[1] || ENV("LARECOMP_VIRTUAL_HEAP")) return;
-    uint64_t want = c->x[2], left = STDHEAP_SIZE - g_stdheap_used;
+    uint64_t cap = HEAP_BASE + HEAP_MAX - STDHEAP_BASE, total = g_stdheap_size < cap ? g_stdheap_size : cap;
+    uint64_t want = c->x[2], left = total - g_stdheap_used;
     uint64_t size = want < left ? want : left;
     if (size < 0x100000) return;  // (no room: the virtual way)
     c->x[1] = STDHEAP_BASE + g_stdheap_used;

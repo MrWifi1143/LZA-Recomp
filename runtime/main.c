@@ -248,6 +248,8 @@ int main(int argc, char **argv) {
             char exefs[1100];
             snprintf(exefs, sizeof exefs, "%s/exefs", root);
             pla60_configure(exefs);
+            extern void pla_cmdpool_configure(void);  // (research: LARECOMP_PLA_CMDPOOL)
+            pla_cmdpool_configure();
         }
         { extern void wildbattle_configure(void); wildbattle_configure(); }  // (runtime/hle/wildbattle.c: the wild battles option)
         { extern void plugins_game_start(void); plugins_game_start(); }  // (runtime/plugin.h: the runtime's hooks are set)
