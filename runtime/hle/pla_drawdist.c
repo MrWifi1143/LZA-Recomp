@@ -23,6 +23,7 @@ static const uint32_t k_off[5] = {0x434, 0x448, 0x44c, 0x458, 0x45c};
 #define NOBJ 8
 static struct { uint64_t obj; float game[5], put[5]; } g_obj[NOBJ];
 static int g_log = -1;
+static void put_lodtab(void);
 
 static float factor(void) { return g_settings.detail >= 0 && g_settings.detail <= 3 ? k_mul[g_settings.detail] : 1.0f; }
 static float *at(uint64_t obj, int i) { return (float *)(uintptr_t)(obj + k_off[i]); }
@@ -37,6 +38,7 @@ static void put(int s) {
 static int fade_hook(Cpu *c, uint64_t addr) {
     uint64_t obj = c->x[0];
     rt_call_original(c, addr);
+    put_lodtab();  // (the field is loading: the game has its LOD table in place by now)
     float vis = *at(obj, 0);
     if (!(vis > 1.0f && vis < 100000.0f)) return 1;  // (not the layout this was found in: left alone)
     int s = 0;
@@ -180,8 +182,47 @@ static int oodle_hook(Cpu *c, uint64_t addr) {
     return 1;
 }
 
+// (research) LARECOMP_PLA_LODFN=1: model LOD - f_700299d91c (per object, x0) asks [[x0+0x288]+0x60](x0 = that+0x80,
+// x1 = {.., current LOD}) for the LOD and stores it at [x0+0x1f0]+0x174: log each distinct selector function once
+static int lodfn_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    uint64_t o = c->x[0];
+    if (o < 0x7200000000ull || o >= 0x7400000000ull) return 0;
+    uint64_t a = *(const uint64_t *)(uintptr_t)(o + 0x288);
+    if (a < 0x7200000000ull || a >= 0x7400000000ull) return 0;
+    uint64_t fn = *(const uint64_t *)(uintptr_t)(a + 0x60);
+    static uint64_t seen[32];
+    static int n;
+    for (int i = 0; i < n; i++) if (seen[i] == fn) return 0;
+    if (n < 32) {
+        seen[n++] = fn;
+        LOG("[lodfn] selector %llx (object %llx, lod object %llx: +e8 %d)\n", (unsigned long long)fn, (unsigned long long)o,
+            (unsigned long long)a, *(const int32_t *)(uintptr_t)(a + 0xe8));
+    }
+    return 0;
+}
+
+// Model LOD (rocks and props swapping to their _lod1/_lod2 meshes - the user's rock): the selector f_7001acd904 works out
+// how much of the screen an object's bounding sphere covers (x 0.25) and takes the first level whose cutoff in the static
+// table at 0x700397caf0 (3 floats per profile, the profile at object+0x234: {0.01, 0.003, 0.001}, {0.01, 0.005,
+// 0.002}, {1.8, 0.5, 0.2}) is above it; the chosen level lands in [object+0x1f0]+0x174 (f_700299d91c). Coverage falls
+// with the distance squared: the cutoffs / k^2 keep each level k times further out. The table is read every frame, so
+// a Settings change applies at once. Found 2026-11-08 from the user's save at the rock (frame-by-frame swap, mesh
+// flags diff, then the writer of the current level).
+#define LODTAB 0x700397caf0ull
+static const float k_lodtab[9] = {0.01f, 0.003f, 0.001f, 0.01f, 0.005f, 0.002f, 1.8f, 0.5f, 0.2f};
+static void put_lodtab(void) {
+    float *t = (float *)(uintptr_t)LODTAB;
+    for (int i = 0; i < 9; i++)  // (not the table this was found in - or not filled in yet: left alone)
+        if (!(t[i] > 1e-7f && t[i] < 2.0f)) { if (g_log) LOG("[drawdist] model LOD table not there (%g at %d)\n", t[i], i); return; }
+    float k = factor();
+    for (int i = 0; i < 9; i++) t[i] = k_lodtab[i] / (k * k);
+    if (g_log) LOG("[drawdist] model LOD cutoffs / %g (detail x%g further)\n", k * k, k);
+}
+
 // Settings changed (the Graphics row, hle/pla_options.c): the remembered objects that still hold what was put there
 void pla_set_detail(void) {
+    put_lodtab();
     for (int s = 0; s < NOBJ; s++) {
         if (!g_obj[s].obj) continue;
         bool same = true;
@@ -196,6 +237,7 @@ void pla_set_detail(void) {
 
 void pla_drawdist_configure(void) {
     g_log = getenv("LARECOMP_PLA_DRAWDIST_LOG") && atoi(getenv("LARECOMP_PLA_DRAWDIST_LOG")) > 0;
+    put_lodtab();
     rt_register_fnhook_at(0x700246746cull, fade_hook);
     rt_register_fnhook_at(0x700246f818ull, fade_hook);
     rt_register_fnhook_at(0x700173d4b0ull, npc_radius_hook);
@@ -204,4 +246,5 @@ void pla_drawdist_configure(void) {
     rt_register_fnhook_at(0x7002b1d074ull, grass_hook);
     g_grass_fade = getenv("LARECOMP_PLA_GRASS_FADE") ? (float)atof(getenv("LARECOMP_PLA_GRASS_FADE")) : 0;
     rt_register_fnhook_at(0x7000004fc0ull, oodle_hook);  // (the setting decides per area load)
+    if (getenv("LARECOMP_PLA_LODFN")) rt_register_fnhook_at(0x700299d91cull, lodfn_hook);
 }
