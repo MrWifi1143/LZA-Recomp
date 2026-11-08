@@ -15,7 +15,7 @@ import argparse, concurrent.futures as cf, glob, hashlib, os, re, shutil, subpro
 
 ROOT = os.getcwd()
 B = 'build/win-native'  # (not build/win: the Linux cross build's objects stay its own)
-GENFLAGS = ('-O1 -fno-strict-aliasing -fdenormal-fp-math=dynamic -Wno-return-type -Wno-unused-label -fvisibility=hidden '
+GENFLAGS = ('-O2 -fno-strict-aliasing -fdenormal-fp-math=dynamic -Wno-return-type -Wno-unused-label -fvisibility=hidden '
             '-Iruntime -D_FILE_OFFSET_BITS=64 -march=x86-64-v3  ')  # (as make expands it, spaces and all: part of the id)
 OSFLAGS = ['-D_FILE_OFFSET_BITS=64', '-D_POSIX_THREAD_SAFE_FUNCTIONS', '-D_CRT_RAND_S', '-DWIN32_LEAN_AND_MEAN', '-DNOMINMAX']
 LIBS = ['-lSDL3', '-lavformat', '-lavcodec', '-lavutil', '-lswscale', '-lvulkan-1', '-lwinmm', '-lole32', '-lshell32',
@@ -91,7 +91,10 @@ def main():
 
     # what the Makefile computes in the shell
     gamelib_srcs = makefile_var('GAMELIB_SRCS')
-    gamelib_id = sha16(gamelib_srcs, (GENFLAGS + '\n').encode())
+    # (as the Makefile: + the release's profile, zig's family - make_zip.py ships it as gamelib-src/pgo.profdata -
+    # so this exe loads a release's game code instead of having the start screen build it again)
+    pgo_zst = sorted(glob.glob('data/pgo/*.clang21.profdata.zst'))
+    gamelib_id = sha16(gamelib_srcs + pgo_zst[:1], (GENFLAGS + '\n').encode())
     gamelib_cflags = ' '.join(f for f in GENFLAGS.split() if f != '-Iruntime')
     xlat_hash = sha16(['runtime/nvn/maxwell/translate.c', 'runtime/nvn/maxwell/shader.h'])
     print('%s.exe with %s; game code id %s, translator %s' % (exe_name, zig, gamelib_id, xlat_hash))
