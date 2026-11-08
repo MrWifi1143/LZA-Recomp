@@ -486,9 +486,81 @@ static bool pla_script_tick_on(void) {  // (off by default: at 144 fps a battle'
     return g_pla_script_tick && g_pla60_build;
 }
 int pla_input_tick(void) { return !pla_script_tick_on() || rt_pla_tick(0xa461); }
+// The event scripts' waits (Haxe's wait(n), compiled into the scripts as "i = 0; while i < n do i = i + 1; if IsSkip()
+// then break end; coroutine.yield() end": n updates) - at 60 fps every wait in a cutscene was half as long: Cyllene
+// removed mid-walk outside Galaxy HQ, her door heard while she was still in view, lines and shots cut short. A script
+// yielded inside such a counting loop isn't resumed on the updates where 30 fps time didn't move on a frame, so the wait
+// lasts its real time; a script waiting on anything else (a message, a camera move, a battle's result) is resumed every
+// update as before - the whole script held to 30 Hz (LARECOMP_PLA_SCRIPT_TICK) missed one-update events. Found from the
+// game's Lua 5.3 (2026-11-08): the script's thread L = [[script+0x140]+0x158]; L->ci (+32) is yield's C frame, its
+// previous (+16) the Lua frame that yielded: savedpc (+40), closure *func (+0) -> Proto (+24): k (+48), code (+56),
+// sizecode (+24). LARECOMP_PLA_WAIT_LOOPS=0: off.
+static bool pla_guest_ptr(uint64_t p) { return p >= 0x7000000000ull && p < 0x8000000000ull && !(p & 7); }
+static bool pla_k_is_one(uint64_t k, uint32_t idx) {
+    const uint8_t *tv = (const uint8_t *)(uintptr_t)(k + 16ull * idx);
+    int tt = *(const int32_t *)(tv + 8);
+    if (tt == 0x13) return *(const int64_t *)tv == 1;     // (LUA_TNUMINT)
+    if (tt == 0x03) return *(const double *)tv == 1.0;    // (LUA_TNUMFLT)
+    return false;
+}
+static int pla_wait_loop_check(uint64_t code, uint64_t k, int sizek, int n, int p) {
+    const uint32_t *I = (const uint32_t *)(uintptr_t)code;
+    if (p < 1 || p > n || (I[p - 1] & 0x3f) != 36) return 0;  // (yield's CALL just before)
+    for (int j = p; j < n && j < p + 16; j++) {  // the loop around it: the first jump back past it
+        if ((I[j] & 0x3f) != 30) continue;
+        int t = j + 1 + (int)(I[j] >> 14) - 131071;
+        if (t > p || t < 0) continue;
+        for (int a = t; a < j; a++) {  // a counter: r = r + 1, compared (LT / LE) in the same loop
+            uint32_t x = I[a];
+            if ((x & 0x3f) != 13) continue;
+            int A = (x >> 6) & 0xff, B = (x >> 23) & 0x1ff, C = (x >> 14) & 0x1ff;
+            if (B != A || !(C & 0x100) || (int)(C & 0xff) >= sizek || !pla_k_is_one(k, C & 0xff)) continue;
+            for (int b = t; b < j; b++) {
+                uint32_t y = I[b];
+                int op = y & 0x3f, yb = (y >> 23) & 0x1ff, yc = (y >> 14) & 0x1ff;
+                if ((op == 32 || op == 33) && (yb == A || yc == A)) return 1;
+            }
+        }
+        return 0;  // (the innermost loop has no counter)
+    }
+    return 0;
+}
+static bool pla_script_in_wait_loop(uint64_t state) {
+    if (!pla_guest_ptr(state)) return false;
+    uint64_t L = *(const uint64_t *)(uintptr_t)(state + 0x158);
+    if (!pla_guest_ptr(L) || *(const uint8_t *)(uintptr_t)(L + 12) != 1) return false;  // (not yielded)
+    uint64_t ci = *(const uint64_t *)(uintptr_t)(L + 32);
+    if (!pla_guest_ptr(ci)) return false;
+    uint64_t lf = *(const uint64_t *)(uintptr_t)(ci + 16);
+    if (!pla_guest_ptr(lf)) return false;
+    uint64_t pc = *(const uint64_t *)(uintptr_t)(lf + 40), func = *(const uint64_t *)(uintptr_t)lf;
+    if (!pla_guest_ptr(func)) return false;
+    uint64_t cl = *(const uint64_t *)(uintptr_t)func;
+    if (!pla_guest_ptr(cl)) return false;
+    uint64_t proto = *(const uint64_t *)(uintptr_t)(cl + 24);
+    if (!pla_guest_ptr(proto)) return false;
+    uint64_t code = *(const uint64_t *)(uintptr_t)(proto + 56), k = *(const uint64_t *)(uintptr_t)(proto + 48);
+    int n = *(const int32_t *)(uintptr_t)(proto + 24), sizek = *(const int32_t *)(uintptr_t)(proto + 20);
+    if (!pla_guest_ptr(code) || !pla_guest_ptr(k) || n <= 0 || n > 1 << 20 || pc < code || ((pc - code) & 3)) return false;
+    int p = (int)((pc - code) / 4);
+    if (p > n) return false;
+    static struct { uint64_t proto; int p, r; } cache[512];  // (per site: 1 a counting loop, 2 not)
+    unsigned h = (unsigned)((proto >> 3) * 31 + (unsigned)p) & 511;
+    if (cache[h].proto == proto && cache[h].p == p) return cache[h].r == 1;
+    int r = pla_wait_loop_check(code, k, sizek, n, p) ? 1 : 2;
+    cache[h].proto = proto, cache[h].p = p, cache[h].r = r;
+    return r == 1;
+}
 static int pla_script_step_hook(Cpu *c, uint64_t addr) {
-    if (!pla_script_tick_on() || rt_pla_tick(0xa460)) return 0;  // (the game's own step)
+    static int loops = -1;
+    if (loops < 0) loops = !(getenv("LARECOMP_PLA_WAIT_LOOPS") && atoi(getenv("LARECOMP_PLA_WAIT_LOOPS")) == 0);
+    if (!g_pla60_patched || rt_pla_tick(0xa460)) return 0;  // (the game's own step)
     uint64_t state = *(const uint64_t *)(uintptr_t)(c->x[0] + 0x140);
+    bool in_wait = loops && pla_script_in_wait_loop(state);
+    static int wlog = -1, wn;
+    if (wlog < 0) wlog = getenv("LARECOMP_PLA_WAIT_LOG") && atoi(getenv("LARECOMP_PLA_WAIT_LOG")) > 0;
+    if (wlog && wn++ < 400) LOG("[waitloop] state %llx in wait %d\n", (unsigned long long)state, (int)in_wait);
+    if (!pla_script_tick_on() && !in_wait) return 0;
     c->x[0] = state && *(const uint8_t *)(uintptr_t)(state + 0x191) == 0;  // (still running: what a step returns)
     (void)addr;
     return 1;
