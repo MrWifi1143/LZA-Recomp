@@ -960,6 +960,28 @@ void backend_present(NvnTexture *t) {
             if (at == (long)total_frames) { g_gpuprof_frame = true; break; }
             if (*p == ',') p++; else break;
         }
+        // LARECOMP_GPUPROF_SLOW=<ms>[,<count>]: the same report, taken by itself wherever play gets slow - a frame whose
+        // GPU time is over <ms> (at most every 120 frames, <count> reports, 20 by default) - and, to compare, three
+        // frames under a third of it
+        static double slow_ms = -1;
+        static int slow_left, fast_left = 3;
+        static uint64_t slow_next;
+        if (slow_ms < 0) {
+            const char *s = getenv("LARECOMP_GPUPROF_SLOW");
+            slow_ms = s ? strtod(s, NULL) : 0;
+            const char *c = s ? strchr(s, ',') : NULL;
+            slow_left = c ? atoi(c + 1) : 20;
+        }
+        if (slow_ms > 0 && !g_gpuprof_frame && total_frames >= slow_next && total_frames > 600) {
+            double g = vk_gpu_ms();
+            if (g > slow_ms && slow_left > 0) {
+                slow_left--, g_gpuprof_frame = true, slow_next = total_frames + 120;
+                LOG("[gpuprof] slow: %.2f ms on the GPU, profiling frame %llu\n", g, (unsigned long long)total_frames);
+            } else if (g > 0 && g < slow_ms / 3 && fast_left > 0) {
+                fast_left--, g_gpuprof_frame = true, slow_next = total_frames + 600;
+                LOG("[gpuprof] fast (to compare): %.2f ms on the GPU, profiling frame %llu\n", g, (unsigned long long)total_frames);
+            }
+        }
     }
     {   // LARECOMP_WATCH_RANGE=<lo>,<hi>@<frame> (hex guest addresses): from that frame on, the functions accessing [lo, hi)
         // ("[watch]" in the log, dispatch.c watch_arm: one page, re-protected every 100 us)
