@@ -220,6 +220,84 @@ static void put_lodtab(void) {
     if (g_log) LOG("[drawdist] model LOD cutoffs / %g (detail x%g further)\n", k * k, k);
 }
 
+// (research, with LARECOMP_PLA_TERRFN=1) terrain: f_7002b17bd4(manager, node) asks [manager+0x60](manager+0x80, node +
+// camera data) whether to split the quadtree node (1) - log each distinct criterion function and the manager's floats
+static int terrfn_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    uint64_t o = c->x[0];
+    if (o < 0x7200000000ull || o >= 0x7400000000ull) return 0;
+    uint64_t fn = *(const uint64_t *)(uintptr_t)(o + 0x60);
+    static uint64_t seen[8];
+    static int n;
+    for (int i = 0; i < n; i++) if (seen[i] == fn) return 0;
+    if (n < 8) {
+        seen[n++] = fn;
+        uint64_t a = *(const uint64_t *)(uintptr_t)(o + 0x80), b = a ? *(const uint64_t *)(uintptr_t)(a + 0x18) : 0;
+        const float *q = b ? (const float *)(uintptr_t)(b - 0x50 + 0x200) : 0;
+        LOG("[terrfn] criterion %llx (manager %llx; obj %llx; +200..: %g %g %g %g %g %g %g %g)\n", (unsigned long long)fn,
+            (unsigned long long)o, (unsigned long long)(b ? b - 0x50 : 0), q ? q[0] : 0, q ? q[1] : 0, q ? q[2] : 0, q ? q[3] : 0,
+            q ? q[4] : 0, q ? q[5] : 0, q ? q[6] : 0, q ? q[7] : 0);
+    }
+    return 0;
+}
+
+// (research) tiles emitted (f_7002b1b6ec) per walk (f_7002b1b248)
+uint32_t g_terr_tiles_max;
+static _Thread_local uint32_t t_tiles, t_depth;
+static int terrwalk_hook(Cpu *c, uint64_t addr) {  // (recursive: count from the outermost call)
+    if (!t_depth++) t_tiles = 0;
+    rt_call_original(c, addr);
+    if (!--t_depth && t_tiles > g_terr_tiles_max) g_terr_tiles_max = t_tiles;
+    return 1;
+}
+static int terremit_hook(Cpu *c, uint64_t addr) { (void)c, (void)addr; t_tiles++; return 0; }
+
+// (research, LARECOMP_PLA_TERRHIST=1) the criterion's answers by quadtree level (0 keep, 1 split, 2 skip)
+static int terrhist_hook(Cpu *c, uint64_t addr) {
+    uint32_t level = *(const uint32_t *)(uintptr_t)(c->x[1] + 8);
+    rt_call_original(c, addr);
+    static uint32_t h[16][3], calls;
+    uint32_t r = (uint32_t)c->x[0];
+    if (level < 16 && r < 3) h[level][r]++;
+    if (++calls % 50000 == 0) {
+        extern uint32_t g_terr_tiles_max;
+        LOG("[terrhist] most tiles in one walk: %u\n", g_terr_tiles_max);
+        g_terr_tiles_max = 0;
+        for (int l = 0; l < 16; l++)
+            if (h[l][0] + h[l][1] + h[l][2]) LOG("[terrhist] level %d: keep %u split %u skip %u\n", l, h[l][0], h[l][1], h[l][2]);
+        memset(h, 0, sizeof h);
+    }
+    return 1;
+}
+
+// Terrain mesh LOD: f_7002b17bd4 (quadtree node) -> criterion f_7002471048 splits a node when the LOD point is within
+// [obj+0x208] (40 m) of the node's edge - one distance for every level, so it sets how far each finer ring reaches.
+// Scaled per Draw Distance (env LARECOMP_PLA_TERRAIN = factor overrides); re-put whenever the game writes it back.
+// Tiles per walk on the user's ridge save: 133 at x1, 302 at x3, 650 at x5 (the staging holds 4096); GPU cost in the noise.
+static const float k_terrain[4] = {1.0f, 1.5f, 2.5f, 4.0f};
+static float g_terrain = -1;
+static uint64_t g_terr_obj;
+static float g_terr_game, g_terr_put;
+static int terrain_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    uint64_t o = c->x[0];
+    if (o < 0x7200000000ull || o >= 0x7400000000ull) return 0;
+    uint64_t a = *(const uint64_t *)(uintptr_t)(o + 0x80);
+    if (a < 0x7200000000ull || a >= 0x7400000000ull) return 0;
+    uint64_t b = *(const uint64_t *)(uintptr_t)(a + 0x18);
+    if (b < 0x7200000000ull + 0x50 || b >= 0x7400000000ull) return 0;
+    float *t = (float *)(uintptr_t)(b - 0x50 + 0x208);
+    float k = g_terrain > 0 ? g_terrain : k_terrain[g_settings.detail >= 0 && g_settings.detail <= 3 ? g_settings.detail : 0];
+    if (b - 0x50 != g_terr_obj || *t != g_terr_put) {
+        if (!(*t > 1.0f && *t < 1000.0f)) return 0;
+        if (b - 0x50 != g_terr_obj || *t != g_terr_game * k) g_terr_game = *t;  // (the game's own value)
+        g_terr_obj = b - 0x50;
+        if (g_log) LOG("[drawdist] terrain detail distance %g m (the game's %g)\n", g_terr_game * k, g_terr_game);
+    }
+    *t = g_terr_put = g_terr_game * k;
+    return 0;
+}
+
 // Settings changed (the Graphics row, hle/pla_options.c): the remembered objects that still hold what was put there
 void pla_set_detail(void) {
     put_lodtab();
@@ -247,4 +325,9 @@ void pla_drawdist_configure(void) {
     g_grass_fade = getenv("LARECOMP_PLA_GRASS_FADE") ? (float)atof(getenv("LARECOMP_PLA_GRASS_FADE")) : 0;
     rt_register_fnhook_at(0x7000004fc0ull, oodle_hook);  // (the setting decides per area load)
     if (getenv("LARECOMP_PLA_LODFN")) rt_register_fnhook_at(0x700299d91cull, lodfn_hook);
+    g_terrain = getenv("LARECOMP_PLA_TERRAIN") ? (float)atof(getenv("LARECOMP_PLA_TERRAIN")) : 0;
+    rt_register_fnhook_at(0x7002b17bd4ull, getenv("LARECOMP_PLA_TERRFN") ? terrfn_hook : terrain_hook);
+    if (getenv("LARECOMP_PLA_TERRHIST"))
+        rt_register_fnhook_at(0x7002471048ull, terrhist_hook), rt_register_fnhook_at(0x7002b1b248ull, terrwalk_hook),
+            rt_register_fnhook_at(0x7002b1b6ecull, terremit_hook);
 }
