@@ -204,15 +204,60 @@ static int hide_player_hook(Cpu *c, uint64_t addr) {
     t_hiding -= me;
     return 1;
 }
-// its palette's maker 0x70029c983c (x2 the bones' matrices, w4 how many): the player's bones collapsed first, so
-// what's drawn of it (and its shadow) is a point
+// its palette's maker 0x70029c983c (x2 the bones' matrices, w4 how many): the player's bones collapsed for that call
+// only, so what's drawn of it (and its shadow) is a point; the game's bones are put back right after (the camera and
+// the rest read them: left zeroed, the 2026-11-08 beach run went purple with the camera off in the terrain)
 static int hide_palette_hook(Cpu *c, uint64_t addr) {
-    (void)addr;
-    if (t_hiding && in_heap(c->x[2]) && (uint32_t)c->x[4] < 1024) memset((void *)(uintptr_t)c->x[2], 0, (size_t)(uint32_t)c->x[4] * 64);
-    return 0;
+    uint32_t n = (uint32_t)c->x[4];
+    if (!t_hiding || !in_heap(c->x[2]) || n == 0 || n >= 1024) return 0;
+    void *bones = (void *)(uintptr_t)c->x[2];
+    void *keep = malloc((size_t)n * 64);
+    if (!keep) return 0;
+    memcpy(keep, bones, (size_t)n * 64);
+    memset(bones, 0, (size_t)n * 64);
+    rt_call_original(c, addr);
+    memcpy(bones, keep, (size_t)n * 64);
+    free(keep);
+    return 1;
 }
 
+// (research) LARECOMP_ALLOC_BT=<size hex>,<from frame>[,n]: the guest call stacks (frame pointers) of the first n
+// allocations of that size (up to 8 KB more) through the game's allocator 0x700084c5b8 (x0 the heap, x1 the size, x2 the
+// alignment) from that frame on - who builds a buffer (Lua hooks there crash: it's called from every thread at once)
+static volatile uint64_t g_frame_now;
+static uint64_t ab_size, ab_from;
+static volatile int ab_left;
+static int alloc_bt_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    if (c->x[1] < ab_size || c->x[1] >= ab_size + 0x2000 || g_frame_now < ab_from || ab_left <= 0) return 0;
+    if (__atomic_sub_fetch(&ab_left, 1, __ATOMIC_RELAXED) < 0) return 0;
+    char line[600];
+    uint64_t sz = c->x[1], heap = c->x[0], lr0 = c->x[30], fp = c->x[29];
+    uint64_t chain[24];
+    int nch = 0;
+    for (uint64_t f = fp; nch < 24 && f >= GUEST_LO && f < GUEST_HI && !(f & 7); nch++) {
+        chain[nch] = ((uint64_t *)(uintptr_t)f)[1];
+        f = ((uint64_t *)(uintptr_t)f)[0];
+        if (!chain[nch]) break;
+    }
+    rt_call_original(c, addr);  // (the block it returns, to match it with what the game does with it later)
+    int o = snprintf(line, sizeof line, "[allocbt] frame %llu size %llx heap %llx -> %llx: lr %llx", (unsigned long long)g_frame_now,
+                     (unsigned long long)sz, (unsigned long long)heap, (unsigned long long)c->x[0], (unsigned long long)lr0);
+    for (int i = 0; i < nch && chain[i] && o < (int)sizeof line - 24; i++) o += snprintf(line + o, sizeof line - o, " %llx", (unsigned long long)chain[i]);
+    LOG("%s\n", line);
+    return 1;
+}
+
+
 __attribute__((constructor)) static void warp_init(void) {
+    {
+        const char *e = getenv("LARECOMP_ALLOC_BT");
+        int n = 12;
+        if (e && sscanf(e, "%llx,%llu,%d", (unsigned long long *)&ab_size, (unsigned long long *)&ab_from, &n) >= 2) {
+            ab_left = n;
+            rt_register_fnhook_at(0x700084c5b8ull, alloc_bt_hook);
+        }
+    }
     if (getenv("LARECOMP_HIDE_PLAYER"))
         rt_register_fnhook_at(0x7002a6ba60ull, hide_player_hook), rt_register_fnhook_at(0x70029c983cull, hide_palette_hook);
     const char *w = getenv("LARECOMP_WARP");
@@ -250,6 +295,7 @@ bool warp_player_pos(float out[3]) {
 }
 
 void warp_frame(uint64_t frame) {  // (each game frame: runtime/hle/input.c)
+    g_frame_now = frame;
     {   // (research) LARECOMP_LOG_PLAYER=<n>: the player's position every n frames ("[player] frame f x y z")
         static long every = -2;
         if (every == -2) every = getenv("LARECOMP_LOG_PLAYER") ? atol(getenv("LARECOMP_LOG_PLAYER")) : 0;

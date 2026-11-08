@@ -60,10 +60,12 @@ static void arg_check(uint64_t a, uint64_t lr) {
         if (e) sscanf(e, "%llx,%llx", (unsigned long long *)&arg_lo, (unsigned long long *)&arg_hi);
     }
     if (!arg_lo) return;
+    static long amask = -1;  // LARECOMP_FNPROF_ARGIN_MASK=<hex>: only values with (v & mask) == 0 (aligned blocks)
+    if (amask < 0) amask = getenv("LARECOMP_FNPROF_ARGIN_MASK") ? (long)strtoul(getenv("LARECOMP_FNPROF_ARGIN_MASK"), NULL, 16) : 0;
     Cpu *c = kernel_current_cpu();
     if (!c) return;
     for (int r = 0; r < 8; r++)
-        if (c->x[r] >= arg_lo && c->x[r] < arg_hi) {
+        if (c->x[r] >= arg_lo && c->x[r] < arg_hi && !(c->x[r] & (uint64_t)amask)) {
             for (int i = 0; i < NARGSEEN; i++) {
                 uint64_t cur = atomic_load(&arg_seen[i]);
                 if (cur == a) return;
