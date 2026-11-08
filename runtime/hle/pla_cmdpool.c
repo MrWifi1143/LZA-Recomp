@@ -102,6 +102,9 @@ static uint32_t g_cmdmem_mb = 280;  // (7x: what the heap window has room for - 
 // Distance, hle/pla_drawdist.c) filled it ("pool FULL" with LARECOMP_PLA_CMDPOOL=1, then the crash above at grass block
 // 16). 800 MB by default (LARECOMP_PLA_GFXMEM_MB, 300 = the game's); the heap window grew 512 MB for it (rt.h HEAP_MAX).
 static uint32_t g_gfxmem_mb = 800;
+// Shadow maps above the Switch's 1024 (hle/pla_drawdist.c): 2 cascades of 32-bit depth + 8-bit id = 10 MB at 1024,
+// 40 MB at 2048, 160 MB at 4096 - the extra goes on the render target pool (+0x30, 250 MB), and on the heap.
+static uint32_t g_rtmem_extra_mb;
 static int gfx_setup_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     uint32_t *sz = (uint32_t *)(uintptr_t)(c->x[0] + 0x38);
@@ -114,6 +117,11 @@ static int gfx_setup_hook(Cpu *c, uint64_t addr) {
         *big = g_gfxmem_mb << 20;
         LOG("[pla] field GPU memory pool: %u MB (the game's 300)\n", g_gfxmem_mb);
     }
+    uint32_t *rt = (uint32_t *)(uintptr_t)(c->x[0] + 0x30);  // (the 250 MB pool: render targets - bigger shadow maps)
+    if (*rt == 250u << 20 && g_rtmem_extra_mb) {
+        *rt += g_rtmem_extra_mb << 20;
+        LOG("[pla] render target memory pool: %u MB (the game's 250)\n", 250 + g_rtmem_extra_mb);
+    }
     return 0;
 }
 void pla_cmdpool_configure(void) {
@@ -125,6 +133,10 @@ void pla_cmdpool_configure(void) {
         extern uint64_t g_stdheap_size;  // (hle/heaps.c: the pools come out of the game's StandardAllocator block)
         g_stdheap_size += (uint64_t)(g_cmdmem_mb - 40) << 20;
         g_stdheap_size += (uint64_t)(g_gfxmem_mb - 300) << 20;
+        extern int pla_shadow_res(void);
+        int sr = pla_shadow_res();
+        if (sr > 1024) g_rtmem_extra_mb = (uint32_t)(((uint64_t)sr * sr * 2 * 5) >> 20) - 10 + 8;  // (+8 MB slack)
+        g_stdheap_size += (uint64_t)g_rtmem_extra_mb << 20;
         rt_register_fnhook_at(0x70029d6a64ull, gfx_setup_hook);
     }
     if (!getenv("LARECOMP_PLA_CMDPOOL")) return;

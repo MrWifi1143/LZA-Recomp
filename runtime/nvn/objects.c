@@ -431,6 +431,22 @@ NVN(nvnTextureInitialize) {
     if (t->flags & 2)
         LOG("[nvn] video texture %p: %ux%u fmt %#x flags %#x target %u addr %llx stride %llu\n", t, t->width, t->height,
             t->format, t->flags, t->target, t->addr, t->stride);
+    static int logbig = -1;  // (research) LARECOMP_LOG_TEXINIT=1: square textures from 512 up (shadow maps) with the caller
+    if (logbig < 0) logbig = getenv("LARECOMP_LOG_TEXINIT") != NULL;
+    if (logbig && t->width >= 512 && t->width == t->height) {
+        char line[256];
+        int o = 0;
+        uint64_t fp = c->x[29];
+        for (int i = 0; i < 10 && fp >= GUEST_LO && fp < GUEST_HI && !(fp & 7) && o < (int)sizeof line - 24; i++) {
+            uint64_t lr = ((uint64_t *)(uintptr_t)fp)[1];
+            fp = ((uint64_t *)(uintptr_t)fp)[0];
+            if (!lr) break;
+            o += snprintf(line + o, sizeof line - o, " %llx", (unsigned long long)lr);
+        }
+        line[o] = 0;
+        LOG("[nvn] texture %ux%ux%u fmt %#x target %u levels %u (lr %llx:%s) %s\n", t->width, t->height, t->depth, t->format,
+            t->target, t->levels, (unsigned long long)c->x[30], line, t->label);
+    }
     SET_HOST(A(0), t);
     pool_reattach(A(0), t);
     RET(1);

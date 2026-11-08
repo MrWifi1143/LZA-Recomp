@@ -176,6 +176,8 @@ static int oodle_hook(Cpu *c, uint64_t addr) {
         float *f = (float *)(out + o + 12);
         if (!(f[0] > 1.5f && f[0] < 4.0f && f[1] >= f[0] && f[2] >= f[1] && f[2] < 5.0f)) continue;
         f[0] *= fade, f[1] *= fade, f[2] *= fade;
+        // (the record's rest, 0.9 / 1.1 / 10.5: the size range and the density - x3 on 10.5 thinned the flowers)
+        if (g_log && n == 0) LOG("[drawdist] detail record: 16 3 1 %g %g %g %g %g %g\n", f[0], f[1], f[2], f[3], f[4], f[5]);
         n++;
     }
     if (n) LOG("[drawdist] plant detail distance x%g in %d detail layer records\n", fade, n);
@@ -238,6 +240,35 @@ static int terrfn_hook(Cpu *c, uint64_t addr) {
             (unsigned long long)o, (unsigned long long)(b ? b - 0x50 : 0), q ? q[0] : 0, q ? q[1] : 0, q ? q[2] : 0, q ? q[3] : 0,
             q ? q[4] : 0, q ? q[5] : 0, q ? q[6] : 0, q ? q[7] : 0);
     }
+    return 0;
+}
+
+// Shadows: the shadow renderer's setup (f_7002a076e0) gets its map size from the config (key d11dc1e0c2a5f6a3 -> renderer
+// +0x3fc: 1024; +0x3f8: 2 cascades), copies it into the texture builder on its stack (sp+0xb0/+0xb8) and creates a
+// 1024x1024x2 depth array + an R8 id array. Far flower stems fell between the far cascade's texels (no shadows past a
+// few metres - the user's 2026-11-08 shots). f_7001a34908 is called between the copy and the creation (lr 7002a07a54):
+// there the size goes up in both places.
+static int g_shadow_res = -1;
+int pla_shadow_res(void) {  // (also hle/pla_cmdpool.c: memory for the bigger maps, set up before this file's hooks)
+    if (g_shadow_res < 0) {
+        static const int k_size[3] = {0, 2048, 4096};  // (Settings.shadows: Switch / High / Ultra; env LARECOMP_PLA_SHADOWRES=<n>)
+        g_shadow_res = g_settings.shadows >= 0 && g_settings.shadows <= 2 ? k_size[g_settings.shadows] : 0;
+        if (getenv("LARECOMP_PLA_SHADOWRES")) g_shadow_res = atoi(getenv("LARECOMP_PLA_SHADOWRES"));
+        if (!(g_shadow_res > 1024 && g_shadow_res <= 8192)) g_shadow_res = 0;
+    }
+    return g_shadow_res;
+}
+static int shadow_size_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    if (c->x[30] != 0x7002a07a54ull || g_shadow_res <= 0) return 0;
+    int32_t *res = (int32_t *)(uintptr_t)(c->x[20] + 0x3fc);
+    uint64_t *bw = (uint64_t *)(uintptr_t)(c->sp + 0xb0);
+    if (*res != 1024 || bw[0] != 1024 || bw[1] != 1024) {
+        LOG("[pla] shadow maps: not the expected setup (%d, %llu x %llu) - left alone\n", *res, (unsigned long long)bw[0], (unsigned long long)bw[1]);
+        return 0;
+    }
+    *res = g_shadow_res, bw[0] = bw[1] = (uint64_t)g_shadow_res;
+    LOG("[pla] shadow maps %d (the game's 1024)\n", g_shadow_res);
     return 0;
 }
 
@@ -327,6 +358,7 @@ void pla_drawdist_configure(void) {
     if (getenv("LARECOMP_PLA_LODFN")) rt_register_fnhook_at(0x700299d91cull, lodfn_hook);
     g_terrain = getenv("LARECOMP_PLA_TERRAIN") ? (float)atof(getenv("LARECOMP_PLA_TERRAIN")) : 0;
     rt_register_fnhook_at(0x7002b17bd4ull, getenv("LARECOMP_PLA_TERRFN") ? terrfn_hook : terrain_hook);
+    if (pla_shadow_res()) rt_register_fnhook_at(0x7001a34908ull, shadow_size_hook);
     if (getenv("LARECOMP_PLA_TERRHIST"))
         rt_register_fnhook_at(0x7002471048ull, terrhist_hook), rt_register_fnhook_at(0x7002b1b248ull, terrwalk_hook),
             rt_register_fnhook_at(0x7002b1b6ecull, terremit_hook);

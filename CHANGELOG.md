@@ -12,6 +12,11 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
   from the folder (Z-A got the same fix for its shader packs in 0.6.0).
 Arceus:
 
+- Shadows (Next Start) in the game's Settings and the start screen: Switch / High / Ultra = shadow maps of 1024 (the
+  game's) / 2048 / 4096. At 1024 thin things - flower stems - lost their shadows a few metres out (they fell between
+  the far cascade's texels); High and Ultra keep them. The render target pool grows by what the maps need (+38 / +158 MB).
+- Draw Distance also moves the terrain mesh's detail rings out (x1 / 1.5 / 2.5 / 4: 40 m -> 160 m at Max): ridges keep
+  their shape instead of reshaping as you walk up.
 - New app icon (window, taskbar, the exe, the release folder): Mount Coronet under the space-time rift, the launcher banner's art, instead
   of the Master Ball left over from the runtime's first game. docs/icon/make_icon.py draws it from the launcher's
   shapes (runtime/ui/launcher_lg.mm) and writes icon.svg, icon_1024.png, icon.ico and icon.icns.
