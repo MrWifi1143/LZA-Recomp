@@ -524,11 +524,19 @@ static int pla_seq_step_hook(Cpu *c, uint64_t addr) {
 // goes up by the step +0x4b4 an update - no frame time - and the move ends at 1 (state 0, the script's "arrived" check
 // f_70019b24dc turns false). At 60 fps moves ended twice as early: Volo removed mid-walk after his battle, people in
 // cutscenes vanishing before they walk off screen. The step is scaled to the frame time for the update (1 at 30 fps).
+// A step of 1 or more is a move done in one update - a cutscene's camera cut to its next shot - and stays whole: scaled,
+// at 60 fps the cut took two updates and showed a frame half way (eased to 71%) between the shots, every cut in a
+// cutscene snapping (2026-11-08, Laventon's beach scene; LARECOMP_PLA_MOVE_CUT=0: scaled as before).
 #define PLA_SCRIPTED_MOVE 0x70019b2140ull
 uint32_t rt_scale30_f32(uint32_t bits);
 static int pla_scripted_move_hook(Cpu *c, uint64_t addr) {
     uint64_t nav = c->x[0];
     if (!nav || *(const uint32_t *)(uintptr_t)(nav + 0x3e4) != 1) return 0;
+    static int cut = -1;
+    if (cut < 0) cut = !(getenv("LARECOMP_PLA_MOVE_CUT") && atoi(getenv("LARECOMP_PLA_MOVE_CUT")) == 0);
+    float sf;
+    memcpy(&sf, (const void *)(uintptr_t)(nav + 0x4b4), 4);
+    if (cut && sf >= 1.0f) return 0;  // (the game's own: done this update)
     uint32_t *step = (uint32_t *)(uintptr_t)(nav + 0x4b4), was = *step;
     *step = rt_scale30_f32(was);
     rt_call_original(c, addr);
