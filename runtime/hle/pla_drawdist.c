@@ -118,14 +118,66 @@ static int anim_poke_hook(Cpu *c, uint64_t addr) {
 // 11 layers per cell, each cell's instances uploaded to the GPU when it enters the block. The manager is built by
 // f_7002b1d074(manager, N) (+0xf8 N, +0xfc 16 m), which allocates N*N of everything: N = 4 = grass to ~32 m.
 // LARECOMP_PLA_GRASS_N=<n> (power of two): research override.
+// With the Draw Distance setting: Switch 4 (the game's), High 8, Very High / Max 16 (16 x 16 needed the 800 MB field
+// GPU pool, hle/pla_cmdpool.c - it crashed in the game's 300). Applies when an area loads.
+static const int k_grass_n[4] = {4, 8, 16, 16};
 static int grass_hook(Cpu *c, uint64_t addr) {
     static int n = -1;
     if (n < 0) n = getenv("LARECOMP_PLA_GRASS_N") ? atoi(getenv("LARECOMP_PLA_GRASS_N")) : 0;
     uint32_t game = (uint32_t)c->x[1];
-    if (n > 0 && (n & (n - 1)) == 0) c->x[1] = (uint32_t)n;
+    int want = n > 0 ? n : (game == 4 && g_settings.detail >= 0 && g_settings.detail <= 3 ? k_grass_n[g_settings.detail] : 0);
+    if (want > 0 && (want & (want - 1)) == 0) c->x[1] = (uint32_t)want;
     LOG("[drawdist] grass block %u x %u cells (the game's %u)\n", (unsigned)c->x[1], (unsigned)c->x[1], game);
     (void)addr;
     return 0;
+}
+
+// The grass's own reach: each area's detail definition (in bin/archive/field/terrain/<area>.gfpak, next to the
+// area<n>_0_0_detailmap_*.trtbf maps) has a record per grass / plant layer: {16 (cell m), 3, 1, 2.25, 2.5, 2.75, 0.9,
+// 1.1, 10.5} - the three are cells (36 / 40 / 44 m): how far a plant keeps its full model (flowers lose their stems
+// past it - the user's focus-camera find; x1.5 verified on the beach walk: stems further out, near density unchanged).
+// The archive is Oodle-compressed: OodleLZ_Decompress (0x7000004fc0: x0 in, x1 its size, x2 out, x3 the raw size) is
+// hooked and the records scaled in what it unpacks, before the game reads them. With the setting: x1 / 1.25 / 2 / 2.75
+// (kept inside the grass block: 2.75 cells x k <= half of it); applies when an area loads. LARECOMP_PLA_GRASS_FADE=<k>.
+static const float k_grass_fade[4] = {1.0f, 1.25f, 2.0f, 2.75f};
+static float g_grass_fade = -1;
+static int oodle_hook(Cpu *c, uint64_t addr) {
+    uint8_t *out = (uint8_t *)(uintptr_t)c->x[2];
+    uint64_t raw = c->x[3];
+    rt_call_original(c, addr);
+    if ((int64_t)c->x[0] <= 0 || raw < 64 || raw > (256u << 20)) return 1;
+    static int find = -1;  // (research) LARECOMP_PLA_FIND_CONST=1: log the unpacked blocks holding (-36, 36, 0.25, 2)
+    if (find < 0) find = getenv("LARECOMP_PLA_FIND_CONST") != NULL;
+    if (find) {
+        static const float pat[4] = {-36.0f, 36.0f, 0.25f, 2.0f};
+        static const float pat2[2] = {-36.0f, 36.0f};
+        for (uint64_t o = 0; o + 16 <= raw; o += 4)
+            if (!memcmp(out + o, pat, 16) || !memcmp(out + o, pat2, 8)) {
+                char nm[80] = {0};
+                for (uint64_t k = 0; k + 4 < raw && k < 0x4000; k++)  // (a name nearby: the first ".tr" string in the block)
+                    if (out[k] == '.' && out[k + 1] == 't' && out[k + 2] == 'r') {
+                        uint64_t s = k;
+                        while (s > 0 && out[s - 1] >= 0x20 && out[s - 1] < 0x7f && k - s < 60) s--;
+                        snprintf(nm, sizeof nm, "%.*s", (int)(k + 6 - s), (const char *)out + s);
+                        break;
+                    }
+                LOG("[drawdist] const %s at +%llx of a %llu-byte block %llx (%s)\n", !memcmp(out + o, pat, 16) ? "(-36,36,0.25,2)" : "(-36,36)",
+                    (unsigned long long)o, (unsigned long long)raw, (unsigned long long)(uintptr_t)out, nm);
+            }
+    }
+    float fade = g_grass_fade > 0 ? g_grass_fade : (g_settings.detail >= 0 && g_settings.detail <= 3 ? k_grass_fade[g_settings.detail] : 1.0f);
+    if (fade <= 1.0f) return 1;
+    static const float key[3] = {16.0f, 3.0f, 1.0f};
+    int n = 0;
+    for (uint64_t o = 0; o + 24 <= raw; o += 4) {
+        if (memcmp(out + o, key, 12)) continue;
+        float *f = (float *)(out + o + 12);
+        if (!(f[0] > 1.5f && f[0] < 4.0f && f[1] >= f[0] && f[2] >= f[1] && f[2] < 5.0f)) continue;
+        f[0] *= fade, f[1] *= fade, f[2] *= fade;
+        n++;
+    }
+    if (n) LOG("[drawdist] plant detail distance x%g in %d detail layer records\n", fade, n);
+    return 1;
 }
 
 // Settings changed (the Graphics row, hle/pla_options.c): the remembered objects that still hold what was put there
@@ -150,4 +202,6 @@ void pla_drawdist_configure(void) {
     rt_register_fnhook_at(0x70018d24f8ull, anim_mgr_hook);
     rt_register_fnhook_at(0x70018d0b54ull, anim_poke_hook);
     rt_register_fnhook_at(0x7002b1d074ull, grass_hook);
+    g_grass_fade = getenv("LARECOMP_PLA_GRASS_FADE") ? (float)atof(getenv("LARECOMP_PLA_GRASS_FADE")) : 0;
+    rt_register_fnhook_at(0x7000004fc0ull, oodle_hook);  // (the setting decides per area load)
 }
