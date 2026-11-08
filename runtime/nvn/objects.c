@@ -433,7 +433,7 @@ NVN(nvnTextureInitialize) {
             t->format, t->flags, t->target, t->addr, t->stride);
     static int logbig = -1;  // (research) LARECOMP_LOG_TEXINIT=1: square textures from 512 up (shadow maps) with the caller
     if (logbig < 0) logbig = getenv("LARECOMP_LOG_TEXINIT") != NULL;
-    if (logbig && t->width >= 512 && t->width == t->height) {
+    if (logbig && t->width >= 512 && (t->width == t->height || getenv("LARECOMP_LOG_TEXINIT")[0] == '2')) {
         char line[256];
         int o = 0;
         uint64_t fp = c->x[29];
