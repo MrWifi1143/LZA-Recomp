@@ -187,7 +187,34 @@ static int body_hook(Cpu *c, uint64_t addr) {
     return 0;
 }
 
+// (research) LARECOMP_HIDE_PLAYER=1: the player's model isn't drawn (pop-in A/Bs: the third-person camera looks over
+// its head). 0x7002a6ba60(sk) poses a skeleton; its drawn world matrix is at +0x410 (axes) / +0x440 (position) -
+// LegendsVR body.c. The one standing where the player's body is gets its axes zeroed after posing.
+void rt_call_original(Cpu *c, uint64_t addr);
+static __thread int t_hiding;  // (inside the player's skeleton's posing)
+static int hide_player_hook(Cpu *c, uint64_t addr) {
+    uint64_t sk = c->x[0], b = g_seen_body;
+    bool me = false;
+    if (b && in_heap(sk) && *(const uint64_t *)(uintptr_t)b == BODY_VTABLE) {
+        const float *m = (const float *)(uintptr_t)(sk + 0x410), *p = (const float *)(uintptr_t)(b + 0x90);
+        me = fabsf(m[12] - p[0]) + fabsf(m[13] - p[1]) + fabsf(m[14] - p[2]) < 0.5f;
+    }
+    t_hiding += me;
+    rt_call_original(c, addr);
+    t_hiding -= me;
+    return 1;
+}
+// its palette's maker 0x70029c983c (x2 the bones' matrices, w4 how many): the player's bones collapsed first, so
+// what's drawn of it (and its shadow) is a point
+static int hide_palette_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    if (t_hiding && in_heap(c->x[2]) && (uint32_t)c->x[4] < 1024) memset((void *)(uintptr_t)c->x[2], 0, (size_t)(uint32_t)c->x[4] * 64);
+    return 0;
+}
+
 __attribute__((constructor)) static void warp_init(void) {
+    if (getenv("LARECOMP_HIDE_PLAYER"))
+        rt_register_fnhook_at(0x7002a6ba60ull, hide_player_hook), rt_register_fnhook_at(0x70029c983cull, hide_palette_hook);
     const char *w = getenv("LARECOMP_WARP");
     if (!w || sscanf(w, "%f %f %f", &g_to[0], &g_to[1], &g_to[2]) != 3) {
         if (!getenv("LARECOMP_LIVE")) return;
