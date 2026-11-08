@@ -250,6 +250,13 @@ bool warp_player_pos(float out[3]) {
 }
 
 void warp_frame(uint64_t frame) {  // (each game frame: runtime/hle/input.c)
+    {   // (research) LARECOMP_LOG_PLAYER=<n>: the player's position every n frames ("[player] frame f x y z")
+        static long every = -2;
+        if (every == -2) every = getenv("LARECOMP_LOG_PLAYER") ? atol(getenv("LARECOMP_LOG_PLAYER")) : 0;
+        float p[3];
+        if (every > 0 && frame % (uint64_t)every == 0 && warp_player_pos(p))
+            LOG("[player] frame %llu %.2f %.2f %.2f\n", (unsigned long long)frame, p[0], p[1], p[2]);
+    }
     if (g_state < 0 || g_state >= 2) return;
     static uint64_t body, since, still_since, writes;
     static float last[3];
