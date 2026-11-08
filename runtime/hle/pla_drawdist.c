@@ -8,6 +8,7 @@
 // +0x458, +0x45c) are multiplied after the game's function; the game's own values are kept per object, so a change in
 // the Settings applies at once (a remembered object is written only while it still holds what was written last:
 // one the game has freed and reused is left alone). LARECOMP_PLA_DRAWDIST_LOG=1: each object and value.
+#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -76,6 +77,31 @@ static int npc_radius_hook(Cpu *c, uint64_t addr) {
     return 1;
 }
 
+// Far Pokemon animating at 1/2 .. 1/8 rate (app_config field_anime_framerate_config): the field's animation-rate
+// manager, built by f_70018d24f8, keeps how many Pokemon each rate level takes - +0xc0 5 at the full rate, +0xc8 3 at
+// 1/2 (+0xcc), +0xd0 8 at 1/4 (+0xd4), the rest at 1/8 (+0xdc) - and each field Pokemon's part (f_70018d0b54) the
+// squared distanceBaseValue (60 m) at +0x1f4. Both are multiplied with the draw distance (the counts by the factor,
+// the distance squared by its square) when they are built: a change applies from the next area load.
+static int anim_mgr_hook(Cpu *c, uint64_t addr) {
+    uint64_t o = c->x[0];
+    rt_call_original(c, addr);
+    int32_t *n = (int32_t *)(uintptr_t)(o + 0xc0);
+    if (n[0] != 5 || n[2] != 3 || n[4] != 8) return 1;  // (not the layout this was found in: left alone)
+    float k = factor();
+    for (int i = 0; i < 5; i += 2) n[i] = (int32_t)(n[i] * k + 0.5f);
+    if (g_log) LOG("[drawdist] animation rates: %d Pokemon at the full rate, %d at 1/2, %d at 1/4\n", n[0], n[2], n[4]);
+    return 1;
+}
+static int anim_poke_hook(Cpu *c, uint64_t addr) {
+    uint64_t o = c->x[0];
+    rt_call_original(c, addr);
+    float *d2 = (float *)(uintptr_t)(o + 0x1f4), k = factor();
+    if (*d2 > 1.0f && *d2 < 1e6f) *d2 *= k * k;
+    static int n;
+    if (g_log && n < 4) n++, LOG("[drawdist] Pokemon %llx: full-rate animation distance %.0f m\n", (unsigned long long)o, sqrtf(*d2));
+    return 1;
+}
+
 // Settings changed (the Graphics row, hle/pla_options.c): the remembered objects that still hold what was put there
 void pla_set_detail(void) {
     for (int s = 0; s < NOBJ; s++) {
@@ -95,4 +121,6 @@ void pla_drawdist_configure(void) {
     rt_register_fnhook_at(0x700246746cull, fade_hook);
     rt_register_fnhook_at(0x700246f818ull, fade_hook);
     rt_register_fnhook_at(0x700173d4b0ull, npc_radius_hook);
+    rt_register_fnhook_at(0x70018d24f8ull, anim_mgr_hook);
+    rt_register_fnhook_at(0x70018d0b54ull, anim_poke_hook);
 }
