@@ -98,6 +98,10 @@ static int free_hook(Cpu *c, uint64_t addr) {
 // +0x30: 250 MB, +0x38: 40 MB - command memory). Our command records are several times NVN's own, so 40 MB ran dry in
 // busy scenes (after the Commander / the photo: the crash above). LARECOMP_PLA_CMDMEM_MB overrides (40 = the game's).
 static uint32_t g_cmdmem_mb = 280;  // (7x: what the heap window has room for - 256 MB above the 2.75 GB block)
+// The 300 MB pool (+0x28) holds the field's buffers - the grass patches among them: a bigger grass block (Draw
+// Distance, hle/pla_drawdist.c) filled it ("pool FULL" with LARECOMP_PLA_CMDPOOL=1, then the crash above at grass block
+// 16). 800 MB by default (LARECOMP_PLA_GFXMEM_MB, 300 = the game's); the heap window grew 512 MB for it (rt.h HEAP_MAX).
+static uint32_t g_gfxmem_mb = 800;
 static int gfx_setup_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     uint32_t *sz = (uint32_t *)(uintptr_t)(c->x[0] + 0x38);
@@ -105,14 +109,22 @@ static int gfx_setup_hook(Cpu *c, uint64_t addr) {
         *sz = g_cmdmem_mb << 20;
         LOG("[pla] command memory pool: %u MB (the game's 40)\n", g_cmdmem_mb);
     }
+    uint32_t *big = (uint32_t *)(uintptr_t)(c->x[0] + 0x28);
+    if (*big == 300u << 20 && g_gfxmem_mb != 300) {
+        *big = g_gfxmem_mb << 20;
+        LOG("[pla] field GPU memory pool: %u MB (the game's 300)\n", g_gfxmem_mb);
+    }
     return 0;
 }
 void pla_cmdpool_configure(void) {
     {
         const char *e = getenv("LARECOMP_PLA_CMDMEM_MB");
         if (e && atoi(e) >= 40 && atoi(e) <= 296) g_cmdmem_mb = (uint32_t)atoi(e);
-        extern uint64_t g_stdheap_size;  // (hle/heaps.c: the pool comes out of the game's StandardAllocator block)
+        const char *g = getenv("LARECOMP_PLA_GFXMEM_MB");
+        if (g && atoi(g) >= 300 && atoi(g) <= 810) g_gfxmem_mb = (uint32_t)atoi(g);
+        extern uint64_t g_stdheap_size;  // (hle/heaps.c: the pools come out of the game's StandardAllocator block)
         g_stdheap_size += (uint64_t)(g_cmdmem_mb - 40) << 20;
+        g_stdheap_size += (uint64_t)(g_gfxmem_mb - 300) << 20;
         rt_register_fnhook_at(0x70029d6a64ull, gfx_setup_hook);
     }
     if (!getenv("LARECOMP_PLA_CMDPOOL")) return;

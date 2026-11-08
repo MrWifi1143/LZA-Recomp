@@ -382,7 +382,57 @@ void watch_arm(void) {
     pthread_create(&t, NULL, watch_thread, NULL);
 }
 
+// More watched pages (research: watch_add_page, Lua watch() on Windows after the first): every function touching
+// one of them logged once ("[watchN]", with the address and the guest's lr / x0..x2)
+#define NWPAGES 64
+static uint64_t g_wpages[NWPAGES], g_wlo[NWPAGES], g_whi[NWPAGES];
+static volatile int g_nwpages;
+static void *wpages_thread(void *a) {
+    (void)a;
+    for (;;) {
+        for (int i = 0; i < g_nwpages; i++) plat_protect(g_wpages[i], PLAT_PAGE, PLAT_PROT_NONE);
+        usleep(100);
+    }
+    return NULL;
+}
+void watch_add_page(uint64_t addr, uint64_t len) {  // (logged: accesses in [addr, addr + len))
+    uint64_t p = addr & ~(uint64_t)(PLAT_PAGE - 1);
+    if (g_nwpages >= NWPAGES) return;
+    g_wpages[g_nwpages] = p, g_wlo[g_nwpages] = addr, g_whi[g_nwpages] = addr + len;
+    __atomic_store_n(&g_nwpages, g_nwpages + 1, __ATOMIC_RELEASE);
+    static int started;
+    if (!started) { started = 1; pthread_t t; pthread_create(&t, NULL, wpages_thread, NULL); }
+    fprintf(stderr, "[watchN] page %llx added (%d)\n", (unsigned long long)p, g_nwpages);
+}
+static bool fault_wpages(uint64_t fa, uint64_t pc) {
+    int n = __atomic_load_n(&g_nwpages, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < n; i++) {
+        if (fa < g_wpages[i] || fa >= g_wpages[i] + PLAT_PAGE) continue;
+        bool inside = false;
+        for (int k = 0; k < n; k++) inside |= fa >= g_wlo[k] && fa < g_whi[k];
+        if (!inside) { plat_protect(g_wpages[i], PLAT_PAGE, PLAT_PROT_RW); return true; }
+        static uint64_t seen[256];
+        static int nseen;
+        const char *nm = host_sym(pc, NULL);
+        uint64_t key = (uint64_t)(uintptr_t)nm ^ (pc >> 4);
+        bool found = false;
+        for (int k = 0; k < nseen; k++) found |= seen[k] == key;
+        if (!found && nseen < 256) {
+            seen[nseen++] = key;
+            Cpu *gc = kernel_current_cpu();
+            fprintf(stderr, "[watchN] %llx by %s (guest lr %llx x0 %llx x1 %llx x2 %llx fp-lr %llx)\n", (unsigned long long)fa, nm ? nm : "?",
+                    gc ? (unsigned long long)gc->x[30] : 0ull, gc ? (unsigned long long)gc->x[0] : 0ull, gc ? (unsigned long long)gc->x[1] : 0ull,
+                    gc ? (unsigned long long)gc->x[2] : 0ull,
+                    (unsigned long long)(gc && gc->x[29] >= GUEST_LO && gc->x[29] < GUEST_HI ? ((uint64_t *)(uintptr_t)gc->x[29])[1] : 0));
+        }
+        plat_protect(g_wpages[i], PLAT_PAGE, PLAT_PROT_RW);
+        return true;
+    }
+    return false;
+}
+
 bool rt_fault_watch(uint64_t fa, uint64_t pc) {
+    if (fault_wpages(fa, pc)) return true;
     if (!watch_page || fa < watch_page || fa >= watch_page + PLAT_PAGE) return false;
     if (fa >= g_watch_lo && fa < g_watch_hi) {
         static char seen[64][48];

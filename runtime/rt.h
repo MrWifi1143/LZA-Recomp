@@ -40,7 +40,8 @@ int rt_log(const char *fmt, ...);
 #define ALIAS_BASE   0x7400000000ull
 #define ALIAS_SIZE   0x0C00000000ull
 #define HEAP_BASE    0x7240000000ull
-#define HEAP_MAX     0x00D0000000ull   // 3.25 GB
+#define HEAP_MAX     0x00F0000000ull   // 3.75 GB (was 3.25: room for the bigger GPU pools, hle/pla_cmdpool.c; under 4 GB,
+                                       // the window is one imported GPU buffer and drivers cap those near 4 GB)
 // The game's virtual-memory StandardAllocator (PLA: Initialize(NULL, 32 GB)) gets this fixed block of the heap window
 // instead (runtime/hle/heaps.c): shader global memory (LDG/STG) reaches the heap window only (imported as a GPU buffer,
 // pinned), and the allocator spreads its allocations over its whole reservation. Above the heap SetHeapSize gives.

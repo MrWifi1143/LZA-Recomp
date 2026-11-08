@@ -141,12 +141,18 @@ void hwwatch_src_arm(void) {
 #else
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 // No debug-register watchpoints here (Windows): the first watch(addr, len) arms the page watch instead (dispatch.c:
 // the page protected, each function touching [addr, addr + len) logged once as "[watch]" - readers too)
 extern uint64_t g_watch_lo, g_watch_hi;
 void watch_arm(void);
+void watch_add_page(uint64_t addr, uint64_t len);
 void hwwatch_arm(uint64_t addr, uint64_t len) {
-    if (g_watch_lo) return;
+    if (g_watch_lo) {  // LARECOMP_WATCHN_SPAN=<hex>: log that many bytes from addr instead of len
+        const char *sp = getenv("LARECOMP_WATCHN_SPAN");
+        watch_add_page(addr, sp ? strtoull(sp, NULL, 16) : len);
+        return;
+    }  // (the second on: whole pages, runtime/dispatch.c)
     g_watch_lo = addr, g_watch_hi = addr + len;
     fprintf(stderr, "[hwwatch] %llx+%llu: page watch (no hardware watchpoints on this system)\n", (unsigned long long)addr, (unsigned long long)len);
     watch_arm();

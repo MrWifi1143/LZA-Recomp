@@ -49,9 +49,9 @@ static void bt_check(uint64_t a, uint64_t lr, uint64_t x0) {
 }
 
 // LARECOMP_FNPROF_ARGIN=<lo>,<hi>: inside the window, each function entered with an argument register (x0..x7) in
-// [lo, hi) is logged once ("[fnprof-arg]", which register, the guest lr) - who is handed a pointer into some buffer
+// [lo, hi) is logged once per value ("[fnprof-arg]", which register, the guest lr) - who is handed a pointer into some buffer
 static uint64_t arg_lo = 1, arg_hi;
-#define NARGSEEN 512
+#define NARGSEEN 8192
 static _Atomic uint64_t arg_seen[NARGSEEN];
 static void arg_check(uint64_t a, uint64_t lr) {
     if (arg_lo == 1) {
@@ -66,11 +66,12 @@ static void arg_check(uint64_t a, uint64_t lr) {
     if (!c) return;
     for (int r = 0; r < 8; r++)
         if (c->x[r] >= arg_lo && c->x[r] < arg_hi && !(c->x[r] & (uint64_t)amask)) {
+            uint64_t key = a * 0x9E3779B97F4A7C15ull ^ c->x[r];  // (each function + value once)
             for (int i = 0; i < NARGSEEN; i++) {
                 uint64_t cur = atomic_load(&arg_seen[i]);
-                if (cur == a) return;
-                if (!cur && atomic_compare_exchange_strong(&arg_seen[i], &cur, a)) break;
-                if (cur == a) return;
+                if (cur == key) return;
+                if (!cur && atomic_compare_exchange_strong(&arg_seen[i], &cur, key)) break;
+                if (cur == key) return;
             }
             fprintf(stderr, "[fnprof-arg] %llx x%d %llx (x0 %llx x1 %llx x2 %llx x3 %llx) lr %llx frame %llu\n", (unsigned long long)a, r,
                     (unsigned long long)c->x[r], (unsigned long long)c->x[0], (unsigned long long)c->x[1], (unsigned long long)c->x[2],

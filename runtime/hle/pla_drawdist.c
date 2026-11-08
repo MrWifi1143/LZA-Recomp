@@ -113,6 +113,21 @@ static int anim_poke_hook(Cpu *c, uint64_t addr) {
     return 1;
 }
 
+// Grass and small plants (2026-11-08, Legends Lua + page watches): the field builds them in 16 m cells, an N x N block
+// around the player (f_7002b1d9d8(manager, position): cell = floor((pos - N*size/2) / size), slots wrap with & (N-1)),
+// 11 layers per cell, each cell's instances uploaded to the GPU when it enters the block. The manager is built by
+// f_7002b1d074(manager, N) (+0xf8 N, +0xfc 16 m), which allocates N*N of everything: N = 4 = grass to ~32 m.
+// LARECOMP_PLA_GRASS_N=<n> (power of two): research override.
+static int grass_hook(Cpu *c, uint64_t addr) {
+    static int n = -1;
+    if (n < 0) n = getenv("LARECOMP_PLA_GRASS_N") ? atoi(getenv("LARECOMP_PLA_GRASS_N")) : 0;
+    uint32_t game = (uint32_t)c->x[1];
+    if (n > 0 && (n & (n - 1)) == 0) c->x[1] = (uint32_t)n;
+    LOG("[drawdist] grass block %u x %u cells (the game's %u)\n", (unsigned)c->x[1], (unsigned)c->x[1], game);
+    (void)addr;
+    return 0;
+}
+
 // Settings changed (the Graphics row, hle/pla_options.c): the remembered objects that still hold what was put there
 void pla_set_detail(void) {
     for (int s = 0; s < NOBJ; s++) {
@@ -134,4 +149,5 @@ void pla_drawdist_configure(void) {
     rt_register_fnhook_at(0x700173d4b0ull, npc_radius_hook);
     rt_register_fnhook_at(0x70018d24f8ull, anim_mgr_hook);
     rt_register_fnhook_at(0x70018d0b54ull, anim_poke_hook);
+    rt_register_fnhook_at(0x7002b1d074ull, grass_hook);
 }
