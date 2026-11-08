@@ -275,15 +275,24 @@ static const char *builtin_src(const char *name, int *stage) {
                "layout(location = 0) in vec2 uv;\n"
                "layout(location = 0) out vec4 o;\n"
                // A render resolution above the window's (the launcher's 1440p / 4K on a smaller screen: supersampling)
-               // is reduced with four bilinear taps spread over each window pixel's footprint - one bilinear tap
-               // skips texels and keeps the jaggies (exactly 2x: the 2x2 box).
+               // is reduced by the exact area average: each window pixel is the texels under its footprint, each
+               // weighted by how much of it the footprint covers. (It was four bilinear taps over the footprint: right
+               // at exactly 2x, but at 1440p -> 1080p (0.75) they reached into the neighbours - the whole image soft,
+               // softer than rendering at 1080p; found on Arceus, 2026-11-08: the user's "doesn't look sharp anywhere".)
                "void main() {\n"
-               "  vec2 d = vec2(dFdx(uv.x), dFdy(uv.y)), r = abs(d) * vec2(textureSize(t, 0));\n"
+               "  vec2 ts = vec2(textureSize(t, 0)), r = abs(vec2(dFdx(uv.x), dFdy(uv.y))) * ts;\n"
                "  if (max(r.x, r.y) < 1.05) { o = vec4(texture(t, uv).rgb, 1.0); return; }\n"
-               "  vec2 q = d * 0.25;\n"
-               "  vec3 c = texture(t, uv + vec2(-q.x, -q.y)).rgb + texture(t, uv + vec2(q.x, -q.y)).rgb +\n"
-               "           texture(t, uv + vec2(-q.x, q.y)).rgb + texture(t, uv + vec2(q.x, q.y)).rgb;\n"
-               "  o = vec4(c * 0.25, 1.0);\n"
+               "  vec2 c = uv * ts, lo = c - 0.5 * r, hi = c + 0.5 * r;\n"
+               "  ivec2 a = ivec2(floor(lo)), b = ivec2(ceil(hi)) - 1, m = ivec2(ts) - 1;\n"
+               "  vec3 s = vec3(0.0); float ws = 0.0;\n"
+               "  for (int y = a.y; y <= min(b.y, a.y + 8); y++) {\n"
+               "    float wy = min(hi.y, float(y + 1)) - max(lo.y, float(y));\n"
+               "    for (int x = a.x; x <= min(b.x, a.x + 8); x++) {\n"
+               "      float w = wy * (min(hi.x, float(x + 1)) - max(lo.x, float(x)));\n"
+               "      s += w * texelFetch(t, clamp(ivec2(x, y), ivec2(0), m), 0).rgb; ws += w;\n"
+               "    }\n"
+               "  }\n"
+               "  o = vec4(s / max(ws, 1e-6), 1.0);\n"
                "}\n";
     }
     // ---- post passes before the present (Video tab "Anti-aliasing" / "Upscaler"): exec.c vk_present_draw.
