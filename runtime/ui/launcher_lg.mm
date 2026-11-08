@@ -885,6 +885,7 @@ extern "C" void launcher_lg_run(const char *root) {
     }
     int shl_i = g_settings.shader_nowait ? 1 : 0;
     bool smooth_sh = g_settings.shadow_smooth;
+    int detail_i = g_settings.detail >= 0 && g_settings.detail <= 3 ? g_settings.detail : 0;
     auto apply_rec = [&]() { res = rec.res, fps_i = rec.fps, shl_i = rec.nowait; };
     if (g_settings_fresh) apply_rec();
     int bg_i = g_settings.background >= 0 && g_settings.background <= 2 ? g_settings.background : 0;
@@ -903,6 +904,7 @@ extern "C" void launcher_lg_run(const char *root) {
         full = d.fullscreen, smaa = d.antialias == AA_SMAA, showfps = d.show_fps, realtime = !d.fixed_steps, experimental = d.experimental;
         fps_i = fps_index(d.fps);
         wildb = d.wild_battle, prompts_i = d.button_prompts, smooth_sh = d.shadow_smooth, bg_i = d.background, pk_i = d.pkhex_link;
+        detail_i = d.detail;
         shl_i = d.shader_nowait;
         gopt = k_gopt_default;
     };
@@ -1003,6 +1005,8 @@ extern "C" void launcher_lg_run(const char *root) {
     };
     auto settings_graphics = [&]() {  // (the game's Settings rows of the same names: runtime/hle/pla_options.c)
         ImGui::Checkbox(T("Smooth shadow edges", "Suavizar as bordas das sombras"), &smooth_sh);
+        const char *const detail_names[] = {T("Switch", "Switch"), T("High", "Alta"), T("Very high", "Muito alta"), T("Max", "Máxima")};
+        ImGui::Combo(T("Draw distance", "Distância de desenho"), &detail_i, detail_names, 4);
         const char *const shl_names[] = {T("Wait (may stutter the first time)", "Esperar (pode travar na primeira vez)"),
                                          T("Don't wait (may show late the first time)", "Não esperar (pode aparecer atrasado na primeira vez)")};
         ImGui::Combo(T("Shader loading", "Carregamento de shaders"), &shl_i, shl_names, 2);
@@ -1476,6 +1480,7 @@ extern "C" void launcher_lg_run(const char *root) {
     g_settings.skip_start = skipstart;
     g_settings.button_prompts = prompts_i;
     g_settings.shadow_smooth = smooth_sh;
+    g_settings.detail = detail_i;
     g_settings.background = bg_i;
     g_settings.pkhex_link = pk_i;
     g_settings.shader_nowait = shl_i;

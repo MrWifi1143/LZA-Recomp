@@ -27,6 +27,7 @@ typedef struct {
     bool mouse_invert_x, mouse_invert_y;  // the mouse camera turned the other way (runtime/hle/input.c)
     int background;      // BG_*: what the game does while its window isn't focused
     bool shadow_smooth;  // the shadow mask's near taps bilinear - smooth shadow edges (nvn/vulkan/exec.c pla_soft_shadows; at the next start)
+    int detail;          // draw distance, 0 the Switch's .. 3 (hle/pla_drawdist.c: x1 / x2 / x3 / x5; applies live)
     int shader_nowait;   // 1: draws whose shaders are still being built are skipped, not waited for (nvn/vulkan/exec.c wait_built)
     int pkhex_link;      // PKHeX's LiveHeX on port 6000: 0 off, 1 this PC, 2 the local network too (hle/pkm_link.c)
     int game_opts;       // the game's own settings (text speed, camera, volumes...) as its save last had them, -1 not seen yet
