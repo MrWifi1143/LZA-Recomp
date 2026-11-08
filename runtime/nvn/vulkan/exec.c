@@ -5183,12 +5183,26 @@ static void exec_list(uint64_t handle, int depth) {
             if (vk_frame_counter() != frame_seen) { frame_seen = vk_frame_counter(); frame_ts = SDL_GetTicksNS(); in_frame = 0; }
             uint64_t v = frozen == 1 ? frame_ts : frozen == 2 ? frame_seen * 33333333ull + in_frame * 1000000ull : SDL_GetTicksNS();
             in_frame++;
-            if (out) { out[0] = 0; out[1] = v; }
+            // (research) LARECOMP_VK_SAMPLES=<frame>: from that frame, SAMPLES_PASSED (type 1) reports cycle every 240
+            // frames: as before / field 0 counts 1M up a report / field 1 does / both 0 (logged at each change)
+            static int64_t samples_at = -2;
+            if (samples_at == -2) samples_at = getenv("LARECOMP_VK_SAMPLES") ? atoll(getenv("LARECOMP_VK_SAMPLES")) : -1;
+            static uint64_t passed;
+            uint64_t f0 = 0;
+            if (samples_at >= 0 && type == 1 && (int64_t)frame_seen >= samples_at) {
+                int mode = (int)(((int64_t)frame_seen - samples_at) / 240 % 4);
+                static int last_mode = -1;
+                if (mode != last_mode) LOG("[samples] frame %llu: mode %d\n", (unsigned long long)frame_seen, mode), last_mode = mode;
+                if (mode == 1) f0 = passed += 1000000;
+                else if (mode == 2) v = passed += 1000000;
+                else if (mode == 3) v = 0;
+            }
+            if (out) { out[0] = f0; out[1] = v; }
             static int clog = -1;  // LARECOMP_COUNTER_LOG=1: each counter, with the draws recorded since the previous one
             if (clog < 0) clog = getenv("LARECOMP_COUNTER_LOG") != NULL;
             static uint64_t last_draws;
-            if (clog) LOG("[counter] frame %llu #%llu value %llu draws %llu\n", (unsigned long long)frame_seen, (unsigned long long)in_frame,
-                          (unsigned long long)v, (unsigned long long)(g_draws_total - last_draws));
+            if (clog) LOG("[counter] frame %llu #%llu type %u value %llu draws %llu\n", (unsigned long long)frame_seen,
+                          (unsigned long long)in_frame, type, (unsigned long long)v, (unsigned long long)(g_draws_total - last_draws));
             last_draws = g_draws_total;
             break;
         }

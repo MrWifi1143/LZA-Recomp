@@ -90,6 +90,82 @@ static int npc_radius_hook(Cpu *c, uint64_t addr) {
     return 1;
 }
 
+// (research) LARECOMP_PLA_SLOTWATCH=1: each frame, the words +0x300..+0x460 of every NPC slot that changed (not +0x330,
+// the distance) - what flips when an NPC is hidden (hle/warp.c calls this each game frame)
+void pla_slot_watch(uint64_t frame) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_PLA_SLOTWATCH") != NULL;
+    if (!on) return;
+    static int armed;  // LARECOMP_PLA_SLOTWATCH=<frame> (> 1): page-watch +0x354..+0x35c of 6 slots from that frame
+    if (!armed && atoi(getenv("LARECOMP_PLA_SLOTWATCH")) > 1 && frame >= (uint64_t)atoi(getenv("LARECOMP_PLA_SLOTWATCH"))) {
+        void watch_add_page(uint64_t addr, uint64_t len);
+        armed = 1;
+        for (int s = 0, k = 0; s < g_nslot && k < 6; s++)
+            if (g_slot[s].slot) watch_add_page(g_slot[s].slot + 0x354, 8), k++;
+    }
+    static uint32_t prev[NSLOT][0x58];
+    static uint64_t prev_slot[NSLOT];
+    for (int s = 0; s < g_nslot; s++) {
+        if (!g_slot[s].slot) continue;
+        const uint32_t *w = (const uint32_t *)(uintptr_t)(g_slot[s].slot + 0x300);
+        bool fresh = prev_slot[s] != g_slot[s].slot;
+        for (int i = 0; i < 0x58; i++) {
+            if (!fresh && w[i] != prev[s][i] && i != (0x330 - 0x300) / 4)
+                LOG("[slotw] frame %llu slot %llx +%03x: %08x -> %08x (dist %.1f)\n", (unsigned long long)frame,
+                    (unsigned long long)g_slot[s].slot, 0x300 + i * 4, prev[s][i], w[i], sqrtf(*(const float *)(uintptr_t)(g_slot[s].slot + 0x330)));
+            prev[s][i] = w[i];
+        }
+        prev_slot[s] = g_slot[s].slot;
+    }
+}
+
+// (research, with LARECOMP_PLA_SLOTWATCH=1) f_7001738c14(slot, state, x2) sets a slot's state (+0x354/+0x358, 0x80
+// flips while the camera pans): each distinct caller + state with its call stack
+static int slotstate_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    static struct { uint64_t lr; uint32_t st; } seen[64];
+    static int n;
+    uint64_t lr = c->x[30];
+    uint32_t st = (uint32_t)c->x[1];
+    for (int i = 0; i < n; i++) if (seen[i].lr == lr && seen[i].st == st) return 0;
+    if (n < 64) seen[n].lr = lr, seen[n].st = st, n++;
+    char line[256];
+    int o = 0;
+    uint64_t fp = c->x[29];
+    for (int i = 0; i < 8 && fp >= 0x7000000000ull && fp < 0x8000000000ull && !(fp & 7) && o < (int)sizeof line - 24; i++) {
+        uint64_t l = ((uint64_t *)(uintptr_t)fp)[1];
+        fp = ((uint64_t *)(uintptr_t)fp)[0];
+        if (!l) break;
+        o += snprintf(line + o, sizeof line - o, " %llx", (unsigned long long)l);
+    }
+    line[o] = 0;
+    LOG("[slotstate] state %#x x2 %#llx from lr %llx:%s\n", st, (unsigned long long)c->x[2], (unsigned long long)lr, line);
+    return 0;
+}
+
+// NPCs popping out and in while the camera turns (the user's village shots, 2026-11-08): each NPC's update
+// f_700173740c(slot, frustum) tests a sphere around it against the camera's planes (frustum +0x20..+0x70, a second
+// set at +0x80..+0xd0 when +0x140; inside when plane . (pos, 1) + radius > 0) and outside sets slot state 0x80 (hidden,
+// not animated) through f_70014916d0; the applied state (+0x354) follows the asked one (+0x358) a few frames later. So
+// NPCs near the screen's edges - often right beside a building - vanished while still on screen and came back late.
+// The test gets a copy of the frustum (on the guest stack: the shared one is left alone, the function runs on several
+// threads) with every plane pushed out by a margin: NPCs stay "in view" that far past the edges, so the late switch
+// happens off screen. LARECOMP_PLA_NPC_MARGIN=<m> (0 = the game's).
+static float g_npc_margin = -1;
+static int npc_view_hook(Cpu *c, uint64_t addr) {
+    uint64_t f = c->x[1];
+    if (g_npc_margin <= 0 || f < 0x7000000000ull || f >= 0x8000000000ull) return 0;
+    uint64_t sp0 = c->sp, copy = (sp0 - 0x180) & ~0xfull;
+    memcpy((void *)(uintptr_t)copy, (const void *)(uintptr_t)f, 0x150);
+    float *p = (float *)(uintptr_t)copy;
+    for (int i = 0; i < 12; i++) p[(0x20 + i * 0x10) / 4 + 3] += g_npc_margin;  // (each plane's w)
+    c->sp = copy;
+    c->x[1] = copy;
+    rt_call_original(c, addr);
+    c->sp = sp0;
+    return 1;
+}
+
 // Far Pokemon animating at 1/2 .. 1/8 rate (app_config field_anime_framerate_config): the field's animation-rate
 // manager, built by f_70018d24f8, keeps how many Pokemon each rate level takes - +0xc0 5 at the full rate, +0xc8 3 at
 // 1/2 (+0xcc), +0xd0 8 at 1/4 (+0xd4), the rest at 1/8 (+0xdc) - and each field Pokemon's part (f_70018d0b54) the
@@ -359,6 +435,9 @@ void pla_drawdist_configure(void) {
     g_terrain = getenv("LARECOMP_PLA_TERRAIN") ? (float)atof(getenv("LARECOMP_PLA_TERRAIN")) : 0;
     rt_register_fnhook_at(0x7002b17bd4ull, getenv("LARECOMP_PLA_TERRFN") ? terrfn_hook : terrain_hook);
     if (pla_shadow_res()) rt_register_fnhook_at(0x7001a34908ull, shadow_size_hook);
+    if (getenv("LARECOMP_PLA_SLOTWATCH")) rt_register_fnhook_at(0x7001738c14ull, slotstate_hook);
+    g_npc_margin = getenv("LARECOMP_PLA_NPC_MARGIN") ? (float)atof(getenv("LARECOMP_PLA_NPC_MARGIN")) : 10.0f;
+    if (g_npc_margin > 0) rt_register_fnhook_at(0x700173740cull, npc_view_hook);
     if (getenv("LARECOMP_PLA_TERRHIST"))
         rt_register_fnhook_at(0x7002471048ull, terrhist_hook), rt_register_fnhook_at(0x7002b1b248ull, terrwalk_hook),
             rt_register_fnhook_at(0x7002b1b6ecull, terremit_hook);
