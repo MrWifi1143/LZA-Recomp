@@ -220,6 +220,33 @@ NVN(nvnCommandBufferBindProgram) {
     r->x[0] = s.x[1] ? (uint64_t)(uintptr_t)HOST(NvnProgram, s.x[1]) : 0;  // host program (0: unbind the stages)
     r->x[1] = s.x[2];                                                      // NVNshaderStageBits
     if (r->x[0]) cb_of(s.x[0])->last_prog = (void *)(uintptr_t)r->x[0];
+    // (research) LARECOMP_PROG_BT=<code address>[,<n>]: the guest call stack (frame pointers) of the first n binds of
+    // the program holding a stage with that code address - which game code records a given draw or dispatch
+    static uint64_t bt_code = 1;
+    static int bt_n;
+    if (bt_code == 1) {
+        const char *e = getenv("LARECOMP_PROG_BT");
+        bt_code = 0, bt_n = 8;
+        if (e) sscanf(e, "%llx,%d", (unsigned long long *)&bt_code, &bt_n);
+    }
+    if (bt_code && bt_n > 0 && r->x[0]) {
+        NvnProgram *p = (NvnProgram *)(uintptr_t)r->x[0];
+        bool hit = false;
+        for (int i = 0; i < (int)(sizeof p->stages / sizeof p->stages[0]); i++) hit |= p->stages[i].code_addr == bt_code;
+        if (hit) {
+            bt_n--;
+            char line[512];
+            int o = snprintf(line, sizeof line, "[progbt] %llx bound: lr %llx", (unsigned long long)bt_code, (unsigned long long)c->x[30]);
+            uint64_t fp = c->x[29];
+            for (int i = 0; i < 14 && fp >= GUEST_LO && fp < GUEST_HI && !(fp & 7) && o < (int)sizeof line - 24; i++) {
+                uint64_t lr = ((uint64_t *)(uintptr_t)fp)[1];
+                fp = ((uint64_t *)(uintptr_t)fp)[0];
+                if (!lr) break;
+                o += snprintf(line + o, sizeof line - o, " %llx", (unsigned long long)lr);
+            }
+            LOG("%s\n", line);
+        }
+    }
 }
 
 // (research) LARECOMP_LOG_XFB: transform feedback use - buffers, begin/end, and the vertex program of each draw recorded

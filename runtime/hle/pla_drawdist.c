@@ -46,6 +46,36 @@ static int fade_hook(Cpu *c, uint64_t addr) {
     return 1;
 }
 
+// NPC load radius: f_700173d4b0(slot, r) gives each NPC slot of the field its radius in whole metres (+0x450 = r,
+// +0x454 = r - 10, +0x458 = r + 20: an NPC loads inside r and unloads past r + 20; +0x330 holds its squared distance to
+// the player). The field passes app_config's kArea00NpcLoadRadius (60 in the village) and kArea00NpcPokeLoadRadius (40)
+// - an NPC walking away vanished at 80 m. Found 2026-11-08 with Legends Lua (hook + per-frame diff of the slots). r is
+// multiplied like the trees; the slots set so far are kept so a change in the Settings applies at once.
+#define NSLOT 256
+static struct { uint64_t slot; int32_t game, put; } g_slot[NSLOT];
+static int g_nslot;
+
+static void put_slot(int s) {
+    int32_t r = (int32_t)(g_slot[s].game * factor() + 0.5f);
+    int32_t *f = (int32_t *)(uintptr_t)(g_slot[s].slot + 0x450);
+    f[0] = r, f[1] = r - 10, f[2] = r + 20;
+    g_slot[s].put = r;
+}
+
+static int npc_radius_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    uint64_t slot = c->x[0];
+    int32_t r = (int32_t)(uint32_t)c->x[1];
+    int s = 0;
+    while (s < g_nslot && g_slot[s].slot != slot) s++;
+    if (s == g_nslot && g_nslot < NSLOT) g_nslot++;
+    if (s == NSLOT) s = NSLOT - 1;  // (full: the last one is reused)
+    g_slot[s].slot = slot, g_slot[s].game = r;
+    put_slot(s);  // (the game's function only stores these three)
+    if (g_log) LOG("[drawdist] NPC slot %llx: load radius %d -> %d m\n", (unsigned long long)slot, r, g_slot[s].put);
+    return 1;
+}
+
 // Settings changed (the Graphics row, hle/pla_options.c): the remembered objects that still hold what was put there
 void pla_set_detail(void) {
     for (int s = 0; s < NOBJ; s++) {
@@ -55,10 +85,14 @@ void pla_set_detail(void) {
         if (same) put(s);
         else g_obj[s].obj = 0;
     }
+    for (int s = 0; s < g_nslot; s++)
+        if (g_slot[s].slot && *(const int32_t *)(uintptr_t)(g_slot[s].slot + 0x450) == g_slot[s].put) put_slot(s);
+        else g_slot[s].slot = 0;
 }
 
 void pla_drawdist_configure(void) {
     g_log = getenv("LARECOMP_PLA_DRAWDIST_LOG") && atoi(getenv("LARECOMP_PLA_DRAWDIST_LOG")) > 0;
     rt_register_fnhook_at(0x700246746cull, fade_hook);
     rt_register_fnhook_at(0x700246f818ull, fade_hook);
+    rt_register_fnhook_at(0x700173d4b0ull, npc_radius_hook);
 }
