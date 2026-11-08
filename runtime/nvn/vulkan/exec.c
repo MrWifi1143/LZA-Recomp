@@ -3661,6 +3661,11 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     g_dyn_epoch++;  // (draw_'s state cache: dc)
     snap_reason = "compute"; snapshots_invalidate(NULL);
     if (!st.program || !gx || !gy || !gz) return;
+    {   // (research) LARECOMP_SKIP_CS=<frame>: from that frame on no compute dispatch runs - which effects come from them
+        static long skip = -2;
+        if (skip == -2) skip = ENV("LARECOMP_SKIP_CS") ? atol(ENV("LARECOMP_SKIP_CS")) : -1;
+        if (skip >= 0 && (long)vk_frame_counter() >= skip) return;
+    }
     CsProg *cp = compute_program(st.program);
     if (!cp || atomic_load(&cp->p.state) != 1) { stat_skipped++; return; }
     vk_end_pass();

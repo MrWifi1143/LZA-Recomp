@@ -140,7 +140,17 @@ void hwwatch_src_arm(void) {
 }
 #else
 #include <stdint.h>
-void hwwatch_arm(uint64_t addr, uint64_t len) { (void)addr, (void)len; }
+#include <stdio.h>
+// No debug-register watchpoints here (Windows): the first watch(addr, len) arms the page watch instead (dispatch.c:
+// the page protected, each function touching [addr, addr + len) logged once as "[watch]" - readers too)
+extern uint64_t g_watch_lo, g_watch_hi;
+void watch_arm(void);
+void hwwatch_arm(uint64_t addr, uint64_t len) {
+    if (g_watch_lo) return;
+    g_watch_lo = addr, g_watch_hi = addr + len;
+    fprintf(stderr, "[hwwatch] %llx+%llu: page watch (no hardware watchpoints on this system)\n", (unsigned long long)addr, (unsigned long long)len);
+    watch_arm();
+}
 void hwwatch_reset(void) {}
 void hwwatch_arm_self(void) {}
 void hwwatch_src_arm(void) {}

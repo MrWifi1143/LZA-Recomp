@@ -6,6 +6,7 @@
 #include <stdlib.h>
 
 #include "hle.h"
+#include "rt.h"
 #include "platform.h"
 
 volatile int g_fnprof;
@@ -47,8 +48,38 @@ static void bt_check(uint64_t a, uint64_t lr, uint64_t x0) {
         }
 }
 
+// LARECOMP_FNPROF_ARGIN=<lo>,<hi>: inside the window, each function entered with an argument register (x0..x7) in
+// [lo, hi) is logged once ("[fnprof-arg]", which register, the guest lr) - who is handed a pointer into some buffer
+static uint64_t arg_lo = 1, arg_hi;
+#define NARGSEEN 512
+static _Atomic uint64_t arg_seen[NARGSEEN];
+static void arg_check(uint64_t a, uint64_t lr) {
+    if (arg_lo == 1) {
+        const char *e = getenv("LARECOMP_FNPROF_ARGIN");
+        arg_lo = 0;
+        if (e) sscanf(e, "%llx,%llx", (unsigned long long *)&arg_lo, (unsigned long long *)&arg_hi);
+    }
+    if (!arg_lo) return;
+    Cpu *c = kernel_current_cpu();
+    if (!c) return;
+    for (int r = 0; r < 8; r++)
+        if (c->x[r] >= arg_lo && c->x[r] < arg_hi) {
+            for (int i = 0; i < NARGSEEN; i++) {
+                uint64_t cur = atomic_load(&arg_seen[i]);
+                if (cur == a) return;
+                if (!cur && atomic_compare_exchange_strong(&arg_seen[i], &cur, a)) break;
+                if (cur == a) return;
+            }
+            fprintf(stderr, "[fnprof-arg] %llx x%d %llx (x0 %llx x1 %llx x2 %llx x3 %llx) lr %llx frame %llu\n", (unsigned long long)a, r,
+                    (unsigned long long)c->x[r], (unsigned long long)c->x[0], (unsigned long long)c->x[1], (unsigned long long)c->x[2],
+                    (unsigned long long)c->x[3], (unsigned long long)lr, (unsigned long long)g_cur_frame);
+            return;
+        }
+}
+
 void fnprof_hit(uint64_t a, uint64_t lr, uint64_t x0) {
     if (bt_n) bt_check(a, lr, x0);
+    if (arg_lo) arg_check(a, lr);
     uint32_t h = (uint32_t)((a >> 2) * 0x9E3779B1u) & (NSLOT - 1);
     for (int n = 0; n < NSLOT; n++, h = (h + 1) & (NSLOT - 1)) {
         uint64_t cur = atomic_load_explicit(&slots[h].addr, memory_order_relaxed);

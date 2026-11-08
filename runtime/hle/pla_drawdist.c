@@ -44,6 +44,17 @@ static int fade_hook(Cpu *c, uint64_t addr) {
     g_obj[s].obj = obj;
     for (int i = 0; i < 5; i++) g_obj[s].game[i] = *at(obj, i);  // (the game's own, just written)
     put(s);
+    static float dmul = -1;  // (research) LARECOMP_PLA_DETAIL_MUL=<k>: the detail fade pair at +0x438 (1, 2) x k
+    if (dmul < 0) dmul = getenv("LARECOMP_PLA_DETAIL_MUL") ? (float)atof(getenv("LARECOMP_PLA_DETAIL_MUL")) : 0;
+    if (dmul > 0) {
+        float *d = (float *)(uintptr_t)(obj + 0x438);
+        d[0] *= dmul, d[1] *= dmul;
+        LOG("[drawdist] detail fade x%g: %g %g\n", dmul, d[0], d[1]);
+    }
+    static float amul = -1;  // (research) LARECOMP_PLA_FADE_ALL=<k>: every float +0x430..+0x45c x k
+    if (amul < 0) amul = getenv("LARECOMP_PLA_FADE_ALL") ? (float)atof(getenv("LARECOMP_PLA_FADE_ALL")) : 0;
+    if (amul > 0)
+        for (uint32_t o = 0x430; o < 0x460; o += 4) *(float *)(uintptr_t)(obj + o) *= amul;
     return 1;
 }
 

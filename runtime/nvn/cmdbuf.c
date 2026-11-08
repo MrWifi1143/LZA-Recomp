@@ -642,7 +642,33 @@ NVN(nvnCommandBufferCopyTextureToTexture) {  // (cmd, src, srcView, srcRegion, d
     CmdRec *r = record(c, CMD_COPY_TEXTURE_TO_TEXTURE, sizeof t, &s);
     memcpy(r->extra, t, sizeof t);
 }
-PLAIN(nvnCommandBufferCopyBufferToBuffer, CMD_COPY_BUFFER_TO_BUFFER)
+// (cmd, src address, dst address, size, flags). (research) LARECOMP_COPY_BT=<lo>,<hi>[,n]: the guest call stack of the
+// first n copies recorded into [lo, hi) - which game code fills a buffer the GPU then reads (no CPU write to watch)
+NVN(nvnCommandBufferCopyBufferToBuffer) {
+    Snap s = snap(c);
+    record(c, CMD_COPY_BUFFER_TO_BUFFER, 0, &s);
+    static uint64_t lo = 1, hi;
+    static int n;
+    if (lo == 1) {
+        const char *e = getenv("LARECOMP_COPY_BT");
+        lo = 0, n = 8;
+        if (e) sscanf(e, "%llx,%llx,%d", (unsigned long long *)&lo, (unsigned long long *)&hi, &n);
+    }
+    if (lo && n > 0 && s.x[2] < hi && s.x[2] + s.x[3] > lo) {
+        n--;
+        char line[512];
+        int o = snprintf(line, sizeof line, "[copybt] %llx+%llx -> %llx: lr %llx", (unsigned long long)s.x[1], (unsigned long long)s.x[3],
+                         (unsigned long long)s.x[2], (unsigned long long)c->x[30]);
+        uint64_t fp = c->x[29];
+        for (int i = 0; i < 16 && fp >= GUEST_LO && fp < GUEST_HI && !(fp & 7) && o < (int)sizeof line - 24; i++) {
+            uint64_t lr = ((uint64_t *)(uintptr_t)fp)[1];
+            fp = ((uint64_t *)(uintptr_t)fp)[0];
+            if (!lr) break;
+            o += snprintf(line + o, sizeof line - o, " %llx", (unsigned long long)lr);
+        }
+        LOG("%s\n", line);
+    }
+}
 NVN(nvnCommandBufferDownsample) {
     Snap s = snap(c);
     TexRef t[2] = {{0}};
@@ -663,7 +689,31 @@ STUB(nvnCommandBufferTiledDownsample)
 STUB(nvnCommandBufferTiledDownsampleTextureView)
 STUB(nvnCommandBufferResolveDepthBuffer)
 // UpdateUniformBuffer(cmd, buffer, size, offset, dataSize, data)
-NVN(nvnCommandBufferUpdateUniformBuffer) { record_copy(c, CMD_UPDATE_UNIFORM_BUFFER, 5, (uint32_t)A(4)); }
+NVN(nvnCommandBufferUpdateUniformBuffer) {
+    uint64_t dst = A(1) + A(3), n = A(4);
+    record_copy(c, CMD_UPDATE_UNIFORM_BUFFER, 5, (uint32_t)n);
+    static uint64_t lo = 1, hi;
+    static int left;
+    if (lo == 1) {  // (research) LARECOMP_COPY_BT covers these inline updates too
+        const char *e = getenv("LARECOMP_COPY_BT");
+        lo = 0, left = 8;
+        if (e) sscanf(e, "%llx,%llx,%d", (unsigned long long *)&lo, (unsigned long long *)&hi, &left);
+    }
+    if (lo && left > 0 && dst < hi && dst + n > lo) {
+        left--;
+        char line[512];
+        int o = snprintf(line, sizeof line, "[copybt] inline update %llx+%llx: lr %llx", (unsigned long long)dst, (unsigned long long)n,
+                         (unsigned long long)c->x[30]);
+        uint64_t fp = c->x[29];
+        for (int i = 0; i < 16 && fp >= GUEST_LO && fp < GUEST_HI && !(fp & 7) && o < (int)sizeof line - 24; i++) {
+            uint64_t lr = ((uint64_t *)(uintptr_t)fp)[1];
+            fp = ((uint64_t *)(uintptr_t)fp)[0];
+            if (!lr) break;
+            o += snprintf(line + o, sizeof line - o, " %llx", (unsigned long long)lr);
+        }
+        LOG("%s\n", line);
+    }
+}
 
 // ---- synchronization and misc
 NVN(nvnCommandBufferFenceSync) {
