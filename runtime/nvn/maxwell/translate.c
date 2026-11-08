@@ -1125,9 +1125,21 @@ static void emit_gatomic(Ctx *c, uint64_t w, bool red) {
     else snprintf(lim, sizeof lim, "0x%llxul", (unsigned long long)maxwell_gmem_size);
     sp(&c->body, "    { ulong ga = %s - 0x%llxul; bool ok = ga < %s; uint wi = uint(ga >> 2); uint av = %s, old = 0u;\n", addr,
        (unsigned long long)maxwell_gmem_base, lim, v);
+    // RED add (no result) where every active lane of the subgroup adds the same value to the same address - a counter, as
+    // Legends: Arceus' exposure pass counts its bright pixels at 480x270 into one 64-bit word: one lane adds value x lanes,
+    // the others nothing. Per lane, 130k atomics on one address took that one draw from 0.1 to 36 ms (2026-11-08,
+    // Windows, RTX 4090). Other cases (addresses or values that differ) keep the per-lane atomics. The decision is one
+    // ballot of the lanes that compared equal against the first lane's ballot: the same for every lane of that set.
+    bool agg = red && op == 0 && (s64 || size == 0 || size == 1);
     if (s64) {  // 64-bit add: the low word, then the high word plus the carry - the sum is exact (adds commute); the old
                 // value a result would return is the two halves read apart
         sp(&c->body, "      uint avh = %s, oldh = 0u;\n", b == RZ || b + 1 >= RZ ? "0u" : R(b + 1));
+        if (agg)
+            sp(&c->body, "      { uvec4 qb = subgroupBallot(true); uint ql = subgroupBallotFindLSB(qb), qn = subgroupBallotBitCount(qb);\n"
+                         "        bool qs = subgroupShuffle(wi, ql) == wi && subgroupShuffle(av, ql) == av && subgroupShuffle(avh, ql) == avh && "
+                         "subgroupShuffle(uint(ok), ql) == uint(ok);\n"
+                         "        if (subgroupBallot(qs) == qb) { if (gl_SubgroupInvocationID == ql) { uint64_t qt = (uint64_t(avh) << 32 | "
+                         "uint64_t(av)) * uint64_t(qn); av = uint(qt); avh = uint(qt >> 32); } else ok = false; } }\n");
         sp(&c->body, "      if (ok) { old = atomicAdd(gmem_.w[wi], av); oldh = atomicAdd(gmem_.w[wi + 1u], avh + (old + av < old ? 1u : 0u)); }\n");
         if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = old;\n", d); }
         if (d != RZ && d + 1 < RZ) { c->reg_used[d + 1] = 1; sp(&c->body, "      r%d = oldh;\n", d + 1); }
@@ -1145,8 +1157,13 @@ static void emit_gatomic(Ctx *c, uint64_t w, bool red) {
     if (nv)
         sp(&c->body, "      if (ok) { uint cur = gmem_.w[wi], prev; do { prev = cur; cur = atomicCompSwap(gmem_.w[wi], prev, %s); } "
                      "while (cur != prev); old = prev; }\n", nv);
-    else
+    else {
+        if (agg)  // (the 32-bit counter case: as the 64-bit one above)
+            sp(&c->body, "      { uvec4 qb = subgroupBallot(true); uint ql = subgroupBallotFindLSB(qb), qn = subgroupBallotBitCount(qb);\n"
+                         "        bool qs = subgroupShuffle(wi, ql) == wi && subgroupShuffle(av, ql) == av && subgroupShuffle(uint(ok), ql) == uint(ok);\n"
+                         "        if (subgroupBallot(qs) == qb) { if (gl_SubgroupInvocationID == ql) av *= qn; else ok = false; } }\n");
         sp(&c->body, "      if (ok) old = %s(gmem_.w[wi], av);\n", direct[op]);
+    }
     if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = old;\n", d); }
     sp(&c->body, "    }\n");
 }
