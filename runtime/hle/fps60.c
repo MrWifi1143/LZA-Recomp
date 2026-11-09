@@ -878,6 +878,19 @@ int rt_pla_tick(int site) {
     if (on < 0) on = getenv("LARECOMP_PLA_TICK") ? atoi(getenv("LARECOMP_PLA_TICK")) : 1;
     int r = !on || !g_pla60_patched ? 1 : g_world_now / 33333334u != g_world_prev / 33333334u;  // (the world's time in this
                                                                                                  // update's steps)
+    // The printer's "print it all now" (f_7002737abc: 100 steps a call, called again until the text is out - the result
+    // of crafting a batch, ...) runs within one update: on an update between two 30 fps ticks every call said "wait", the
+    // loop never ended and the game froze (the user's: crafting the most Poke Balls it could). The printer asked more
+    // than 32 times in one update and one frame: that loop - let it print.
+    if (!r && site == 0x1864) {
+        extern uint64_t renderer_present_count(void);
+        static uint64_t same_p, same_w;
+        static int same;
+        uint64_t pc = renderer_present_count();
+        if (pc == same_p && g_world_now == same_w) {
+            if (++same > 32) r = 1;
+        } else same_p = pc, same_w = g_world_now, same = 0;
+    }
     static int tlog = -1;  // (research: LARECOMP_PLA_TICK_LOG=1 - each second, per site: calls, ticks, presents)
     if (tlog < 0) tlog = getenv("LARECOMP_PLA_TICK_LOG") && atoi(getenv("LARECOMP_PLA_TICK_LOG")) > 0;
     if (tlog) {
