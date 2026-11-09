@@ -676,7 +676,11 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
             // reading it back to hash the icon - glyphs_patch below - cost ~0.1-0.3 ms per small texture: up to 3.7 ms
             // of a frame where Legends Z-A brought in a batch of small BC4 / BC5 textures)
             bool glyph_cand = lv == 0 && layer == 0 && l.d == 1 && l.w <= 128 && l.h <= 128 && (t->format == 0x49 || t->format == 0x4B);
-            uint8_t *lin = expand || glyph_cand ? malloc(sz) : s.ptr;
+            // (and a texture a pack may replace: its key is a hash of these blocks - read back from the write-combined
+            // staging buffer, every new texture's top level while a pack was on, a load held one frame for 6-20 s)
+            bool tp_cand = lv == 0 && layer == 0 && !b->texpack_seen && !expand && !linear && !b->dynamic && !b->scalable && l.d == 1 &&
+                           layers == 1 && t->target == 1 && b->samples == 1 && !(t->flags & 0x1b) && texpack_active();
+            uint8_t *lin = expand || glyph_cand || tp_cand ? malloc(sz) : s.ptr;  // (built in normal memory, copied after)
             const uint8_t *src = (const uint8_t *)(uintptr_t)t->addr + layer * layer_size + l.offset;
             if (linear) {
                 for (uint32_t y = 0; y < l.hb; y++) memcpy(lin + (uint64_t)y * row, src + (uint64_t)y * t->stride, row);
@@ -757,7 +761,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                     }
                 free(lin);
             }
-            if (glyph_cand && !expand) memcpy(s.ptr, lin, sz), free(lin);
+            if ((glyph_cand || tp_cand) && !expand) memcpy(s.ptr, lin, sz), free(lin);
             uint32_t w = l.w, hh = l.h, d = l.d;
             // the copy stays inside the image's level: a texture allocated at the internal resolution (16:9, render
             // target sized) can still be filled from the CPU - the save slots' screenshots on the title screen. Its
