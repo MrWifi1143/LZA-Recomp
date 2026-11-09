@@ -2,6 +2,7 @@
 // the game's language. runtime/mods.c; the start screen (runtime/ui/launcher_lg.mm) picks both.
 //
 //   mods/<name>/romfs/...                                  the game's RomFS paths (bin/message/English/...)
+//   mods/<name>/texpack/<key>.png                          a texture pack (runtime/nvn/vulkan/texpack.c)
 //   mods/<name>/atmosphere/contents/<title id>/romfs/...   (or any folder holding a romfs/ up to 4 levels down:
 //                                                           a download unpacked as it came)
 #pragma once
@@ -17,6 +18,9 @@ extern "C" {
 int mods_list(char names[][128], int max);
 // The active mod's romfs/ folder (LARECOMP_MOD, else g_settings.mod), or NULL.
 const char *mod_romfs_dir(void);
+// The active mod's texture pack, mods/<name>/texpack/ (<key>.png replacements, or under textures/: made with Legends
+// Studio's texexport + tools/texpack_upscale.py; runtime/nvn/vulkan/texpack.c loads them), or NULL.
+const char *mod_texpack_dir(void);
 // path: a RomFS path ("bin/message/English/..."). True with the host file when the active mod replaces it.
 bool mod_romfs_override(const char *path, char *out, size_t cap);
 // The language whose texts a mod replaces (its romfs/bin/message/<language>/), as a language code ("en-US"), or NULL

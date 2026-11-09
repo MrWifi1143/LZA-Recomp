@@ -10,6 +10,7 @@ in the Windows release, in the `licenses/` folder next to the program.
 |---|---|---|---|
 | [Dear ImGui](https://github.com/ocornut/imgui) | 1.91.9 | MIT | Omar Cornut |
 | [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) | 3.3.0 | MIT | Advanced Micro Devices, Inc. |
+| [miniz](https://github.com/richgel999/miniz) (texture packs' PNG reading) | 11.0.2 | MIT | Rich Geldreich, RAD Game Tools, Valve Software |
 | [SMAA](https://github.com/iryoku/smaa) | - | MIT | Jorge Jimenez, Jose I. Echevarria, Belen Masia, Fernando Navarro, Diego Gutierrez |
 | [Baloo 2](https://github.com/EkType/Baloo2) font | - | SIL Open Font License 1.1 | The Baloo 2 Project Authors |
 | [Lua](https://www.lua.org) (in the Lua scripting plugin, `contrib/legendslua`) | 5.3.6 | MIT | Lua.org, PUC-Rio |

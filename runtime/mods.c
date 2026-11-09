@@ -58,7 +58,9 @@ int mods_list(char names[][128], int max) {
     for (struct dirent *e; n < max && (e = readdir(d));) {
         if (e->d_name[0] == '.') continue;
         snprintf(p, sizeof p, "mods/%s", e->d_name);
-        if (is_dir(p) && find_romfs(p, 4, r, sizeof r)) snprintf(names[n++], 128, "%s", e->d_name);
+        char tp[1100];
+        snprintf(tp, sizeof tp, "%s/texpack", p);  // (a texture pack alone - mods/<name>/texpack/ - is a mod too)
+        if (is_dir(p) && (find_romfs(p, 4, r, sizeof r) || is_dir(tp))) snprintf(names[n++], 128, "%s", e->d_name);
     }
     closedir(d);
     return n;
@@ -86,6 +88,14 @@ static const char *active_mod(void) {
 }
 
 const char *mod_romfs_dir(void) { return romfs_of(active_mod()); }
+
+const char *mod_texpack_dir(void) {
+    static char dir[1024];
+    const char *name = active_mod();
+    if (!name || !*name) return NULL;
+    snprintf(dir, sizeof dir, "mods/%s/texpack", name);
+    return is_dir(dir) ? dir : NULL;
+}
 
 bool mod_romfs_override(const char *path, char *out, size_t cap) {
     const char *root = mod_romfs_dir();

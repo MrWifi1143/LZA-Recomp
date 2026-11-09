@@ -12,6 +12,12 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
   from the folder (Z-A got the same fix for its shader packs in 0.6.0).
 Arceus:
 
+- Texture packs (framework): a mod's texpack/ folder of <key>.png replaces the game's textures at any size
+  (runtime/nvn/vulkan/texpack.c); Legends Studio exports every texture under its key and tools/texpack_upscale.py makes
+  the pack (AI for colour, filters for normal maps and masks). LARECOMP_TEXPACK=<folder> for one run. Decoded when first
+  used and kept as RGBA8 for now.
+- Sharper image: the game's dynamic resolution drew the field at 0.9 (fake GPU timings); NPCs no longer switched off
+  at the screen's edges while the camera turns.
 - Shadows (Next Start) in the game's Settings and the start screen: Switch / High / Ultra = shadow maps of 1024 (the
   game's) / 2048 / 4096. At 1024 thin things - flower stems - lost their shadows a few metres out (they fell between
   the far cascade's texels); High and Ultra keep them. The render target pool grows by what the maps need (+38 / +158 MB).
