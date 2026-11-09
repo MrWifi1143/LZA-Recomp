@@ -1414,6 +1414,74 @@ static void save_glsl(const char *src, uint64_t addr, const char *suffix) {
     if (f) { fputs(src, f); fclose(f); }
 }
 
+// Legends: Arceus's bloom: a 480 x 270 bright pass, blurred and halved down to 30 x 16 (fs 9edcc9a669f532b0 vertical,
+// 586b5b1968b8c1c3 horizontal: up to 7 taps each side weighted by a table in cb1, flat enough to act as a box), then
+// added back up level by level, each read with one bilinear tap (c5a406021e0bca5c). Box blur + bilinear steps turn every
+// bright point into a square halo - the intro's sparks, lamps at night (on the Switch too). Here the blur taps get
+// Gaussian weights (sigma 0.45 x the game's radius; the game's code still normalizes by their sum) and the upward
+// reads a B-spline bicubic (4 bilinear taps): round, soft glows, the same overall bloom (frame means within 1-3% in the
+// intro). LARECOMP_ROUND_BLOOM=0: the game's. Returns the new GLSL, or NULL if the code isn't as expected.
+static char *str_insert_before(const char *src, const char *at, const char *text) {
+    const char *m = strstr(src, at);
+    if (!m) return NULL;
+    size_t pre = (size_t)(m - src), tl = strlen(text), n = strlen(src);
+    char *o = malloc(n + tl + 1);
+    memcpy(o, src, pre), memcpy(o + pre, text, tl), memcpy(o + pre + tl, m, n - pre + 1);
+    return o;
+}
+static char *pla_round_bloom(const char *src, uint64_t h) {
+    if (h == 0xc5a406021e0bca5cull) {
+        static const char call[] = "{ vec4 t = texture(t0, vec2(";
+        const char *m = strstr(src, call);
+        if (!m || strstr(m + 1, call)) return NULL;
+        static const char helper[] =
+            "vec4 pla_bspline(sampler2D t, vec2 uv) {  // (B-spline bicubic from 4 bilinear taps: pla_round_bloom)\n"
+            "    vec2 sz = vec2(textureSize(t, 0)), p = uv * sz - 0.5, i = floor(p), f = p - i, f2 = f * f, f3 = f2 * f;\n"
+            "    vec2 w0 = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0, w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;\n"
+            "    vec2 w2 = (1.0 + 3.0 * f + 3.0 * f2 - 3.0 * f3) / 6.0, w3 = f3 / 6.0, g0 = w0 + w1, g1 = w2 + w3;\n"
+            "    vec2 c0 = (i - 0.5 + w1 / g0) / sz, c1 = (i + 1.5 + w3 / g1) / sz;\n"
+            "    return g0.y * (g0.x * texture(t, c0) + g1.x * texture(t, vec2(c1.x, c0.y))) +\n"
+            "           g1.y * (g0.x * texture(t, vec2(c0.x, c1.y)) + g1.x * texture(t, c1));\n"
+            "}\n";
+        char *a = str_insert_before(src, "void main()", helper);
+        if (!a) return NULL;
+        char *t = strstr(a, call);
+        size_t pre = (size_t)(t - a) + 11, n = strlen(a);  // ("{ vec4 t = " then the call)
+        char *o = malloc(n + 16);
+        memcpy(o, a, pre), memcpy(o + pre, "pla_bspline", 11), memcpy(o + pre + 11, a + pre + 7, n - pre - 7 + 1);
+        free(a);
+        return o;
+    }
+    // the blurs: the radius register ("rR = uint(min(int(uint(min(int((rA)), int(7u)))), int(rB)));"), then each tap's
+    // weight "cbr(cb1, (rN) + 0u)" (the table entry for |offset| x 4 bytes) -> pla_bw(rN, rR)
+    const char *m = strstr(src, " = uint(min(int(uint(min(int((r");
+    if (!m) return NULL;
+    const char *ls = m;
+    while (ls > src && ls[-1] != '\n') ls--;
+    int rr;
+    if (sscanf(ls, " r%d =", &rr) != 1) return NULL;
+    char helper[256];
+    snprintf(helper, sizeof helper,
+             "float pla_bw(uint b, uint rad) {  // (a Gaussian blur weight for offset b / 4: pla_round_bloom)\n"
+             "    float x = float(b) * 0.25 / (max(float(int(rad)), 1.0) * 0.45);\n    return exp(-0.5 * x * x);\n}\n");
+    char *a = str_insert_before(src, "void main()", helper);
+    if (!a) return NULL;
+    size_t n = strlen(a);
+    char *o = malloc(n + 4096), *w = o;
+    int k = 0;
+    for (const char *l = a; *l;) {
+        int r, end = 0;
+        if (l[0] == 'c' && sscanf(l, "cbr(cb1, (r%d) + 0u)%n", &r, &end) == 1 && end && (size_t)(w - o) + 40 < n + 4096) {
+            w += sprintf(w, "pla_bw(r%d, r%d)", r, rr), l += end, k++;
+        } else
+            *w++ = *l++;
+    }
+    *w = 0;
+    free(a);
+    if (k < 4 || k > 16) { free(o); return NULL; }
+    return o;
+}
+
 static void gpl_prebuild(void *arg);
 // Legends: Arceus's deferred lighting (fs 1f805599a6b15df8, trees' and rocks' 9c2656bd44467b79, and any other with the
 // same table) reads a row pair per material from cb3: a lit row at +192..+204 and a shade row at +320..+332 (rgb tint,
@@ -1842,6 +1910,18 @@ static void translate_program(void *arg) {
             char *s = pla_soft_shadows(p->fi->msl);
             if (s) p->fi->msl = s;
             LOG("[pla] shadow mask %016llx: %s\n", (unsigned long long)h, s ? "near cascade's taps bilinear (smooth edges)" : "not the expected code, left as it is");
+        }
+    }
+    // Legends: Arceus's bloom: round glows instead of squares (pla_round_bloom)
+    if (p->code[1]) {
+        static int rb = -1;
+        if (rb < 0) rb = !getenv("LARECOMP_ROUND_BLOOM") || atoi(getenv("LARECOMP_ROUND_BLOOM")) != 0;
+        extern uint64_t vk_fs_hash(uint64_t fs);
+        uint64_t h = rb ? vk_fs_hash(p->code[1]) : 0;
+        if (h == 0xc5a406021e0bca5cull || h == 0x586b5b1968b8c1c3ull || h == 0x9edcc9a669f532b0ull) {
+            char *s = pla_round_bloom(p->fi->msl, h);
+            if (s) p->fi->msl = s;
+            LOG("[pla] bloom %016llx: %s\n", (unsigned long long)h, s ? "round (Gaussian taps / B-spline reads)" : "not the expected code, left as it is");
         }
     }
     // Legends: Arceus's lighting, Settings.shadow_color Natural: the materials' shade tint less saturated (pla_shade_tint)
