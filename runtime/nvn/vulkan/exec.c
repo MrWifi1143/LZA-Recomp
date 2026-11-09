@@ -4874,6 +4874,17 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     vk_end_pass();
     if (dl_on == 2) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=2: each copy its own submission, waited on)
     gp_mark(vk_cmd(), "copy texture %ux%u -> %ux%u", st_->width, st_->height, dt->width, dt->height);
+    {   // (research) LARECOMP_LOG_COPYFMT=1: each distinct (source format, destination size and format) copy, once
+        static int on = -1;
+        if (on < 0) on = getenv("LARECOMP_LOG_COPYFMT") != NULL;
+        static uint64_t seen[64];
+        static int ns;
+        uint64_t k = (uint64_t)st_->format << 48 | (uint64_t)dt->format << 32 | dt->width << 16 | dt->height;
+        bool fresh = on;
+        for (int i = 0; fresh && i < ns; i++) fresh = seen[i] != k;
+        if (fresh && ns < 64) seen[ns++] = k, LOG("[copyfmt] %ux%u fmt %#x flags %#x -> %ux%u fmt %#x flags %#x\n", st_->width, st_->height,
+                                                  st_->format, st_->flags, dt->width, dt->height, dt->format, dt->flags);
+    }
     dl_note("copy texture %ux%u f%#x -> %ux%u f%#x (%p -> %p)", st_->width, st_->height, st_->format, dt->width, dt->height,
             dt->format, (void *)st_, (void *)dt);
     TexBackend *s = vk_tex(st_, false), *d = vk_tex(dt, true);

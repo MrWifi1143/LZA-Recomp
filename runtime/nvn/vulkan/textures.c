@@ -161,7 +161,26 @@ static bool tex_scalable(const NvnTexture *t) {
     // 2026-11-08), and the game got counts 4x what it expects. Native: 2.6 ms, 60 fps held. LARECOMP_SCALE_MIN_W=<px>.
     static int min_w = -1;
     if (min_w < 0) min_w = getenv("LARECOMP_SCALE_MIN_W") ? atoi(getenv("LARECOMP_SCALE_MIN_W")) : 500;
-    if (t->target != 1 || t->samples > 1 || !(t->flags & 8) || t->width < (uint32_t)min_w || t->height < 16) return false;
+    // Except depth (0x35, D24S8) - the game copies its depth to a 480 x 270 target that the water reads (soft edges, the
+    // foam where things stand in it): kept at 480 x 270 at 4K, an 8x8 staircase showed round the player in front of water
+    // (the user's, Jubilife's river). A depth copy is cheap at any size. LARECOMP_SMALL_SCALE=<NVN formats, hex> to choose
+    // ("none": the game's size for all).
+    static int nsf = -1;
+    static uint32_t sf[8];
+    if (nsf < 0) {
+        const char *e = getenv("LARECOMP_SMALL_SCALE") ? getenv("LARECOMP_SMALL_SCALE") : "35";
+        nsf = 0;
+        for (const char *q = e; *q && nsf < 8;) {
+            char *end;
+            unsigned long v = strtoul(q, &end, 16);
+            if (end == q) break;
+            sf[nsf++] = (uint32_t)v;
+            q = *end == ',' ? end + 1 : end;
+        }
+    }
+    bool small_ok = false;
+    for (int i = 0; i < nsf; i++) small_ok |= sf[i] == t->format;
+    if (t->target != 1 || t->samples > 1 || !(t->flags & 8) || (t->width < (uint32_t)min_w && !small_ok) || t->height < 16) return false;
     float a = (float)t->width / (float)t->height;
     return a > 1.74f && a < 1.81f;
 }
@@ -243,10 +262,34 @@ void vk_collect_dead(void) {
     ndead = k;
 }
 
+// The game's half-resolution targets (960 x 540: its 1920 x 1080 field halved) that are drawn at full output resolution
+// instead (twice the scale of the others): the water reads its depth from one, and a half-size copy at 4K showed as a
+// pixelated outline round the player in front of water and blocky foam (the user's, Jubilife's river).
+// LARECOMP_HALF_FULL=<NVN formats, hex, comma separated> (research; default below), "none" for the game's.
+static float half_full(const NvnTexture *t) {
+    static int n = -1;
+    static uint32_t fmts[8];
+    if (n < 0) {
+        const char *e = getenv("LARECOMP_HALF_FULL");
+        n = 0;
+        if (!e) e = "";
+        for (const char *q = e; *q && n < 8;) {
+            char *end;
+            unsigned long v = strtoul(q, &end, 16);
+            if (end == q) break;
+            fmts[n++] = (uint32_t)v;
+            q = *end == ',' ? end + 1 : end;
+        }
+    }
+    if (t->width != 960 || t->height != 540) return 1;
+    for (int i = 0; i < n; i++) if (fmts[i] == t->format) return 2;
+    return 1;
+}
+
 static void create_image(NvnTexture *t, TexBackend *b) {
     VkFmt mf = fmt_of(t->format);
-    b->sx = b->scalable ? g_rs_x : 1;
-    b->sy = b->scalable ? g_rs_y : 1;
+    b->sx = b->scalable ? g_rs_x * half_full(t) : 1;
+    b->sy = b->scalable ? g_rs_y * half_full(t) : 1;
     uint32_t tw = t->width ? t->width : 1, th = t->height ? t->height : 1;
     if (b->scalable) {
         tw = (uint32_t)lroundf(tw * b->sx); th = (uint32_t)lroundf(th * b->sy);
@@ -385,7 +428,7 @@ static void live_remove(TexBackend *b) {
 static TexBackend *tex_backend(NvnTexture *t) {
     TexBackend *b = t->backend;
     if (b) {
-        if (b->scalable && (b->sx != g_rs_x || b->sy != g_rs_y)) {  // output resolution changed: reallocate
+        if (b->scalable && (b->sx != g_rs_x * half_full(t) || b->sy != g_rs_y * half_full(t))) {  // output resolution changed: reallocate
             destroy_image(b);
             create_image(t, b);
             if (t->width >= 900 && getenv("LARECOMP_LOG_RT"))
