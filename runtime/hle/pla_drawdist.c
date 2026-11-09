@@ -143,27 +143,35 @@ static int slotstate_hook(Cpu *c, uint64_t addr) {
     return 0;
 }
 
-// NPCs popping out and in while the camera turns (the user's village shots, 2026-11-08): each NPC's update
-// f_700173740c(slot, frustum) tests a sphere around it against the camera's planes (frustum +0x20..+0x70, a second
-// set at +0x80..+0xd0 when +0x140; inside when plane . (pos, 1) + radius > 0) and outside sets slot state 0x80 (hidden,
-// not animated) through f_70014916d0; the applied state (+0x354) follows the asked one (+0x358) a few frames later. So
-// NPCs near the screen's edges - often right beside a building - vanished while still on screen and came back late.
-// The test gets a copy of the frustum (on the guest stack: the shared one is left alone, the function runs on several
-// threads) with every plane pushed out by a margin: NPCs stay "in view" that far past the edges, so the late switch
-// happens off screen. LARECOMP_PLA_NPC_MARGIN=<m> (0 = the game's).
-static float g_npc_margin = -1;
-static int npc_view_hook(Cpu *c, uint64_t addr) {
-    uint64_t f = c->x[1];
-    if (g_npc_margin <= 0 || f < 0x7000000000ull || f >= 0x8000000000ull) return 0;
-    uint64_t sp0 = c->sp, copy = (sp0 - 0x180) & ~0xfull;
-    memcpy((void *)(uintptr_t)copy, (const void *)(uintptr_t)f, 0x150);
-    float *p = (float *)(uintptr_t)copy;
-    for (int i = 0; i < 12; i++) p[(0x20 + i * 0x10) / 4 + 3] += g_npc_margin;  // (each plane's w)
-    c->sp = copy;
-    c->x[1] = copy;
-    rt_call_original(c, addr);
-    c->sp = sp0;
-    return 1;
+// NPCs popping out and in while the camera turns (the user's village shots, 2026-11-08): the two per-frame NPC
+// updates, f_700173740c(slot, frustum) and f_7001736bfc(slot, frustum), test the NPC against the camera and, when they
+// decide it isn't seen, set slot state 0x80 (hidden, not animated) through f_70014916d0(slot, 1, 0x80) (lr 70017377c4 /
+// 7001736d38); the applied state (+0x354) follows the asked one (+0x358) a few frames later. NPCs by a building went
+// away while still on screen and came back late. Widening the frustum (plane w + 10 m) cut it 18 -> 13 hides on the
+// village pan but the far kids by the stall still went: with the planes 1000 m out, 4 hides were left - the decision
+// takes more than the planes. So those two "not seen" requests are refused: NPCs inside their load radius stay on
+// (the renderer still culls what's off screen; clears and every other caller - events, story - go through).
+// LARECOMP_PLA_NPC_KEEP=0: the game's. 60 fps on the village pan, hides 0.
+static int g_npc_keep = -1;
+static int npc_hide_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    if ((uint32_t)c->x[2] != 0x80) return 0;
+    static int research = -1;  // (LARECOMP_PLA_SLOTWATCH=1: each distinct caller setting / clearing 0x80, logged once)
+    if (research < 0) research = getenv("LARECOMP_PLA_SLOTWATCH") != NULL;
+    if (research) {
+        static uint64_t seen[64];
+        static int n;
+        uint64_t key = c->x[30] ^ ((c->x[1] & 1) << 63);
+        bool dup = false;
+        for (int i = 0; i < n && !dup; i++) dup = seen[i] == key;
+        if (!dup && n < 64) {
+            seen[n++] = key;
+            LOG("[slotbit] %s 0x80 from lr %llx slot %llx\n", c->x[1] & 1 ? "SET" : "clear", (unsigned long long)c->x[30],
+                (unsigned long long)c->x[0]);
+        }
+    }
+    if (g_npc_keep && (c->x[1] & 1) && (c->x[30] == 0x70017377c4ull || c->x[30] == 0x7001736d38ull)) return 1;
+    return 0;
 }
 
 // Far Pokemon animating at 1/2 .. 1/8 rate (app_config field_anime_framerate_config): the field's animation-rate
@@ -436,8 +444,8 @@ void pla_drawdist_configure(void) {
     rt_register_fnhook_at(0x7002b17bd4ull, getenv("LARECOMP_PLA_TERRFN") ? terrfn_hook : terrain_hook);
     if (pla_shadow_res()) rt_register_fnhook_at(0x7001a34908ull, shadow_size_hook);
     if (getenv("LARECOMP_PLA_SLOTWATCH")) rt_register_fnhook_at(0x7001738c14ull, slotstate_hook);
-    g_npc_margin = getenv("LARECOMP_PLA_NPC_MARGIN") ? (float)atof(getenv("LARECOMP_PLA_NPC_MARGIN")) : 10.0f;
-    if (g_npc_margin > 0) rt_register_fnhook_at(0x700173740cull, npc_view_hook);
+    g_npc_keep = !getenv("LARECOMP_PLA_NPC_KEEP") || atoi(getenv("LARECOMP_PLA_NPC_KEEP")) != 0;
+    if (g_npc_keep || getenv("LARECOMP_PLA_SLOTWATCH")) rt_register_fnhook_at(0x70014916d0ull, npc_hide_hook);
     if (getenv("LARECOMP_PLA_TERRHIST"))
         rt_register_fnhook_at(0x7002471048ull, terrhist_hook), rt_register_fnhook_at(0x7002b1b248ull, terrwalk_hook),
             rt_register_fnhook_at(0x7002b1b6ecull, terremit_hook);

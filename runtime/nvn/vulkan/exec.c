@@ -5073,6 +5073,19 @@ static void exec_list(uint64_t handle, int depth) {
         }
         case CMD_SET_VIEWPORTS:
             for (uint64_t i = 0; i < r->x[1] && r->x[0] + i < 16; i++) memcpy(st.viewport[r->x[0] + i], (uint8_t *)x + i * 16, 16);
+            {   // (research) LARECOMP_LOG_VIEWPORTS=1: each distinct viewport (x, y, w, h, the game's pixels) once
+                static int lv = -1;
+                if (lv < 0) lv = getenv("LARECOMP_LOG_VIEWPORTS") != NULL;
+                static float seen[256][4];
+                static int ns;
+                const float *v = (const float *)x;
+                bool dup = false;
+                for (int k = 0; lv && k < ns && !dup; k++) dup = !memcmp(seen[k], v, 16);
+                if (lv && !dup && ns < 256) {
+                    memcpy(seen[ns++], v, 16);
+                    LOG("[viewport] %g %g %g x %g (frame %llu)\n", v[0], v[1], v[2], v[3], (unsigned long long)vk_frame_counter());
+                }
+            }
             break;
         case CMD_SET_SCISSORS:
             for (uint64_t i = 0; i < r->x[1] && r->x[0] + i < 16; i++) memcpy(st.scissor[r->x[0] + i], (uint8_t *)x + i * 16, 16);
@@ -5170,18 +5183,22 @@ static void exec_list(uint64_t handle, int depth) {
         }
         case CMD_REPORT_COUNTER: {
             // The game times its GPU work with these (two per frame) and drops to 30 fps when that looks slow;
-            // the value is our translation time, not GPU time. LARECOMP_VK_COUNTER=frozen: the same timestamp for
-            // every counter within a presented frame (experiment).
+            // the value was our translation time, not GPU time - and Legends: Arceus's dynamic resolution read it too:
+            // the field drawn at 1728 x 918 (0.9) and stretched, the whole image soft (the user's 2026-11-08 "doesn't
+            // look sharp"; LARECOMP_LOG_VIEWPORTS). Now every counter within a presented frame has the same timestamp
+            // (frozen): no GPU time to see, the field at its full 1920 x 1080 (x the render scale), 60 fps held.
+            // LARECOMP_VK_COUNTER=real: as before; =ideal: a 33.3 ms frame, 1 ms per counter in it.
             uint64_t *out = (uint64_t *)(uintptr_t)r->x[1];
             uint32_t type = (uint32_t)r->x[0];
             static uint32_t seen;
             if (type < 32 && !(seen & (1u << type))) { seen |= 1u << type; LOG("[nvn] ReportCounter type %u\n", type); }
-            static int frozen = -1;  // 1: frozen; 2: ideal (LARECOMP_VK_COUNTER=ideal: a 33.3 ms frame, 1 ms per counter in it)
-            if (frozen < 0) { const char *e = getenv("LARECOMP_VK_COUNTER"); frozen = !e ? 0 : !strcmp(e, "frozen") ? 1 : !strcmp(e, "ideal") ? 2 : 0; }
+            static int frozen = -1;  // 0: real time; 1: frozen (default); 2: ideal
+            if (frozen < 0) { const char *e = getenv("LARECOMP_VK_COUNTER"); frozen = !e ? 1 : !strcmp(e, "real") ? 0 : !strcmp(e, "ideal") ? 2 : 1; }
             static uint64_t frame_seen = ~0ull, frame_ts, in_frame;
             extern uint64_t vk_frame_counter(void);
             if (vk_frame_counter() != frame_seen) { frame_seen = vk_frame_counter(); frame_ts = SDL_GetTicksNS(); in_frame = 0; }
-            uint64_t v = frozen == 1 ? frame_ts : frozen == 2 ? frame_seen * 33333333ull + in_frame * 1000000ull : SDL_GetTicksNS();
+            uint64_t v = type == 1 ? SDL_GetTicksNS()  // (SAMPLES_PASSED: as before - frozen it would read 0 pixels)
+                       : frozen == 1 ? frame_ts : frozen == 2 ? frame_seen * 33333333ull + in_frame * 1000000ull : SDL_GetTicksNS();
             in_frame++;
             // (research) LARECOMP_VK_SAMPLES=<frame>: from that frame, SAMPLES_PASSED (type 1) reports cycle every 240
             // frames: as before / field 0 counts 1M up a report / field 1 does / both 0 (logged at each change)
