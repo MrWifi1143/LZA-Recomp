@@ -546,10 +546,18 @@ static bool texpack_apply(TexBackend *b, const TexLoaded *r) {
 }
 
 static void upload_texture(NvnTexture *t, TexBackend *b) {
-    if (b->texpack_wait) {  // (its replacement read by now? the game's own until then)
+    // (its replacement read by now? the game's own until then.) At most LARECOMP_TEXPACK_BUDGET_MB (8) of replacements
+    // go in a frame, at least one: each is a new image and all its levels copied on this thread - many done at once
+    // (after a load, or running into a new place) held single frames for 300+ ms with a 2x pack
+    static uint64_t tp_frame, tp_bytes, tp_budget;
+    if (!tp_budget) tp_budget = (getenv("LARECOMP_TEXPACK_BUDGET_MB") ? strtoull(getenv("LARECOMP_TEXPACK_BUDGET_MB"), NULL, 10) : 8) << 20;
+    if (b->texpack_wait) {
+        uint64_t fr = vk_frame_counter();
+        if (fr != tp_frame) tp_frame = fr, tp_bytes = 0;
         TexLoaded *r;
-        if (texpack_take(b->texpack_key, &r)) {
+        if (tp_bytes < tp_budget && texpack_take(b->texpack_key, &r)) {
             b->texpack_wait = false;
+            if (r) for (uint32_t lv = 0; lv < r->levels && lv < TEXPACK_MAX_LEVELS; lv++) tp_bytes += r->level_size[lv];
             bool ok = r && texpack_apply(b, r);
             texpack_free(r);
             if (ok) return;
