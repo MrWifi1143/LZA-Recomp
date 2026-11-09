@@ -111,6 +111,8 @@ static int get_minvx(void) { return g_settings.mouse_invert_x ? 1 : 0; }
 static void set_minvx(int i) { g_settings.mouse_invert_x = i == 1; }
 static int get_smooth(void) { return g_settings.shadow_smooth ? 0 : 1; }
 static void set_smooth(int i) { g_settings.shadow_smooth = i == 0; }
+static int get_sharp(void) { return g_settings.sharpen >= 0 && g_settings.sharpen <= 3 ? g_settings.sharpen : 0; }
+static void set_sharp(int i) { g_settings.sharpen = i; }
 static int get_shadows(void) { return g_settings.shadows >= 0 && g_settings.shadows <= 2 ? g_settings.shadows : 0; }
 static void set_shadows(int i) { g_settings.shadows = i; }
 void pla_set_detail(void);  // (hle/pla_drawdist.c)
@@ -140,6 +142,8 @@ static const Row k_rows[] = {
     {"Screen Mode", "Choose whether the game fills the screen or plays in a window.", CHOICE, 2, {"Window", "Fullscreen"},
      get_full, set_full},
     {"Anti-Aliasing", "Choose whether to smooth jagged edges (SMAA).", CHOICE, 2, {"Enabled", "Disabled"}, get_aa, set_aa},
+    {"Sharpening", "Choose how much the image is sharpened at your screen's resolution (AMD's RCAS).", CHOICE, 4,
+     {"Off", "Low", "Medium", "High"}, get_sharp, set_sharp},
     {"Shadows (Next Start)", "Choose how sharp shadows are. Higher shows the shadows of thin things, like flower stems, further away.",
      CHOICE, 3, {"Switch", "High", "Ultra"}, get_shadows, set_shadows},
     {"Shadow Smoothing (Next Start)", "Choose whether shadow edges are smoothed or show the shadow map's steps.", CHOICE, 2,
