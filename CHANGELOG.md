@@ -6,6 +6,17 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsA`)
 
+## 2026-11-09: LegendsA-v1.1.1
+
+Previous release: LegendsA-v1.1.0. Game version: Pokemon Legends: Arceus 1.1.1.
+
+- Lush Foliage now brings its trees: 19,294 more across the seven areas - the forests about half again as full, and
+  forest on the hills and steep banks round the playing areas that nobody can reach. They can't be shipped (they are
+  the game's own area files with trees added), so the mod carries only where each tree stands (trees.lft) and the
+  recomp builds the trees from your game files the first time the game starts with the mod on (about a second, ~140 MB
+  in the mod's folder; again only if the game's files or the mod change). Any mod can do the same: mod.ini tree_patch.
+  Needs a decent PC (tested on an RTX 4090 at 4K: 60 fps held in Jubilife and the forests).
+
 ## 2026-11-09: LegendsA-v1.1.0
 
 Previous release: LegendsA-v1.0.1. Game version: Pokemon Legends: Arceus 1.1.1.
