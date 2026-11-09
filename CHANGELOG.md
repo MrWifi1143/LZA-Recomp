@@ -12,6 +12,10 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
   from the folder (Z-A got the same fix for its shader packs in 0.6.0).
 Arceus:
 
+- Fixed: the game could freeze for good after crafting a batch (the most Poke Balls at once) above 30 fps - the result
+  text's "print it all now" waited for the 30 fps clock inside one update (since 0.3.0).
+- Texture packs no longer hitch when many replacements arrive at once (at most 8 MB put in a frame): running into a new
+  place with a 2x pack held single frames for 300+ ms.
 - Shadow Color (Next Start): Natural (the default) tones down the strong purple the game gives shade at dusk (shaded
   rock and leaves turned violet - on the Switch too); Switch keeps the original.
 - Draw Distance also keeps far trees as full models (the game swapped them to flat cards past 100 m): 150 / 200 /
