@@ -452,6 +452,27 @@ static int lodcam_hook(Cpu *c, uint64_t addr) {
     return 1;
 }
 
+// (research) LARECOMP_PLA_GRASSWATCH=1: the render code copies each grass cell's instances (16 B: x, z, scale, 0;
+// 36 x 36) from a page-aligned staging slot (memcpy 0x70032a23b0 from lr 0x7002aac5a0); after 30 cells, page-watch the
+// 64 pages above the highest slot so far - the builder's first write into a new slot there logs its function
+static int grasscopy_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    if (c->x[30] != 0x7002aac5a0ull) return 0;
+    uint64_t src = c->x[1], len = c->x[2];
+    if (len < 0x400 || len > 0x5a40 || len % 16) return 0;
+    static uint64_t hi;
+    static int n, armed;
+    if (src + len > hi) hi = src + len;
+    if (++n == 30 && !armed) {
+        void watch_add_page(uint64_t addr, uint64_t len);
+        armed = 1;
+        uint64_t p = (hi + 0x3fffull) & ~0x3fffull;
+        LOG("[grasswatch] slots up to %llx: watching %llx..%llx\n", (unsigned long long)hi, (unsigned long long)p, (unsigned long long)(p + 64 * 0x4000ull));
+        for (int i = 0; i < 64; i++) watch_add_page(p + (uint64_t)i * 0x4000ull, 0x4000);
+    }
+    return 0;
+}
+
 void pla_drawdist_configure(void) {
     g_log = getenv("LARECOMP_PLA_DRAWDIST_LOG") && atoi(getenv("LARECOMP_PLA_DRAWDIST_LOG")) > 0;
     put_lodtab();
@@ -465,6 +486,7 @@ void pla_drawdist_configure(void) {
     rt_register_fnhook_at(0x7002a11f80ull, lodcam_hook);
     g_grass_fade = getenv("LARECOMP_PLA_GRASS_FADE") ? (float)atof(getenv("LARECOMP_PLA_GRASS_FADE")) : 0;
     rt_register_fnhook_at(0x7000004fc0ull, oodle_hook);  // (the setting decides per area load)
+    if (getenv("LARECOMP_PLA_GRASSWATCH")) rt_register_fnhook_at(0x70032a23b0ull, grasscopy_hook);
     if (getenv("LARECOMP_PLA_LODFN")) rt_register_fnhook_at(0x700299d91cull, lodfn_hook);
     g_terrain = getenv("LARECOMP_PLA_TERRAIN") ? (float)atof(getenv("LARECOMP_PLA_TERRAIN")) : 0;
     rt_register_fnhook_at(0x7002b17bd4ull, getenv("LARECOMP_PLA_TERRFN") ? terrfn_hook : terrain_hook);

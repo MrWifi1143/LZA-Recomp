@@ -107,6 +107,21 @@ void hwwatch_arm(uint64_t addr, uint64_t len) {
     }
     if (d) closedir(d);
     fprintf(stderr, "[hwwatch] %llx+%llu on %d thread(s) (%d failed)\n", (unsigned long long)addr, (unsigned long long)len, n, fail);
+    if (!n && fail) {  // (the kernel refuses breakpoints - kernel.perf_event_paranoid 2 - : the page watch, as on Windows)
+        extern uint64_t g_watch_lo, g_watch_hi;
+        void watch_arm(void);
+        void watch_add_page(uint64_t addr, uint64_t len);
+        g_nw--;
+        if (g_watch_lo) {
+            const char *sp = getenv("LARECOMP_WATCHN_SPAN");
+            watch_add_page(addr, sp ? strtoull(sp, NULL, 16) : len);
+            return;
+        }
+        g_watch_lo = addr, g_watch_hi = addr + len;
+        fprintf(stderr, "[hwwatch] %llx+%llu: page watch instead (no breakpoints allowed: kernel.perf_event_paranoid)\n",
+                (unsigned long long)addr, (unsigned long long)len);
+        watch_arm();
+    }
 }
 
 // The watchpoints armed so far, on the calling thread too (one started after they were armed: kernel.c thread_main)
