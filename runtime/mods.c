@@ -71,9 +71,10 @@ int mods_list(char names[][128], int max) {
 }
 
 // Each mod's romfs/ folder, found once (NULL: it has none - a texture pack alone, say)
+static int ncache;  // (romfs_of's: mods_forget empties it)
+void mods_forget(void) { ncache = 0; }  // (a mod's romfs/ made since it was looked for: runtime/oodle_server.c trees_prepare)
 static const char *romfs_of(const char *name) {
     static struct { char name[128]; char dir[1024]; bool ok; } cache[MODS_MAX];
-    static int ncache;
     if (!name || !*name) return NULL;
     for (int i = 0; i < ncache; i++) if (!strcmp(cache[i].name, name)) return cache[i].ok ? cache[i].dir : NULL;
     if (ncache == MODS_MAX) return NULL;
@@ -135,34 +136,37 @@ int mod_texpack_dirs(char dirs[][160], int max) {
     return k;
 }
 
+bool mod_ini_get(const char *name, const char *key, char *out, size_t cap) {
+    char p[200], line[512];
+    snprintf(p, sizeof p, "mods/%s/mod.ini", name);
+    FILE *f = fopen(p, "r");
+    if (!f) return false;
+    bool found = false;
+    while (!found && fgets(line, sizeof line, f)) {
+        char *l = line;
+        while (*l == ' ' || *l == '\t') l++;
+        if (*l == '#' || *l == ';' || *l == '[') continue;
+        char *eq = strchr(l, '=');
+        if (!eq) continue;
+        char *ke = eq;
+        while (ke > l && (ke[-1] == ' ' || ke[-1] == '\t')) ke--;
+        if ((size_t)(ke - l) != strlen(key) || strncmp(l, key, (size_t)(ke - l))) continue;
+        char *v = eq + 1;
+        while (*v == ' ' || *v == '\t') v++;
+        size_t len = strcspn(v, "\r\n#;");
+        while (len && (v[len - 1] == ' ' || v[len - 1] == '\t')) len--;
+        snprintf(out, cap, "%.*s", (int)len, v);
+        found = true;
+    }
+    fclose(f);
+    return found;
+}
+
 bool mod_ini_value(const char *key, char *out, size_t cap) {
     char names[MODS_MAX][128];
     int n = mods_active(names, MODS_MAX);
-    for (int i = 0; i < n; i++) {  // (the first mod that sets it)
-        char p[200], line[512];
-        snprintf(p, sizeof p, "mods/%s/mod.ini", names[i]);
-        FILE *f = fopen(p, "r");
-        if (!f) continue;
-        bool found = false;
-        while (!found && fgets(line, sizeof line, f)) {
-            char *l = line;
-            while (*l == ' ' || *l == '\t') l++;
-            if (*l == '#' || *l == ';' || *l == '[') continue;
-            char *eq = strchr(l, '=');
-            if (!eq) continue;
-            char *ke = eq;
-            while (ke > l && (ke[-1] == ' ' || ke[-1] == '\t')) ke--;
-            if ((size_t)(ke - l) != strlen(key) || strncmp(l, key, (size_t)(ke - l))) continue;
-            char *v = eq + 1;
-            while (*v == ' ' || *v == '\t') v++;
-            size_t len = strcspn(v, "\r\n#;");
-            while (len && (v[len - 1] == ' ' || v[len - 1] == '\t')) len--;
-            snprintf(out, cap, "%.*s", (int)len, v);
-            found = true;
-        }
-        fclose(f);
-        if (found) { LOG("[mods] %s: %s = %s\n", names[i], key, out); return true; }
-    }
+    for (int i = 0; i < n; i++)  // (the first mod that sets it)
+        if (mod_ini_get(names[i], key, out, cap)) { LOG("[mods] %s: %s = %s\n", names[i], key, out); return true; }
     return false;
 }
 

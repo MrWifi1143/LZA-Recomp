@@ -254,3 +254,399 @@ void oodle_server_install(const char *exefs) {
     if (!nn_main) { fprintf(stderr, "[oodle] nnMain not found\n"); reply(0, NULL); _exit(2); }
     hle_override(nn_main, serve, "<oodle_server>");
 }
+
+// ---- --build-trees (Lush Foliage's trees, runtime/mods.h mod.ini tree_patch): a mod can carry trees as a patch of the
+// game's files - only the trees' matrices and file names, no game data (Legends Studio's `foliage ... <patch>`,
+// formats/foliage.h: "LFT1", u32 ops, each {u8 kind, str pack, str path, str tmpl, str model, str trtrr, u32 trees,
+// f32[16] each}, str = u16 length + bytes). This mode builds the mod's files from the player's own game: each area pack
+// (bin/archive/field/terrain/<area>.gfpak, a GFLXPACK) read from the RomFS, the entries the patch names decoded (the
+// game's own Oodle, as above), the trees added - kind 0 appended to an existing .trins ({0 "SrtInstanceBuffer", 2
+// count, 4 {0 [ubyte] 64-byte matrices}}: a new matrix vector appended, the table pointed at it), kind 1 a new .trins
+// made from tmpl (a file of the same tree) and listed in its tree's group of the chunk's .trtrr ({4 [{0 model, 1
+// [names]}]}) - and the pack written to mods/<mod>/romfs/<pack> (changed and new entries as stored LZ4; the tables
+// rebuilt). trees_prepare runs it before the game when the mod's build is missing or stale.
+typedef struct { uint8_t *p; size_t n, cap; } Bytes;
+static void by_put(Bytes *b, const void *d, size_t n) {
+    if (b->n + n > b->cap) { b->cap = (b->n + n) * 2 + 64; b->p = realloc(b->p, b->cap); }
+    if (n) memcpy(b->p + b->n, d, n);
+    b->n += n;
+}
+static void by_zero(Bytes *b, size_t n) { while (n--) { uint8_t z = 0; by_put(b, &z, 1); } }
+static void by_align(Bytes *b, size_t a, size_t plus) { while ((b->n + plus) % a) by_zero(b, 1); }
+static void put32(Bytes *b, size_t at, uint32_t v) { memcpy(b->p + at, &v, 4); }
+
+typedef struct { uint8_t kind; char pack[256], path[256], tmpl[256], model[128], trtrr[256]; uint32_t n; const float *mats; } TreeOp;
+
+static bool rd_str(const uint8_t *d, size_t n, size_t *o, char *out, size_t cap) {
+    if (*o + 2 > n) return false;
+    uint16_t l = (uint16_t)(d[*o] | d[*o + 1] << 8);
+    *o += 2;
+    if (*o + l > n || l >= cap) return false;
+    memcpy(out, d + *o, l), out[l] = 0;
+    *o += l;
+    return true;
+}
+
+// a stored LZ4 block (literals only: what a decoder reads back as the bytes)
+static void lz4_stored(Bytes *out, const uint8_t *d, size_t n) {
+    uint8_t tok = (uint8_t)((n >= 15 ? 15 : n) << 4);
+    by_put(out, &tok, 1);
+    if (n >= 15) {
+        size_t r = n - 15;
+        while (r >= 255) { uint8_t f = 255; by_put(out, &f, 1); r -= 255; }
+        uint8_t l = (uint8_t)r;
+        by_put(out, &l, 1);
+    }
+    by_put(out, d, n);
+}
+static bool lz4_dec(const uint8_t *in, size_t n, uint8_t *out, size_t outsz) {
+    size_t i = 0, o = 0;
+    while (i < n) {
+        uint8_t t = in[i++];
+        size_t lit = t >> 4;
+        if (lit == 15) { uint8_t b; do { if (i >= n) return false; b = in[i++]; lit += b; } while (b == 255); }
+        if (i + lit > n || o + lit > outsz) return false;
+        memcpy(out + o, in + i, lit), i += lit, o += lit;
+        if (i >= n) break;
+        if (i + 2 > n) return false;
+        size_t off = in[i] | ((size_t)in[i + 1] << 8), ml = t & 15;
+        i += 2;
+        if (ml == 15) { uint8_t b; do { if (i >= n) return false; b = in[i++]; ml += b; } while (b == 255); }
+        ml += 4;
+        if (!off || off > o || o + ml > outsz) return false;
+        for (size_t k = 0; k < ml; k++, o++) out[o] = out[o - off];
+    }
+    return o == outsz;
+}
+
+typedef struct { uint8_t *d; size_t n; int32_t nf, nd; uint64_t ftab, hashes; } Pak;
+static int pak_find(const Pak *p, uint64_t h) {
+    for (int i = 0; i < p->nf; i++) { uint64_t v; memcpy(&v, p->d + p->hashes + 8 * (size_t)i, 8); if (v == h) return i; }
+    return -1;
+}
+static uint8_t *pak_entry(Cpu *c, uint8_t *dec_mem, const Pak *p, int i, size_t *outn) {
+    const uint8_t *r = p->d + p->ftab + 0x18 * (size_t)i;
+    uint16_t codec;
+    uint32_t size, packed;
+    uint64_t off;
+    memcpy(&codec, r + 2, 2), memcpy(&size, r + 4, 4), memcpy(&packed, r + 8, 4), memcpy(&off, r + 0x10, 8);
+    if (off + packed > p->n || size > (256u << 20)) return NULL;
+    uint8_t *out = malloc(size ? size : 1);
+    bool ok = false;
+    if (codec == 0) ok = packed == size, memcpy(out, p->d + off, size);
+    else if (codec == 2) ok = lz4_dec(p->d + off, packed, out, size);
+    else if (codec >= 3 && codec <= 7) ok = oodle_decode(c, dec_mem, p->d + off, packed, out, size) == (int64_t)size;
+    if (!ok) { free(out); return NULL; }
+    *outn = size;
+    return out;
+}
+
+// the matrices put in a .trins: tmpl's tables, its matrices (kept or not) and these after them
+static bool trins_with(const uint8_t *d, size_t n, bool keep, const float *mats, uint32_t count, Bytes *out) {
+    FbBuf b = {d, n};
+    size_t root = fb_root(b), body = fb_deref(b, fb_field(b, root, 4)), slot = body ? fb_field(b, body, 0) : 0, cslot = fb_field(b, root, 2);
+    if (!slot || !cslot) return false;
+    size_t v = fb_deref(b, slot);
+    uint32_t vn = fb32(b, v);
+    if (v + 4 + vn > n || vn % 64) return false;
+    out->n = 0;
+    by_put(out, d, n);
+    by_align(out, 16, 4);
+    size_t at = out->n;
+    uint32_t total = (keep ? vn : 0) + count * 64;
+    by_put(out, &total, 4);
+    if (keep) by_put(out, d + v + 4, vn);
+    by_put(out, mats, (size_t)count * 64);
+    put32(out, slot, (uint32_t)(at - slot));
+    put32(out, cslot, total / 64);
+    return true;
+}
+
+// trtrr with name added to model's group (its names vector rebuilt after the end: the old names and the new one)
+static bool trtrr_add(Bytes *t, const char *model, const char *name) {
+    FbBuf b = {t->p, t->n};
+    uint32_t ng;
+    size_t g0 = fb_vec(b, fb_root(b), 4, &ng), slot = 0;
+    char **names = NULL;
+    uint32_t nn = 0;
+    for (uint32_t gi = 0; gi < ng && !slot; gi++) {
+        size_t gt = fb_deref(b, g0 + 4 * (size_t)gi), ms = fb_deref(b, fb_field(b, gt, 0));
+        uint32_t ml = fb32(b, ms);
+        if (!ms || ml != strlen(model) || memcmp(t->p + ms + 4, model, ml) || !fb_field(b, gt, 1)) continue;
+        uint32_t cnt;
+        size_t v0 = fb_vec(b, gt, 1, &cnt);
+        names = calloc(cnt + 1, sizeof *names);
+        for (uint32_t k = 0; k < cnt; k++) {
+            size_t s = fb_deref(b, v0 + 4 * (size_t)k);
+            uint32_t l = fb32(b, s);
+            names[nn] = malloc(l + 1), memcpy(names[nn], t->p + s + 4, l), names[nn][l] = 0, nn++;
+        }
+        slot = fb_field(b, gt, 1);
+    }
+    if (!slot) return false;
+    names[nn++] = strdup(name);
+    by_align(t, 4, 0);
+    size_t vp = t->n;
+    by_put(t, &nn, 4);
+    by_zero(t, 4 * (size_t)nn);
+    for (uint32_t k = 0; k < nn; k++) {
+        by_align(t, 4, 0);
+        size_t sp = t->n;
+        uint32_t l = (uint32_t)strlen(names[k]);
+        by_put(t, &l, 4), by_put(t, names[k], l), by_zero(t, 1);
+        put32(t, vp + 4 + 4 * k, (uint32_t)(sp - (vp + 4 + 4 * k)));
+        free(names[k]);
+    }
+    free(names);
+    put32(t, slot, (uint32_t)(vp - slot));
+    return true;
+}
+
+// the pack with entries replaced (repl[i]: new bytes or NULL) and added (path hash, name hash, bytes) to the folder
+// entry `sibling` is in: tables rebuilt (header, folder offsets, path hashes, folders, file table), the old payloads
+// after them, the new ones (stored LZ4) at the end
+typedef struct { uint64_t ph, nh; Bytes data; } NewEnt;
+static bool pak_build(const Pak *p, Bytes *const *repl, const NewEnt *add, int nadd, int sibling, Bytes *out) {
+    int nf2 = p->nf + nadd, nd = p->nd;
+    uint8_t *recs = malloc(0x18 * (size_t)nf2);
+    uint64_t *ph = malloc(8 * (size_t)nf2), data0 = ~0ull;
+    for (int i = 0; i < p->nf; i++) {
+        memcpy(recs + 0x18 * (size_t)i, p->d + p->ftab + 0x18 * (size_t)i, 0x18);
+        memcpy(&ph[i], p->d + p->hashes + 8 * (size_t)i, 8);
+        uint64_t off;
+        memcpy(&off, recs + 0x18 * (size_t)i + 0x10, 8);
+        if (off < data0) data0 = off;
+    }
+    for (int k = 0; k < nadd; k++) memcpy(recs + 0x18 * (size_t)(p->nf + k), recs + 0x18 * (size_t)sibling, 0x18), ph[p->nf + k] = add[k].ph;
+    // the folders
+    uint64_t *fh = calloc((size_t)nd, 8);
+    int *fcnt = calloc((size_t)nd, sizeof(int)), sib_f = -1;
+    uint64_t **fname = calloc((size_t)nd, sizeof *fname);
+    int32_t **fidx = calloc((size_t)nd, sizeof *fidx);
+    for (int f = 0; f < nd; f++) {
+        uint64_t fo;
+        int32_t cnt;
+        memcpy(&fo, p->d + 0x28 + 8 * (size_t)f, 8);
+        memcpy(&fh[f], p->d + fo, 8), memcpy(&cnt, p->d + fo + 8, 4);
+        fname[f] = malloc(8 * (size_t)(cnt + nadd)), fidx[f] = malloc(4 * (size_t)(cnt + nadd));
+        for (int k = 0; k < cnt; k++) {
+            memcpy(&fname[f][k], p->d + fo + 0x10 + 0x10 * (size_t)k, 8), memcpy(&fidx[f][k], p->d + fo + 0x10 + 0x10 * (size_t)k + 8, 4);
+            if (fidx[f][k] == sibling) sib_f = f;
+        }
+        fcnt[f] = cnt;
+    }
+    bool ok = sib_f >= 0 && data0 <= p->n;
+    for (int k = 0; ok && k < nadd; k++) fname[sib_f][fcnt[sib_f]] = add[k].nh, fidx[sib_f][fcnt[sib_f]++] = p->nf + k;
+    if (ok) {
+        out->n = 0;
+        by_zero(out, 0x28 + 8 * (size_t)nd);
+        uint64_t h2 = out->n;
+        by_put(out, ph, 8 * (size_t)nf2);
+        uint64_t *fo2 = malloc(8 * (size_t)nd);
+        for (int f = 0; f < nd; f++) {
+            fo2[f] = out->n;
+            by_put(out, &fh[f], 8), by_put(out, &fcnt[f], 4), by_zero(out, 4);
+            for (int k = 0; k < fcnt[f]; k++) by_put(out, &fname[f][k], 8), by_put(out, &fidx[f][k], 4), by_zero(out, 4);
+        }
+        uint64_t ft2 = out->n;
+        by_zero(out, 0x18 * (size_t)nf2);
+        by_align(out, 16, 0);
+        int64_t delta = (int64_t)out->n - (int64_t)data0;
+        by_put(out, p->d + data0, p->n - data0);
+        for (int i = 0; i < nf2; i++) {
+            const Bytes *nb = i < p->nf ? repl[i] : &add[i - p->nf].data;
+            uint8_t *r = recs + 0x18 * (size_t)i;
+            if (!nb) { uint64_t off; memcpy(&off, r + 0x10, 8); off = (uint64_t)((int64_t)off + delta); memcpy(r + 0x10, &off, 8); continue; }
+            by_align(out, 16, 0);
+            uint64_t at = out->n;
+            lz4_stored(out, nb->p, nb->n);
+            uint16_t codec = 2;
+            uint32_t size = (uint32_t)nb->n, packed = (uint32_t)(out->n - at);
+            memcpy(r + 2, &codec, 2), memcpy(r + 4, &size, 4), memcpy(r + 8, &packed, 4), memcpy(r + 0x10, &at, 8);
+        }
+        memcpy(out->p, p->d, 0x10);
+        memcpy(out->p + 0x10, &nf2, 4), memcpy(out->p + 0x14, &nd, 4), memcpy(out->p + 0x18, &ft2, 8), memcpy(out->p + 0x20, &h2, 8);
+        for (int f = 0; f < nd; f++) memcpy(out->p + 0x28 + 8 * (size_t)f, &fo2[f], 8);
+        memcpy(out->p + ft2, recs, 0x18 * (size_t)nf2);
+        free(fo2);
+    }
+    for (int f = 0; f < nd; f++) free(fname[f]), free(fidx[f]);
+    free(fname), free(fidx), free(fh), free(fcnt), free(recs), free(ph);
+    return ok;
+}
+
+static bool write_whole(const char *path, const uint8_t *d, size_t n) {
+    char dir[1100];
+    snprintf(dir, sizeof dir, "%s", path);
+    for (char *q = dir + 1; *q; q++) if (*q == '/') { *q = 0; xmkdir(dir); *q = '/'; }
+    char tmp[1110];
+    snprintf(tmp, sizeof tmp, "%s.part", path);
+    FILE *f = fopen(tmp, "wb");
+    bool ok = f && fwrite(d, 1, n, f) == n;
+    if (f) ok &= fclose(f) == 0;
+    remove(path);
+    return ok && rename(tmp, path) == 0;
+}
+
+bool romfs_image_file(const char *path, int *fd, uint64_t *off, uint64_t *size);  // runtime/services/fs.c
+static uint8_t *romfs_read(const char *path, size_t *n) {  // (the extracted folder of a source checkout, else romfs.bin)
+    char loose[1100];
+    snprintf(loose, sizeof loose, "%s/%s", g_romfs_dir, path);
+    FILE *f = getenv("LARECOMP_TREES_IMAGE") ? NULL : fopen(loose, "rb");  // (tests: =1 reads romfs.bin as an install does)
+    if (f) {
+        uint64_t sz = xsize(f);
+        fclose(f);
+        *n = (size_t)sz;
+        return read_range(loose, 0, sz);
+    }
+    int fd;
+    uint64_t off, size;
+    if (!romfs_image_file(path, &fd, &off, &size)) return NULL;
+    uint8_t *d = malloc(size ? size : 1);
+    if (!d || pread(fd, d, (size_t)size, (off_t)off) != (ssize_t)size) { free(d); return NULL; }
+    *n = (size_t)size;
+    return d;
+}
+
+static const char *g_trees_mod;  // (--build-trees: the mod; main.c)
+#include "mods.h"
+static void build_trees(Cpu *c) {
+    char pf[64], path[1100];
+    if (!mod_ini_get(g_trees_mod, "tree_patch", pf, sizeof pf)) { fprintf(stderr, "[trees] %s: no tree_patch\n", g_trees_mod); _exit(2); }
+    snprintf(path, sizeof path, "mods/%s/%s", g_trees_mod, pf);
+    FILE *f = fopen(path, "rb");
+    uint64_t pn = f ? xsize(f) : 0;
+    if (f) fclose(f);
+    uint8_t *pd = pn ? read_range(path, 0, pn) : NULL;
+    if (!pd || pn < 8 || memcmp(pd, "LFT1", 4)) { fprintf(stderr, "[trees] %s: not a tree patch\n", path); _exit(2); }
+    uint32_t nops;
+    memcpy(&nops, pd + 4, 4);
+    TreeOp *ops = calloc(nops ? nops : 1, sizeof *ops);
+    size_t o = 8;
+    for (uint32_t i = 0; i < nops; i++) {
+        TreeOp *op = &ops[i];
+        if (o + 1 > pn) _exit(2);
+        op->kind = pd[o++];
+        if (!rd_str(pd, pn, &o, op->pack, sizeof op->pack) || !rd_str(pd, pn, &o, op->path, sizeof op->path) ||
+            !rd_str(pd, pn, &o, op->tmpl, sizeof op->tmpl) || !rd_str(pd, pn, &o, op->model, sizeof op->model) ||
+            !rd_str(pd, pn, &o, op->trtrr, sizeof op->trtrr) || o + 4 > pn) { fprintf(stderr, "[trees] patch damaged\n"); _exit(2); }
+        memcpy(&op->n, pd + o, 4), o += 4;
+        if (o + (uint64_t)op->n * 64 > pn) { fprintf(stderr, "[trees] patch damaged\n"); _exit(2); }
+        op->mats = (const float *)(pd + o), o += (size_t)op->n * 64;
+    }
+    uint8_t *dec_mem = calloc(1, 0x80000);
+    int packs = 0, trees = 0, newfiles = 0, failed = 0;
+    bool *done = calloc(nops ? nops : 1, 1);
+    for (uint32_t s = 0; s < nops; s++) {  // pack by pack
+        if (done[s]) continue;
+        const char *pack = ops[s].pack;
+        size_t pkn;
+        uint8_t *pk = romfs_read(pack, &pkn);
+        Pak p = {pk, pkn, 0, 0, 0, 0};
+        if (pk && pkn >= 0x28 && !memcmp(pk, "GFLXPACK", 8)) {
+            memcpy(&p.nf, pk + 0x10, 4), memcpy(&p.nd, pk + 0x14, 4), memcpy(&p.ftab, pk + 0x18, 8), memcpy(&p.hashes, pk + 0x20, 8);
+            if (p.nf < 0 || p.nd <= 0 || p.ftab + 0x18 * (uint64_t)p.nf > pkn || p.hashes + 8 * (uint64_t)p.nf > pkn) p.nf = -1;
+        } else p.nf = -1;
+        if (p.nf < 0) { fprintf(stderr, "[trees] %s: not readable\n", pack); failed++; for (uint32_t i = s; i < nops; i++) if (!strcmp(ops[i].pack, pack)) done[i] = 1; free(pk); continue; }
+        Bytes **repl = calloc((size_t)p.nf, sizeof *repl);
+        NewEnt *add = calloc(nops, sizeof *add);
+        int nadd = 0, sibling = -1;
+        for (uint32_t i = s; i < nops; i++) {
+            TreeOp *op = &ops[i];
+            if (done[i] || strcmp(op->pack, pack)) continue;
+            done[i] = 1;
+            if (op->kind == 0) {
+                int e = pak_find(&p, fnv64(op->path, strlen(op->path)));
+                if (e < 0) { failed++; continue; }
+                Bytes *cur = repl[e];
+                size_t n0;
+                uint8_t *d0 = cur ? NULL : pak_entry(c, dec_mem, &p, e, &n0);
+                Bytes nb = {0};
+                if ((cur || d0) && trins_with(cur ? cur->p : d0, cur ? cur->n : n0, true, op->mats, op->n, &nb)) {
+                    if (cur) free(cur->p); else repl[e] = calloc(1, sizeof(Bytes));
+                    *repl[e] = nb, trees += (int)op->n;
+                } else failed++, free(nb.p);
+                free(d0);
+            } else {
+                int te = pak_find(&p, fnv64(op->tmpl, strlen(op->tmpl))), re = pak_find(&p, fnv64(op->trtrr, strlen(op->trtrr)));
+                size_t tn, rn;
+                uint8_t *td = te >= 0 ? pak_entry(c, dec_mem, &p, te, &tn) : NULL;
+                if (re >= 0 && !repl[re]) {
+                    uint8_t *rd = pak_entry(c, dec_mem, &p, re, &rn);
+                    if (rd) { repl[re] = calloc(1, sizeof(Bytes)); by_put(repl[re], rd, rn); free(rd); }
+                }
+                const char *nm = strrchr(op->path, '/');
+                nm = nm ? nm + 1 : op->path;
+                Bytes nb = {0};
+                if (td && re >= 0 && repl[re] && trins_with(td, tn, false, op->mats, op->n, &nb) && trtrr_add(repl[re], op->model, nm)) {
+                    add[nadd].ph = fnv64(op->path, strlen(op->path)), add[nadd].nh = fnv64(nm, strlen(nm)), add[nadd].data = nb, nadd++;
+                    if (sibling < 0) sibling = te;
+                    trees += (int)op->n, newfiles++;
+                } else failed++, free(nb.p);
+                free(td);
+            }
+        }
+        Bytes out = {0};
+        if (sibling < 0) for (int i = 0; i < p.nf && sibling < 0; i++) if (repl[i]) sibling = i;
+        char dst[1100];
+        snprintf(dst, sizeof dst, "mods/%s/romfs/%s", g_trees_mod, pack);
+        if (sibling >= 0 && pak_build(&p, repl, add, nadd, sibling, &out) && write_whole(dst, out.p, out.n)) packs++;
+        else if (sibling >= 0) { fprintf(stderr, "[trees] %s: not written\n", dst); failed++; }
+        free(out.p);
+        for (int i = 0; i < p.nf; i++) if (repl[i]) free(repl[i]->p), free(repl[i]);
+        for (int k = 0; k < nadd; k++) free(add[k].data.p);
+        free(repl), free(add), free(pk);
+    }
+    fprintf(stderr, "[trees] %s: %d packs written, %d trees (%d new files), %d operations failed\n", g_trees_mod, packs, trees, newfiles, failed);
+    _exit(packs && !failed ? 0 : 3);
+}
+
+// main.c, --build-trees <mod>: as extract_shaders_install
+void build_trees_install(const char *exefs, const char *mod) {
+    g_trees_mod = mod;
+    uint8_t id[8] = {0};
+    char mp[1100];
+    snprintf(mp, sizeof mp, "%s/main", exefs);
+    FILE *f = fopen(mp, "rb");
+    if (f) {
+        if (fseek(f, 0x40, SEEK_SET) || fread(id, 1, 8, f) != 8) memset(id, 0, 8);
+        fclose(f);
+    }
+    for (size_t i = 0; i < sizeof k_builds / sizeof *k_builds; i++)
+        if (!memcmp(id, k_builds[i].id, 8)) g_fn = k_builds[i].fn;
+    uint64_t nn_main = loader_find_symbol("nnMain");
+    if (!nn_main || !g_fn) { fprintf(stderr, "[trees] this game build has no known decoder\n"); _exit(2); }
+    hle_override(nn_main, build_trees, "<build_trees>");
+}
+
+// Before the game (main.c): each active mod with a tree_patch gets its trees built from the player's files once - again
+// when the patch or the game's RomFS changes (mods/<mod>/romfs/.trees: what it was built from)
+#include "platform.h"
+void trees_prepare(const char *root) {
+    char names[MODS_MAX][128];
+    int n = mods_active(names, MODS_MAX);
+    for (int i = 0; i < n; i++) {
+        char pf[64], pp[1100], img[1100], stamp_path[1100], want[256], have[256] = "";
+        if (!mod_ini_get(names[i], "tree_patch", pf, sizeof pf)) continue;
+        snprintf(pp, sizeof pp, "mods/%s/%s", names[i], pf);
+        snprintf(img, sizeof img, "%s/romfs.bin", root);
+        struct stat sp, si;
+        if (stat(pp, &sp)) continue;
+        if (stat(img, &si)) memset(&si, 0, sizeof si);
+        snprintf(want, sizeof want, "1 %lld %lld %lld", (long long)sp.st_size, (long long)sp.st_mtime, (long long)si.st_size);
+        snprintf(stamp_path, sizeof stamp_path, "mods/%s/romfs/.trees", names[i]);
+        FILE *f = fopen(stamp_path, "r");
+        if (f) { if (!fgets(have, sizeof have, f)) have[0] = 0; fclose(f); have[strcspn(have, "\n")] = 0; }
+        if (!strcmp(want, have)) continue;
+        char exe[1100], logp[1100];
+        if (!plat_exe_path(exe, sizeof exe)) continue;
+        snprintf(logp, sizeof logp, "mods/%s/build-trees.log", names[i]);
+        uint64_t t0 = plat_now_ns();
+        const char *argv[] = {exe, root, "--build-trees", names[i], NULL};
+        PlatProc pr = plat_spawn(argv, logp, false);
+        int rc = pr ? plat_proc_wait(pr, true) : -1;
+        LOG("[trees] %s: %s (%.1f s, %s)\n", names[i], rc == 0 ? "built from the game's files" : "not built", (double)(plat_now_ns() - t0) / 1e9, logp);
+        if (rc == 0 && (f = fopen(stamp_path, "w"))) { fprintf(f, "%s\n", want); fclose(f); }
+        mods_forget();
+    }
+}

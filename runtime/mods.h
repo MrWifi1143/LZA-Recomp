@@ -4,7 +4,7 @@
 //   mods/<name>/romfs/...                                  the game's RomFS paths (bin/message/English/...)
 //   mods/<name>/texpack/<key>.png                          a texture pack (runtime/nvn/vulkan/texpack.c)
 //   mods/<name>/mod.ini                                    recomp features the mod turns on (key = value lines:
-//                                                           plant_density, plant_spread - Lush Foliage)
+//                                                           plant_density, plant_spread, tree_patch - Lush Foliage)
 //   mods/<name>/atmosphere/contents/<title id>/romfs/...   (or any folder holding a romfs/ up to 4 levels down:
 //                                                           a download unpacked as it came)
 #pragma once
@@ -29,6 +29,10 @@ const char *mod_romfs_dir(void);  // (the first of them, or NULL)
 int mod_texpack_dirs(char dirs[][160], int max);
 // A value from the active mods' mod.ini files (the first mod that sets key): true with it in out.
 bool mod_ini_value(const char *key, char *out, size_t cap);
+// The same from one mod's mod.ini (mods/<name>/mod.ini)
+bool mod_ini_get(const char *name, const char *key, char *out, size_t cap);
+// Forget the mods' romfs/ folders found so far (one was made since: the trees a mod builds, runtime/oodle_server.c)
+void mods_forget(void);
 // path: a RomFS path ("bin/message/English/..."). True with the host file when a mod replaces it (the first that has it).
 bool mod_romfs_override(const char *path, char *out, size_t cap);
 // The language whose texts a mod replaces (its romfs/bin/message/<language>/), as a language code ("en-US"), or NULL

@@ -129,6 +129,7 @@ static void teardown(void) {
 
 static bool g_oodle_server;  // --oodle-server: runtime/oodle_server.c
 static bool g_extract_shaders;  // --extract-shaders: the same file (the shader warm-up's first step on Z-A)
+static const char *g_build_trees;  // --build-trees <mod>: the same file (a mod's trees made from the game's files)
 
 static void boot(const char *root) {
     char exefs[1024], romfs[1024], npdm_path[1024];
@@ -142,9 +143,10 @@ static void boot(const char *root) {
     loader_load(exefs);
     if (g_oodle_server) { extern void oodle_server_install(const char *exefs); oodle_server_install(exefs); }
     if (g_extract_shaders) { extern void extract_shaders_install(const char *exefs, const char *romfs); extract_shaders_install(exefs, romfs); }
+    if (g_build_trees) { extern void build_trees_install(const char *exefs, const char *mod); build_trees_install(exefs, g_build_trees); }
     { extern void libcfast_configure(void); libcfast_configure(); }  // (runtime/hle/libcfast.c)
     { extern void settings_load(void); settings_load(); }
-    if (!g_oodle_server && !g_extract_shaders) { extern void pkm_link_apply(void); pkm_link_apply(); }  // (PKHeX Link, if on: hle/pkm_link.c)
+    if (!g_oodle_server && !g_extract_shaders && !g_build_trees) { extern void pkm_link_apply(void); pkm_link_apply(); }  // (PKHeX Link, if on: hle/pkm_link.c)
     kernel_init();
     dispatch_init();
 
@@ -194,6 +196,10 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "--extract-shaders")) {
             g_extract_shaders = true;
             setenv("LARECOMP_LOG_STDERR", "1", 1);
+        } else if (!strcmp(argv[i], "--build-trees") && i + 1 < argc) {
+            g_build_trees = argv[i + 1];
+            argv[++i] = "--";  // (the mod's name: not the game root)
+            setenv("LARECOMP_LOG_STDERR", "1", 1);
         }
     plat_init();
 #ifdef _WIN32
@@ -211,7 +217,7 @@ int main(int argc, char **argv) {
         else if (argv[i][0] != '-') root = arg_root;
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
-    if (g_oodle_server || g_extract_shaders) {  // (Legends Studio's decoder / the warm-up's extraction, runtime/oodle_server.c: no window)
+    if (g_oodle_server || g_extract_shaders || g_build_trees) {  // (Legends Studio's decoder / the warm-up's extraction / a mod's trees, runtime/oodle_server.c: no window)
         boot(root);
         for (;;) SDL_Delay(1000);
     }
@@ -239,6 +245,12 @@ int main(int argc, char **argv) {
         {
             extern void warmup_cleanup_start(void);  // (old shader caches: runtime/nvn/vulkan/warmup.c)
             warmup_cleanup_start();
+        }
+        {   // (a mod's trees from the game's files, once: runtime/oodle_server.c - Lush Foliage)
+            extern void settings_load(void);
+            settings_load();
+            extern void trees_prepare(const char *root);
+            trees_prepare(root);
         }
         {  // (runtime/fnhook.c: the runtime's hooks, in the address tables of the known builds)
             extern void rt_fnhook_set_build(int build);
