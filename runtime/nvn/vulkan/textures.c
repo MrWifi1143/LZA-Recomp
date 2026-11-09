@@ -1115,6 +1115,19 @@ static VkSampler sampler_create(NvnSamplerDesc *d, bool cmp) {
     return s;
 }
 
+// The sampler with linear filtering where it has nearest (the same wrap, levels, bias): for the game's small glow
+// buffers stretched over the screen (exec.c texture_info) - nearest made bloom, sun glare and particles blocky
+VkSampler vk_sampler_linear_for(NvnSamplerDesc *d) {
+    if (d->backend_lin) return (VkSampler)d->backend_lin;
+    NvnSamplerDesc c = *d;
+    c.backend = c.backend_nocmp = c.backend_lin = NULL;
+    c.mag_filter = 1;
+    c.min_filter = c.min_filter == 0 ? 1 : c.min_filter == 2 ? 3 : c.min_filter == 4 ? 5 : c.min_filter;
+    VkSampler s = sampler_create(&c, false);
+    d->backend_lin = (void *)s;
+    return s;
+}
+
 VkSampler vk_default_sampler(bool linear) {
     static VkSampler s[2];
     if (!s[linear]) {

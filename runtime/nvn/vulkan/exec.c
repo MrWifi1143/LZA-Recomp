@@ -3317,6 +3317,27 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
         }
     }
     if (h && st.spool && tsc < (uint32_t)st.spool->count) smp = vk_sampler_for(&((NvnSamplerDesc *)st.spool->entries)[tsc], st_->shadow);
+    {   // Glow smoothing: the game's small colour render targets (under 1000 px wide: drawn at a fraction of the screen
+        // and stretched over it) read with a nearest sampler get its linear twin. Arceus samples its bloom chain linearly
+        // already; the one it reads nearest is the 480 x 270 R8 mask of changed pixels (the sun-occlusion glare) - 8 x 8
+        // blocks at 4K, blocky around the player against the sun (the user's 2026-11-08). LARECOMP_GLOW_LINEAR=0: the
+        // game's sampling; =2: each such read logged ("[glow]").
+        static int gl = -1;
+        if (gl < 0) gl = getenv("LARECOMP_GLOW_LINEAR") ? atoi(getenv("LARECOMP_GLOW_LINEAR")) : 1;
+        NvnTexture *gt = h && st.tpool && tic < (uint32_t)st.tpool->count ? ((NvnTexEntry *)st.tpool->entries)[tic].tex : NULL;
+        if (gl && smp && gt && st.spool && tsc < (uint32_t)st.spool->count && (gt->flags & 8) && gt->width < 1000 &&
+            (gt->format == 0x3f || gt->format == 0x29 || gt->format == 0x25 || gt->format == 0x38 || gt->format == 0x01 ||
+             gt->format == 0x05)) {
+            NvnSamplerDesc *sd = &((NvnSamplerDesc *)st.spool->entries)[tsc];
+            static int nlog;
+            if (gl > 1 && nlog < 40) nlog++, LOG("[glow] %ux%u fmt %#x sampled mag %u min %u%s\n", gt->width, gt->height, gt->format,
+                                                 sd->mag_filter, sd->min_filter, sd->mag_filter != 1 && !sd->compare_mode ? " -> linear" : "");
+            if (sd->mag_filter != 1 && !sd->compare_mode) {
+                extern VkSampler vk_sampler_linear_for(NvnSamplerDesc *d);
+                smp = vk_sampler_linear_for(sd);
+            }
+        }
+    }
     static int dump_sampled = -1;  // LARECOMP_DUMP_SAMPLED=1 (with the frame dump): depth / R8UI / G-buffer textures as sampled
     if (dump_sampled < 0) dump_sampled = getenv("LARECOMP_DUMP_SAMPLED") != NULL;  // (its readbacks split the frame's passes)
     if (dump_sampled && g_debug_frame && h && st.tpool && tic < (uint32_t)st.tpool->count) {

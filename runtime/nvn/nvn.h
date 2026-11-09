@@ -40,6 +40,7 @@ typedef struct {
     float border[4];
     void *backend;
     void *backend_nocmp;  // (a depth-compare sampler as used by a shader that reads raw depth: renderer)
+    void *backend_lin;    // (its linearly filtered twin: the glow buffers' smoothing, renderer)
 } NvnSamplerDesc;
 
 typedef struct {
