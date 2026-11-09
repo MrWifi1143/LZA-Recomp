@@ -428,6 +428,30 @@ void pla_set_detail(void) {
         else g_slot[s].slot = 0;
 }
 
+// Distance LOD (the field's trees: the far ones are flat stand-in cards, full trees only near the player): the LOD
+// selector f_7001acd904's distance mode ([model+0x1f0] = 1: the jump table's 0x7001acdb48) takes level floor(d / 100 m)
+// (100.0 built in code, 0x7001acdc08), capped at the model's level count, d from the object (x19 + 0x10) to the camera
+// that f_7002a11f80 returns there (its +0x40). That one call (lr 0x7001acdbb0) gets a copy of the camera moved toward
+// the object to d / k, so each level reaches k times further. Found 2026-11-08 on the user's save by the beach (birches
+// 100+ m away swapping as they walked): forcing the selector to 0 made every far tree full. The coverage mode (rocks)
+// is put_lodtab's.
+static const float k_distlod[4] = {1.0f, 1.5f, 2.0f, 3.0f};
+static float g_distlod = -1;  // (LARECOMP_PLA_DISTLOD=<k>: k instead of the setting's)
+static _Thread_local float t_cam[8] __attribute__((aligned(16)));
+static int lodcam_hook(Cpu *c, uint64_t addr) {
+    if (c->x[30] != 0x7001acdbb0ull) return 0;
+    float k = g_distlod > 0 ? g_distlod : g_settings.detail >= 0 && g_settings.detail <= 3 ? k_distlod[g_settings.detail] : 1.0f;
+    uint64_t obj = c->x[19];  // (the selector's object, set before this call)
+    rt_call_original(c, addr);
+    uint64_t cam = c->x[0];
+    if (k == 1.0f || cam < 0x7200000000ull || cam >= 0x7400000000ull || obj < 0x7200000000ull || obj >= 0x7400000000ull) return 1;
+    const float *cp = (const float *)(uintptr_t)(cam + 0x40), *op = (const float *)(uintptr_t)(obj + 0x10);
+    for (int i = 0; i < 3; i++) t_cam[i + 4] = op[i] + (cp[i] - op[i]) / k;
+    t_cam[7] = cp[3];
+    c->x[0] = (uint64_t)(uintptr_t)t_cam - 0x30;  // (the selector reads only +0x40 of it)
+    return 1;
+}
+
 void pla_drawdist_configure(void) {
     g_log = getenv("LARECOMP_PLA_DRAWDIST_LOG") && atoi(getenv("LARECOMP_PLA_DRAWDIST_LOG")) > 0;
     put_lodtab();
@@ -437,6 +461,8 @@ void pla_drawdist_configure(void) {
     rt_register_fnhook_at(0x70018d24f8ull, anim_mgr_hook);
     rt_register_fnhook_at(0x70018d0b54ull, anim_poke_hook);
     rt_register_fnhook_at(0x7002b1d074ull, grass_hook);
+    g_distlod = getenv("LARECOMP_PLA_DISTLOD") ? (float)atof(getenv("LARECOMP_PLA_DISTLOD")) : 0;
+    rt_register_fnhook_at(0x7002a11f80ull, lodcam_hook);
     g_grass_fade = getenv("LARECOMP_PLA_GRASS_FADE") ? (float)atof(getenv("LARECOMP_PLA_GRASS_FADE")) : 0;
     rt_register_fnhook_at(0x7000004fc0ull, oodle_hook);  // (the setting decides per area load)
     if (getenv("LARECOMP_PLA_LODFN")) rt_register_fnhook_at(0x700299d91cull, lodfn_hook);
