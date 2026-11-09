@@ -17,23 +17,35 @@ void rt_register_fnhook_at(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
 static float g_to[3];
 static volatile uint64_t g_body;
 static int g_state = -1;  // -1 off, 0 waiting, 1 writing, 2 done
+static long g_log_every;  // (research) LARECOMP_LOG_PLAYER=<n>: the player's position every n frames ("[player] frame f x y z")
 
 static int body_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     uint64_t o = c->x[0];
-    if (g_state == 0 && o >= HEAP_BASE && o < HEAP_BASE + HEAP_MAX && *(const uint64_t *)(uintptr_t)o == BODY_VTABLE) g_body = o;
+    if ((g_state == 0 || g_log_every) && o >= HEAP_BASE && o < HEAP_BASE + HEAP_MAX && *(const uint64_t *)(uintptr_t)o == BODY_VTABLE) g_body = o;
     return 0;
 }
 
 __attribute__((constructor)) static void warp_init(void) {
+    g_log_every = getenv("LARECOMP_LOG_PLAYER") ? atol(getenv("LARECOMP_LOG_PLAYER")) : 0;
+    if (g_log_every) {
+        rt_register_fnhook_at(0x7000081ce0ull, body_hook);
+        rt_register_fnhook_at(0x700004c3e8ull, body_hook);
+    }
     const char *w = getenv("LARECOMP_WARP");
     if (!w || sscanf(w, "%f %f %f", &g_to[0], &g_to[1], &g_to[2]) != 3) return;
     g_state = 0;
-    rt_register_fnhook_at(0x7000081ce0ull, body_hook);
-    rt_register_fnhook_at(0x700004c3e8ull, body_hook);
+    if (!g_log_every) {
+        rt_register_fnhook_at(0x7000081ce0ull, body_hook);
+        rt_register_fnhook_at(0x700004c3e8ull, body_hook);
+    }
 }
 
 void warp_frame(uint64_t frame) {  // (each game frame: runtime/hle/input.c)
+    if (g_log_every > 0 && frame % (uint64_t)g_log_every == 0 && g_body && *(const uint64_t *)(uintptr_t)g_body == BODY_VTABLE) {
+        const float *p = (const float *)(uintptr_t)(g_body + 0x90);
+        LOG("[player] frame %llu %.2f %.2f %.2f\n", (unsigned long long)frame, p[0], p[1], p[2]);
+    }
     if (g_state < 0 || g_state == 2) return;
     static uint64_t body, since, still_since, writes;
     static float last[3];
