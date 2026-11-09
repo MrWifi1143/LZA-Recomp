@@ -39,7 +39,7 @@
 #pragma GCC diagnostic pop
 #endif
 
-typedef struct { uint64_t key; char *path; bool dds; } Ent;
+typedef struct { uint64_t key; char *path; bool dds; int prio; } Ent;  // (prio: the mod's place in the load order)
 static Ent *g_ent;
 static int g_n = -1;
 static uint64_t g_hits;
@@ -47,10 +47,11 @@ static uint64_t g_hits;
 static int cmp_ent(const void *a, const void *b) {
     const Ent *x = a, *y = b;
     if (x->key != y->key) return x->key < y->key ? -1 : 1;
-    return (int)y->dds - (int)x->dds;  // (the .dds first)
+    if (x->prio != y->prio) return x->prio - y->prio;  // (the first mod's)
+    return (int)y->dds - (int)x->dds;  // (its .dds before its .png)
 }
 
-static void index_dir(const char *dir) {
+static void index_dir(const char *dir, int prio) {
     int count = 0;
     char **names = SDL_GlobDirectory(dir, "*", 0, &count);
     if (!names) return;
@@ -67,7 +68,7 @@ static void index_dir(const char *dir) {
         if (*end || !key) continue;
         g_ent = realloc(g_ent, (size_t)(g_n + 1) * sizeof *g_ent);
         size_t n = strlen(dir) + len + 2;
-        g_ent[g_n] = (Ent){key, malloc(n), dds};
+        g_ent[g_n] = (Ent){key, malloc(n), dds, prio};
         snprintf(g_ent[g_n].path, n, "%s/%s", dir, nm);
         g_n++;
     }
@@ -77,17 +78,23 @@ static void index_dir(const char *dir) {
 static void loader_start(void);
 static void texpack_init(void) {
     g_n = 0;
-    const char *e = getenv("LARECOMP_TEXPACK");
-    const char *dir = e && *e ? e : mod_texpack_dir();
-    if (!dir) return;
-    char sub[1100];
-    index_dir(dir);
-    snprintf(sub, sizeof sub, "%s/textures", dir);
-    index_dir(sub);
+    const char *e = getenv("LARECOMP_TEXPACK");  // (a folder for this run, in place of the mods' packs)
+    char dirs[MODS_MAX][160];
+    int nd = 0;
+    if (e && *e) snprintf(dirs[nd++], sizeof dirs[0], "%s", e);
+    else nd = mod_texpack_dirs(dirs, MODS_MAX);  // (every mod that's on with a texpack/, in load order)
+    for (int d = 0; d < nd; d++) {
+        char sub[200];
+        int before = g_n;
+        index_dir(dirs[d], d);
+        snprintf(sub, sizeof sub, "%s/textures", dirs[d]);
+        index_dir(sub, d);
+        LOG("[texpack] %s: %d files\n", dirs[d], g_n - before);
+    }
     if (g_n) qsort(g_ent, (size_t)g_n, sizeof *g_ent, cmp_ent);
     int dds = 0, keys = 0;
     for (int i = 0; i < g_n; i++) dds += g_ent[i].dds, keys += !i || g_ent[i].key != g_ent[i - 1].key;
-    LOG("[texpack] %s: %d replacement textures (%d as .dds)\n", dir, keys, dds);
+    if (nd) LOG("[texpack] %d replacement textures from %d pack%s (%d .dds files)\n", keys, nd, nd == 1 ? "" : "s", dds);
     if (g_n) loader_start();
 }
 
@@ -96,7 +103,7 @@ bool texpack_active(void) {
     return g_n > 0;
 }
 
-static const Ent *find(uint64_t key) {  // (the .dds when there's one: sorted first)
+static const Ent *find(uint64_t key) {  // (the first mod's, its .dds when it has one: sorted first)
     int lo = 0, hi = g_n - 1, at = -1;
     while (lo <= hi) {
         int mid = (lo + hi) / 2;

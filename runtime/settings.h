@@ -46,7 +46,7 @@ typedef struct {
     bool wild_battle;    // touching a wild Pokémon starts a battle, then the capture (runtime/hle/wildbattle.c)
     int button_prompts;  // PROMPTS_*: which controller's buttons the game's prompts show (runtime/nvn/glyphs.c)
     char game_lang[8];   // the game's language code ("en-US", "es"...: runtime/mods.c game_language)
-    char mod[128];       // active mod / fan translation (mods/<name>/), empty = none (runtime/mods.h)
+    char mod[1024];      // the mods that are on (mods/<name>/), in load order, separated by commas; empty = none (runtime/mods.h)
     char plugins_off[256];  // plugins/ files left out, comma-separated (runtime/plugin.c)
     char plugins_on[256];   // ... and the opt-in ones switched on ("steamrelay.dll"; plugin_opt_in)
     int next_fps, next_res_height;  // set in game (hle/pla_options.c; the height + 1), 0 = not: for the ini, from the next start

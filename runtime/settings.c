@@ -43,10 +43,10 @@ void settings_defaults(Settings *s) { *s = (Settings)SETTINGS_DEFAULTS; }
 static bool g_experimental_seen;
 static void parse_line(const char *line) {
     char key[64];
-    char val[128];
-    if (sscanf(line, " %63[^= ] = %127[^\n]", key, val) < 1) return;
+    char val[1024];  // (mod: several names)
+    if (sscanf(line, " %63[^= ] = %1023[^\n]", key, val) < 1) return;
     if (!strcmp(key, "game_lang") || !strcmp(key, "mod") || !strcmp(key, "plugins_off") || !strcmp(key, "plugins_on")) {  // (may be empty)
-        if (sscanf(line, " %63[^= ] = %127[^\n]", key, val) != 2) val[0] = 0;
+        if (sscanf(line, " %63[^= ] = %1023[^\n]", key, val) != 2) val[0] = 0;
         if (key[0] == 'g') strlcpy(g_settings.game_lang, val, sizeof g_settings.game_lang);
         else if (!strcmp(key, "plugins_off")) strlcpy(g_settings.plugins_off, val, sizeof g_settings.plugins_off);
         else if (key[0] == 'p') strlcpy(g_settings.plugins_on, val, sizeof g_settings.plugins_on);
@@ -104,7 +104,7 @@ void settings_load(void) {
     loaded = true;
     FILE *f = fopen(SETTINGS_FILE, "r");
     if (!f) { g_settings_fresh = true; return; }
-    char line[256];
+    char line[1200];
     while (fgets(line, sizeof line, f)) {
         // (a file edited by hand may have CRLF: "resolution = dynamic\r" did not match and fell back silently)
         for (size_t n = strlen(line); n && (line[n - 1] == '\n' || line[n - 1] == '\r' || line[n - 1] == ' '); n--) line[n - 1] = 0;
@@ -115,7 +115,7 @@ void settings_load(void) {
             const char *eq = strstr(p, " = "), *next = eq ? strstr(eq + 3, " = ") : NULL, *k = next;
             while (k && k > eq + 3 && ((k[-1] >= 'a' && k[-1] <= 'z') || k[-1] == '_')) k--;
             if (!next || k == next || k <= eq + 3) { parse_line(p); break; }
-            char part[256];
+            char part[1200];
             snprintf(part, sizeof part, "%.*s", (int)(k - p), p);
             parse_line(part);
             p = k;
