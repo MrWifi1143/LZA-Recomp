@@ -11,7 +11,7 @@
 // shaders keep one base address (gmem_ref_info). Also on RADV, where importing costs every submit (see decide).
 // LARECOMP_DMABUF_HEAP=0 turns it off; =1 tries it on any driver.
 //
-// Lazy on RADV: there every chunk is GTT memory and counts against the kernel's GTT limit from the moment it exists -
+// Lazy (RADV, Turnip): on RADV every chunk is GTT memory and counts against the kernel's GTT limit from the moment it exists -
 // the PS5 under Linux has 512 MB VRAM and 7.2 GB GTT, and Z-A's StandardAllocator block at max settings is 5.75 GB
 // (hle/za_fixes.c: headroom for 4K targets, People and Detail): backed whole, GTT sat at its limit and anything more
 // (a texture pack) made gamescope fault and the session restart. The game takes nearly all of the block for its own
@@ -125,7 +125,8 @@ static void decide(void) {
     H.get_fd = (PFN_vkGetMemoryFdKHR)vkGetDeviceProcAddr(H.dev, "vkGetMemoryFdKHR");
     if (!H.get_fd) goto off;
     H.state = 1;
-    H.lazy = radv && !(ENV("LARECOMP_GPUHEAP_EAGER") && *ENV("LARECOMP_GPUHEAP_EAGER") == '1');
+    // (lazy on Turnip too: the Frame's chunks are committed RAM of its 15 GB, shared with everything else)
+    H.lazy = !(ENV("LARECOMP_GPUHEAP_EAGER") && *ENV("LARECOMP_GPUHEAP_EAGER") == '1');
     LOG("[vk] no host memory import: the guest heap is made of GPU memory (dma-buf, memory type %u, %#x)\n", H.mtype,
         mp.memoryTypes[H.mtype].propertyFlags);
     return;
