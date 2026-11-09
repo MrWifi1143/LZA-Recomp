@@ -4891,7 +4891,9 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, 
     // bigger (the area average, as present.frag), so the sharpening is per screen pixel. 1440p on a 1080p screen read
     // soft though the field really renders at 1440 (the game's low-resolution textures; the user, 2026-11-08).
     int sharpen = g_settings.sharpen >= 1 && g_settings.sharpen <= 3 ? g_settings.sharpen : 0;
-    static const float k_sharp_stops[4] = {0, 1.0f, 0.5f, 0.0f};  // (RCAS: 0 stops = the most)
+    // (RCAS: 0 stops = the most. Full strength made faces look cut out - polygon edges dark lines, stubble blown up: the
+    // user's Laventon close-up - so High is AMD's FSR default, 0.2 stops, and Low / Medium sit below it)
+    static const float k_sharp_stops[4] = {0, 2.0f, 1.0f, 0.2f};
     if (fsr) sharpen = 0;  // (FSR's own RCAS sharpens an upscale)
     if (!smaa && !fsr && !sharpen) return v;
     extern void vk_frame_suspend(void);
