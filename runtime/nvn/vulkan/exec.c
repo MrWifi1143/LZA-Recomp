@@ -1487,8 +1487,9 @@ static void gpl_prebuild(void *arg);
 // same table) reads a row pair per material from cb3: a lit row at +192..+204 and a shade row at +320..+332 (rgb tint,
 // weight), mixed by sun visibility, and blends the surface toward that tint by the weight. At dusk the shade rows are a
 // strong purple (0.45, 0.19, 0.74 on rock; on the Switch too) - lit faces and shadow depth are fine, shaded rock and
-// leaves turn violet. Settings.shadow_color 0 (Natural): each shade row's rgb is read 80% less saturated, its
-// luminance kept, so shade keeps its brightness and a little of the cool tint. Returns the new GLSL, or NULL when the
+// leaves turn violet. Settings.shadow_color 0 (Natural): a magenta shade row (red and blue both above green) is read up
+// to 80% less saturated, its luminance kept, so shade keeps its brightness and a little of the cool tint; blue (night)
+// and warm tints stay the game's. Returns the new GLSL, or NULL when the
 // shader has no such table (cb3 a vec4 array, the eight reads off one register).
 static char *pla_shade_tint(const char *src) {
     static const char *const decl = "uniform CB3 { vec4 cb3[";
@@ -1513,7 +1514,8 @@ static char *pla_shade_tint(const char *src) {
     static const char helper[] =
         "float pla_tint(uint b, int c) {  // (a material's shade-row tint, 80% less saturated: pla_shade_tint)\n"
         "    vec3 t = vec3(cbr(cb3, b + 320u), cbr(cb3, b + 324u), cbr(cb3, b + 328u));\n"
-        "    t = mix(t, vec3(dot(t, vec3(0.299, 0.587, 0.114))), 0.8);\n"
+        "    float m = smoothstep(0.0, 0.08, min(t.r, t.b) - t.g);  // (only magenta tints: red and blue above green)\n"
+        "    t = mix(t, vec3(dot(t, vec3(0.299, 0.587, 0.114))), 0.8 * m);\n"
         "    return t[c];\n"
         "}\n";
     size_t n = strlen(src);
