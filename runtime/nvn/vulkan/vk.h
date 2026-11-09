@@ -36,6 +36,7 @@ typedef struct {
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
     bool custom_border, divisor, host_import;
+    bool mem_budget;  // VK_EXT_memory_budget (VMA's heap budgets are the driver's: texture packs keep below them)
     bool xfb;  // VK_EXT_transform_feedback (NVN transform feedback: PLA skins its characters with it)
     bool depth_clamp;  // depthClamp feature (NVN SetDepthClamp)
     bool gpl;          // VK_EXT_graphics_pipeline_library with fast linking (exec.c: pipelines from parts)

@@ -182,6 +182,8 @@ static void create_device(void) {
         } else if (gpuheap_on())
             LOG("[vk] warning: the guest heap is GPU memory but the queue can't bind it: shader global memory reads return zero\n");
     }
+    g_vk.mem_budget = has_ext(ep, ne, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+    if (g_vk.mem_budget) ext[n_ext++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
     g_vk.xfb = has_ext(ep, ne, VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME);
     if (g_vk.xfb) ext[n_ext++] = VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME;
     // pipelines linked from separately built parts (exec.c gpl_link); LARECOMP_VK_GPL=0: whole pipelines as before
@@ -344,7 +346,8 @@ static void create_device(void) {
     LOG("[vk] transform feedback: %s\n", g_vk.xfb ? "yes" : "no");
 
     VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.dev, .instance = g_vk.inst,
-                                 .vulkanApiVersion = VK_API_VERSION_1_3};
+                                 .vulkanApiVersion = VK_API_VERSION_1_3,
+                                 .flags = g_vk.mem_budget ? VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT : 0};
     VK_CHECK(vmaCreateAllocator(&ai, &g_vk.vma));
 
     VkSemaphoreTypeCreateInfo st = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
