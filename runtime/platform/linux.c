@@ -238,9 +238,11 @@ void plat_print_backtrace(void) {
 }
 
 bool pagewatch_fault(uint64_t addr);  // (runtime/pagewatch.c)
+bool gpuheap_fault(uint64_t addr);    // (runtime/nvn/vulkan/gpuheap.c)
 
 static void crash_handler(int sig, siginfo_t *si, void *ctx) {
     ucontext_t *uc = ctx;
+    if (sig == SIGSEGV && gpuheap_fault((uint64_t)(uintptr_t)si->si_addr)) return;  // (GPU memory backed at first use)
     if (sig == SIGSEGV && pagewatch_fault((uint64_t)(uintptr_t)si->si_addr)) return;  // (a page the renderer keeps a copy of)
     static volatile int depth;
     if (sig == SIGABRT && depth++ > 0) { signal(SIGABRT, SIG_DFL); abort(); }  // (nested: just die)

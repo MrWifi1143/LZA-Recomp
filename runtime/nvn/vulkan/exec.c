@@ -3453,8 +3453,11 @@ static VkBuffer gmem_chunk_buf[GMEM_MAX_CHUNKS];
 static uint64_t gmem_chunk_size;
 static bool gmem_sparse_bind(void) {
     extern int gpuheap_take(uint64_t *off, int *fds, int max);
-    extern uint64_t gpuheap_end(void), gpuheap_chunk_size(void), g_gpuheap_end;
-    if (gmem_buf && __atomic_load_n(&g_gpuheap_end, __ATOMIC_ACQUIRE) == gmem_size) return true;  // (nothing new)
+    extern uint64_t gpuheap_end(void), gpuheap_chunk_size(void), g_gpuheap_end, g_gpuheap_gen;
+    static uint64_t gen_bound = UINT64_MAX;  // (gpuheap backs chunks below its end lazily on RADV: g_gpuheap_gen counts them)
+    uint64_t gen = __atomic_load_n(&g_gpuheap_gen, __ATOMIC_ACQUIRE);
+    if (gmem_buf && __atomic_load_n(&g_gpuheap_end, __ATOMIC_ACQUIRE) == gmem_size && gen == gen_bound) return true;  // (nothing new)
+    gen_bound = gen;
     if (!gmem_buf) {
         VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = HEAP_MAX,
                                  .flags = VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT,
@@ -3511,6 +3514,12 @@ static bool gmem_sparse_bind(void) {
     }
     uint64_t end = gpuheap_end();
     if (end != gmem_size) LOG("[vk] guest heap bound for shader global memory: %llu MB (sparse)\n", (unsigned long long)(end >> 20));
+    if (n) {
+        extern unsigned gpuheap_backed_mb(void);
+        static unsigned shown;
+        unsigned mb = gpuheap_backed_mb();
+        if (mb >= shown + 512 || ENV("LARECOMP_LOG_GPUHEAP")) LOG("[vk] guest heap: %u MB of GPU memory backed\n", mb), shown = mb;
+    }
     gmem_size = end;
     return true;
 }

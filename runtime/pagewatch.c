@@ -85,8 +85,12 @@ bool pagewatch_fault(uint64_t addr) {
     return retry;
 }
 
+void gpuheap_touch(uint64_t addr, uint64_t n);
 void pagewatch_prewrite(uint64_t addr, uint64_t n) {
     if (!n) return;
+#ifdef __linux__
+    gpuheap_touch(addr, n);  // (an unbacked GPU-memory chunk: a syscall would fail with EFAULT there, not fault)
+#endif
     for (uint64_t a = addr & ~(PAGE - 1); a < addr + n; a += PAGE) {
         if (!in_heap(a)) continue;
         uint64_t p = pidx(a);
