@@ -12,6 +12,12 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
   from the folder (Z-A got the same fix for its shader packs in 0.6.0).
 Arceus:
 
+- Shadow Color (Next Start): Natural (the default) tones down the strong purple the game gives shade at dusk (shaded
+  rock and leaves turned violet - on the Switch too); Switch keeps the original.
+- Draw Distance also keeps far trees as full models (the game swapped them to flat cards past 100 m): 150 / 200 /
+  300 m at High / Very High / Max, at no measurable GPU cost.
+- Round bloom: bright points (the intro's sparks, lamps at night) glow round and soft instead of in squares (the
+  game's box blur and bilinear steps - on the Switch too). LARECOMP_ROUND_BLOOM=0 for the original.
 - Texture packs (framework): a mod's texpack/ folder of <key>.png replaces the game's textures at any size
   (runtime/nvn/vulkan/texpack.c); Legends Studio exports every texture under its key and tools/texpack_upscale.py makes
   the pack (AI for colour, filters for normal maps and masks). LARECOMP_TEXPACK=<folder> for one run. Decoded when first
