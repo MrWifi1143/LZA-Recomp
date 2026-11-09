@@ -155,7 +155,13 @@ uint64_t renderer_present_count(void);
 
 static bool tex_scalable(const NvnTexture *t) {
     if (getenv("LARECOMP_NO_SCALE")) return false;
-    if (t->target != 1 || t->samples > 1 || !(t->flags & 8) || t->width < 32 || t->height < 16) return false;
+    // Targets narrower than 500 (the game's 480 x 270 and smaller) keep the game's size: Arceus counts changed pixels in
+    // a 480 x 270 pass (fs 304bac5d0887128c: an atomic add per pixel over a threshold, all on one counter) - at 4K it ran
+    // 4x the pixels and 4x the atomics, 7.9 ms of an 11 ms frame while the player ran (51 fps in the village; the user's
+    // 2026-11-08), and the game got counts 4x what it expects. Native: 2.6 ms, 60 fps held. LARECOMP_SCALE_MIN_W=<px>.
+    static int min_w = -1;
+    if (min_w < 0) min_w = getenv("LARECOMP_SCALE_MIN_W") ? atoi(getenv("LARECOMP_SCALE_MIN_W")) : 500;
+    if (t->target != 1 || t->samples > 1 || !(t->flags & 8) || t->width < (uint32_t)min_w || t->height < 16) return false;
     float a = (float)t->width / (float)t->height;
     return a > 1.74f && a < 1.81f;
 }
