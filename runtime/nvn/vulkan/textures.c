@@ -542,6 +542,30 @@ static void upload_pending(TexBackend *b) {
 uint64_t prof_tex_checks, prof_tex_samples, prof_tex_full, prof_tex_full_bytes, prof_tex_dyn;
 // Texture packs (texpack.c): the texture's image becomes the pack's - a .dds's BC7 / BC5 / BC4 levels as they are, or a
 // PNG's RGBA8 (sRGB when the game's texture was) with its mips blitted down the chain. False: nothing changed.
+// Room for a replacement of `need` bytes: the GPU's memory (all heaps - an APU's images land in whichever has room) used
+// with it stays a reserve (15%, at least 768 MB) below the driver's budget (VK_EXT_memory_budget; VMA estimates without).
+// The PS5 under Linux has 512 MB VRAM + 7 GB GTT and Z-A's guest heap takes 6 GB of it: its 6.5 GB AI pack filled the
+// rest, the compositor's buffers faulted and the GPU hung (the user's, 2026-11-09). Over the budget the game's own
+// texture stays; LARECOMP_TEXPACK_NOBUDGET=1 ignores it.
+static bool texpack_room(uint64_t need) {
+    static int off = -1;
+    if (off < 0) off = getenv("LARECOMP_TEXPACK_NOBUDGET") != NULL;
+    if (off) return true;
+    VmaBudget bud[VK_MAX_MEMORY_HEAPS];
+    vmaGetHeapBudgets(g_vk.vma, bud);
+    const VkPhysicalDeviceMemoryProperties *mp;
+    vmaGetMemoryProperties(g_vk.vma, &mp);
+    uint64_t use = 0, budget = 0;
+    for (uint32_t i = 0; i < mp->memoryHeapCount; i++) use += bud[i].usage, budget += bud[i].budget;
+    uint64_t reserve = budget * 15 / 100 > (768ull << 20) ? budget * 15 / 100 : (768ull << 20);
+    bool ok = use + need + reserve <= budget;
+    static int warned;
+    if (!ok && !warned++)
+        LOG("[texpack] GPU memory budget reached (%llu of %llu MB used): the game's textures stay from here\n",
+            (unsigned long long)(use >> 20), (unsigned long long)(budget >> 20));
+    return ok;
+}
+
 static bool texpack_apply(TexBackend *b, const TexLoaded *r) {
     VkFormat old = b->format, vf = r->fmt;
     if (r->rgba) {
@@ -550,6 +574,10 @@ static bool texpack_apply(TexBackend *b, const TexLoaded *r) {
                     old == VK_FORMAT_B8G8R8A8_SRGB;
         vf = srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
     }
+    uint64_t need = 0;
+    for (uint32_t lv = 0; lv < r->levels && lv < TEXPACK_MAX_LEVELS; lv++) need += r->level_size[lv];
+    if (r->rgba) need = need * 4 / 3;  // (a PNG's: its levels made here)
+    if (!texpack_room(need)) return false;
     uint32_t w = r->w, h = r->h, levels = r->levels;
     if (r->rgba) for (uint32_t s = w > h ? w : h; s > 1; s >>= 1) levels++;
     VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
