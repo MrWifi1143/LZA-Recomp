@@ -60,7 +60,9 @@ GENARCH  ?= -march=x86-64-v3  # as on Windows: AVX2 + FMA for the lifted FP/SIMD
 endif
 GENFLAGS += $(GENARCH) -fPIC
 OSFLAGS  := -Wno-format  # (%llx for uint64_t, which is unsigned long here: the same size)
-SHADERC  ?= -lshaderc  # (Debian / Ubuntu's libshaderc.so; a shaderc built from source: -lshaderc_shared)
+# shaderc: Debian / Ubuntu ship libshaderc.so; Arch (and a shaderc built from source) only libshaderc_shared.so -
+# its libshaderc.a lacks shaderc_util ("undefined symbol: shaderc_util::..." at the link, 2026-11-08)
+SHADERC  ?= $(if $(wildcard /usr/lib/libshaderc.so /usr/lib64/libshaderc.so /usr/lib/*/libshaderc.so),-lshaderc,-lshaderc_shared)
 # -rdynamic: crash backtraces name host functions (runtime/platform/linux.c)
 LDFLAGS  := -fuse-ld=lld -rdynamic $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
             -lvulkan $(SHADERC) -lpthread -ldl -lm
