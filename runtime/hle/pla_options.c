@@ -111,6 +111,8 @@ static int get_minvx(void) { return g_settings.mouse_invert_x ? 1 : 0; }
 static void set_minvx(int i) { g_settings.mouse_invert_x = i == 1; }
 static int get_smooth(void) { return g_settings.shadow_smooth ? 0 : 1; }
 static void set_smooth(int i) { g_settings.shadow_smooth = i == 0; }
+static int get_shcol(void) { return g_settings.shadow_color == 1; }
+static void set_shcol(int i) { g_settings.shadow_color = i; }
 static int get_sharp(void) { return g_settings.sharpen >= 0 && g_settings.sharpen <= 3 ? g_settings.sharpen : 0; }
 static void set_sharp(int i) { g_settings.sharpen = i; }
 static int get_shadows(void) { return g_settings.shadows >= 0 && g_settings.shadows <= 2 ? g_settings.shadows : 0; }
@@ -148,6 +150,8 @@ static const Row k_rows[] = {
      CHOICE, 3, {"Switch", "High", "Ultra"}, get_shadows, set_shadows},
     {"Shadow Smoothing (Next Start)", "Choose whether shadow edges are smoothed or show the shadow map's steps.", CHOICE, 2,
      {"Enabled", "Disabled"}, get_smooth, set_smooth},
+    {"Shadow Color (Next Start)", "Choose the color of shade at dawn, dusk and night. The Switch's tints it strongly, purple at dusk.",
+     CHOICE, 2, {"Natural", "Switch"}, get_shcol, set_shcol},
     {"Draw Distance", "Choose how far away trees and the rest of the field are still drawn. Farther costs performance.",
      CHOICE, 4, {"Switch", "High", "Very High", "Max"}, get_detail, set_detail},
     {"Shader Loading", "Wait for new things to load (may stutter), or show them a moment later.", CHOICE, 2,

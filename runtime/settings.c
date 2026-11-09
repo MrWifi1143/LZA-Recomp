@@ -69,6 +69,7 @@ static void parse_line(const char *line) {
     else if (!strcmp(key, "mouse_invert_x")) g_settings.mouse_invert_x = atoi(val) != 0;
     else if (!strcmp(key, "mouse_invert_y")) g_settings.mouse_invert_y = atoi(val) != 0;
     else if (!strcmp(key, "shadow_smoothing")) g_settings.shadow_smooth = atoi(val) != 0;
+    else if (!strcmp(key, "shadow_color")) g_settings.shadow_color = atoi(val) == 1;
     else if (!strcmp(key, "sharpening")) g_settings.sharpen = atoi(val) >= 0 && atoi(val) <= 3 ? atoi(val) : 0;
     else if (!strcmp(key, "shadows")) g_settings.shadows = atoi(val) >= 0 && atoi(val) <= 2 ? atoi(val) : 0;
     else if (!strcmp(key, "detail_distance")) g_settings.detail = atoi(val) >= 0 && atoi(val) <= 3 ? atoi(val) : 0;
@@ -156,6 +157,7 @@ void settings_save(void) {
     fprintf(f, "mouse_invert_x = %d\nmouse_invert_y = %d\n", g_settings.mouse_invert_x, g_settings.mouse_invert_y);
     fprintf(f, "shader_loading = %s\n", g_settings.shader_nowait ? "nowait" : "wait");
     fprintf(f, "shadow_smoothing = %d\n", g_settings.shadow_smooth);
+    fprintf(f, "shadow_color = %d\n", g_settings.shadow_color);
     fprintf(f, "sharpening = %d\n", g_settings.sharpen);
     fprintf(f, "shadows = %d\n", g_settings.shadows);
     fprintf(f, "detail_distance = %d\n", g_settings.detail);

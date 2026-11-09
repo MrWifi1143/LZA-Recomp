@@ -889,6 +889,7 @@ extern "C" void launcher_lg_run(const char *root) {
     }
     int shl_i = g_settings.shader_nowait ? 1 : 0;
     bool smooth_sh = g_settings.shadow_smooth;
+    int shcol_i = g_settings.shadow_color == 1;
     int detail_i = g_settings.detail >= 0 && g_settings.detail <= 3 ? g_settings.detail : 0;
     int shadows_i = g_settings.shadows >= 0 && g_settings.shadows <= 2 ? g_settings.shadows : 0;
     int sharp_i = g_settings.sharpen >= 0 && g_settings.sharpen <= 3 ? g_settings.sharpen : 0;
@@ -909,7 +910,7 @@ extern "C" void launcher_lg_run(const char *root) {
         for (int i = 0; i < 6; i++) if (res_lines[i] == d.res_height) res = i;
         full = d.fullscreen, smaa = d.antialias == AA_SMAA, showfps = d.show_fps, realtime = !d.fixed_steps, experimental = d.experimental;
         fps_i = fps_index(d.fps);
-        wildb = d.wild_battle, prompts_i = d.button_prompts, smooth_sh = d.shadow_smooth, bg_i = d.background, pk_i = d.pkhex_link;
+        wildb = d.wild_battle, prompts_i = d.button_prompts, smooth_sh = d.shadow_smooth, shcol_i = d.shadow_color, bg_i = d.background, pk_i = d.pkhex_link;
         detail_i = d.detail, shadows_i = d.shadows, sharp_i = d.sharpen;
         shl_i = d.shader_nowait;
         gopt = k_gopt_default;
@@ -1035,6 +1036,8 @@ extern "C" void launcher_lg_run(const char *root) {
         const char *const shadow_names[] = {"Switch (1024)", T("High (2048)", "Alta (2048)"), T("Ultra (4096)", "Ultra (4096)")};
         ImGui::Combo(T("Shadows", "Sombras"), &shadows_i, shadow_names, 3);
         ImGui::Checkbox(T("Smooth shadow edges", "Suavizar as bordas das sombras"), &smooth_sh);
+        const char *const shcol_names[] = {T("Natural", "Natural"), T("Switch (strong tint, purple at dusk)", "Switch (tom forte, roxo ao entardecer)")};
+        ImGui::Combo(T("Shadow color", "Cor das sombras"), &shcol_i, shcol_names, 2);
         const char *const detail_names[] = {T("Switch", "Switch"), T("High", "Alta"), T("Very high", "Muito alta"), T("Max", "Máxima")};
         ImGui::Combo(T("Draw distance", "Distância de desenho"), &detail_i, detail_names, 4);
         const char *const shl_names[] = {T("Wait (may stutter the first time)", "Esperar (pode travar na primeira vez)"),
@@ -1536,6 +1539,7 @@ extern "C" void launcher_lg_run(const char *root) {
     g_settings.skip_start = skipstart;
     g_settings.button_prompts = prompts_i;
     g_settings.shadow_smooth = smooth_sh;
+    g_settings.shadow_color = shcol_i;
     g_settings.detail = detail_i;
     g_settings.shadows = shadows_i;
     g_settings.sharpen = sharp_i;

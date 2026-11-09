@@ -1415,6 +1415,57 @@ static void save_glsl(const char *src, uint64_t addr, const char *suffix) {
 }
 
 static void gpl_prebuild(void *arg);
+// Legends: Arceus's deferred lighting (fs 1f805599a6b15df8, trees' and rocks' 9c2656bd44467b79, and any other with the
+// same table) reads a row pair per material from cb3: a lit row at +192..+204 and a shade row at +320..+332 (rgb tint,
+// weight), mixed by sun visibility, and blends the surface toward that tint by the weight. At dusk the shade rows are a
+// strong purple (0.45, 0.19, 0.74 on rock; on the Switch too) - lit faces and shadow depth are fine, shaded rock and
+// leaves turn violet. Settings.shadow_color 0 (Natural): each shade row's rgb is read 80% less saturated, its
+// luminance kept, so shade keeps its brightness and a little of the cool tint. Returns the new GLSL, or NULL when the
+// shader has no such table (cb3 a vec4 array, the eight reads off one register).
+static char *pla_shade_tint(const char *src) {
+    static const char *const decl = "uniform CB3 { vec4 cb3[";
+    const char *d = strstr(src, decl), *dl = d ? strchr(d, '\n') : NULL;
+    if (!dl || !strstr(src, " + 332u)")) return NULL;
+    bool base[256] = {0}, any = false;
+    for (const char *l = src; (l = strstr(l, "cbr(cb3, (r")); l++) {  // (registers with a +320 read, then the other seven)
+        int r, off;
+        if (sscanf(l, "cbr(cb3, (r%d) + %du)", &r, &off) == 2 && off == 320 && r >= 0 && r < 256) base[r] = true;
+    }
+    for (int r = 0; r < 256; r++) {
+        if (!base[r]) continue;
+        static const int offs[] = {192, 196, 200, 204, 324, 328, 332};
+        for (int k = 0; k < 7 && base[r]; k++) {
+            char pat[48];
+            snprintf(pat, sizeof pat, "cbr(cb3, (r%d) + %du)", r, offs[k]);
+            base[r] = strstr(src, pat) != NULL;
+        }
+        any |= base[r];
+    }
+    if (!any) return NULL;
+    static const char helper[] =
+        "float pla_tint(uint b, int c) {  // (a material's shade-row tint, 80% less saturated: pla_shade_tint)\n"
+        "    vec3 t = vec3(cbr(cb3, b + 320u), cbr(cb3, b + 324u), cbr(cb3, b + 328u));\n"
+        "    t = mix(t, vec3(dot(t, vec3(0.299, 0.587, 0.114))), 0.8);\n"
+        "    return t[c];\n"
+        "}\n";
+    size_t n = strlen(src);
+    char *out = malloc(n + sizeof helper + 4096), *o = out;
+    size_t cap = n + sizeof helper + 4096, pre = (size_t)(dl + 1 - src);
+    memcpy(o, src, pre), o += pre;
+    memcpy(o, helper, sizeof helper - 1), o += sizeof helper - 1;
+    for (const char *l = src + pre; *l;) {
+        int r, off, end = 0;
+        if (l[0] == 'c' && sscanf(l, "cbr(cb3, (r%d) + %du)%n", &r, &off, &end) == 2 && end && r >= 0 && r < 256 && base[r] &&
+            (off == 320 || off == 324 || off == 328)) {
+            if ((size_t)(o - out) + 32 > cap) { free(out); return NULL; }  // (the reads only shrink: can't happen)
+            o += sprintf(o, "pla_tint(r%d, %d)", r, (off - 320) / 4);
+            l += end;
+        } else
+            *o++ = *l++;
+    }
+    *o = 0;
+    return out;
+}
 // Legends: Arceus's shadow mask (three variants: fs 4b939b54f87f7794, aadb7169a8eebe27, 52a5c7cf8d756842) takes 16 taps
 // of its near shadow cascade and 16 of the far one (a depth array, texture(tD, ...)). A near tap counts lit when the
 // receiver is at least as near the light (rREF >= depth) or the shadow map's 8-bit id there (texelFetch(tI, ...)) is the
@@ -1791,6 +1842,15 @@ static void translate_program(void *arg) {
             char *s = pla_soft_shadows(p->fi->msl);
             if (s) p->fi->msl = s;
             LOG("[pla] shadow mask %016llx: %s\n", (unsigned long long)h, s ? "near cascade's taps bilinear (smooth edges)" : "not the expected code, left as it is");
+        }
+    }
+    // Legends: Arceus's lighting, Settings.shadow_color Natural: the materials' shade tint less saturated (pla_shade_tint)
+    if (p->code[1] && g_settings.shadow_color == 0 && strstr(p->fi->msl, " + 332u)")) {
+        char *s = pla_shade_tint(p->fi->msl);
+        if (s) {
+            extern uint64_t vk_fs_hash(uint64_t fs);
+            p->fi->msl = s;
+            LOG("[pla] shade tint %016llx: natural (80%% less saturated)\n", (unsigned long long)vk_fs_hash(p->code[1]));
         }
     }
     if (p->vkey.xfb_count[0]) xfb_rewrite(p);

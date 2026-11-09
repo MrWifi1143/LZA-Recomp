@@ -27,6 +27,7 @@ typedef struct {
     bool mouse_invert_x, mouse_invert_y;  // the mouse camera turned the other way (runtime/hle/input.c)
     int background;      // BG_*: what the game does while its window isn't focused
     bool shadow_smooth;  // the shadow mask's near taps bilinear - smooth shadow edges (nvn/vulkan/exec.c pla_soft_shadows; at the next start)
+    int shadow_color;    // shade tint (nvn/vulkan/exec.c pla_shade_tint; at the next start): 0 natural (80% less saturated), 1 the Switch's
     int sharpen;         // sharpening at the window's size (RCAS, nvn/vulkan/exec.c post_process): 0 off, 1 low, 2 medium, 3 high
     int shadows;         // the shadow maps' size, 0 the Switch's 1024, 1 2048, 2 4096 (hle/pla_drawdist.c; at the next start)
     int detail;          // draw distance, 0 the Switch's .. 3 (hle/pla_drawdist.c: x1 / x2 / x3 / x5; applies live)
