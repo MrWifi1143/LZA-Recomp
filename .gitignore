@@ -27,6 +27,7 @@ save/
 larecomp.ini
 *.log
 mods/
+!contrib/mods/
 
 # Logs the NVIDIA driver writes to the working folder
 NVIDIA Corporation/

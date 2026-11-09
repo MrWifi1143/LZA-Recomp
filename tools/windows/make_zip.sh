@@ -51,6 +51,8 @@ cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$D/"
 make -s PLATFORM=windows B=build/win CC=$R/tools/windows/zcc DEPS=$W/deps legendslua
 mkdir -p "$D/plugins" && cp build/win/plugins/legendslua.dll "$D/plugins/"
 cp docs/release-README.txt "$D/README.txt"
+# mods that are only recomp settings (no game files): off until turned on in the Mods page
+if [ -d contrib/mods ]; then mkdir -p "$D/mods" && cp -r contrib/mods/. "$D/mods/"; fi
 # licenses: this project's, then every bundled component's (THIRD-PARTY-NOTICES.md says which is which)
 cp LICENSE "$D/LICENSE.txt"
 cp LICENSE-LASRecomp "$D/licenses/LICENSE-LASRecomp.txt"

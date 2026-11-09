@@ -6,41 +6,57 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsA`)
 
+## 2026-11-09: LegendsA-v1.1.0
+
+Previous release: LegendsA-v1.0.1. Game version: Pokemon Legends: Arceus 1.1.1.
+
+Fixes:
+
+- The game could freeze for good after crafting a batch (the most Poke Balls at once) above 30 fps - the result text's
+  "print it all now" waited for the 30 fps clock inside one update (since 0.3.0).
+- No more crash after the Commander / taking a photo: the command memory pool is 7x the game's (280 MB, not 40).
+- Cutscenes at 60 fps: cuts happen in one frame again (no half-way frame), and scripted waits last their real time
+  (Cyllene walks out of view again).
+- No pixelated outline round the player in front of water at high resolutions (the water's 480 x 270 depth copy now
+  scales with the output).
+- A frame-time spike gone: Arceus's exposure counter added one value per pixel on one counter (one draw from 0.1 to
+  36 ms); adds are now aggregated per subgroup.
+
+Settings and looks:
+
+- Draw Distance (Settings, start screen): trees out to 400 / 600 / 1000 m (the Switch: 200), far trees kept as full
+  models (150 / 200 / 300 m), NPCs loaded further, far Pokemon animating at a full rate further out, rocks and props
+  keeping their full mesh further, the terrain mesh's detail rings moved out (40 m -> 160 m at Max), more grass around
+  you. The field's GPU memory pool grows with it.
+- Shadows (Next Start): Switch / High / Ultra = shadow maps of 1024 (the game's) / 2048 / 4096 - thin things (flower
+  stems) keep their shadows further out.
+- Shadow Color (Next Start): Natural (the default) tones down the strong purple the game gives shade at dusk; Switch
+  keeps the original.
+- Round bloom: bright points (the intro's sparks, lamps at night) glow round and soft instead of in squares.
+  LARECOMP_ROUND_BLOOM=0 for the original.
+- Sharpening setting (AMD RCAS at the window's size); glows read from small targets smoothly.
+- Sharper image: the game's dynamic resolution drew the field at 0.9 (fake GPU timings); NPCs no longer vanish at the
+  screen's edges while the camera turns.
+- 4K: render targets under 500 px wide keep the game's size (a pixel-counting pass ran 4x the pixels: 51 -> 60 fps).
+
+Mods:
+
+- Several mods on at once, in a load order (the Mods page; the first wins where two change the same file).
+- Texture packs: a mod's texpack/ folder of <key>.dds / .png replaces the game's textures at any size (Legends Studio
+  exports and builds them; tools/texpack_upscale.py makes AI-upscaled packs). Replacements go in at most 8 MB a frame,
+  and their keys are hashed in normal memory (a pack once froze loads for 6-20 s). LARECOMP_TEXPACK=<folder> for a run.
+- mod.ini: a mod can turn recomp features on. The first: Lush Foliage (mods/Lush Foliage, in this release, off) - 3x
+  the grass, flowers and small plants, placed on the GPU (~0.2 ms a frame on an RTX 4090). Needs a decent PC. More
+  trees for it are made from your own game files with Legends Studio (see its README).
+
+Linux: a hung game can be inspected (eu-stack / gdb -p) - LARECOMP_DEBUGGABLE=0 to keep the system's rule.
+
+## Earlier, released in 1.0.0 / 1.0.1
+
 - The first-start shader warm-up works on installed copies: it scanned only a `romfs/` folder (a source checkout), and
   an install - Windows included - has only the `romfs.bin` image the start screen builds, so it found 0 shaders and
   every first play compiled them as the game drew. It now reads the files straight from the image: 8,427 programs, as
   from the folder (Z-A got the same fix for its shader packs in 0.6.0).
-Arceus:
-
-- Fixed: the game could freeze for good after crafting a batch (the most Poke Balls at once) above 30 fps - the result
-  text's "print it all now" waited for the 30 fps clock inside one update (since 0.3.0).
-- Texture packs no longer hitch when many replacements arrive at once (at most 8 MB put in a frame): running into a new
-  place with a 2x pack held single frames for 300+ ms. Loads with a pack on no longer freeze for 6-20 s on the loading
-  screen (each new texture's pack key was hashed from write-combined upload memory).
-- Shadow Color (Next Start): Natural (the default) tones down the strong purple the game gives shade at dusk (shaded
-  rock and leaves turned violet - on the Switch too); Switch keeps the original.
-- Draw Distance also keeps far trees as full models (the game swapped them to flat cards past 100 m): 150 / 200 /
-  300 m at High / Very High / Max, at no measurable GPU cost.
-- Lush Foliage (a mod: mods/Lush Foliage): more grass and trees. A mod's new mod.ini turns recomp features on:
-  plant_density = 2..4 draws every grass blade, flower and small plant that many times, the copies placed on the GPU
-  around the game's own (on the ground, turned, 80-110% size; ~0.2 ms a frame at 3x); the trees come from Legends
-  Studio's `foliage` command (2,049 more, in the forests only, off paths). LARECOMP_PLA_DENSITY=<k> for one run.
-- Round bloom: bright points (the intro's sparks, lamps at night) glow round and soft instead of in squares (the
-  game's box blur and bilinear steps - on the Switch too). LARECOMP_ROUND_BLOOM=0 for the original.
-- Texture packs (framework): a mod's texpack/ folder of <key>.png replaces the game's textures at any size
-  (runtime/nvn/vulkan/texpack.c); Legends Studio exports every texture under its key and tools/texpack_upscale.py makes
-  the pack (AI for colour, filters for normal maps and masks). LARECOMP_TEXPACK=<folder> for one run. Decoded when first
-  used and kept as RGBA8 for now.
-- Sharper image: the game's dynamic resolution drew the field at 0.9 (fake GPU timings); NPCs no longer switched off
-  at the screen's edges while the camera turns.
-- Shadows (Next Start) in the game's Settings and the start screen: Switch / High / Ultra = shadow maps of 1024 (the
-  game's) / 2048 / 4096. At 1024 thin things - flower stems - lost their shadows a few metres out (they fell between
-  the far cascade's texels); High and Ultra keep them. The render target pool grows by what the maps need (+38 / +158 MB).
-- Draw Distance also moves the terrain mesh's detail rings out (x1 / 1.5 / 2.5 / 4: 40 m -> 160 m at Max): ridges keep
-  their shape instead of reshaping as you walk up.
-- New app icon (window, taskbar, the exe, the release folder): Mount Coronet under the space-time rift, the launcher banner's art, instead
-  of the Master Ball left over from the runtime's first game. docs/icon/make_icon.py draws it from the launcher's
-  shapes (runtime/ui/launcher_lg.mm) and writes icon.svg, icon_1024.png, icon.ico and icon.icns.
 
 ## 2026-10-31: LegendsA-v0.6.2-alpha
 
