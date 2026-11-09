@@ -4,6 +4,7 @@
 #include <float.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -547,10 +548,63 @@ uint64_t prof_tex_checks, prof_tex_samples, prof_tex_full, prof_tex_full_bytes, 
 // The PS5 under Linux has 512 MB VRAM + 7 GB GTT and Z-A's guest heap takes 6 GB of it: its 6.5 GB AI pack filled the
 // rest, the compositor's buffers faulted and the GPU hung (the user's, 2026-11-09). Over the budget the game's own
 // texture stays; LARECOMP_TEXPACK_NOBUDGET=1 ignores it.
+// On Linux with one amdgpu card the kernel's own counters are used (sysfs mem_info_{vram,gtt}_{used,total}): RADV's
+// budget there said 12.3 GB used of a 2.5 GB host heap on the PS5, and GTT is what runs out (the dma-buf guest heap,
+// nvn/vulkan/gpuheap.c, lives in it).
+#ifdef __linux__
+static bool amdgpu_free(uint64_t *free_b, uint64_t *total_b) {
+    static int card = -2;  // -1: none (or several)
+    char p[96];
+    if (card == -2) {
+        card = -1;
+        for (int i = 0, found = 0; i < 16; i++) {
+            snprintf(p, sizeof p, "/sys/class/drm/card%d/device/mem_info_gtt_total", i);
+            struct stat st;
+            if (!stat(p, &st)) { if (found++) { card = -1; break; } card = i; }
+        }
+    }
+    if (card < 0) return false;
+    static const char *k[4] = {"vram_total", "vram_used", "gtt_total", "gtt_used"};
+    uint64_t v[4];
+    for (int i = 0; i < 4; i++) {
+        snprintf(p, sizeof p, "/sys/class/drm/card%d/device/mem_info_%s", card, k[i]);
+        FILE *f = fopen(p, "r");
+        unsigned long long x = 0;
+        int ok = f && fscanf(f, "%llu", &x) == 1;
+        if (f) fclose(f);
+        if (!ok) return false;
+        v[i] = x;
+    }
+    *total_b = v[0] + v[2];
+    *free_b = (v[0] > v[1] ? v[0] - v[1] : 0) + (v[2] > v[3] ? v[2] - v[3] : 0);
+    return true;
+}
+#endif
 static bool texpack_room(uint64_t need) {
     static int off = -1;
     if (off < 0) off = getenv("LARECOMP_TEXPACK_NOBUDGET") != NULL;
     if (off) return true;
+#ifdef __linux__
+    {
+        static uint64_t free_b, total_b, at, left;  // (sysfs read every 100 ms; what was taken since, counted here)
+        static int have = -1;
+        uint64_t now = SDL_GetTicks();
+        if (have < 0 || now - at >= 100) have = amdgpu_free(&free_b, &total_b), at = now, left = free_b;
+        if (have) {
+            uint64_t reserve = total_b * 10 / 100 > (768ull << 20) ? total_b * 10 / 100 : (768ull << 20);
+            static int shown;
+            if (!shown++) LOG("[texpack] GPU memory (amdgpu): %llu of %llu MB free\n", (unsigned long long)(free_b >> 20),
+                              (unsigned long long)(total_b >> 20));
+            bool ok = need + reserve <= left;
+            if (ok) left -= need;
+            static int warned;
+            if (!ok && !warned++)
+                LOG("[texpack] GPU memory budget reached (%llu MB free of %llu): the game's textures stay from here\n",
+                    (unsigned long long)(left >> 20), (unsigned long long)(total_b >> 20));
+            return ok;
+        }
+    }
+#endif
     VmaBudget bud[VK_MAX_MEMORY_HEAPS];
     vmaGetHeapBudgets(g_vk.vma, bud);
     const VkPhysicalDeviceMemoryProperties *mp;
