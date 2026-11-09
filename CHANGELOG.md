@@ -16,6 +16,10 @@ Arceus:
   rock and leaves turned violet - on the Switch too); Switch keeps the original.
 - Draw Distance also keeps far trees as full models (the game swapped them to flat cards past 100 m): 150 / 200 /
   300 m at High / Very High / Max, at no measurable GPU cost.
+- Lush Foliage (a mod: mods/Lush Foliage): more grass and trees. A mod's new mod.ini turns recomp features on:
+  plant_density = 2..4 draws every grass blade, flower and small plant that many times, the copies placed on the GPU
+  around the game's own (on the ground, turned, 80-110% size; ~0.2 ms a frame at 3x); the trees come from Legends
+  Studio's `foliage` command (2,049 more, in the forests only, off paths). LARECOMP_PLA_DENSITY=<k> for one run.
 - Round bloom: bright points (the intro's sparks, lamps at night) glow round and soft instead of in squares (the
   game's box blur and bilinear steps - on the Switch too). LARECOMP_ROUND_BLOOM=0 for the original.
 - Texture packs (framework): a mod's texpack/ folder of <key>.png replaces the game's textures at any size

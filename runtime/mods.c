@@ -60,7 +60,11 @@ int mods_list(char names[][128], int max) {
         snprintf(p, sizeof p, "mods/%s", e->d_name);
         char tp[1100];
         snprintf(tp, sizeof tp, "%s/texpack", p);  // (a texture pack alone - mods/<name>/texpack/ - is a mod too)
-        if (is_dir(p) && (find_romfs(p, 4, r, sizeof r) || is_dir(tp))) snprintf(names[n++], 128, "%s", e->d_name);
+        char ip[1100];
+        snprintf(ip, sizeof ip, "%s/mod.ini", p);  // (and a mod.ini alone: recomp features, say Lush Foliage)
+        struct stat sb;
+        bool ini = !stat(ip, &sb) && S_ISREG(sb.st_mode);
+        if (is_dir(p) && (find_romfs(p, 4, r, sizeof r) || is_dir(tp) || ini)) snprintf(names[n++], 128, "%s", e->d_name);
     }
     closedir(d);
     return n;
@@ -129,6 +133,37 @@ int mod_texpack_dirs(char dirs[][160], int max) {
         if (is_dir(dirs[k])) k++;
     }
     return k;
+}
+
+bool mod_ini_value(const char *key, char *out, size_t cap) {
+    char names[MODS_MAX][128];
+    int n = mods_active(names, MODS_MAX);
+    for (int i = 0; i < n; i++) {  // (the first mod that sets it)
+        char p[200], line[512];
+        snprintf(p, sizeof p, "mods/%s/mod.ini", names[i]);
+        FILE *f = fopen(p, "r");
+        if (!f) continue;
+        bool found = false;
+        while (!found && fgets(line, sizeof line, f)) {
+            char *l = line;
+            while (*l == ' ' || *l == '\t') l++;
+            if (*l == '#' || *l == ';' || *l == '[') continue;
+            char *eq = strchr(l, '=');
+            if (!eq) continue;
+            char *ke = eq;
+            while (ke > l && (ke[-1] == ' ' || ke[-1] == '\t')) ke--;
+            if ((size_t)(ke - l) != strlen(key) || strncmp(l, key, (size_t)(ke - l))) continue;
+            char *v = eq + 1;
+            while (*v == ' ' || *v == '\t') v++;
+            size_t len = strcspn(v, "\r\n#;");
+            while (len && (v[len - 1] == ' ' || v[len - 1] == '\t')) len--;
+            snprintf(out, cap, "%.*s", (int)len, v);
+            found = true;
+        }
+        fclose(f);
+        if (found) { LOG("[mods] %s: %s = %s\n", names[i], key, out); return true; }
+    }
+    return false;
 }
 
 bool mod_romfs_override(const char *path, char *out, size_t cap) {

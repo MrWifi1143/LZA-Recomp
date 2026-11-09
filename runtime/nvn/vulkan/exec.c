@@ -21,6 +21,7 @@
 #include "../../platform.h"
 #include "../renderer.h"
 #include "../../settings.h"
+#include "../../mods.h"
 
 static uint64_t g_draws_total;  // (never reset: LARECOMP_COUNTER_LOG)
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
@@ -1389,6 +1390,7 @@ typedef struct {
     VkDescriptorSetLayout set_layout[2];
     VkPipelineLayout layout;
     bool vs_uses_vid;
+    uint8_t inst_mul;   // (pla_dense_plants: each instance drawn this many times, the copies placed by the shader)
     _Atomic int state;  // 0 building, 1 ready, 2 failed
     uint64_t fs_hash;   // vk_fs_hash of the fragment program (draw_: made on first use, fs_hash_ok)
     bool fs_hash_ok;
@@ -1491,6 +1493,104 @@ static void gpl_prebuild(void *arg);
 // to 80% less saturated, its luminance kept, so shade keeps its brightness and a little of the cool tint; blue (night)
 // and warm tints stay the game's. Returns the new GLSL, or NULL when the
 // shader has no such table (cb3 a vec4 array, the eight reads off one register).
+// Lush Foliage (a mod's mod.ini: plant_density = 2..4, plant_spread = <m>): more grass, flowers and small plants.
+// Arceus draws them as instanced patches: each instance is 16 bytes in cb9 (x, z, scale, 0), its height read from the
+// terrain's height map (cb8[38..39]) - the vertex shaders of the whole family (colour, depth and shadow passes: ~100
+// programs) read cb9 at +0 / +4 / +8 from one register. Here each instance is drawn plant_density times (the draws'
+// instance counts are multiplied: Prog.inst_mul); copy 0 is the game's, the others sit a hashed distance (up to
+// plant_spread m, 0.4 by default) around it - on the ground, since the height is read after - at 80-110% of its size
+// and, where the shader has no fourth attribute it doesn't understand, turned about the up axis (position, normal and
+// tangent). The hash is of the instance's own position: the same plant every frame. Every pass gets the same copies, so
+// depth / shadow / colour still agree. Returns the new GLSL, or NULL if the code isn't of that family.
+static char *str_replace_all(const char *src, const char *a, const char *b, int *count) {
+    size_t la = strlen(a), lb = strlen(b), n = 0;
+    for (const char *q = src; (q = strstr(q, a)); q += la) n++;
+    if (count) *count = (int)n;
+    if (!n) return NULL;
+    char *out = malloc(strlen(src) + n * (lb > la ? lb - la : 0) + 1), *o = out;
+    for (const char *q = src;;) {
+        const char *m = strstr(q, a);
+        if (!m) { strcpy(o, q); break; }
+        memcpy(o, q, (size_t)(m - q)), o += m - q;
+        memcpy(o, b, lb), o += lb;
+        q = m + la;
+    }
+    return out;
+}
+static char *pla_dense_plants(const char *src, int k, float spread) {
+    static const char ii[] = "uint(gl_InstanceIndex - gl_BaseInstanceARB)";
+    if (k < 2 || !strstr(src, "uniform CB9 { uvec4 cb9[4096]; }") || !strstr(src, "(-cb8[38][0])") || !strstr(src, "in vec4 a0;"))
+        return NULL;
+    int nii = 0, reg = -1, offs = 0, nreads = 0;
+    for (const char *q = src; (q = strstr(q, ii)); q++) nii++;
+    for (const char *q = src; (q = strstr(q, "cbr(cb9, (r")); q++) {  // (three reads, one register: +0 / +4 / +8)
+        int r, off;
+        if (sscanf(q, "cbr(cb9, (r%d) + %du)", &r, &off) != 2 || (reg >= 0 && r != reg) || (off != 0 && off != 4 && off != 8)) return NULL;
+        reg = r, offs |= 1 << (off / 4), nreads++;
+    }
+    if (nii != 1 || nreads != 3 || offs != 7) return NULL;
+    bool rot = !strstr(src, "in vec4 a4;"), has1 = strstr(src, "in vec4 a1;") != NULL, has3 = strstr(src, "in vec4 a3;") != NULL;
+    char *a = str_replace_all(src, ii, "(uint(gl_InstanceIndex - gl_BaseInstanceARB) / PLA_DK)", NULL), *b;
+    char pat[48], rep[48];
+    static const char *const fn_of[3] = {"pla_dx(r%d, 0u)", "pla_dx(r%d, 1u)", "pla_dsc(r%d)"};
+    for (int i = 0; i < 3; i++) {
+        snprintf(pat, sizeof pat, "cbr(cb9, (r%d) + %du)", reg, i * 4);
+        snprintf(rep, sizeof rep, fn_of[i], reg);
+        b = str_replace_all(a, pat, rep, NULL), free(a), a = b;
+        if (!a) return NULL;
+    }
+    char helper[4096];
+    int hl = snprintf(helper, sizeof helper,
+        "#define PLA_DK %du  // (Lush Foliage: pla_dense_plants)\n"
+        "uint pla_hash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }\n"
+        "uint pla_sub() { return uint(gl_InstanceIndex - gl_BaseInstanceARB) %% PLA_DK; }\n"
+        "uint pla_seed(uint o) { return pla_hash(cbr(cb9, o) ^ pla_hash(cbr(cb9, o + 4u) ^ pla_hash(pla_sub() * 0x9e3779b9u))); }\n"
+        "vec2 pla_off(uint o) {\n"
+        "    if (pla_sub() == 0u) return vec2(0.0);\n"
+        "    uint h = pla_seed(o);\n"
+        "    float an = float(h & 0xffffu) * (6.2831853 / 65536.0), r = %.3f * sqrt(0.1 + 0.9 * float(h >> 16) / 65536.0);\n"
+        "    return r * vec2(cos(an), sin(an));\n"
+        "}\n"
+        "uint pla_dx(uint o, uint c) { return floatBitsToUint(uintBitsToFloat(cbr(cb9, o + c * 4u)) + pla_off(o)[c]); }\n"
+        "uint pla_dsc(uint o) {\n"
+        "    float s = uintBitsToFloat(cbr(cb9, o + 8u));\n"
+        "    if (pla_sub() == 0u) return floatBitsToUint(s);\n"
+        "    return floatBitsToUint(s * (0.8 + 0.3 * float(pla_hash(pla_seed(o) + 7u) & 0xffffu) / 65536.0));\n"
+        "}\n", k, spread);
+    if (rot) {
+        hl += snprintf(helper + hl, sizeof helper - (size_t)hl,
+            "vec4 pla_a0%s%s;\n"
+            "void pla_turn() {\n"
+            "    pla_a0 = a0;%s%s\n"
+            "    if (pla_sub() == 0u) return;\n"
+            "    uint o = (uint(gl_InstanceIndex - gl_BaseInstanceARB) / PLA_DK) << 4;\n"
+            "    float an = float(pla_hash(pla_seed(o) + 3u) & 0xffffu) * (6.2831853 / 65536.0);\n"
+            "    mat2 m = mat2(cos(an), sin(an), -sin(an), cos(an));\n"
+            "    pla_a0.xz = m * a0.xz;%s%s\n"
+            "}\n",
+            has1 ? ", pla_a1" : "", has3 ? ", pla_a3" : "", has1 ? " pla_a1 = a1;" : "", has3 ? " pla_a3 = a3;" : "",
+            has1 ? " pla_a1.xz = m * a1.xz;" : "", has3 ? " pla_a3.xz = m * a3.xz;" : "");
+        const char *m = strstr(a, "void main() {\n");
+        if (!m) { free(a); return NULL; }
+        // (the attribute reads in main: a0[ -> pla_a0[ ...)
+        size_t pre = (size_t)(m - a);
+        char *body = strdup(a + pre);
+        const char *an[3] = {"a0[", has1 ? "a1[" : NULL, has3 ? "a3[" : NULL}, *pn[3] = {"pla_a0[", "pla_a1[", "pla_a3["};
+        for (int i = 0; i < 3; i++) {
+            if (!an[i]) continue;
+            char *nb = str_replace_all(body, an[i], pn[i], NULL);
+            if (nb) free(body), body = nb;
+        }
+        char *nb = str_replace_all(body, "void main() {\n", "void main() {\n  pla_turn();\n", NULL);
+        free(body), body = nb;
+        char *joined = malloc(pre + strlen(body) + 1);
+        memcpy(joined, a, pre), strcpy(joined + pre, body);
+        free(body), free(a), a = joined;
+    }
+    b = str_insert_before(a, "void main()", helper);
+    free(a);
+    return b;
+}
 static char *pla_shade_tint(const char *src) {
     static const char *const decl = "uniform CB3 { vec4 cb3[";
     const char *d = strstr(src, decl), *dl = d ? strchr(d, '\n') : NULL;
@@ -1933,6 +2033,26 @@ static void translate_program(void *arg) {
             extern uint64_t vk_fs_hash(uint64_t fs);
             p->fi->msl = s;
             LOG("[pla] shade tint %016llx: natural (80%% less saturated)\n", (unsigned long long)vk_fs_hash(p->code[1]));
+        }
+    }
+    // Lush Foliage (a mod's mod.ini plant_density; LARECOMP_PLA_DENSITY=<k> for one run): more plants (pla_dense_plants)
+    {
+        static int dk = -1;
+        static float dspread = 0.4f;
+        if (dk < 0) {
+            char v[64];
+            dk = getenv("LARECOMP_PLA_DENSITY") ? atoi(getenv("LARECOMP_PLA_DENSITY")) : mod_ini_value("plant_density", v, sizeof v) ? atoi(v) : 1;
+            if (dk > 4) dk = 4;
+            if (mod_ini_value("plant_spread", v, sizeof v) && atof(v) > 0.0 && atof(v) < 4.0) dspread = (float)atof(v);
+            if (dk > 1) LOG("[pla] Lush Foliage: plants x%d (spread %.2f m)\n", dk, dspread);
+        }
+        char *s = dk > 1 && p->vi->msl ? pla_dense_plants(p->vi->msl, dk, dspread) : NULL;
+        if (dk > 1 && p->vi->msl && strstr(p->vi->msl, "#define PLA_DK ")) p->inst_mul = (uint8_t)dk;  // (shared, done)
+        if (s) {
+            p->vi->msl = s;
+            p->inst_mul = (uint8_t)dk;
+            static int nlog;
+            if (nlog++ < 400) LOG("[pla] plants x%d: vs %llx\n", dk, (unsigned long long)p->code[0]);
         }
     }
     if (p->vkey.xfb_count[0]) xfb_rewrite(p);
@@ -4444,6 +4564,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (exp_alt < 0) exp_alt = getenv("LARECOMP_EXP_ALT") != NULL;
     bool exp_hit = exp_mode && st.program->stages[0].code_addr == exp_vs && (!exp_alt || (vk_frame_counter() & 1));
     uint32_t inst_eff = exp_hit && exp_mode == 3 && inst > 1 ? inst / 2 : inst;
+    if (pr->inst_mul > 1) inst_eff *= pr->inst_mul;  // (Lush Foliage: the copies pla_dense_plants places)
     if (exp_hit && exp_mode == 2) { VkRect2D one = {{0, 0}, {1, 1}}; vkCmdSetScissor(cb, 0, 1, &one); }
     bool gp_q = g_gpuprof_frame && gp_draw_marks && gps_qp && gp_n && gps_n < GP_MAX;
     if (gp_q) vkCmdBeginQuery(cb, gps_qp, (uint32_t)gps_n, 0);
