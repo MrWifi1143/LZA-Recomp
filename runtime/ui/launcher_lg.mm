@@ -22,6 +22,10 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+
+#include <string>
+#include <vector>
 
 #include "imgui.h"
 #include "imgui_internal.h"  // (the input queue: ui_scale_apply)
@@ -944,8 +948,28 @@ extern "C" void launcher_lg_run(const char *root) {
     };
     // Translation: the folders under mods/ (runtime/mods.h); 0 = none (the game's own English)
     static char mods[MODS_MAX][128];
-    int nmods = mods_list(mods, MODS_MAX), mod = 0;
-    for (int i = 0; i < nmods; i++) if (!strcmp(mods[i], g_settings.mod)) mod = i + 1;
+    int nmods = mods_list(mods, MODS_MAX);
+    // The mods that are on, in load order (g_settings.mod: names separated by commas; the first wins where two change
+    // the same file - a texture pack and a translation both on, say), those still in mods/
+    std::vector<std::string> on_mods;
+    {
+        char act[MODS_MAX][128];
+        int na = mods_active(act, MODS_MAX);
+        for (int k = 0; k < na; k++)
+            for (int i = 0; i < nmods; i++) if (!strcmp(mods[i], act[k])) { on_mods.push_back(act[k]); break; }
+    }
+    auto mod_on = [&](const char *nm) { for (auto &s : on_mods) if (s == nm) return true; return false; };
+    auto mod_set = [&](const char *nm, bool on) {
+        for (size_t k = 0; k < on_mods.size(); k++) if (on_mods[k] == nm) { on_mods.erase(on_mods.begin() + (long)k); break; }
+        if (on) on_mods.push_back(nm);
+    };
+    auto mod_prune = [&]() {  // (the list after mods/ changed: those gone dropped)
+        for (size_t k = 0; k < on_mods.size();) {
+            bool there = false;
+            for (int i = 0; i < nmods; i++) there |= on_mods[k] == mods[i];
+            if (there) k++; else on_mods.erase(on_mods.begin() + (long)k);
+        }
+    };
     // Plugins (plugins/: code mods - the VR mod, the Steam relay): each on or off. They load before this screen (they
     // may extend the Vulkan device it draws with), so a change restarts the game once when Play is pressed.
     static char plugs[16][64];
@@ -1130,11 +1154,13 @@ extern "C" void launcher_lg_run(const char *root) {
         }
     };
     auto settings_mods = [&]() {
-        const char *none = T("None", "Nenhum");
-        if (ImGui::BeginCombo(T("Mod", "Mod"), mod ? mods[mod - 1] : none)) {
-            if (ImGui::Selectable(none, mod == 0)) mod = 0;
-            for (int i = 0; i < nmods; i++)
-                if (ImGui::Selectable(mods[i], mod == i + 1)) mod = i + 1;
+        std::string shown = on_mods.empty() ? std::string(T("None", "Nenhum"))
+                          : on_mods[0] + (on_mods.size() > 1 ? " +" + std::to_string(on_mods.size() - 1) : std::string());
+        if (ImGui::BeginCombo(T("Mods", "Mods"), shown.c_str())) {  // (each on or off; the order: the Mods page)
+            for (int i = 0; i < nmods; i++) {
+                bool on = mod_on(mods[i]);
+                if (ImGui::Checkbox(mods[i], &on)) mod_set(mods[i], on);
+            }
             ImGui::EndCombo();
         }
     };
@@ -1165,39 +1191,63 @@ extern "C" void launcher_lg_run(const char *root) {
             ImGui::TableSetupColumn("on", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFrameHeight());
             ImGui::TableSetupColumn("mod", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn("kind", ImGuiTableColumnFlags_WidthFixed, 130);
+            std::vector<int> ord;  // (the mods that are on first, in their load order, then the rest)
+            for (auto &s : on_mods)
+                for (int i = 0; i < nmods; i++) if (s == mods[i]) ord.push_back(i);
+            for (int i = 0; i < nmods; i++) if (!mod_on(mods[i])) ord.push_back(i);
+            int move_from = -1, move_to = -1;
             for (int r = 0; r < nmods + nplugs; r++) {
                 bool tr = r < nmods;
-                int i = tr ? r : r - nmods;
+                int i = tr ? ord[r] : r - nmods;
                 ImGui::PushID(r);
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
-                bool on = tr ? mod == i + 1 : plug_on[i];
+                bool on = tr ? mod_on(mods[i]) : plug_on[i];
                 if (ImGui::Checkbox("##on", &on)) {
-                    if (tr) mod = on ? i + 1 : 0;  // (one translation at a time)
+                    if (tr) mod_set(mods[i], on);
                     else plug_on[i] = on;
                 }
                 ImGui::TableSetColumnIndex(1);
-                if (ImGui::Selectable(tr ? mods[i] : plugin_title(plugs[i]), mod_sel == r,
+                int sel_id = tr ? i : r;  // (a mod's own index in mods[], a plugin's nmods + its index: rows are reordered)
+                if (ImGui::Selectable(tr ? mods[i] : plugin_title(plugs[i]), mod_sel == sel_id,
                                       ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap))
-                    mod_sel = r;
+                    mod_sel = sel_id;
                 char about[300];
                 if (tr) {
                     const char *lang = mod_language(mods[i]);
-                    snprintf(about, sizeof about, "%s%s%s", T("Replaces game files", "Substitui arquivos do jogo"),
+                    char tp[200];
+                    struct stat tsb;
+                    snprintf(tp, sizeof tp, "mods/%s/texpack", mods[i]);
+                    bool pack = !stat(tp, &tsb) && S_ISDIR(tsb.st_mode);
+                    snprintf(about, sizeof about, "%s%s%s", pack ? T("Texture pack", "Pacote de texturas") : T("Replaces game files", "Substitui arquivos do jogo"),
                              lang ? T(" - texts: ", " - textos: ") : "", lang ? lang : "");
                 } else snprintf(about, sizeof about, "%s", plugin_about(plugs[i]));
                 ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
                 ImGui::TextWrapped("%s", about);
                 ImGui::PopStyleColor();
                 ImGui::TableSetColumnIndex(2);
-                ImGui::TextDisabled("%s", tr ? T("Translation", "Tradução") : T("Plugin", "Plugin"));
+                if (tr && on && on_mods.size() > 1) {  // (its place in the load order: up / down)
+                    int k = r;  // (the mods that are on come first, in order)
+                    ImGui::BeginDisabled(k == 0);
+                    if (ImGui::ArrowButton("##up", ImGuiDir_Up)) move_from = k, move_to = k - 1;
+                    ImGui::EndDisabled();
+                    ImGui::SameLine();
+                    ImGui::BeginDisabled(k + 1 >= (int)on_mods.size());
+                    if (ImGui::ArrowButton("##down", ImGuiDir_Down)) move_from = k, move_to = k + 1;
+                    ImGui::EndDisabled();
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%d", k + 1);
+                } else ImGui::TextDisabled("%s", tr ? T("Mod", "Mod") : T("Plugin", "Plugin"));
                 ImGui::PopID();
             }
+            if (move_from >= 0) std::swap(on_mods[(size_t)move_from], on_mods[(size_t)move_to]);
             ImGui::EndTable();
         }
         ImGui::Spacing();
-        ImGui::TextDisabled("%s", T("One translation at a time. Plugins load as the game starts: a change restarts it once when you press Play.",
-                                    "Uma tradução por vez. Plugins carregam ao iniciar: uma mudança reinicia o jogo uma vez ao apertar Jogar."));
+        ImGui::TextDisabled("%s", T("Mods that are on load in their order (the arrows): where two change the same file or texture, the higher one wins. "
+                                    "Plugins load as the game starts: a change restarts it once when you press Play.",
+                                    "Mods ligados carregam na ordem (as setas): onde dois mudam o mesmo arquivo ou textura, o de cima vence. "
+                                    "Plugins carregam ao iniciar: uma mudança reinicia o jogo uma vez ao apertar Jogar."));
         if (ImGui::BeginPopupModal("##remove", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
             bool tr = mod_sel < nmods;
             int i = tr ? mod_sel : mod_sel - nmods;
@@ -1210,11 +1260,10 @@ extern "C" void launcher_lg_run(const char *root) {
                 ImGui::Spacing();
                 if (ImGui::Button(T("Remove", "Remover"), ImVec2(140, 0))) {
                     if (tr) {
-                        char active[128] = "";
-                        if (mod && mod != i + 1) snprintf(active, sizeof active, "%s", mods[mod - 1]);
+                        mod_set(mods[i], false);
                         remove_tree(path);
-                        nmods = mods_list(mods, MODS_MAX), mod = 0;
-                        for (int k = 0; k < nmods; k++) if (!strcmp(mods[k], active)) mod = k + 1;
+                        nmods = mods_list(mods, MODS_MAX);
+                        mod_prune();
                     } else if (remove(path)) {  // (a plugin loaded now: Windows keeps its file - gone at the next start)
                         char later[320];
                         snprintf(later, sizeof later, "%s.removed", path);
@@ -1463,9 +1512,10 @@ extern "C" void launcher_lg_run(const char *root) {
         }
         static int last_install;
         inst = mod_install_state();
-        if (inst != last_install && inst == MOD_INSTALL_DONE) {  // a new translation: listed and chosen
+        if (inst != last_install && inst == MOD_INSTALL_DONE) {  // a new mod: listed and on, at the top of the order
             nmods = mods_list(mods, MODS_MAX);
-            for (int i = 0; i < nmods; i++) if (!strcmp(mods[i], mod_install_name())) mod = i + 1;
+            for (int i = 0; i < nmods; i++)
+                if (!strcmp(mods[i], mod_install_name())) mod_set(mods[i], false), on_mods.insert(on_mods.begin(), mods[i]);
         }
         last_install = inst;
         ready = !setup_running() && setup_ready();
@@ -1523,7 +1573,11 @@ extern "C" void launcher_lg_run(const char *root) {
     g_settings.pkhex_link = pk_i;
     g_settings.shader_nowait = shl_i;
     if (gopt != gopt_was) g_settings.game_opts_next = gopt == g_settings.game_opts ? -1 : gopt;  // (back to the save's: nothing to do)
-    snprintf(g_settings.mod, sizeof g_settings.mod, "%s", mod ? mods[mod - 1] : "");
+    {   // the mods that are on, in their order
+        std::string list;
+        for (auto &s : on_mods) list += (list.empty() ? "" : ",") + s;
+        snprintf(g_settings.mod, sizeof g_settings.mod, "%s", list.c_str());
+    }
     plugins_choose(plugs, plug_on, nplugs);
     settings_save();
     char plugins_now[1100];

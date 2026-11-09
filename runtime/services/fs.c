@@ -184,15 +184,21 @@ static int64_t dir_make(uint8_t **dm, uint64_t *dsz, uint64_t *dcap, uint8_t *dh
 }
 
 static void add_new_files(int fd, const uint64_t *h, const uint8_t *dmeta, uint64_t dsz, uint64_t fsz) {
-    if (!mod_romfs_dir()) return;  // a mod's new files (runtime/mods.h)
-    char root[1100];
-    snprintf(root, sizeof root, "%s", mod_romfs_dir());
+    const char *roots[MODS_MAX];
+    int nroots = mod_romfs_dirs(roots, MODS_MAX);  // the mods' new files (runtime/mods.h), each path from the first mod that has it
+    if (!nroots) return;
     char **known = malloc(sizeof *known * rom_nfiles);
     for (int i = 0; i < rom_nfiles; i++) known[i] = rom_files[i].path;
     qsort(known, rom_nfiles, sizeof *known, path_cmp);
     NewFile *nf = NULL;
     int n = 0, cap = 0;
-    walk_new(root, "", known, rom_nfiles, &nf, &n, &cap);
+    for (int r = 0; r < nroots; r++) {
+        int before = n;
+        walk_new(roots[r], "", known, rom_nfiles, &nf, &n, &cap);
+        for (int i = before; i < n; i++)  // (one an earlier mod adds already: that mod's)
+            for (int k = 0; k < before; k++)
+                if (!strcmp(nf[i].rel, nf[k].rel)) { nf[i--] = nf[--n]; break; }
+    }
     free(known);
     if (!n) return;
     rom_files = realloc(rom_files, sizeof(RomFile) * (rom_nfiles + n));
@@ -329,8 +335,10 @@ static void bpatch_walk(const char *root, const char *rel, int depth) {
     closedir(d);
 }
 
-static void apply_bpatches(void) {
-    if (mod_romfs_dir()) bpatch_walk(mod_romfs_dir(), "", 0);
+static void apply_bpatches(void) {  // (every mod's, the last in the order first: the first mod's patches land on top)
+    const char *roots[MODS_MAX];
+    int n = mod_romfs_dirs(roots, MODS_MAX);
+    for (int i = n - 1; i >= 0; i--) bpatch_walk(roots[i], "", 0);
 }
 
 static void rom_index(int fd) {

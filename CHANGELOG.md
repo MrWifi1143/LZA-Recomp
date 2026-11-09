@@ -7,6 +7,9 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 Z-A:
 
+- Texture packs: a mod's texpack/ folder of <key>.dds / .png replaces the game's textures at any size
+  (runtime/nvn/vulkan/texpack.c, Arceus's, same keys as Legends Studio's export); read on loader threads.
+- Mods: several on at once (mod = a,b,c - the first wins where two change the same thing).
 - New app icon (window, taskbar, the exe, the release folder): Prism Tower over the night city, the launcher banner's art, instead
   of the Master Ball left over from the runtime's first game. docs/icon/make_icon.py draws it from the launcher's
   shapes (runtime/ui/launcher_lg.mm) and writes icon.svg, icon_1024.png, icon.ico and icon.icns.

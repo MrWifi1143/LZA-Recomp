@@ -58,41 +58,88 @@ int mods_list(char names[][128], int max) {
     for (struct dirent *e; n < max && (e = readdir(d));) {
         if (e->d_name[0] == '.') continue;
         snprintf(p, sizeof p, "mods/%s", e->d_name);
-        if (is_dir(p) && find_romfs(p, 4, r, sizeof r)) snprintf(names[n++], 128, "%s", e->d_name);
+        char tp[1100];
+        snprintf(tp, sizeof tp, "%s/texpack", p);  // (a texture pack alone - mods/<name>/texpack/ - is a mod too)
+        if (is_dir(p) && (find_romfs(p, 4, r, sizeof r) || is_dir(tp))) snprintf(names[n++], 128, "%s", e->d_name);
     }
     closedir(d);
     return n;
 }
 
+// Each mod's romfs/ folder, found once (NULL: it has none - a texture pack alone, say)
 static const char *romfs_of(const char *name) {
-    static char cached_name[128], dir[1024];
-    static bool ok;
+    static struct { char name[128]; char dir[1024]; bool ok; } cache[MODS_MAX];
+    static int ncache;
     if (!name || !*name) return NULL;
-    if (strcmp(name, cached_name)) {
-        snprintf(cached_name, sizeof cached_name, "%s", name);
-        char p[1024];
-        snprintf(p, sizeof p, "mods/%s", name);
-        ok = find_romfs(p, 4, dir, sizeof dir);
-        if (ok) LOG("[mods] %s: %s\n", name, dir);
-        else LOG("[mods] %s: no romfs/ folder found under mods/%s\n", name, name);
-    }
-    return ok ? dir : NULL;
+    for (int i = 0; i < ncache; i++) if (!strcmp(cache[i].name, name)) return cache[i].ok ? cache[i].dir : NULL;
+    if (ncache == MODS_MAX) return NULL;
+    int i = ncache++;
+    snprintf(cache[i].name, sizeof cache[i].name, "%s", name);
+    char p[1024];
+    snprintf(p, sizeof p, "mods/%s", name);
+    cache[i].ok = find_romfs(p, 4, cache[i].dir, sizeof cache[i].dir);
+    if (cache[i].ok) LOG("[mods] %s: %s\n", name, cache[i].dir);
+    return cache[i].ok ? cache[i].dir : NULL;
 }
 
-// LARECOMP_MOD=<name> (Legends Studio's "Play"): that mod for this run, in place of the settings' (which stay as they were)
-static const char *active_mod(void) {
+// The mods that are on, in their load order (the first wins where two change the same file): LARECOMP_MOD=<name>[,...]
+// (Legends Studio's "Play": for this run, in place of the settings' - which stay as they were), else g_settings.mod -
+// one name, or several separated by commas (the start screen's Mods page writes them)
+int mods_active(char names[][128], int max) {
     const char *e = getenv("LARECOMP_MOD");
-    return e ? e : g_settings.mod;
+    const char *list = e ? e : g_settings.mod;
+    int n = 0;
+    while (list && *list && n < max) {
+        const char *c = strchr(list, ',');
+        size_t len = c ? (size_t)(c - list) : strlen(list);
+        while (len && (*list == ' ')) list++, len--;
+        while (len && list[len - 1] == ' ') len--;
+        if (len && len < 128) {
+            memcpy(names[n], list, len), names[n][len] = 0;
+            bool dup = false;
+            for (int k = 0; k < n; k++) dup |= !strcmp(names[k], names[n]);
+            if (!dup) n++;
+        }
+        if (!c) break;
+        list = c + 1;
+    }
+    return n;
 }
 
-const char *mod_romfs_dir(void) { return romfs_of(active_mod()); }
+int mod_romfs_dirs(const char *dirs[], int max) {
+    char names[MODS_MAX][128];
+    int n = mods_active(names, MODS_MAX), k = 0;
+    for (int i = 0; i < n && k < max; i++) {
+        const char *d = romfs_of(names[i]);
+        if (d) dirs[k++] = d;
+    }
+    return k;
+}
+
+const char *mod_romfs_dir(void) {
+    const char *d[1];
+    return mod_romfs_dirs(d, 1) ? d[0] : NULL;
+}
+
+int mod_texpack_dirs(char dirs[][160], int max) {
+    char names[MODS_MAX][128];
+    int n = mods_active(names, MODS_MAX), k = 0;
+    for (int i = 0; i < n && k < max; i++) {
+        snprintf(dirs[k], 160, "mods/%s/texpack", names[i]);
+        if (is_dir(dirs[k])) k++;
+    }
+    return k;
+}
 
 bool mod_romfs_override(const char *path, char *out, size_t cap) {
-    const char *root = mod_romfs_dir();
-    if (!root) return false;
-    struct stat sb;
-    snprintf(out, cap, "%s/%s", root, path);
-    return !stat(out, &sb) && S_ISREG(sb.st_mode);
+    const char *dirs[MODS_MAX];
+    int n = mod_romfs_dirs(dirs, MODS_MAX);
+    for (int i = 0; i < n; i++) {  // (the first mod that has the file)
+        struct stat sb;
+        snprintf(out, cap, "%s/%s", dirs[i], path);
+        if (!stat(out, &sb) && S_ISREG(sb.st_mode)) return true;
+    }
+    return false;
 }
 
 // bin/message/<folder> -> language code
@@ -116,8 +163,12 @@ const char *mod_language(const char *name) {
 }
 
 const char *game_language(void) {
-    const char *m = mod_language(active_mod());
-    if (m) return m;
+    char names[MODS_MAX][128];
+    int n = mods_active(names, MODS_MAX);
+    for (int i = 0; i < n; i++) {  // (the first mod that replaces a language's texts)
+        const char *m = mod_language(names[i]);
+        if (m) return m;
+    }
     return g_settings.game_lang[0] ? g_settings.game_lang : "en-US";
 }
 

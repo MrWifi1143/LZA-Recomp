@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 
 #include "vk.h"
+#include "texpack.h"
 #include "../astc.h"
 #include "../glyphs.h"
 #include "../renderer.h"
@@ -491,8 +492,70 @@ static void upload_pending(TexBackend *b) {
 }
 
 uint64_t prof_tex_checks, prof_tex_samples, prof_tex_full, prof_tex_full_bytes, prof_tex_dyn;
+// Texture packs (texpack.c): the texture's image becomes the pack's - a .dds's BC7 / BC5 / BC4 levels as they are, or a
+// PNG's RGBA8 (sRGB when the game's texture was) with its mips blitted down the chain. False: nothing changed.
+static bool texpack_apply(TexBackend *b, const TexLoaded *r) {
+    VkFormat old = b->format, vf = r->fmt;
+    if (r->rgba) {
+        bool srgb = old == VK_FORMAT_BC7_SRGB_BLOCK || old == VK_FORMAT_BC1_RGBA_SRGB_BLOCK || old == VK_FORMAT_BC1_RGB_SRGB_BLOCK ||
+                    old == VK_FORMAT_BC2_SRGB_BLOCK || old == VK_FORMAT_BC3_SRGB_BLOCK || old == VK_FORMAT_R8G8B8A8_SRGB ||
+                    old == VK_FORMAT_B8G8R8A8_SRGB;
+        vf = srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+    }
+    uint32_t w = r->w, h = r->h, levels = r->levels;
+    if (r->rgba) for (uint32_t s = w > h ? w : h; s > 1; s >>= 1) levels++;
+    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
+                            .imageType = VK_IMAGE_TYPE_2D, .format = vf, .extent = {w, h, 1}, .mipLevels = levels, .arrayLayers = 1,
+                            .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                            .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    VkImage img;
+    VmaAllocation mem;
+    if (!format_supports(vf, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT) ||
+        vmaCreateImage(g_vk.vma, &ci, &ai, &img, &mem, NULL) != VK_SUCCESS)
+        return false;
+    destroy_image(b);
+    b->image = img, b->mem = mem;
+    b->format = vf, b->usage = ci.usage, b->storage = false;
+    b->width = w, b->height = h, b->depth = 1, b->layers = 1, b->levels = levels, b->samples = 1;
+    b->aspect = VK_IMAGE_ASPECT_COLOR_BIT, b->base_type = VK_IMAGE_VIEW_TYPE_2D;
+    b->astc_bw = b->astc_bh = 0;
+    b->texpack = true;
+    VkCommandBuffer cb = vk_upload_cmd();
+    vk_image_init_layout(cb, img, VK_IMAGE_ASPECT_COLOR_BIT);
+    for (uint32_t lv = 0; lv < r->levels; lv++) {
+        VkSpan s = vk_transient_copy(r->data + r->level_off[lv], r->level_size[lv], 16);
+        VkBufferImageCopy rg = {.bufferOffset = s.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, 0, 1},
+                                .imageExtent = {level_w(b, lv), level_h(b, lv), 1}};
+        vkCmdCopyBufferToImage(cb, s.buf, img, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
+    }
+    for (uint32_t lv = r->levels; lv < levels; lv++) {  // (a PNG's: each level from the one above, once that one is written)
+        VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                               .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                               .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT};
+        VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+        vkCmdPipelineBarrier2(cb, &di);
+        int32_t sw = (int32_t)level_w(b, lv - 1), sh = (int32_t)level_h(b, lv - 1), dw = (int32_t)level_w(b, lv), dh = (int32_t)level_h(b, lv);
+        VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv - 1, 0, 1}, .srcOffsets = {{0, 0, 0}, {sw, sh, 1}},
+                          .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, 0, 1}, .dstOffsets = {{0, 0, 0}, {dw, dh, 1}}};
+        vkCmdBlitImage(cb, img, VK_IMAGE_LAYOUT_GENERAL, img, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+    }
+    vk_full_barrier(cb);
+    return true;
+}
+
 static void upload_texture(NvnTexture *t, TexBackend *b) {
-    if (!t->addr || t->target == 10) return;
+    if (b->texpack_wait) {  // (its replacement read by now? the game's own until then)
+        TexLoaded *r;
+        if (texpack_take(b->texpack_key, &r)) {
+            b->texpack_wait = false;
+            bool ok = r && texpack_apply(b, r);
+            texpack_free(r);
+            if (ok) return;
+        }
+    }
+    if (!t->addr || t->target == 10 || b->texpack) return;
     uint64_t frame = vk_frame_counter();
     if (b->glyph && b->glyph_gen != glyphs_generation()) b->uploaded = false;  // (another controller's prompts)
     if (b->uploaded && b->checked_frame == frame) return;
@@ -582,6 +645,24 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 uint64_t st = pr ? SDL_GetTicksNS() : 0;
                 tegra_deswizzle(src, lin, l.wb, l.hb, l.d, fi->bpb, l.block_height_log2, l.block_depth_log2);
                 if (pr) prof_up_swz_ns += SDL_GetTicksNS() - st;
+            }
+            // a texture pack's replacement (texpack.c): plain 2D textures from the game's files, on their first upload
+            if (lv == 0 && layer == 0 && !b->texpack_seen && getenv("LARECOMP_TEXPACK_WHY")) {
+                static int nwhy;
+                if (nwhy++ < 60)
+                    LOG("[texpack] why %ux%u fmt %#x: expand %d linear %d dynamic %d scalable %d d %u layers %u target %u samples %u flags %#x\n",
+                        l.w, l.h, t->format, expand, linear, b->dynamic, b->scalable, l.d, layers, t->target, b->samples, t->flags);
+            }
+            if (lv == 0 && layer == 0 && !b->texpack_seen && !expand && !linear && !b->dynamic && !b->scalable && l.d == 1 &&
+                layers == 1 && t->target == 1 && b->samples == 1 && !(t->flags & 0x1b) && texpack_active()) {
+                // (flags: display 1, video 2, compressible 8 - render targets -, linear 0x10 are never the game's files; the
+                // image flag 4 is on Arceus's material textures too)
+                b->texpack_seen = true;
+                uint64_t key = hash_full(lin, (uint64_t)row * l.hb) | 1;
+                static int klog = -1;  // (LARECOMP_TEXPACK_KEYS=<n>: the first n keys looked up, to match against an export)
+                if (klog < 0) klog = getenv("LARECOMP_TEXPACK_KEYS") ? atoi(getenv("LARECOMP_TEXPACK_KEYS")) : 0;
+                if (klog > 0) klog--, LOG("[texpack] key %016llx %ux%u fmt %#x\n", (unsigned long long)key, l.w, l.h, t->format);
+                if (texpack_has(key)) texpack_request(key), b->texpack_key = key, b->texpack_wait = true;
             }
             static int dump_fmt = -2;  // LARECOMP_DUMP_TEX_FMT=<nvn format>: level 0 of those textures, untiled -> build/tex/
             if (dump_fmt == -2) dump_fmt = ENV("LARECOMP_DUMP_TEX_FMT") ? (int)strtol(ENV("LARECOMP_DUMP_TEX_FMT"), NULL, 0) : -1;

@@ -106,6 +106,10 @@ typedef struct TexBackend {
     int reg;  // slot in textures.c's live list + 1 (a reboot destroys them all)
     uint64_t dirty_seq;  // last host write (backend_pool_written) this texture was checked against
     bool storage;        // created with storage usage (an NVN image: SUST / SURED write it)
+    bool texpack_seen;   // looked up in the texture pack (texpack.c) once
+    bool texpack;        // replaced by the pack's image: the game's data isn't uploaded into it
+    bool texpack_wait;   // its replacement is being read (texpack_key): the game's own until then
+    uint64_t texpack_key;
     VkImageUsageFlags usage;
 } TexBackend;
 
