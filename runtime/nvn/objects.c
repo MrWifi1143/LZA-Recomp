@@ -1,4 +1,6 @@
 // NVN objects, builders, and state objects (everything except command recording).
+#include <pthread.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -47,7 +49,7 @@ NVN(nvnDeviceGetInteger) {
     static uint64_t seen[4];
     if (which < 256 && !(seen[which >> 6] >> (which & 63) & 1)) {
         seen[which >> 6] |= 1ull << (which & 63);
-        if (getenv("LARECOMP_LOG_NVN_INTS") || which > 64) LOG("[nvn] DeviceGetInteger %u -> %u%s\n", which, v, which > 64 ? " (unknown)" : "");
+        if (ENV("LARECOMP_LOG_NVN_INTS") || which > 64) LOG("[nvn] DeviceGetInteger %u -> %u%s\n", which, v, which > 64 ? " (unknown)" : "");
     }
     *(int32_t *)AP(2) = (int32_t)v;
 }
@@ -158,10 +160,10 @@ void renderer_flush(void);
 NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     static int flush = -1;
     static uint64_t n;
-    if (flush < 0) flush = getenv("LARECOMP_SYNC_FLUSH") ? 1 : 0;
-    if (getenv("LARECOMP_LOG_SYNC") && n++ % 60 == 0) LOG("[nvn] SyncWait #%llu (lr %llx)\n", (unsigned long long)n, c->x[30]);
+    if (flush < 0) flush = ENV("LARECOMP_SYNC_FLUSH") ? 1 : 0;
+    if (ENV("LARECOMP_LOG_SYNC") && n++ % 60 == 0) LOG("[nvn] SyncWait #%llu (lr %llx)\n", (unsigned long long)n, c->x[30]);
     static int whole = -1;  // LARECOMP_SYNC_ALL=1: old behaviour, wait for all submitted work
-    if (whole < 0) whole = getenv("LARECOMP_SYNC_ALL") ? 1 : 0;
+    if (whole < 0) whole = ENV("LARECOMP_SYNC_ALL") ? 1 : 0;
     if (flush) { rt_drain(); renderer_flush(); }
     else if (whole) { rt_drain(); renderer_sync(); }
     else {
@@ -346,7 +348,7 @@ static void builder_layout(uint64_t b, TexLayout *t) {
     // from the driver default: NVNpackagedTextureLayout's low word is log2(GOBs per block).
     uint64_t pl = G(uint64_t, b, 0x50);
     if (pl && (uint32_t)pl <= 5) t->block_height_log2 = (uint32_t)pl;
-    if (pl && getenv("LARECOMP_LOG_PACKAGED")) {
+    if (pl && ENV("LARECOMP_LOG_PACKAGED")) {
         static int n;
         if (n++ < 4000) LOG("[nvn] packaged layout %016llx fmt %#x %ux%u lv %u -> default bh %u\n", pl, G(uint32_t, b, 0x20), t->width, t->height, t->levels, t->block_height_log2);
     }
@@ -402,38 +404,83 @@ extern NvnDescPool *g_texture_pools[64];
 static uint64_t g_pool_dangling, g_pool_reattached, g_pool_mismatch;
 static int pool_fix(void) {
     static int f = -1;
-    if (f < 0) f = getenv("LARECOMP_POOL_FIX") ? atoi(getenv("LARECOMP_POOL_FIX")) : 1;
+    if (f < 0) f = ENV("LARECOMP_POOL_FIX") ? atoi(ENV("LARECOMP_POOL_FIX")) : 1;
     return f;
 }
 static void pool_note(const char *what, uint64_t n) { if (!(n & (n - 1))) LOG("[nvn] texture pool: %s %llu\n", what, (unsigned long long)n); }
-static void pool_forget(NvnTexture *t) {
-    for (int p = 0; p < 64 && g_texture_pools[p]; p++) {
-        NvnTexEntry *e = g_texture_pools[p]->entries;
-        for (int i = 0; i < g_texture_pools[p]->count; i++)
-            if (e[i].tex == t) {
-                pool_note("slots left on a finalized texture", ++g_pool_dangling);
-                if (pool_fix()) e[i].tex = NULL;
-            }
+// The slots each NVNtexture object was registered in (register_texture): finalize / initialize look at those, not at
+// every slot of every pool - that scan ran on each texture the game streams in and out, 1.75% of Z-A's CPU on the
+// Steam Frame. A list can hold slots registered with another object since (checked: e->guest), dropped when seen.
+typedef struct { NvnDescPool *d; int id; } SlotRef;
+typedef struct ObjSlots { uint64_t obj; int n, cap; SlotRef *v; struct ObjSlots *next; } ObjSlots;
+#define OS_BUCKETS 16384
+static ObjSlots *g_os[OS_BUCKETS];
+static pthread_mutex_t g_os_lock = PTHREAD_MUTEX_INITIALIZER;
+static ObjSlots *obj_slots(uint64_t obj, bool make) {  // (g_os_lock held)
+    unsigned h = (unsigned)((obj >> 4) ^ (obj >> 18)) & (OS_BUCKETS - 1);
+    for (ObjSlots *s = g_os[h]; s; s = s->next) if (s->obj == obj) return s;
+    if (!make) return NULL;
+    ObjSlots *s = calloc(1, sizeof *s);
+    s->obj = obj, s->next = g_os[h], g_os[h] = s;
+    return s;
+}
+static void obj_slot_add(uint64_t obj, NvnDescPool *d, int id) {
+    pthread_mutex_lock(&g_os_lock);
+    ObjSlots *s = obj_slots(obj, true);
+    bool have = false;
+    for (int i = 0; i < s->n && !have; i++) have = s->v[i].d == d && s->v[i].id == id;
+    if (!have) {
+        if (s->n == s->cap) s->cap = s->cap ? s->cap * 2 : 2, s->v = realloc(s->v, (size_t)s->cap * sizeof *s->v);
+        s->v[s->n++] = (SlotRef){d, id};
     }
+    pthread_mutex_unlock(&g_os_lock);
+}
+static void obj_slots_reset(void) {
+    pthread_mutex_lock(&g_os_lock);
+    for (int h = 0; h < OS_BUCKETS; h++)
+        for (ObjSlots *s = g_os[h], *n; s; s = n) n = s->next, free(s->v), free(s);
+    memset(g_os, 0, sizeof g_os);
+    pthread_mutex_unlock(&g_os_lock);
+}
+// each slot still registered with obj (stale references dropped): f(entry)
+#define FOR_OBJ_SLOTS(obj, e, body)                                                       \
+    do {                                                                                  \
+        pthread_mutex_lock(&g_os_lock);                                                   \
+        ObjSlots *s_ = obj_slots(obj, false);                                             \
+        for (int i_ = 0; s_ && i_ < s_->n;) {                                             \
+            NvnTexEntry *e = &((NvnTexEntry *)s_->v[i_].d->entries)[s_->v[i_].id];        \
+            if (e->guest != (obj)) { s_->v[i_] = s_->v[--s_->n]; continue; }              \
+            body;                                                                         \
+            i_++;                                                                         \
+        }                                                                                 \
+        pthread_mutex_unlock(&g_os_lock);                                                 \
+    } while (0)
+
+static void pool_forget(NvnTexture *t) {
+    FOR_OBJ_SLOTS(t->obj, e, {
+        if (e->tex == t) {
+            pool_note("slots left on a finalized texture", ++g_pool_dangling);
+            if (pool_fix()) e->tex = NULL;
+        }
+    });
 }
 static void pool_reattach(uint64_t guest, NvnTexture *t) {
-    for (int p = 0; p < 64 && g_texture_pools[p]; p++) {
-        NvnTexEntry *e = g_texture_pools[p]->entries;
-        for (int i = 0; i < g_texture_pools[p]->count; i++)
-            if (e[i].guest == guest && e[i].tex != t) {
-                if (!e[i].tex) { e[i].tex = t; pool_note("slots given the texture initialized again", ++g_pool_reattached); }
-                else if (!pool_fix()) pool_note("slots on another object than the texture initialized again", ++g_pool_mismatch);
-            }
-    }
+    FOR_OBJ_SLOTS(guest, e, {
+        if (e->tex != t) {
+            if (!e->tex) { e->tex = t; pool_note("slots given the texture initialized again", ++g_pool_reattached); }
+            else if (!pool_fix()) pool_note("slots on another object than the texture initialized again", ++g_pool_mismatch);
+        }
+    });
 }
 NVN(nvnTextureInitialize) {
     NvnTexture *t = texture_from_builder(A(1));
+    t->obj = A(0);
     if (t->flags & 2)
         LOG("[nvn] video texture %p: %ux%u fmt %#x flags %#x target %u addr %llx stride %llu\n", t, t->width, t->height,
             t->format, t->flags, t->target, t->addr, t->stride);
     static int logbig = -1;  // (research) LARECOMP_LOG_TEXINIT=1: square textures from 512 up (shadow maps) with the caller
-    if (logbig < 0) logbig = getenv("LARECOMP_LOG_TEXINIT") != NULL;
-    if (logbig && t->width >= 512 && (t->width == t->height || getenv("LARECOMP_LOG_TEXINIT")[0] == '2')) {
+    if (logbig < 0) logbig = ENV("LARECOMP_LOG_TEXINIT") != NULL;
+    if (logbig && t->width >= 512 && (t->width == t->height || ENV("LARECOMP_LOG_TEXINIT")[0] == '2')) {
         char line[256];
         int o = 0;
         uint64_t fp = c->x[29];
@@ -602,7 +649,10 @@ NVN(nvnSamplerGetDebugID) { RET(A(0)); }
 
 // ================================================================== descriptor pools
 NvnDescPool *g_texture_pools[64], *g_sampler_pools[64];
-RT_ON_RESET(desc_pools_reset) { memset(g_texture_pools, 0, sizeof g_texture_pools); memset(g_sampler_pools, 0, sizeof g_sampler_pools); }
+RT_ON_RESET(desc_pools_reset) {
+    memset(g_texture_pools, 0, sizeof g_texture_pools); memset(g_sampler_pools, 0, sizeof g_sampler_pools);
+    obj_slots_reset();
+}
 
 static NvnDescPool *desc_pool_init(uint64_t guest, uint64_t pool, uint64_t off, int count, size_t entry, NvnDescPool **reg) {
     NvnDescPool *d = calloc(1, sizeof *d);
@@ -633,6 +683,7 @@ static void register_texture(Cpu *c) {
     NvnTexEntry *e = &((NvnTexEntry *)d->entries)[id];
     e->tex = HOST(NvnTexture, A(2));
     e->guest = A(2);
+    obj_slot_add(A(2), d, id);  // (pool_forget / pool_reattach: this object's slots)
     e->has_view = A(3) != 0;
     if (e->has_view) memcpy(&e->view, AP(3), sizeof e->view);
 }
@@ -731,7 +782,7 @@ static void set_shaders(Cpu *c, int stride) {
                 p->xfb_count[b] = ok ? (uint8_t)n_ : 0;
                 p->xfb_stride[b] = ok && n_ ? s_ : 0;
             }
-            if (p->xfb_count[0] && getenv("LARECOMP_LOG_XFB"))
+            if (p->xfb_count[0] && ENV("LARECOMP_LOG_XFB"))
                 LOG("[xfb] program %llx layout: %u/%u %u/%u %u/%u %u/%u\n", (unsigned long long)code, p->xfb_count[0], p->xfb_stride[0],
                     p->xfb_count[1], p->xfb_stride[1], p->xfb_count[2], p->xfb_stride[2], p->xfb_count[3], p->xfb_stride[3]);
         }
@@ -812,7 +863,7 @@ static void present_pace(int interval) {
         }
     }
     if (fps < 0) {
-        const char *e = getenv("LARECOMP_FPS");
+        const char *e = ENV("LARECOMP_FPS");
         fps = e ? atoi(e) : -2;  // -2: the game's own interval
     }
     uint64_t period;
@@ -887,7 +938,7 @@ NVN(nvnQueuePresentTexture) {
     int i = (int)A(2);
     {   // LARECOMP_POKE32="<guest addr>=<value>[;...]": 32-bit values written to the game's memory before every present
         static const char *poke = (const char *)1;  // (experiments: a constant the game reads, without rebuilding anything)
-        if (poke == (const char *)1) poke = getenv("LARECOMP_POKE32");
+        if (poke == (const char *)1) poke = ENV("LARECOMP_POKE32");
         for (const char *p = poke; p && *p;) {
             char *eq;
             uint64_t pa = strtoull(p, &eq, 0);
