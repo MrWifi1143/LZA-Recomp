@@ -41,6 +41,191 @@ ALL_LABELS_MAX = 1024  # instructions: above this, only unresolved tables get th
 OPTNONE_MIN = 2048     # instructions: a function this big with the fallback is compiled without optimization
 
 
+# ---- guest registers promoted to locals (--no-promote: off)
+# The lifted code keeps x0-x30 and sp in the Cpu struct, and every guest load / store goes through a may_alias pointer,
+# so the compiler must assume any of them can overwrite a register: each instruction re-loads the registers it reads and
+# stores the ones it writes (27% of the game code's instructions on AArch64 were that traffic). Here a function keeps
+# them in locals (X0.., XSP) and the struct is only brought up to date where something else looks at it: calls with c
+# that aren't the headers' own helpers (game functions, rt_dispatch, rt_svc, setjmp points, patches - those statements
+# keep their c->x as they were, with the dirty registers stored before and all of them reloaded after), returns, and
+# inline asm (AArch64 SIMD) at the registers it names by offset. Which registers are dirty where: a forward data flow
+# over the function's statements (labels, gotos, switches), so a call stores only what changed since the last sync.
+# AArch64 only (--simd asm, its 31 registers): Arceus on the Steam Frame -3% CPU per frame (code -16%). On x86-64 (16
+# registers) the locals spill to the stack instead: the DLL grew 9% and Windows used 4% more CPU per frame - off there.
+_HELPERS = None
+
+
+def _helpers():
+    """Functions / macros of runtime/cpu.h, simd.h, simd_fp.h taking c: flags, conditions, exclusives, C SIMD - none of
+    them reads or writes x0-x30 or sp (checked: only FN_ENTER does, before the locals are loaded)."""
+    global _HELPERS
+    if _HELPERS is None:
+        names = set()
+        here = os.path.dirname(os.path.abspath(__file__))
+        # (a source checkout: runtime/; a release: gamelib-src/ beside gen/, what the start screen compiles with)
+        dirs = [os.path.join(here, '..', 'runtime'), os.path.join(here, '..', 'gamelib-src'), here]
+        for h in ('cpu.h', 'simd.h', 'simd_fp.h'):
+            p = next((os.path.join(d, h) for d in dirs if os.path.exists(os.path.join(d, h))), None)
+            if not p:
+                continue
+            src = open(p, encoding='utf-8', errors='replace').read()
+            # only inline definitions (bodies here, checked) and macros - not the runtime's prototypes declared beside
+            # them (rt_dispatch, rt_svc, rt_setjmp_point...: those are the calls the struct must be current for)
+            names.update(re.findall(r'(?:\bstatic\s+(?:inline\s+)?|\bSI\s+)(?:__attribute__\(\([^)]*\)\)\s*)?[\w\s\*]*?\b([A-Za-z_]\w*)'
+                                    r'\s*\(\s*Cpu\s*\*\s*c\b[^;{]*\{', src))
+            names.update(re.findall(r'#\s*define\s+([A-Za-z_]\w*)\s*\(\s*c\s*[,)]', src))
+            # functions made by macros (EXCL(N, T): ldx##N / stx##N; ...): the generated names they produce
+            if re.search(r'\b(ldx|stx)##', src):
+                names.update(['ldx8', 'ldx16', 'ldx32', 'ldx64', 'stx8', 'stx16', 'stx32', 'stx64', 'ldxp64', 'stxp64',
+                              'ldxp32', 'stxp32'])
+        # (simd_fp.h's per-type functions, named by macros - op_##s...: the names C SIMD code calls)
+        names.update(f'{b}_{t}' for b in ('op', 'cmp', 'fromint', 'toint', 'vcmp', 'frint', 'fmax', 'fmin', 'fsqrt', 'fabs')
+                     for t in ('s', 'd', 'h'))
+        names = {n for n in names if not n.startswith(('rt_', 'f_', 'hle_', 'guest_', 'kernel_'))}
+        names.discard('FN_ENTER')
+        _HELPERS = names
+    return _HELPERS
+
+
+_RX_REG = re.compile(r'c->x\[(\d+)\]')
+_RX_WRITE = re.compile(r'c->(x\[(\d+)\]|sp)\s*(=|\+=|-=|\|=|&=|\^=|<<=|>>=)(?!=)')
+_RX_CALLC = re.compile(r'\b([A-Za-z_]\w*)\s*\(\s*c\s*[,)]')
+_RX_GOTO = re.compile(r'goto (L_\w+);')
+_RX_ASMOFF = re.compile(r'\[%0(?:, #(\d+))?\]')
+
+
+def _regs_of_offset(o):
+    """Promoted registers an asm access at Cpu offset o may touch (ldp / stp: two of them)."""
+    if o < 248:
+        return {o // 8, o // 8 + 1} if o // 8 < 30 else {30}
+    if o == 248:
+        return {'sp'}  # (a pair from x30 reaches sp)
+    if o == 256:
+        return {'sp'}
+    return set()  # (pc, flags, FPCR / FPSR, v registers: not promoted)
+
+
+def promote_registers(out, stats):
+    """out: one function's lines as emit_function made them. Returns the promoted lines, or out unchanged."""
+    if len(out) < 4 or out[0].startswith('__attribute__((optnone') or not out[1].lstrip().startswith('FN_ENTER'):
+        return out
+    body = out[2:-1]
+    if out[-1] != '}':
+        return out
+    head = []
+    while body and body[0].lstrip().startswith('if (__builtin_expect(c->alias_pc'):
+        head.append(body.pop(0))
+    text = '\n'.join(body)
+    if '&c->x' in text or '&c->sp' in text or 'c->x[i' in text:
+        stats['promote_skipped'] += 1
+        return out
+    for l in body:  # (one statement per line, braces closed: rando / multi-line patches are left as they are)
+        if l.count('{') != l.count('}') or l.count('(') != l.count(')'):
+            stats['promote_skipped'] += 1
+            return out
+    helpers = _helpers()
+    regs = set()  # promoted: 0..30 and 'sp'
+    kinds = []    # per statement: ('plain'|'barrier'|'asm'|'label', info)
+    for l in body:
+        s = l.strip()
+        if s.startswith('L_') and s.endswith(':;') or s == 'L_dispatch:':
+            kinds.append(('label', s.rstrip(':;').rstrip(':')))
+            continue
+        if '__asm__' in s:
+            offs = _RX_ASMOFF.findall(s)
+            touched = set()
+            full = len(offs) != s.count('%0')  # (c used other than as [%0, #offset]: everything synced)
+            for o in offs:
+                touched |= _regs_of_offset(int(o) if o else 0)
+            kinds.append(('asm', 'full' if full else touched))
+            continue
+        calls = [n for n in _RX_CALLC.findall(s) if n not in helpers]
+        if calls or 'rt_setjmp_point' in s or 'return' in s:
+            kinds.append(('barrier', None))
+            continue
+        kinds.append(('plain', None))
+        regs.update(int(m) for m in _RX_REG.findall(s))
+        if 'c->sp' in s:
+            regs.add('sp')
+    if not regs:
+        return out
+    def var(r):
+        return 'XSP' if r == 'sp' else f'X{r}'
+    def field(r):
+        return 'c->sp' if r == 'sp' else f'c->x[{r}]'
+    allregs = sorted(regs, key=lambda r: 99 if r == 'sp' else r)
+    # control flow: successors of each statement (labels by name, fall-through unless the statement always leaves)
+    label_at = {k[1]: i for i, k in enumerate(kinds) if k[0] == 'label'}
+    n = len(body)
+    succ = []
+    for i, l in enumerate(body):
+        s = l.strip()
+        nxt = [label_at[g] for g in _RX_GOTO.findall(s) if g in label_at]
+        terminal = (s.startswith('goto ') or s.startswith('return') or s.startswith('__attribute__((musttail)) return')
+                    or (s.startswith('c->pc =') and 'goto L_dispatch' in s) or s.startswith('rt_udf('))
+        if not terminal and i + 1 < n:
+            nxt.append(i + 1)
+        succ.append(nxt)
+    # dirty registers at each statement's start (forward, union)
+    writes = []
+    for i, l in enumerate(body):
+        w = set()
+        if kinds[i][0] == 'plain':
+            for m in _RX_WRITE.finditer(l):
+                w.add('sp' if m.group(1) == 'sp' else int(m.group(2)))
+        writes.append(w & regs)
+    din = [set() for _ in range(n)]
+    work = list(range(n))
+    inq = [True] * n
+    while work:
+        i = work.pop()
+        inq[i] = False
+        d = din[i]
+        k = kinds[i][0]
+        if k == 'barrier':
+            dout = set()
+        elif k == 'asm':
+            dout = set() if kinds[i][1] == 'full' else d - kinds[i][1]
+        else:
+            dout = d | writes[i]
+        for j in succ[i]:
+            if not dout <= din[j]:
+                din[j] |= dout
+                if not inq[j]:
+                    inq[j] = True
+                    work.append(j)
+    def spill(rs):
+        return ' '.join(f'{field(r)} = {var(r)};' for r in sorted(rs, key=lambda r: 99 if r == 'sp' else r))
+    def reload(rs):
+        return ' '.join(f'{var(r)} = {field(r)};' for r in sorted(rs, key=lambda r: 99 if r == 'sp' else r))
+    res = [out[0], out[1], '    uint64_t ' + ', '.join(f'{var(r)} = {field(r)}' for r in allregs) + ';'] + head
+    for i, l in enumerate(body):
+        k, info = kinds[i]
+        if k == 'label':
+            res.append(l)
+        elif k == 'plain':
+            t = _RX_REG.sub(lambda m: var(int(m.group(1))) if int(m.group(1)) in regs else m.group(0), l)
+            if 'sp' in regs:
+                t = re.sub(r'c->sp\b', 'XSP', t)
+            res.append(t)
+        elif k == 'barrier':
+            s = l.strip()
+            terminal = not succ[i] or (s.startswith('__attribute__((musttail)) return') or s.startswith('return'))
+            pre = spill(din[i])
+            post = '' if terminal else reload(regs)
+            res.append(f'    {{ {pre} {s} {post} }}' if (pre or post) else l)
+            stats['promote_sync'] += 1
+        else:  # asm
+            touched = set(regs) if info == 'full' else info & regs
+            pre, post = spill(din[i] & touched), reload(touched)
+            res.append(f'    {pre} {l.strip()} {post}' if (pre or post) else l)
+    res.append('}')
+    stats['promoted_fns'] += 1
+    return res
+
+
+
+
 class Module:
     def __init__(self, name, path, base, simd='asm', trace_stores=False):
         self.name = name
@@ -674,6 +859,7 @@ def main():
     ap.add_argument('--chunk-bytes', type=int, default=1500000)  # and about this much C (even compile times)
     ap.add_argument('--big-fn', type=int, default=100000)  # bytes of C from which a function gets its own file
     ap.add_argument('--limit', type=int, default=0)
+    ap.add_argument('--no-promote', action='store_true')  # guest registers stay in the Cpu struct (promote_registers)
     ap.add_argument('--trace-stores', action='store_true')  # research build (letsgo-recomp's docs/DEPURACAO.md, LARECOMP_TRACE_STORES)
     ap.add_argument('--simd', choices=('asm', 'c'),
                     default='asm' if platform.machine().lower() in ('arm64', 'aarch64') else 'c')
@@ -786,6 +972,8 @@ def main():
                 ci += 1
                 end, labels, tables = entries[a]
                 lines = m.emit_function(a, end, labels | set(aliases.get(a, ())), tables, hle, aliases.get(a))
+                if not args.no_promote and args.simd == 'asm':  # (AArch64 hosts only: see promote_registers)
+                    lines = promote_registers(lines, m.stats)
                 for p in aliases.get(a, ()):
                     lines.append(f'void {fname(p)}(Cpu *c) {{ c->alias_pc = {hx(p)}; {fname(a)}(c); }}')
                 r = getattr(m, '_refs', set())
