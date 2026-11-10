@@ -5,15 +5,22 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsZA`)
 
-Z-A:
+## 2026-11-10: LegendsZA-v1.1.0-rc1 (release candidate)
 
-- Texture packs: a mod's texpack/ folder of <key>.dds / .png replaces the game's textures at any size
-  (runtime/nvn/vulkan/texpack.c, Arceus's, same keys as Legends Studio's export); read on loader threads.
+Previous release: LegendsZA-v1.0.2. Game version: Pokemon Legends: Z-A 2.0.2. The game code is built again once on the
+first start (the generator changed): a few minutes, as at setup.
+
+- Texture packs: a mod's texpack/ folder of <key>.dds / .png replaces the game's textures at any size (make them with
+  Legends Studio), read on loader threads, at most 8 MB put in a frame (no hitches) and kept under the GPU's memory.
 - Mods: several on at once (mod = a,b,c - the first wins where two change the same thing).
-- New app icon (window, taskbar, the exe, the release folder): Prism Tower over the night city, the launcher banner's art, instead
-  of the Master Ball left over from the runtime's first game. docs/icon/make_icon.py draws it from the launcher's
-  shapes (runtime/ui/launcher_lg.mm) and writes icon.svg, icon_1024.png, icon.ico and icon.icns.
-
+- New app icon: Prism Tower over the night city.
+- Render resolution above the window's: an exact area average (sharper than the bilinear scale).
+- Steam Frame / ARM Linux: runs natively on AArch64; the shader warm-up is off there (it overheated the Frame) and the
+  game code keeps registers in locals (3-8% less CPU).
+- PS5 under Linux (RADV): the game's memory is GPU memory only where it's used - max settings + the HD pack no longer
+  restart the session.
+- Lower-end hardware: less CPU per frame (the function dispatcher, texture pool lookups).
+- Steam relay: Z-A rooms and Arceus rooms never show up in each other's scans.
 ## 2026-10-31: LegendsZA-v0.6.2-alpha
 
 Z-A:
