@@ -136,7 +136,12 @@ def main():
               'runtime/hle/hle_symbols.txt'):
         shutil.copy(f, G)
     for z in glob.glob('data/pgo/*.clang21.profdata.zst'):  # (the optimiser's profile, zig's family: Makefile PGO)
-        subprocess.run(['zstd', '-q', '-d', '-f', z, '-o', os.path.join(G, 'pgo.profdata')], check=True)
+        if shutil.which('zstd'):
+            subprocess.run(['zstd', '-q', '-d', '-f', z, '-o', os.path.join(G, 'pgo.profdata')], check=True)
+        else:  # (Windows: no zstd program - the Python module: pip install zstandard)
+            import zstandard
+            with open(z, 'rb') as fi, open(os.path.join(G, 'pgo.profdata'), 'wb') as fo:
+                zstandard.ZstdDecompressor().copy_stream(fi, fo)
     shutil.copy('docs/icon/icon_1024.png', os.path.join(D, 'icon.png'))
     shutil.copy('third_party/fonts/Baloo2/Baloo2-SemiBold.ttf', D)
     if os.path.isfile('data/shader_manifest.txt'):  # (the warm-up's first programs: runtime/nvn/vulkan/warmup.c)
@@ -148,6 +153,14 @@ def main():
             if not os.path.isfile(plug):
                 die('no %s: build.py builds it' % plug)
             shutil.copy(plug, os.path.join(D, 'plugins'))
+    lua = os.path.join(B, 'plugins', 'legendslua.dll')  # (Legends Lua: shipped, off until switched on in the Mods page)
+    if os.path.isfile('contrib/legendslua/legendslua.c'):
+        if not os.path.isfile(lua):
+            die('no %s: build.py builds it' % lua)
+        os.makedirs(os.path.join(D, 'plugins'), exist_ok=True)
+        shutil.copy(lua, os.path.join(D, 'plugins'))
+    if os.path.isdir('contrib/mods'):  # (mods that are only recomp settings - no game files: off until turned on)
+        shutil.copytree('contrib/mods', os.path.join(D, 'mods'), dirs_exist_ok=True)
     shutil.copy('docs/release-README.txt', os.path.join(D, 'README.txt'))
     # licenses: this project's, then every bundled component's (THIRD-PARTY-NOTICES.md says which is which)
     Ls = os.path.join(D, 'licenses')
