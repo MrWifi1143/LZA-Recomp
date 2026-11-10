@@ -236,6 +236,31 @@ win-exe:
 dist: win-exe
 	tools/windows/make_zip.sh $(WIN_TAG) $(WIN_EXE)
 
+# The Steam relay plugin (contrib/steamrelay): Link Trades / Private Battles with Steam friends. In <game folder>/plugins/
+# (the Windows zip has it there); off until switched on in the start screen's Mods page.
+ifeq ($(PLATFORM),windows)
+RELAY := $(B)/plugins/steamrelay.dll
+RELAY_LIBS := -lws2_32 -ladvapi32
+else
+RELAY := $(B)/plugins/libsteamrelay.so
+RELAY_LIBS := -fPIC -lpthread -ldl
+endif
+# Its helper (the Steam API in a process of its own: the game keeps its own Steam Input controller setup) beside it.
+ifeq ($(PLATFORM),windows)
+RELAYH := $(B)/plugins/steamrelay-helper.exe
+RELAYH_LIBS := -ladvapi32
+else
+RELAYH := $(B)/plugins/steamrelay-helper
+RELAYH_LIBS := -lpthread -ldl
+endif
+steamrelay: $(RELAY) $(RELAYH)
+$(RELAY): contrib/steamrelay/steamrelay.c runtime/plugin.h
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -g -Wall -shared -Iruntime -Ithird_party $(DEPINC) $< -o $@ $(RELAY_LIBS)
+$(RELAYH): contrib/steamrelay/steamrelay.c
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -g -Wall -DRELAY_HELPER $< -o $@ $(RELAYH_LIBS)
+
 # Legends Lua (contrib/legendslua): Lua scripting of the game (hooks, memory, calls; scripts in <game folder>/lua/).
 # In <game folder>/plugins/; off until switched on in the Mods page.
 ifeq ($(PLATFORM),windows)
@@ -250,4 +275,4 @@ $(LUAMOD): contrib/legendslua/legendslua.c runtime/plugin.h $(wildcard third_par
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -Wall -shared -Iruntime -Ithird_party $(DEPINC) $< $(wildcard third_party/lua/*.c) -o $@ $(LUAMOD_FLAGS)
 
-.PHONY: all gen gen-objs runtime-objs win-exe dist legendslua
+.PHONY: all gen gen-objs runtime-objs win-exe dist legendslua steamrelay

@@ -142,11 +142,12 @@ def main():
     if os.path.isfile('data/shader_manifest.txt'):  # (the warm-up's first programs: runtime/nvn/vulkan/warmup.c)
         shutil.copy('data/shader_manifest.txt', D)
     if os.path.isdir('contrib/steamrelay'):  # (the Steam relay plugin: shipped, off until switched on in the Mods page)
-        plug = os.path.join(B, 'plugins', 'steamrelay.dll')
-        if not os.path.isfile(plug):
-            die('no %s: build.py builds it' % plug)
         os.makedirs(os.path.join(D, 'plugins'))
-        shutil.copy(plug, os.path.join(D, 'plugins'))
+        for f in ('steamrelay.dll', 'steamrelay-helper.exe'):  # (the helper: the Steam API in a process of its own)
+            plug = os.path.join(B, 'plugins', f)
+            if not os.path.isfile(plug):
+                die('no %s: build.py builds it' % plug)
+            shutil.copy(plug, os.path.join(D, 'plugins'))
     shutil.copy('docs/release-README.txt', os.path.join(D, 'README.txt'))
     # licenses: this project's, then every bundled component's (THIRD-PARTY-NOTICES.md says which is which)
     Ls = os.path.join(D, 'licenses')

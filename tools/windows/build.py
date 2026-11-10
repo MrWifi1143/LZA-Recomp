@@ -218,6 +218,11 @@ def main():
         if not ok:
             die('steamrelay: ' + out)
         print('built ' + plugin)
+        helper = B + '/plugins/steamrelay-helper.exe'  # (the Steam API in a process of its own: contrib/steamrelay)
+        ok, out = run(cc + ['-O2', '-g', '-Wall', '-DRELAY_HELPER', 'contrib/steamrelay/steamrelay.c', '-o', helper, '-ladvapi32'])
+        if not ok:
+            die('steamrelay-helper: ' + out)
+        print('built ' + helper)
 
     if args.install:
         d = args.install
@@ -237,6 +242,7 @@ def main():
         if plugin:
             os.makedirs(os.path.join(d, 'plugins'), exist_ok=True)
             put(plugin, os.path.join(d, 'plugins', 'steamrelay.dll'))
+            put(B + '/plugins/steamrelay-helper.exe', os.path.join(d, 'plugins', 'steamrelay-helper.exe'))
         print('installed into %s (the previous exe: %s.exe.prev)' % (d, exe_name))
 
 

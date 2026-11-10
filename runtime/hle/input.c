@@ -369,7 +369,13 @@ static void pad_use(SDL_JoystickID id) {
     SDL_Gamepad *g = SDL_GetGamepadFromID(id);
     if (!g || g == pad) return;
     pad = g;
-    LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad));
+    {
+        char *m = SDL_GetGamepadMapping(pad);  // (the layout SDL reads it with: a wrong one leaves buttons dead)
+        SDL_Joystick *j = SDL_GetGamepadJoystick(pad);
+        LOG("[input] gamepad: %s (%04x:%04x, type %d) mapping %.300s\n", SDL_GetGamepadName(pad), SDL_GetJoystickVendor(j),
+            SDL_GetJoystickProduct(j), (int)SDL_GetGamepadType(pad), m ? m : "-");
+        SDL_free(m);
+    }
     note_family();
 }
 static int pad_slot(SDL_JoystickID id) {
