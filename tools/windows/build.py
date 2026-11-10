@@ -224,6 +224,17 @@ def main():
             die('steamrelay-helper: ' + out)
         print('built ' + helper)
 
+    # Legends Lua (contrib/legendslua): Lua scripting of the game - shipped, off until switched on in the Mods page
+    lua = None
+    if os.path.isfile('contrib/legendslua/legendslua.c'):
+        lua = B + '/plugins/legendslua.dll'
+        os.makedirs(os.path.dirname(lua), exist_ok=True)
+        ok, out = run(cc + ['-O2', '-g', '-Wall', '-shared', '-Iruntime', '-Ithird_party', '-I' + deps + '/include',
+                            'contrib/legendslua/legendslua.c'] + sorted(glob.glob('third_party/lua/*.c')) + ['-o', lua])
+        if not ok:
+            die('legendslua: ' + out)
+        print('built ' + lua)
+
     if args.install:
         d = args.install
         if not os.path.isfile(os.path.join(d, exe_name + '.exe')):
@@ -243,6 +254,9 @@ def main():
             os.makedirs(os.path.join(d, 'plugins'), exist_ok=True)
             put(plugin, os.path.join(d, 'plugins', 'steamrelay.dll'))
             put(B + '/plugins/steamrelay-helper.exe', os.path.join(d, 'plugins', 'steamrelay-helper.exe'))
+        if lua:
+            os.makedirs(os.path.join(d, 'plugins'), exist_ok=True)
+            put(lua, os.path.join(d, 'plugins', 'legendslua.dll'))
         print('installed into %s (the previous exe: %s.exe.prev)' % (d, exe_name))
 
 
