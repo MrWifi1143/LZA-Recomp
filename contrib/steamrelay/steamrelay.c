@@ -15,7 +15,8 @@
 // How: runtime/services/ldn.c treats a relay peer as a player at 127.0.4.<k> (ldn_relay_set). What the game sends there
 // comes here and goes to that friend as a Steam networking message (port numbers first: [from port][to port][data]);
 // what a friend sends is replayed over loopback from 127.0.4.<k>:<their port> to this copy, where ldn.c receives it as
-// from any LAN player. A host advertises itself in its Steam rich presence (key "lzarecomp" = "hosting"); a scan asks
+// from any LAN player. A host advertises itself in its Steam rich presence (key "lzarecomp" = "hosting" - Z-A; Arceus:
+// "plarecomp", so the two games never see each other's rooms - LARECOMP_RELAY_KEY, set for the helper); a scan asks
 // every friend showing it. Only friends: messages from anyone else are refused (their sessions not accepted).
 //
 // The Steam API is not shipped: libsteam_api.so is loaded from the Steam install (Steam's own copy - SteamVR's - or any
@@ -69,6 +70,11 @@ static __attribute__((unused)) void env_set(const char *k, const char *v) { sete
 static __attribute__((unused)) void nonblocking(sock_t s) { fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK); }
 #define STEAM_API "libsteam_api.so"
 #endif
+// the rich presence key hosts advertise under: one per game (the plugin sets it for the helper from the title id)
+static __attribute__((unused)) const char *relay_key(void) {
+    const char *k = getenv("LARECOMP_RELAY_KEY");
+    return k && *k ? k : "lzarecomp";
+}
 
 
 #ifdef RELAY_HELPER
@@ -377,7 +383,7 @@ static void *from_game(void *arg) {  // (the plugin's frames: sends and the host
             S.SetSteamID64(&who, id);
             S.Send(g_msgs, &who, buf + 8, n - 8, SEND_UNRELIABLE_NO_NAGLE_AUTORESTART, 0);
         } else if (h[0] == 'P' && n >= 1) {
-            S.SetRichPresence(g_friends, "lzarecomp", buf[0] ? "hosting" : "");
+            S.SetRichPresence(g_friends, relay_key(), buf[0] ? "hosting" : "");
         }
         pthread_mutex_unlock(&g_steam_lock);
     }
@@ -429,7 +435,7 @@ int main(void) {
             int nf = S.FriendCount(g_friends, FRIEND_IMMEDIATE);
             for (int i = 0; i < nf && k + 300 <= sizeof list; i++) {
                 uint64_t f = S.FriendByIndex(g_friends, i, FRIEND_IMMEDIATE);
-                const char *rp = S.FriendRichPresence(g_friends, f, "lzarecomp");
+                const char *rp = S.FriendRichPresence(g_friends, f, relay_key());
                 if (!rp || strcmp(rp, "hosting")) continue;
                 const char *name = S.FriendName(g_friends, f);
                 size_t nl = name ? strlen(name) : 0;
@@ -683,6 +689,7 @@ int larecomp_plugin_init(const LarecompPluginApi *api, LarecompPluginHooks *hook
         g_fake_peer = (uint16_t)peer;
         LOG("[steamrelay] fake relay (tests): port %u, the peer at %u is 127.0.4.%d\n", mine, peer, peer_of(peer));
     } else {
+        env_set("LARECOMP_RELAY_KEY", api->title_id && api->title_id() == 0x01001F5010DFA000ull ? "plarecomp" : "lzarecomp");
         if (!helper_start()) { LOG("[steamrelay] no Steam helper (plugins/steamrelay-helper): no relay\n"); return 1; }
         uint8_t h[5], b[256];
         uint32_t n = 0;
