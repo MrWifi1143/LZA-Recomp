@@ -58,6 +58,12 @@ DEPINC   := $(if $(DEPS),-I$(DEPS)/include)
 ifeq ($(ARCH),x86_64)
 GENARCH  ?= -march=x86-64-v3  # as on Windows: AVX2 + FMA for the lifted FP/SIMD code (checked at startup)
 endif
+ifeq ($(ARCH),aarch64)
+# ARMv8.2 (LSE atomics inline: the default outlined them into a call per atomic that tests the CPU first, 7% of the
+# Steam Frame's CPU time; every ARMv8.2+ core has them - Cortex-A55 / A75 and later, Snapdragon 845+, Apple M1)
+ARMARCH  := -march=armv8.2-a
+GENARCH  ?= -include sj_aarch64.h $(ARMARCH)  # (guest setjmp points: the runtime's own longjmp, runtime/sj_aarch64.h)
+endif
 GENFLAGS += $(GENARCH) -fPIC
 OSFLAGS  := -Wno-format  # (%llx for uint64_t, which is unsigned long here: the same size)
 # shaderc: Debian / Ubuntu ship libshaderc.so; Arch (and a shaderc built from source) only libshaderc_shared.so -
@@ -117,11 +123,11 @@ PGOFLAGS  := $(if $(PGO_DATA),-fprofile-instr-use=$(PGO_DATA) -Wno-profile-instr
 # flags, the profile). A library with another id is rebuilt by the start screen, never loaded.
 GAMELIB_SRCS := tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/patches.py \
                 tools/simd_c.py tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
-                runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h
+                runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h $(if $(filter aarch64,$(ARCH)),runtime/sj_aarch64.h)
 GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS) $(PGO_ZST); echo '$(GENFLAGS)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
 
 RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
-RTFLAGS  := -O2 -g -fno-strict-aliasing -fdenormal-fp-math=dynamic -Wall -Wno-unused-function -Iruntime -Iruntime/nvn -Ithird_party $(DEPINC) $(OSFLAGS)
+RTFLAGS  := -O2 -g -fno-strict-aliasing -fdenormal-fp-math=dynamic -Wall -Wno-unused-function -Iruntime -Iruntime/nvn -Ithird_party $(DEPINC) $(OSFLAGS) $(ARMARCH)
 CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn -Ithird_party $(DEPINC)
 
 all: $(EXE) $(if $(strip $(GEN_SRC)),$(GAMELIB))  # (strip: an empty wildcard list is spaces, which $(if) took as true)
