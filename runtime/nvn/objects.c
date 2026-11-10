@@ -1,5 +1,7 @@
 // NVN objects, builders, and state objects (everything except command recording).
 #include <stdatomic.h>
+#include <pthread.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -488,28 +490,74 @@ static int pool_fix(void) {
     return f;
 }
 static void pool_note(const char *what, uint64_t n) { if (!(n & (n - 1))) LOG("[nvn] texture pool: %s %llu\n", what, (unsigned long long)n); }
-static void pool_forget(NvnTexture *t) {
-    for (int p = 0; p < 64 && g_texture_pools[p]; p++) {
-        NvnTexEntry *e = g_texture_pools[p]->entries;
-        for (int i = 0; i < g_texture_pools[p]->count; i++)
-            if (e[i].tex == t) {
-                pool_note("slots left on a finalized texture", ++g_pool_dangling);
-                if (pool_fix()) e[i].tex = NULL;
-            }
+
+// The slots each NVNtexture object was registered in (register_texture): finalize / initialize look at those, not at
+// every slot of every pool - that scan ran on each texture the game streams in and out, 1.75% of Z-A's CPU on the
+// Steam Frame. A list can hold slots registered with another object since (checked: e->guest), dropped when seen.
+typedef struct { NvnDescPool *d; int id; } SlotRef;
+typedef struct ObjSlots { uint64_t obj; int n, cap; SlotRef *v; struct ObjSlots *next; } ObjSlots;
+#define OS_BUCKETS 16384
+static ObjSlots *g_os[OS_BUCKETS];
+static pthread_mutex_t g_os_lock = PTHREAD_MUTEX_INITIALIZER;
+static ObjSlots *obj_slots(uint64_t obj, bool make) {  // (g_os_lock held)
+    unsigned h = (unsigned)((obj >> 4) ^ (obj >> 18)) & (OS_BUCKETS - 1);
+    for (ObjSlots *s = g_os[h]; s; s = s->next) if (s->obj == obj) return s;
+    if (!make) return NULL;
+    ObjSlots *s = calloc(1, sizeof *s);
+    s->obj = obj, s->next = g_os[h], g_os[h] = s;
+    return s;
+}
+static void obj_slot_add(uint64_t obj, NvnDescPool *d, int id) {
+    pthread_mutex_lock(&g_os_lock);
+    ObjSlots *s = obj_slots(obj, true);
+    bool have = false;
+    for (int i = 0; i < s->n && !have; i++) have = s->v[i].d == d && s->v[i].id == id;
+    if (!have) {
+        if (s->n == s->cap) s->cap = s->cap ? s->cap * 2 : 2, s->v = realloc(s->v, (size_t)s->cap * sizeof *s->v);
+        s->v[s->n++] = (SlotRef){d, id};
     }
+    pthread_mutex_unlock(&g_os_lock);
+}
+static void obj_slots_reset(void) {
+    pthread_mutex_lock(&g_os_lock);
+    for (int h = 0; h < OS_BUCKETS; h++)
+        for (ObjSlots *s = g_os[h], *n; s; s = n) n = s->next, free(s->v), free(s);
+    memset(g_os, 0, sizeof g_os);
+    pthread_mutex_unlock(&g_os_lock);
+}
+// each slot still registered with obj (stale references dropped): f(entry)
+#define FOR_OBJ_SLOTS(obj, e, body)                                                       \
+    do {                                                                                  \
+        pthread_mutex_lock(&g_os_lock);                                                   \
+        ObjSlots *s_ = obj_slots(obj, false);                                             \
+        for (int i_ = 0; s_ && i_ < s_->n;) {                                             \
+            NvnTexEntry *e = &((NvnTexEntry *)s_->v[i_].d->entries)[s_->v[i_].id];        \
+            if (e->guest != (obj)) { s_->v[i_] = s_->v[--s_->n]; continue; }              \
+            body;                                                                         \
+            i_++;                                                                         \
+        }                                                                                 \
+        pthread_mutex_unlock(&g_os_lock);                                                 \
+    } while (0)
+
+static void pool_forget(NvnTexture *t) {
+    FOR_OBJ_SLOTS(t->obj, e, {
+        if (e->tex == t) {
+            pool_note("slots left on a finalized texture", ++g_pool_dangling);
+            if (pool_fix()) e->tex = NULL;
+        }
+    });
 }
 static void pool_reattach(uint64_t guest, NvnTexture *t) {
-    for (int p = 0; p < 64 && g_texture_pools[p]; p++) {
-        NvnTexEntry *e = g_texture_pools[p]->entries;
-        for (int i = 0; i < g_texture_pools[p]->count; i++)
-            if (e[i].guest == guest && e[i].tex != t) {
-                if (!e[i].tex) { e[i].tex = t; pool_note("slots given the texture initialized again", ++g_pool_reattached); }
-                else if (!pool_fix()) pool_note("slots on another object than the texture initialized again", ++g_pool_mismatch);
-            }
-    }
+    FOR_OBJ_SLOTS(guest, e, {
+        if (e->tex != t) {
+            if (!e->tex) { e->tex = t; pool_note("slots given the texture initialized again", ++g_pool_reattached); }
+            else if (!pool_fix()) pool_note("slots on another object than the texture initialized again", ++g_pool_mismatch);
+        }
+    });
 }
 NVN(nvnTextureInitialize) {
     NvnTexture *t = texture_from_builder(A(1));
+    t->obj = A(0);
     if (t->flags & 2)
         LOG("[nvn] video texture %p: %ux%u fmt %#x flags %#x target %u addr %llx stride %llu\n", t, t->width, t->height,
             t->format, t->flags, t->target, t->addr, t->stride);
@@ -668,7 +716,10 @@ NVN(nvnSamplerGetDebugID) { RET(A(0)); }
 
 // ================================================================== descriptor pools
 NvnDescPool *g_texture_pools[64], *g_sampler_pools[64];
-RT_ON_RESET(desc_pools_reset) { memset(g_texture_pools, 0, sizeof g_texture_pools); memset(g_sampler_pools, 0, sizeof g_sampler_pools); }
+RT_ON_RESET(desc_pools_reset) {
+    memset(g_texture_pools, 0, sizeof g_texture_pools); memset(g_sampler_pools, 0, sizeof g_sampler_pools);
+    obj_slots_reset();
+}
 
 static NvnDescPool *desc_pool_init(uint64_t guest, uint64_t pool, uint64_t off, int count, size_t entry, NvnDescPool **reg) {
     NvnDescPool *d = calloc(1, sizeof *d);
@@ -699,6 +750,7 @@ static void register_texture(Cpu *c) {
     NvnTexEntry *e = &((NvnTexEntry *)d->entries)[id];
     e->tex = HOST(NvnTexture, A(2));
     e->guest = A(2);
+    obj_slot_add(A(2), d, id);  // (pool_forget / pool_reattach: this object's slots)
     e->has_view = A(3) != 0;
     if (e->has_view) memcpy(&e->view, AP(3), sizeof e->view);
 }

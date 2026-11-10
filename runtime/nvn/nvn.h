@@ -31,6 +31,7 @@ typedef struct NvnTexture {
     uint64_t pool_offset;
     void *backend;  // renderer-side texture
     uint64_t debug_id;
+    uint64_t obj;   // the game's NVNtexture object it was initialized in (objects.c: the pool slots index)
     char label[64];
 } NvnTexture;
 
