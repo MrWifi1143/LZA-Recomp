@@ -56,22 +56,35 @@ static uint64_t fnv(const uint8_t *p, size_t n, uint64_t h) {
 static inline uint32_t rd32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 static inline uint64_t rd64(const uint8_t *p) { uint64_t v; memcpy(&v, p, 8); return v; }
 // A captured container's name: its hash with host pointers left out. The runtime keeps a few of its own pointers in a
-// loaded container (8-byte words above the guest range, below 2^47 - both Linux and Windows user space), different
-// every run, so hashing them saved the same container again on each start (one Z-A container 486 times: 9 GB).
+// loaded container (8-byte words above the guest range, below 2^48 - user space: x86-64 Linux and Windows stop at 2^47,
+// AArch64 Linux goes to 2^48), different every run, so hashing them saved the same container again on each start (one Z-A
+// container 486 times: 9 GB). Below 2^47 only, the Steam Frame's pointers (0xf7..) stayed in: 7225 containers, 5.4 GB,
+// and every start compiled their programs again - the Frame at 90 C even at 30 fps.
 static uint64_t container_hash(const uint8_t *c, size_t n) {
     uint64_t h = 0xcbf29ce484222325ull;
     size_t i = 0;
     for (; i + 8 <= n; i += 8) {
         uint64_t v = rd64(c + i);
-        if (v >= GUEST_HI && v < (1ull << 47)) v = 0;
+        if (v >= GUEST_HI && v < (1ull << 48)) v = 0;
         h = (h ^ v) * 0x100000001b3ull;
     }
     return fnv(c + i, n - i, h);
 }
 
+// Off by default on AArch64 hosts (the Steam Frame): there it never caught up - each start compiled thousands of programs
+// again (the cache grew by ~2500 SPIR-V files a run) on a CPU that has no headroom, the SoC at 90-96 C and paused even at
+// 30 fps; without it the draws' own programs (~450 a run, all from the cache after the first) cost 0.04 s and the Frame
+// ran 40 s of Lumiose with no pause, CPU 42 vs 113-136 ms per frame. LARECOMP_WARMUP=1 turns it on there.
 static bool disabled(void) {
     static int off = -1;
-    if (off < 0) off = getenv("LARECOMP_WARMUP") && atoi(getenv("LARECOMP_WARMUP")) == 0;
+    if (off < 0) {
+        const char *e = getenv("LARECOMP_WARMUP");
+#if defined(__aarch64__)
+        off = !(e && atoi(e) != 0);
+#else
+        off = e && atoi(e) == 0;
+#endif
+    }
     return off;
 }
 
@@ -473,9 +486,9 @@ static uint64_t prune_dir(const char *dir, const char *keep) {
 }
 
 // captured containers named by the old hash (with host pointers in it): renamed to their name now, or removed if that
-// one exists (the same container); once, then cache/warm/containers/.merged
+// one exists (the same container); once, then cache/warm/containers/.merged2 (2: again with the 2^48 bound)
 static void merge_containers(void) {
-    const char *dir = "cache/warm/containers", *mark = "cache/warm/containers/.merged";
+    const char *dir = "cache/warm/containers", *mark = "cache/warm/containers/.merged2";
     struct stat sb;
     if (!stat(mark, &sb) || stat(dir, &sb)) return;
     DIR *dp = opendir(dir);
