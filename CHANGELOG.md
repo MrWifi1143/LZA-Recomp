@@ -6,6 +6,18 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsA`)
 
+## 2026-11-10: LegendsA-v1.2.0-rc1 (release candidate)
+
+Previous release: LegendsA-v1.1.1. Game version: Pokemon Legends: Arceus 1.1.1. The game code is built again once on
+the first start (the generator changed): a few minutes, as at setup.
+
+- Link Trades: trade with another copy on this PC, on your LAN, or with Steam friends anywhere (the Steam relay plugin,
+  off until switched on in the Mods page). Pick the local trade at Simona's and enter the same Link Code on both sides.
+- Steam Frame / ARM Linux: Arceus runs natively on AArch64 (Adreno / Turnip), 30 fps at 720p.
+- Lower-end hardware: less CPU per frame (the function dispatcher's fast path, texture pool lookups, settings read
+  once instead of every draw); on ARM the shader warm-up is off (it overheated the Frame) and the game code keeps
+  registers in locals (3% less CPU there).
+- Texture packs stay under the GPU's memory (no GPU hang on the PS5 under Linux with the HD pack).
 ## 2026-11-09: LegendsA-v1.1.1
 
 Previous release: LegendsA-v1.1.0. Game version: Pokemon Legends: Arceus 1.1.1.
