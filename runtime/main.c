@@ -145,6 +145,7 @@ static void boot(const char *root) {
     if (g_extract_shaders) { extern void extract_shaders_install(const char *exefs, const char *romfs); extract_shaders_install(exefs, romfs); }
     if (g_build_trees) { extern void build_trees_install(const char *exefs, const char *mod); build_trees_install(exefs, g_build_trees); }
     { extern void libcfast_configure(void); libcfast_configure(); }  // (runtime/hle/libcfast.c)
+    { extern void ngc_configure(void); ngc_configure(); }  // (runtime/services/misc.c: the SDK's profanity filter)
     { extern void settings_load(void); settings_load(); }
     if (!g_oodle_server && !g_extract_shaders && !g_build_trees) { extern void pkm_link_apply(void); pkm_link_apply(); }  // (PKHeX Link, if on: hle/pkm_link.c)
     kernel_init();

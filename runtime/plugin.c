@@ -111,6 +111,10 @@ static void plugin_register_fnhook(uint64_t addr, FnHook fn) {
 }
 
 uint64_t renderer_present_count(void);
+struct LdnRelay;  // (runtime/services/ldn.c: local play, a relay mod carries it - mods/steamrelay)
+void ldn_relay_set(const struct LdnRelay *r);
+uint32_t ldn_relay_local(void);
+static void relay_set(const void *r) { ldn_relay_set((const struct LdnRelay *)r); }
 void hwwatch_arm(uint64_t addr, uint64_t len);  // (runtime/hle/hwwatch.c)
 void hwwatch_reset(void);
 static void set_stereo(int on);
@@ -122,7 +126,7 @@ static const LarecompPluginApi g_api = {
     .abi = LARECOMP_PLUGIN_ABI, .log = plugin_log, .register_fnhook = plugin_register_fnhook,
     .call_original = plugin_call_original, .title_id = game_title_id, .queue_lock = vk_queue_lock, .queue_unlock = vk_queue_unlock,
     .image_origin_lower_left = origin_lower_left, .set_pad = input_plugin_pad, .set_render_height = set_render_height,
-    .ldn_relay_set = NULL, .ldn_relay_local = NULL,  // (Arceus: no local play service - no relay)
+    .ldn_relay_set = relay_set, .ldn_relay_local = ldn_relay_local,
     .guest_call = guest_call, .data_root = rt_data_root, .present_count = renderer_present_count,
     .watch = hwwatch_arm, .watch_reset = hwwatch_reset, .set_stereo = set_stereo, .set_render_shape = set_render_shape, .set_overlay_parallax = set_overlay_parallax, .set_overlay_scale = set_overlay_scale,
 };

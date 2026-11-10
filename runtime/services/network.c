@@ -5,6 +5,10 @@
 // local wireless and the GO Park settings leave with B, the Mystery Gift / internet screens keep their spinner (the
 // game polls RecvFrom with no timeout and no cancel there: nothing to download without Nintendo's servers).
 // Command shapes as in switchbrew (nn::nifm IGeneralService / IRequest, nn::ldn, bsd).
+// nifm tells the two kinds of request apart by their connection confirmation option (Z-A's connect routine calls
+// nn::nifm::SetLocalNetworkMode(local), which the SDK sends as SetConnectionConfirmationOption: true -> 1, prohibited:
+// a network without the internet check; false -> 4, required): a local request is accepted (the console's wireless is
+// there - Link Play's "Nearby Players"), an internet one still fails, so nothing waits on Nintendo's servers.
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,20 +27,33 @@ static uint32_t signalled_event(void) {
 }
 
 // ------------------------------------------------------------------ nifm:u
+enum { CONFIRMATION_PROHIBITED = 1 };
+typedef struct { uint32_t preset; uint8_t confirmation; bool submitted; } NifmRequest;
+
+static bool request_ok(const NifmRequest *r) {
+    return r && r->submitted && r->confirmation == CONFIRMATION_PROHIBITED && !getenv("LARECOMP_NIFM_ERROR");
+}
+
 static void nifm_request(Service *s, IpcReq *req, IpcResp *resp) {
-    (void)s;
+    NifmRequest *r = s->state;
     switch (req->cmd) {
-    case 0: OUT(uint32_t, 0) = 1; resp_size(resp, 4); break;  // GetRequestState: free (done, not accepted)
-    case 1: {  // GetResult: no internet connection (2110-0300); LARECOMP_NIFM_ERROR=<result> for experiments
+    case 0: OUT(uint32_t, 0) = request_ok(r) ? 3 : 1; resp_size(resp, 4); break;  // GetRequestState: accepted / free
+    case 1: {  // GetResult: a local request: success; else no internet connection (2110-0300); LARECOMP_NIFM_ERROR=<result>
         const char *e = getenv("LARECOMP_NIFM_ERROR");
-        resp->result = e && *e ? (uint32_t)strtoul(e, NULL, 0) : MAKE_RESULT(110, 300);
+        if (!request_ok(r)) resp->result = e && *e ? (uint32_t)strtoul(e, NULL, 0) : MAKE_RESULT(110, 300);
         break;
     }
     case 2:  // GetSystemEventReadableHandles: two events
         resp->copy_handles[resp->ncopy++] = signalled_event();
         resp->copy_handles[resp->ncopy++] = signalled_event();
         break;
-    case 4: break;  // Submit: done at once (GetRequestState)
+    case 3: if (r) r->submitted = false; break;  // Cancel
+    case 4:                                      // Submit: done at once (GetRequestState)
+        if (r) r->submitted = true, LOG("[nifm] request (preset %u, confirmation %u): %s\n", r->preset, r->confirmation,
+                                       request_ok(r) ? "local network, accepted" : "internet, no connection");
+        break;
+    case 6: if (r) r->preset = IN(uint32_t, 0); break;         // SetRequirementPreset
+    case 11: if (r) r->confirmation = IN(uint8_t, 0); break;   // SetConnectionConfirmationOption
     default: LOG("[nifm] IRequest cmd %u (ok)\n", req->cmd);
     }
 }
@@ -44,9 +61,14 @@ static void nifm_request(Service *s, IpcReq *req, IpcResp *resp) {
 static void nifm_general(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;
     switch (req->cmd) {
-    case 1: memset(resp->data, 0, 4); resp_size(resp, 4); break;                               // GetClientId
-    case 4: ipc_return_object(resp, service_new("IRequest", nifm_request, NULL)); break;      // CreateRequest
-    case 18: memset(resp->data, 0, 4); resp_size(resp, 4); break;                              // GetInternetConnectionStatus
+    case 1: memset(resp->data, 0, 4); resp_size(resp, 4); break;  // GetClientId
+    case 4: {                                                      // CreateRequest(preset)
+        NifmRequest *r = calloc(1, sizeof *r);
+        if (r) r->preset = IN(uint32_t, 0);
+        ipc_return_object(resp, service_new("IRequest", nifm_request, r));
+        break;
+    }
+    case 18: memset(resp->data, 0, 4); resp_size(resp, 4); break;  // GetInternetConnectionStatus
     default: LOG("[nifm] IGeneralService cmd %u (ok)\n", req->cmd);
     }
 }
@@ -71,43 +93,4 @@ SERVICE("ssl", ssl) {
     else LOG("[ssl] cmd %u (ok)\n", req->cmd);
 }
 
-// ------------------------------------------------------------------ bsd:u (sockets)
-// Setting up succeeds; a new socket fails with ENETDOWN (the network is down) and a receive returns one zero byte.
-SERVICE("bsd:u", bsd_u) {
-    (void)s;
-    switch (req->cmd) {
-    case 2:  // Socket
-    case 3:  // SocketExempt
-        OUT(int32_t, 0) = -1;
-        OUT(int32_t, 4) = 100;  // ENETDOWN (Linux errno values, switchbrew)
-        resp_size(resp, 8);
-        break;
-    case 9:  // RecvFrom
-        OUT(int32_t, 0) = 1;
-        OUT(int32_t, 4) = 0;
-        resp_size(resp, 8);
-        break;
-    default: LOG("[bsd] bsd:u cmd %u (ok)\n", req->cmd);
-    }
-}
-
-// ------------------------------------------------------------------ ldn:u (local wireless)
-typedef struct { bool init; } Ldn;
-
-static void ldn_user(Service *s, IpcReq *req, IpcResp *resp) {
-    Ldn *u = s->state;
-    switch (req->cmd) {
-    case 0: OUT(uint32_t, 0) = u && u->init ? 1 : 0; resp_size(resp, 4); break;  // GetState: initialized or not
-    case 100: resp->copy_handles[resp->ncopy++] = signalled_event(); break;       // GetStateChangeEvent
-    case 102: OUT(uint16_t, 0) = 0; resp_size(resp, 4); break;                    // Scan: no network found
-    case 400: if (u) u->init = true; break;                                        // Initialize
-    case 401: if (u) u->init = false; break;                                       // Finalize
-    default: LOG("[ldn] IUserLocalCommunicationService cmd %u (ok, no wireless)\n", req->cmd);
-    }
-}
-
-SERVICE("ldn:u", ldn_u) {
-    (void)s;
-    if (req->cmd == 0) ipc_return_object(resp, service_new("IUserLocalCommunicationService", ldn_user, calloc(1, sizeof(Ldn))));
-    else LOG("[ldn] ldn:u cmd %u (ok)\n", req->cmd);
-}
+// bsd:u and ldn:u: ldn.c (local wireless play between copies of the game on this PC)

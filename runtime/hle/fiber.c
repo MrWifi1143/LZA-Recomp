@@ -58,7 +58,9 @@ static HFiber *take_suspended(uint64_t key) {  // (g_lock held)
 
 // After a switch, on the new context: the old one is complete now (its registers are saved), so it may be resumed.
 // The context word goes to the guest last, as DispatchFiberContext's own store of sp does.
-static void publish_left(void) {
+// (noinline, as resumed_as below: a context may resume on another thread, and code compiled for Windows keeps the
+// thread-local block's address it took before the switch - its writes would land in the old thread's variables)
+__attribute__((noinline)) static void publish_left(void) {
     HFiber *f = t_left;
     if (!f) return;
     t_left = NULL;
@@ -144,6 +146,12 @@ static void drop_fiber_of(uint64_t fiber) {
     pthread_mutex_unlock(&g_lock);
 }
 
+__attribute__((noinline)) static void resumed_as(HFiber *me) {  // (this thread's variables, looked up afresh)
+    publish_left();
+    t_running = me;
+    g_fiber_cpu = me->stack ? me->cpu : NULL;
+}
+
 // nn::os::detail::DispatchFiberContext(FiberContextForHorizon **save, FiberContextForHorizon **load)
 HLE_FUNC("_ZN2nn2os6detail20DispatchFiberContextEPPNS1_22FiberContextForHorizonES4_", fiber_dispatch) {
     uint64_t save = c->x[0], load = c->x[1];
@@ -184,9 +192,7 @@ HLE_FUNC("_ZN2nn2os6detail20DispatchFiberContextEPPNS1_22FiberContextForHorizonE
     swapcontext(&me->uc, &to->uc);
 #endif
     // Resumed (maybe on another thread): this context runs again with its own Cpu, as DispatchFiberContext returns.
-    publish_left();
-    t_running = me;
-    g_fiber_cpu = me->stack ? me->cpu : NULL;
+    resumed_as(me);
     me->cpu->host_fpcr = 1;  // (swapcontext restored the host FP state saved on whichever thread this context left)
     c->x[0] = 0;  // (DispatchFiberContext's saved x0 slot)
 }
