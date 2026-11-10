@@ -83,9 +83,9 @@ static VkFmt fmt_of(uint32_t f) {
     case 0x48: return (VkFmt){VK_FORMAT_BC3_SRGB_BLOCK};
     case 0x49: return (VkFmt){VK_FORMAT_BC4_UNORM_BLOCK};
     case 0x4A: return (VkFmt){VK_FORMAT_BC4_SNORM_BLOCK};
-    case 0x4B: return (VkFmt){getenv("LARECOMP_BC5_SNORM_TEST") ? VK_FORMAT_BC5_SNORM_BLOCK : VK_FORMAT_BC5_UNORM_BLOCK};
+    case 0x4B: return (VkFmt){ENV("LARECOMP_BC5_SNORM_TEST") ? VK_FORMAT_BC5_SNORM_BLOCK : VK_FORMAT_BC5_UNORM_BLOCK};
     // 0x4C = signed RGTC2; LARECOMP_BC5_UNORM=1 decodes it unsigned (see metal.m / notes/PLAN.md)
-    case 0x4C: return (VkFmt){getenv("LARECOMP_BC5_UNORM") ? VK_FORMAT_BC5_UNORM_BLOCK : VK_FORMAT_BC5_SNORM_BLOCK};
+    case 0x4C: return (VkFmt){ENV("LARECOMP_BC5_UNORM") ? VK_FORMAT_BC5_UNORM_BLOCK : VK_FORMAT_BC5_SNORM_BLOCK};
     case 0x4D: return (VkFmt){VK_FORMAT_BC7_UNORM_BLOCK};
     case 0x4E: return (VkFmt){VK_FORMAT_BC7_SRGB_BLOCK};
     case 0x4F: return (VkFmt){VK_FORMAT_BC6H_SFLOAT_BLOCK};
@@ -155,13 +155,13 @@ void renderer_set_scale(float sx, float sy) { g_rs_x = sx; g_rs_y = sy; }
 uint64_t renderer_present_count(void);
 
 static bool tex_scalable(const NvnTexture *t) {
-    if (getenv("LARECOMP_NO_SCALE")) return false;
+    if (ENV("LARECOMP_NO_SCALE")) return false;
     // Targets narrower than 500 (the game's 480 x 270 and smaller) keep the game's size: Arceus counts changed pixels in
     // a 480 x 270 pass (fs 304bac5d0887128c: an atomic add per pixel over a threshold, all on one counter) - at 4K it ran
     // 4x the pixels and 4x the atomics, 7.9 ms of an 11 ms frame while the player ran (51 fps in the village; the user's
     // 2026-11-08), and the game got counts 4x what it expects. Native: 2.6 ms, 60 fps held. LARECOMP_SCALE_MIN_W=<px>.
     static int min_w = -1;
-    if (min_w < 0) min_w = getenv("LARECOMP_SCALE_MIN_W") ? atoi(getenv("LARECOMP_SCALE_MIN_W")) : 500;
+    if (min_w < 0) min_w = ENV("LARECOMP_SCALE_MIN_W") ? atoi(ENV("LARECOMP_SCALE_MIN_W")) : 500;
     // Except depth (0x35, D24S8) - the game copies its depth to a 480 x 270 target that the water reads (soft edges, the
     // foam where things stand in it): kept at 480 x 270 at 4K, an 8x8 staircase showed round the player in front of water
     // (the user's, Jubilife's river). A depth copy is cheap at any size. LARECOMP_SMALL_SCALE=<NVN formats, hex> to choose
@@ -169,7 +169,7 @@ static bool tex_scalable(const NvnTexture *t) {
     static int nsf = -1;
     static uint32_t sf[8];
     if (nsf < 0) {
-        const char *e = getenv("LARECOMP_SMALL_SCALE") ? getenv("LARECOMP_SMALL_SCALE") : "35";
+        const char *e = ENV("LARECOMP_SMALL_SCALE") ? ENV("LARECOMP_SMALL_SCALE") : "35";
         nsf = 0;
         for (const char *q = e; *q && nsf < 8;) {
             char *end;
@@ -198,7 +198,7 @@ static uint32_t g_level_gen = 1;
 
 bool renderer_texture_frame_fresh(NvnTexture *t) {
     static int on = -1;
-    if (on < 0) on = getenv("LARECOMP_NO_FRAME_CLEAR") == NULL;
+    if (on < 0) on = ENV("LARECOMP_NO_FRAME_CLEAR") == NULL;
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;
     uint64_t total_frames = renderer_present_count();
     if (!on || !b || !b->scalable || b->frame_cleared == total_frames + 1) return false;
@@ -209,7 +209,7 @@ bool renderer_texture_frame_fresh(NvnTexture *t) {
 bool renderer_texture_level_fresh(NvnTexture *t) {
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;
     static int keep = -1;
-    if (keep < 0) keep = getenv("LARECOMP_KEEP_TARGETS") != NULL;
+    if (keep < 0) keep = ENV("LARECOMP_KEEP_TARGETS") != NULL;
     if (!b || keep || b->level_gen == g_level_gen) return false;
     if (!b->scalable) { b->level_gen = g_level_gen; return false; }
     bool fresh = b->level_gen != 0;
@@ -271,7 +271,7 @@ static float half_full(const NvnTexture *t) {
     static int n = -1;
     static uint32_t fmts[8];
     if (n < 0) {
-        const char *e = getenv("LARECOMP_HALF_FULL");
+        const char *e = ENV("LARECOMP_HALF_FULL");
         n = 0;
         if (!e) e = "";
         for (const char *q = e; *q && n < 8;) {
@@ -432,7 +432,7 @@ static TexBackend *tex_backend(NvnTexture *t) {
         if (b->scalable && (b->sx != g_rs_x * half_full(t) || b->sy != g_rs_y * half_full(t))) {  // output resolution changed: reallocate
             destroy_image(b);
             create_image(t, b);
-            if (t->width >= 900 && getenv("LARECOMP_LOG_RT"))
+            if (t->width >= 900 && ENV("LARECOMP_LOG_RT"))
                 LOG("[rt-tex] rescaled %ux%u fmt %#x -> %ux%u\n", t->width, t->height, t->format, b->width, b->height);
         }
         return b;
@@ -441,7 +441,7 @@ static TexBackend *tex_backend(NvnTexture *t) {
     b = calloc(1, sizeof *b);
     b->scalable = tex_scalable(t);
     create_image(t, b);
-    if (t->width >= 900 && getenv("LARECOMP_LOG_RT"))  // (research: which big textures follow the render scale)
+    if (t->width >= 900 && ENV("LARECOMP_LOG_RT"))  // (research: which big textures follow the render scale)
         LOG("[rt-tex] %ux%u fmt %#x target %u flags %#x -> %ux%u%s\n", t->width, t->height, t->format, t->target, t->flags,
             b->width, b->height, b->scalable ? " scaled" : "");
     t->backend = b;
@@ -582,7 +582,7 @@ static bool amdgpu_free(uint64_t *free_b, uint64_t *total_b) {
 #endif
 static bool texpack_room(uint64_t need) {
     static int off = -1;
-    if (off < 0) off = getenv("LARECOMP_TEXPACK_NOBUDGET") != NULL;
+    if (off < 0) off = ENV("LARECOMP_TEXPACK_NOBUDGET") != NULL;
     if (off) return true;
 #ifdef __linux__
     {
@@ -680,7 +680,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     // go in a frame, at least one: each is a new image and all its levels copied on this thread - many done at once
     // (after a load, or running into a new place) held single frames for 300+ ms with a 2x pack
     static uint64_t tp_frame, tp_bytes, tp_budget;
-    if (!tp_budget) tp_budget = (getenv("LARECOMP_TEXPACK_BUDGET_MB") ? strtoull(getenv("LARECOMP_TEXPACK_BUDGET_MB"), NULL, 10) : 8) << 20;
+    if (!tp_budget) tp_budget = (ENV("LARECOMP_TEXPACK_BUDGET_MB") ? strtoull(ENV("LARECOMP_TEXPACK_BUDGET_MB"), NULL, 10) : 8) << 20;
     if (b->texpack_wait) {
         uint64_t fr = vk_frame_counter();
         if (fr != tp_frame) tp_frame = fr, tp_bytes = 0;
@@ -708,7 +708,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     if (full_hash_budget_frame != frame) { full_hash_budget_frame = frame; full_hash_budget = 4 << 20; }
     const uint8_t *mem = (const uint8_t *)(uintptr_t)t->addr;
     static int always_full = -1;
-    if (always_full < 0) always_full = getenv("LARECOMP_TEX_FULLHASH") ? 1 : 0;
+    if (always_full < 0) always_full = ENV("LARECOMP_TEX_FULLHASH") ? 1 : 0;
     bool full = b->dynamic || !b->uploaded || always_full;
     if (!full && frame - b->full_frame >= 120 && full_hash_budget >= total) { full = true; full_hash_budget -= total; }
     if (!full) {
@@ -770,7 +770,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 tegra_deswizzle(src, lin, l.wb, l.hb, l.d, fi->bpb, l.block_height_log2, l.block_depth_log2);
             }
             // a texture pack's replacement (texpack.c): plain 2D textures from the game's files, on their first upload
-            if (lv == 0 && layer == 0 && !b->texpack_seen && getenv("LARECOMP_TEXPACK_WHY")) {
+            if (lv == 0 && layer == 0 && !b->texpack_seen && ENV("LARECOMP_TEXPACK_WHY")) {
                 static int nwhy;
                 if (nwhy++ < 60)
                     LOG("[texpack] why %ux%u fmt %#x: expand %d linear %d dynamic %d scalable %d d %u layers %u target %u samples %u flags %#x\n",
@@ -783,12 +783,12 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 b->texpack_seen = true;
                 uint64_t key = hash_full(lin, (uint64_t)row * l.hb) | 1;
                 static int klog = -1;  // (LARECOMP_TEXPACK_KEYS=<n>: the first n keys looked up, to match against an export)
-                if (klog < 0) klog = getenv("LARECOMP_TEXPACK_KEYS") ? atoi(getenv("LARECOMP_TEXPACK_KEYS")) : 0;
+                if (klog < 0) klog = ENV("LARECOMP_TEXPACK_KEYS") ? atoi(ENV("LARECOMP_TEXPACK_KEYS")) : 0;
                 if (klog > 0) klog--, LOG("[texpack] key %016llx %ux%u fmt %#x\n", (unsigned long long)key, l.w, l.h, t->format);
                 if (texpack_has(key)) texpack_request(key), b->texpack_key = key, b->texpack_wait = true;
             }
             static int dump_fmt = -2;  // LARECOMP_DUMP_TEX_FMT=<nvn format>: level 0 of those textures, untiled -> build/tex/
-            if (dump_fmt == -2) dump_fmt = getenv("LARECOMP_DUMP_TEX_FMT") ? (int)strtol(getenv("LARECOMP_DUMP_TEX_FMT"), NULL, 0) : -1;
+            if (dump_fmt == -2) dump_fmt = ENV("LARECOMP_DUMP_TEX_FMT") ? (int)strtol(ENV("LARECOMP_DUMP_TEX_FMT"), NULL, 0) : -1;
             if ((int)t->format == dump_fmt && lv == 0 && layer == 0) {
                 char path[160];
                 mkdir("build/tex", 0755);
@@ -799,7 +799,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
             // LARECOMP_DUMP_TEX_ALL=<max size>: level 0 of every texture up to that width and height, once per content
             // -> build/tex/all/<hash>_<w>x<h>_f<format>_row<bytes>.bin (deswizzled blocks; <hash> as runtime/nvn/glyphs.c keys them)
             static int dump_all = -1;
-            if (dump_all < 0) dump_all = getenv("LARECOMP_DUMP_TEX_ALL") ? atoi(getenv("LARECOMP_DUMP_TEX_ALL")) : 0;
+            if (dump_all < 0) dump_all = ENV("LARECOMP_DUMP_TEX_ALL") ? atoi(ENV("LARECOMP_DUMP_TEX_ALL")) : 0;
             if (dump_all && lv == 0 && layer == 0 && l.w <= (uint32_t)dump_all && l.h <= (uint32_t)dump_all && l.d == 1) {
                 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
                 static uint64_t seen[65536];
@@ -1181,7 +1181,7 @@ static VkCompareOp compare_op(uint32_t f) {
 static VkSampler sampler_create(NvnSamplerDesc *d, bool cmp);
 VkSampler vk_sampler(NvnSamplerDesc *d) { return d->backend ? (VkSampler)d->backend : sampler_create(d, true); }
 VkSampler vk_sampler_for(NvnSamplerDesc *d, bool shadow) {
-    if (shadow || !d->compare_mode || getenv("LARECOMP_KEEP_COMPARE")) return vk_sampler(d);
+    if (shadow || !d->compare_mode || ENV("LARECOMP_KEEP_COMPARE")) return vk_sampler(d);
     return d->backend_nocmp ? (VkSampler)d->backend_nocmp : sampler_create(d, false);
 }
 static VkSampler sampler_create(NvnSamplerDesc *d, bool cmp) {
@@ -1194,7 +1194,7 @@ static VkSampler sampler_create(NvnSamplerDesc *d, bool cmp) {
     bool border = false;
     static int w7 = -1;  // (research: LARECOMP_WRAP_TEST=<mode>,<vk mode> - one NVN wrap mode sampled another way)
     static int w7from = -1;
-    if (w7 < 0) { w7 = 99; if (getenv("LARECOMP_WRAP_TEST")) sscanf(getenv("LARECOMP_WRAP_TEST"), "%d,%d", &w7from, &w7); }
+    if (w7 < 0) { w7 = 99; if (ENV("LARECOMP_WRAP_TEST")) sscanf(ENV("LARECOMP_WRAP_TEST"), "%d,%d", &w7from, &w7); }
     for (int i = 0; i < 3; i++) {
         if (d->wrap[i] == w7from && w7 != 99) { modes[i] = (VkSamplerAddressMode)w7; if (w7 == 3) border = true; continue; }
         switch (d->wrap[i]) {
@@ -1218,20 +1218,20 @@ static VkSampler sampler_create(NvnSamplerDesc *d, bool cmp) {
     // also keeps tiled detail sharp out to the horizon: Arceus's sea then shows its wave texture's tiles as a checkerboard
     // (Eden and the Switch blur it), so it is not the default.
     static int aniso = -1;
-    if (aniso < 0) aniso = getenv("LARECOMP_ANISO") ? atoi(getenv("LARECOMP_ANISO")) : 0;
+    if (aniso < 0) aniso = ENV("LARECOMP_ANISO") ? atoi(ENV("LARECOMP_ANISO")) : 0;
     if (aniso > 1 && mf >= 2 && si.minFilter == VK_FILTER_LINEAR && !d->compare_mode) {
         si.anisotropyEnable = VK_TRUE;
         si.maxAnisotropy = fmaxf(si.maxAnisotropy, fminf((float)aniso, 16));
     }
     static float lodmin = -1;
-    if (lodmin < 0) lodmin = getenv("LARECOMP_LOD_MIN") ? (float)atof(getenv("LARECOMP_LOD_MIN")) : 0;
+    if (lodmin < 0) lodmin = ENV("LARECOMP_LOD_MIN") ? (float)atof(ENV("LARECOMP_LOD_MIN")) : 0;
     if (lodmin > 0 && mf > 1) si.minLod = fmaxf(si.minLod, lodmin);
     static int stest = -1;
-    if (stest < 0) stest = getenv("LARECOMP_SAMPLER_TEST") != NULL;
+    if (stest < 0) stest = ENV("LARECOMP_SAMPLER_TEST") != NULL;
     if (stest && mf > 1) { si.minLod = 0; si.maxLod = VK_LOD_CLAMP_NONE; si.anisotropyEnable = VK_TRUE; si.maxAnisotropy = 16; }
     if (d->compare_mode && cmp) {
         si.compareEnable = VK_TRUE;
-        si.compareOp = getenv("LARECOMP_NO_SHADOW") ? VK_COMPARE_OP_ALWAYS : compare_op(d->compare_func);
+        si.compareOp = ENV("LARECOMP_NO_SHADOW") ? VK_COMPARE_OP_ALWAYS : compare_op(d->compare_func);
     }
     VkSamplerCustomBorderColorCreateInfoEXT cb = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CUSTOM_BORDER_COLOR_CREATE_INFO_EXT};
     if (border) {

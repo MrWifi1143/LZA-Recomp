@@ -72,8 +72,8 @@ double output_scale_dynamic_factor(void) { return g_dyn; }
 void output_scale(double dw, double dh, bool reshape_allowed, double now, double gpu_ms, OutScale *o) {
     double fit = fmin(dw / 1920.0, dh / 1080.0);
     static double forced = -1, wide_test = -1;
-    if (forced < 0) forced = getenv("LARECOMP_SCALE") ? atof(getenv("LARECOMP_SCALE")) : 0;
-    if (wide_test < 0) wide_test = getenv("LARECOMP_WIDE_TEST") ? atof(getenv("LARECOMP_WIDE_TEST")) : 0;
+    if (forced < 0) forced = ENV("LARECOMP_SCALE") ? atof(ENV("LARECOMP_SCALE")) : 0;
+    if (wide_test < 0) wide_test = ENV("LARECOMP_WIDE_TEST") ? atof(ENV("LARECOMP_WIDE_TEST")) : 0;
     double shape = wide_test > 0 ? wide_test : (dw / dh) / (16.0 / 9.0);
     bool reshape = reshape_allowed && fabs(shape - 1.0) > 0.005;
     if (!reshape) shape = 1.0;

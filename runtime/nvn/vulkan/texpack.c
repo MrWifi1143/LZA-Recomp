@@ -78,7 +78,7 @@ static void index_dir(const char *dir, int prio) {
 static void loader_start(void);
 static void texpack_init(void) {
     g_n = 0;
-    const char *e = getenv("LARECOMP_TEXPACK");  // (a folder for this run, in place of the mods' packs)
+    const char *e = ENV("LARECOMP_TEXPACK");  // (a folder for this run, in place of the mods' packs)
     char dirs[MODS_MAX][160];
     int nd = 0;
     if (e && *e) snprintf(dirs[nd++], sizeof dirs[0], "%s", e);

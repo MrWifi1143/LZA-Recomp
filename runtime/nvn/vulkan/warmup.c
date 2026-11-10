@@ -78,7 +78,7 @@ static uint64_t container_hash(const uint8_t *c, size_t n) {
 static bool disabled(void) {
     static int off = -1;
     if (off < 0) {
-        const char *e = getenv("LARECOMP_WARMUP");
+        const char *e = ENV("LARECOMP_WARMUP");
 #if defined(__aarch64__)
         off = !(e && atoi(e) != 0);
 #else
@@ -208,7 +208,7 @@ static bool container_at(const uint8_t *p, size_t avail, uint32_t *size) {
 // pipeline layout, as a draw would make them)
 static void compile(const WStage *v, const WStage *f) {
     static int pipes = -1;
-    if (pipes < 0) pipes = getenv("LARECOMP_WARMUP_PIPELINES") && atoi(getenv("LARECOMP_WARMUP_PIPELINES")) != 0;
+    if (pipes < 0) pipes = ENV("LARECOMP_WARMUP_PIPELINES") && atoi(ENV("LARECOMP_WARMUP_PIPELINES")) != 0;
     if (vk_ready()) { vk_warm_program(v->code, v->max, v->cn, f ? f->code : NULL, f ? f->max : 0, f ? f->cn : 0, pipes); return; }
     ShaderKey vk = {0}, fk = {0};
     vk.glsl = fk.glsl = 1;  // (flip_y and depth_minus_one 0: window origin and depth mode 1 in both Legends games)

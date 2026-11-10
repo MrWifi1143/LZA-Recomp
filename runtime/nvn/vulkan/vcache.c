@@ -57,7 +57,7 @@ static void drop_buf(VEnt *e) {
 static bool enabled(void) {
     static int on = -1;
     if (on < 0) {
-        const char *v = getenv("LARECOMP_VCACHE");
+        const char *v = ENV("LARECOMP_VCACHE");
         on = (!v || atoi(v) != 0) && pagewatch_supported() && g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
         if (on) LOG("[vk] vertex streams kept in VRAM, copied again when the game writes them\n");
     }
@@ -142,7 +142,7 @@ bool vcache_get(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off) {
         e->vol = true, e->vol_frame = frame;
         drop_buf(e);
         g_vcache_why[2]++;
-        if (getenv("LARECOMP_VCACHE_LOG")) LOG("[vcache] volatile %llx +%llu (frame %llu)\n", (unsigned long long)addr, (unsigned long long)len, (unsigned long long)frame);
+        if (ENV("LARECOMP_VCACHE_LOG")) LOG("[vcache] volatile %llx +%llu (frame %llu)\n", (unsigned long long)addr, (unsigned long long)len, (unsigned long long)frame);
         return false;
     }
     VkCommandBuffer cb = vk_upload_cmd();

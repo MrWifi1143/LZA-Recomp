@@ -61,9 +61,9 @@ static pthread_t thread;
 bool rt_active(void) {
     static int on = -1;
     if (on < 0) {
-        const char *e = getenv("LARECOMP_RENDER_THREAD");
+        const char *e = ENV("LARECOMP_RENDER_THREAD");
         on = e ? atoi(e) != 0 : g_settings.render_thread;  // (the environment wins over larecomp.ini)
-        if (getenv("LARECOMP_INTERP")) on = 0;  // (research: the interpolation replays lists on the game thread)
+        if (ENV("LARECOMP_INTERP")) on = 0;  // (research: the interpolation replays lists on the game thread)
         if (on) LOG("[rt] render thread on\n");
     }
     return on;
