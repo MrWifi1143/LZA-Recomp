@@ -236,11 +236,15 @@ static void setjmp_resume(Cpu *c) {
         if (jmp_points[i].ret == c->pc && jmp_points[i].sp == c->sp) __builtin_longjmp(jmp_points[i].buf, 1);
 }
 
-// Small direct-mapped cache in front of the binary search
-#define DCACHE 4096
+// Small direct-mapped cache in front of the binary search. Indexed by the address's low and middle bits together: the
+// low bits alone put many of the game's ~240k functions in the same slots (conflict misses: a quarter of rt_dispatch's
+// time went to the binary search on the Steam Frame).
+#define DCACHE 8192
 static __thread struct { uint64_t addr; GuestFn fn; } dcache[DCACHE];
+static inline unsigned dslot(uint64_t pc) { return (unsigned)((pc >> 2) ^ (pc >> 15)) & (DCACHE - 1); }
 
-static GuestFn dispatch_slow(Cpu *c) {
+// (out of line: inlined, its locals gave rt_dispatch a stack frame and a stack-protector check on every call, hit or not)
+__attribute__((noinline)) static GuestFn dispatch_slow(Cpu *c) {
     uint64_t pc = c->pc;
     kernel_core_reacquire();  // (after host code that blocked: no lock is held here)
     if (pc >= HLE_BASE && pc < HLE_BASE + HLE_SIZE) {
@@ -262,7 +266,7 @@ static GuestFn dispatch_slow(Cpu *c) {
         const char *s = loader_symbol_at(c->x[30], &off);
         FATAL("no function at %llx (lr=%llx %s+%llx)\n", pc, c->x[30], s ? s : "?", off);
     }
-    unsigned h = (unsigned)(pc >> 2) & (DCACHE - 1);
+    unsigned h = dslot(pc);
     dcache[h].addr = pc;
     dcache[h].fn = f;
     return f;
@@ -270,7 +274,7 @@ static GuestFn dispatch_slow(Cpu *c) {
 
 // Always tail-calls, so chains of indirect jumps don't grow the host stack.
 void rt_dispatch(Cpu *c) {
-    unsigned h = (unsigned)(c->pc >> 2) & (DCACHE - 1);
+    unsigned h = dslot(c->pc);
     GuestFn f = dcache[h].addr == c->pc ? dcache[h].fn : dispatch_slow(c);
     __attribute__((musttail)) return f(c);
 }
