@@ -5063,9 +5063,9 @@ static VkPipeline post_pipeline(const char *fs) {
 }
 
 // Post image `i` at w x h (RGBA8, kept until the size changes). 0, 1: SMAA edges / weights, 2: SMAA output,
-// 3, 4: FSR EASU / RCAS, 5, 6: Sharpening's window-size image / RCAS.
+// 3, 4: FSR EASU / RCAS, 5, 7: the reduction to the window's size (across, then down), 6: Sharpening's RCAS.
 static TexBackend *post_image(int i, uint32_t w, uint32_t h) {
-    static TexBackend img[7];
+    static TexBackend img[8];
     TexBackend *d = &img[i];
     if (d->image && (d->width != w || d->height != h)) {
         vk_views_forget(d);
@@ -5162,18 +5162,35 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, 
     if (oh > 16384) oh = 16384;
     bool fsr = g_settings.upscaler == UPSCALE_FSR1 && (ow > b->width + 1 || oh > b->height + 1);  // (an upscale only)
     // Sharpening (Settings.sharpen 1..3): RCAS at the window's size - after the render's reduction to it when it is
-    // bigger (the area average, as present.frag), so the sharpening is per screen pixel. 1440p on a 1080p screen read
+    // bigger (down.frag, below), so the sharpening is per screen pixel. 1440p on a 1080p screen read
     // soft though the field really renders at 1440 (the game's low-resolution textures; the user, 2026-11-08).
     int sharpen = g_settings.sharpen >= 1 && g_settings.sharpen <= 3 ? g_settings.sharpen : 0;
     // (RCAS: 0 stops = the most. Full strength made faces look cut out - polygon edges dark lines, stubble blown up: the
     // user's Laventon close-up - so High is AMD's FSR default, 0.2 stops, and Low / Medium sit below it)
     static const float k_sharp_stops[4] = {0, 2.0f, 1.0f, 0.2f};
     if (fsr) sharpen = 0;  // (FSR's own RCAS sharpens an upscale)
-    if (!smaa && !fsr && !sharpen) return v;
+    // A render bigger than its place in the window (1440p / 4K on a 1080p screen) is reduced to it here, before the
+    // sharpening, by a Lanczos-3 filter stretched to the reduction (down.frag, two passes); the present then draws it 1:1.
+    // It was the area average (present.frag's, area.frag): exact at 2x, but at 1440p -> 1080p (1.33x) each texel
+    // counts as a square spread over two pixels, a blur the 2x reduction doesn't have: a pattern 3 pixels wide kept
+    // 0.80 of its contrast, 0.89 from 4K (Lanczos-3: 0.99), and 1440p read soft next to 4K with any sharpening
+    // (2026-11-11). A render at or below the window's size is untouched. LARECOMP_DOWNSCALE=area | cr | l2 | l3 (research).
+    static int dk_env = -2;  // (-1: not set)
+    if (dk_env == -2) {
+        const char *e = ENV("LARECOMP_DOWNSCALE");
+        dk_env = !e ? -1 : !strcmp(e, "area") ? 0 : !strcmp(e, "cr") ? 1 : !strcmp(e, "l2") ? 2 : 3;
+    }
+    bool down = !fsr && (ow + 1 < b->width || oh + 1 < b->height);
+    // a whole ratio (4K -> 1080p: 2x) keeps the area average: there it is a clean 2x2 box, and measured in the game it
+    // was a hair sharper than Lanczos-3 (detail 9.80 vs 9.69); 1440p -> 1080p gets Lanczos-3 (8.71 -> 9.02)
+    bool whole = ow && oh && b->width % ow == 0 && b->height % oh == 0 && b->width / ow == b->height / oh;
+    int dk = dk_env >= 0 ? dk_env : whole ? 0 : 3;
+    if (!smaa && !fsr && !sharpen && !down) return v;
     extern void vk_frame_suspend(void);
     extern void vk_frame_resume(void);
     vk_frame_suspend();
     if (smaa) {  // SMAA 1x: luma edges -> blending weights -> neighbourhood blending
+        gp_mark(cb, "post: smaa %ux%u", b->width, b->height);
         float w = (float)b->width, h = (float)b->height;
         float m[8] = {1.0f / w, 1.0f / h, w, h};
         TexBackend *edges = post_image(0, b->width, b->height), *weights = post_image(1, b->width, b->height);
@@ -5187,6 +5204,7 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, 
         v = post_view(out);
     }
     if (fsr) {
+        gp_mark(cb, "post: fsr1 %ux%u -> %ux%u", b->width, b->height, ow, oh);
         float iw = (float)b->width, ih = (float)b->height;
         TexBackend *e = post_image(3, ow, oh), *r = post_image(4, ow, oh);
         float pe[8] = {iw / ow, ih / oh, 0.5f * iw / ow - 0.5f, 0.5f * ih / oh - 0.5f, iw, ih};
@@ -5197,30 +5215,44 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, 
         post_pass(cb, "rcas.frag", ri_, 1, r, pr, false);
         v = post_view(r);
     }
+    uint32_t sw = b->width, sh = b->height;
+    if (down && !dk) {  // (research: the area average)
+        gp_mark(cb, "post: area %ux%u -> %ux%u", b->width, b->height, ow, oh);
+        TexBackend *a = post_image(5, ow, oh);
+        float pa[8] = {(float)b->width / ow, (float)b->height / oh, 0, 0, (float)b->width, (float)b->height};
+        VkImageView ai[3] = {v};
+        post_pass(cb, "area.frag", ai, 1, a, pa, false);
+        v = post_view(a);
+        sw = ow, sh = oh;
+    } else if (down) {  // separable: across into (ow x render height), then down into (ow x oh)
+        gp_mark(cb, "post: downscale %ux%u -> %ux%u", b->width, b->height, ow, oh);
+        TexBackend *hx = post_image(5, ow, b->height), *vy = post_image(7, ow, oh);
+        float px_[8] = {(float)b->width / ow, 0, (float)dk, 1, (float)b->width, (float)b->height};
+        VkImageView hi_[3] = {v};
+        post_pass(cb, "down.frag", hi_, 1, hx, px_, false);
+        float py_[8] = {(float)b->height / oh, 1, (float)dk, 1, (float)ow, (float)b->height};
+        VkImageView vi_[3] = {post_view(hx)};
+        post_pass(cb, "down.frag", vi_, 1, vy, py_, false);
+        v = post_view(vy);
+        sw = ow, sh = oh;
+    }
     if (sharpen) {
-        uint32_t sw = b->width, sh = b->height;
-        if (ow + 1 < b->width || oh + 1 < b->height) {  // bigger than the window: reduced to it first
-            TexBackend *a = post_image(5, ow, oh);
-            float pa[8] = {(float)b->width / ow, (float)b->height / oh, 0, 0, (float)b->width, (float)b->height};
-            VkImageView ai[3] = {v};
-            post_pass(cb, "area.frag", ai, 1, a, pa, false);
-            v = post_view(a);
-            sw = ow, sh = oh;
-        }
+        gp_mark(cb, "post: sharpen %ux%u", sw, sh);
         TexBackend *r = post_image(6, sw, sh);
         float pr[8] = {exp2f(-k_sharp_stops[sharpen]), 0, 0, 0, (float)sw, (float)sh};
         VkImageView ri_[3] = {v};
         post_pass(cb, "rcas.frag", ri_, 1, r, pr, false);
         v = post_view(r);
     }
+    gp_mark(cb, "post: end");
     vk_full_barrier(cb);
     vk_frame_resume();
     {
         static uint32_t piw, pih, pow_, poh;
         static int psm = -1, pfs = -1, psh = -1;
         if (b->width != piw || b->height != pih || ow != pow_ || oh != poh || smaa != psm || fsr != pfs || sharpen != psh)
-            LOG("[post] %ux%u%s%s%s -> %ux%u\n", b->width, b->height, smaa ? " smaa" : "", fsr ? " fsr1" : "",
-                sharpen ? " sharpen" : "", ow, oh);
+            LOG("[post] %ux%u%s%s%s%s -> %ux%u\n", b->width, b->height, smaa ? " smaa" : "", fsr ? " fsr1" : "",
+                down ? (dk ? " downscale" : " area") : "", sharpen ? " sharpen" : "", ow, oh);
         piw = b->width; pih = b->height; pow_ = ow; poh = oh; psm = smaa; pfs = fsr; psh = sharpen;
     }
     return v;
