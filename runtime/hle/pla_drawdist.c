@@ -259,6 +259,9 @@ static int oodle_hook(Cpu *c, uint64_t addr) {
         if (memcmp(out + o, key, 12)) continue;
         float *f = (float *)(out + o + 12);
         if (!(f[0] > 1.5f && f[0] < 4.0f && f[1] >= f[0] && f[2] >= f[1] && f[2] < 5.0f)) continue;
+        // (the whole record, size range and density too: every block the game unpacks is scanned - a mesh or an animation
+        // holding the first six numbers by chance must not be changed)
+        if (o + 36 > raw || !(f[3] > 0.3f && f[3] <= 1.0f && f[4] >= 1.0f && f[4] < 3.0f && f[5] > 0.5f && f[5] < 100.0f)) continue;
         f[0] *= fade, f[1] *= fade, f[2] *= fade;
         // (the record's rest, 0.9 / 1.1 / 10.5: the size range and the density - x3 on 10.5 thinned the flowers)
         if (g_log && n == 0) LOG("[drawdist] detail record: 16 3 1 %g %g %g %g %g %g\n", f[0], f[1], f[2], f[3], f[4], f[5]);
@@ -302,6 +305,8 @@ static void put_lodtab(void) {
     for (int i = 0; i < 9; i++)  // (not the table this was found in - or not filled in yet: left alone)
         if (!(t[i] > 1e-7f && t[i] < 2.0f)) { if (g_log) LOG("[drawdist] model LOD table not there (%g at %d)\n", t[i], i); return; }
     float k = factor();
+    if (getenv("LARECOMP_PLA_LODTAB")) k = (float)atof(getenv("LARECOMP_PLA_LODTAB"));  // (research: this table's factor alone; 1 = the game's)
+    if (!(k > 0)) k = 1;
     for (int i = 0; i < 9; i++) t[i] = k_lodtab[i] / (k * k);
     if (g_log) LOG("[drawdist] model LOD cutoffs / %g (detail x%g further)\n", k * k, k);
 }
