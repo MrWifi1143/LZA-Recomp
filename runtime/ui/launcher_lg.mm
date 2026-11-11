@@ -429,6 +429,16 @@ static bool take(char *slot, char *out, size_t n) {
 // ------------------------------------------------------------------ the game files section
 static const ImVec4 k_green(0.45f, 0.85f, 0.50f, 1), k_red(1.0f, 0.45f, 0.40f, 1), k_yellow(1.0f, 0.82f, 0.35f, 1);
 
+// The setup's progress bar text: the percent, and the estimated time left while the game code compiles
+static const char *progress_overlay() {
+    static char b[96];
+    int pct = (int)(setup_progress() * 100), m = setup_minutes_left();
+    if (m > 1) snprintf(b, sizeof b, g_pt ? "%d%% - cerca de %d minutos restantes" : "%d%% - about %d minutes left", pct, m);
+    else if (m == 1) snprintf(b, sizeof b, g_pt ? "%d%% - cerca de um minuto restante" : "%d%% - about a minute left", pct);
+    else snprintf(b, sizeof b, "%d%%", pct);
+    return b;
+}
+
 static void game_files_section(SDL_Window *win) {
     ImGui::SeparatorText(T("Game files", "Arquivos do jogo"));
     int st = setup_state();
@@ -440,7 +450,7 @@ static void game_files_section(SDL_Window *win) {
                                          "Montando a imagem de dados do jogo...", "Lendo o código do jogo...",
                                          "Recompilando o código do jogo...", "Finalizando..."};
         ImGui::TextUnformatted(st >= 1 && st <= 7 ? T(en[st], pt[st]) : "...");
-        ImGui::ProgressBar(setup_progress(), ImVec2(-FLT_MIN, 0));
+        ImGui::ProgressBar(setup_progress(), ImVec2(-FLT_MIN, 0), progress_overlay());
         ImGui::TextDisabled("%s", T("This takes a while (10-30 minutes), only once. The game can be played when it's done.",
                                     "Isso demora (de 10 a 30 minutos), só uma vez. O jogo fica liberado quando terminar."));
         return;
@@ -1353,7 +1363,7 @@ extern "C" void launcher_lg_run(const char *root) {
                                                  "Copiando os arquivos do jogo...", "Montando a imagem de dados do jogo...",
                                                  "Lendo o código do jogo...", "Recompilando o código do jogo...", "Finalizando..."};
                 ImGui::TextUnformatted(st >= 1 && st <= 7 ? T(en[st], pt[st]) : "...");
-                ImGui::ProgressBar(setup_progress(), ImVec2(split - 56, 0));
+                ImGui::ProgressBar(setup_progress(), ImVec2(split - 56, 0), progress_overlay());
             } else if (ready) {
                 const char *name = game_name("extracted/exefs");
                 ImGui::TextColored(k_green, g_pt ? "Pokémon %s - pronto para jogar" : "Pokémon %s - ready to play", name ? name : "Legends: Arceus");

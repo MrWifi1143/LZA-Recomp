@@ -33,6 +33,8 @@ enum {
     SETUP_FAIL_UNPACK,      // a package couldn't be read (damaged, or a layout runtime/nxpkg.c doesn't read)
 };
 
+// While the game code is compiled: the estimated minutes left (from the pace so far), -1 before there is one.
+int setup_minutes_left(void);
 // The game files in <data root>/extracted: ready to play (exefs, romfs.bin and game code built for this version).
 bool setup_ready(void);
 // The game in that exefs/ folder: "Eevee", "Pikachu" or NULL.

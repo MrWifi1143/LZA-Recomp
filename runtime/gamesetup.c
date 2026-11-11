@@ -166,8 +166,12 @@ static float g_phase0, g_phase1;
 static void copy_progress(uint64_t done, uint64_t total) {
     if (total) g_progress = g_phase0 + (g_phase1 - g_phase0) * (float)((double)done / (double)total);
 }
+static _Atomic int g_minutes_left = -1;
+int setup_minutes_left(void) { return g_minutes_left; }
 static void build_progress(double f, const char *step) {
     g_progress = 0.15f + 0.85f * (float)f;
+    const char *a = strstr(step, "about ");  // (gamebuild.c's estimate: "about N minutes left" / "about a minute left")
+    g_minutes_left = !a ? -1 : !strncmp(a, "about a minute", 14) ? 1 : atoi(a + 6);
     g_state = !strncmp(step, "Reading", 7) ? SETUP_READING : !strncmp(step, "Finishing", 9) ? SETUP_FINISHING
                                                                                            : SETUP_COMPILING;
 }
@@ -230,8 +234,14 @@ static bool from_packages(void) {
 
 static bool build_code(void) {
     if (!gamebuild_available()) { g_state = SETUP_FAIL_TOOLS; return false; }
-    int cores = SDL_GetNumLogicalCPUCores(), ram_gb = SDL_GetSystemRAM() / 1024;
-    GameBuildOpts o = {build_progress, cores < ram_gb - 2 ? cores : ram_gb - 2 > 1 ? ram_gb - 2 : 1};
+    // One compiler process per thread, as far as the memory goes: the generator and Windows take ~4 GB, each compiler
+    // up to ~1.5 GB on the big files. 8 GB PCs (Windows reports ~7) ran 4 at once and swapped for hours at "55%"
+    // (a player's i5-6500, 2026-11-11); now 2.
+    int cores = SDL_GetNumLogicalCPUCores(), ram_mb = SDL_GetSystemRAM();
+    int by_ram = (ram_mb - 4096) / 1536;
+    if (by_ram < 1) by_ram = 1;
+    GameBuildOpts o = {build_progress, cores < by_ram ? cores : by_ram};
+    LOG("[setup] game code: %d compiler processes (%d threads, %d MB memory)\n", o.jobs, cores, ram_mb);
     char why[256] = "";
     g_state = SETUP_READING;
     if (!gamebuild_run(ROOT, &o, why, sizeof why)) {

@@ -438,7 +438,25 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         double secs = (double)(plat_now_ns() - t0) / 1e9;
         if (gen_frac == 0) f = 0.05 * (secs / (secs + 20));  // (the generator's first pass: no count yet)
         if (f > shown) shown = f;
-        if (o->progress) o->progress(shown, gen_frac < 1 && !gens_done ? "Reading the game code..." : "Recompiling...");
+        // a time estimate once a quarter is done (from the pace so far: slower machines see theirs), and the progress
+        // in the log every 5% - a log sent in from a long build shows how far it got and how fast
+        char step[96];
+        const char *what = gen_frac < 1 && !gens_done ? "Reading the game code..." : "Recompiling...";
+        snprintf(step, sizeof step, "%s", what);
+        if (shown > 0.25 && secs > 60) {
+            double left = secs * (1 - shown) / shown;
+            static double eta;  // (smoothed: the pace changes with the files' sizes)
+            eta = eta > 0 ? eta * 0.97 + left * 0.03 : left;
+            int m = (int)(eta / 60 + 0.5);
+            if (m >= 2) snprintf(step, sizeof step, "%s about %d minutes left", what, m);
+            else snprintf(step, sizeof step, "%s about a minute left", what);
+        }
+        static int logged_pct;
+        if ((int)(shown * 20) > logged_pct) {
+            logged_pct = (int)(shown * 20);
+            LOG("[gamebuild] %d%% after %.0f min (%d compiler processes)\n", logged_pct * 5, secs / 60, jobs);
+        }
+        if (o->progress) o->progress(shown, step);
         sleep_ms(50);
     }
     for (int k = 0; k < nrun; k++) stop(run[k].p);  // (a failure: the rest is of no use - the failure shows at once)
