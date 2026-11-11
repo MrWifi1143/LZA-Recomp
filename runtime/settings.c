@@ -34,6 +34,7 @@ static const char *settings_file(void) {
     .game_opts = -1,                                                        \
     .game_opts_next = -1,                                                   \
     .antialias = AA_SMAA,  /* (the game has no anti-aliasing of its own) */ \
+    .sharpen = 2,          /* Medium: Off read soft next to the user's setup (2026-11-11) */ \
 }
 Settings g_settings = SETTINGS_DEFAULTS;
 void settings_defaults(Settings *s) { *s = (Settings)SETTINGS_DEFAULTS; }

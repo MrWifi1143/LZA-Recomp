@@ -788,6 +788,7 @@ void backend_present(NvnTexture *t) {
             g_present_rect[0] = vx, g_present_rect[1] = vy, g_present_rect[2] = vw, g_present_rect[3] = vh;
         }
         renderer_set_scale((float)sx, (float)sy);
+        { extern void vk_tex_lod_bias(double render_h, double shown_h); if (b && b->height > 1 && vh > 1) vk_tex_lod_bias(b->height, vh); }
         VkCommandBuffer cb = vk_cmd();
         float pv[8] = {renderer_origin_lower_left() ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
         memcpy(g_shot_crop, crop, sizeof crop);

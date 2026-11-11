@@ -1179,10 +1179,59 @@ static VkCompareOp compare_op(uint32_t f) {
 // result of a compare sampler on a non-shadow image type undefined (NVIDIA: 0/1 - no cast shadows). Those get the same
 // sampler without compare.
 static VkSampler sampler_create(NvnSamplerDesc *d, bool cmp);
-VkSampler vk_sampler(NvnSamplerDesc *d) { return d->backend ? (VkSampler)d->backend : sampler_create(d, true); }
+// Texture detail per screen pixel (vk_tex_lod_bias, set at each present from the render size and the image's size on
+// screen): mipmapped samplers read finer levels when the render is smaller than twice the screen - the detail 4K gives on
+// a 1080p screen. 1440p on 1080p read soft next to 4K (the user's 2026-11-11, same frame): the same field, but each
+// texture a level coarser. The samplers made for another value are looked up again (the cache below keeps every one).
+static float g_lod_bias;
+static uint32_t g_lod_gen = 1;
+static void sampler_fresh(NvnSamplerDesc *d) {
+    if (d->backend_gen != g_lod_gen) d->backend = d->backend_nocmp = d->backend_lin = NULL, d->backend_gen = g_lod_gen;
+}
+void vk_tex_lod_bias(double render_h, double shown_h) {
+    static int mode = -2;  // LARECOMP_TEX_BIAS=<v>: that bias always (0: the game's own)
+    static float fixed;
+    if (mode == -2) { const char *e = ENV("LARECOMP_TEX_BIAS"); mode = e ? 1 : 0; fixed = e ? (float)atof(e) : 0; }
+    float b = 0;
+    if (mode) b = fixed;
+    else if (render_h > 0 && shown_h > 0) {
+        b = (float)log2(render_h / (2.0 * shown_h));  // (0 at twice the screen and above)
+        if (b > 0) b = 0;
+        if (b < -0.6f) b = -0.6f;  // (native and below: more would shimmer)
+        b = roundf(b * 20) / 20;
+    }
+    if (b != g_lod_bias) {
+        LOG("[tex] texture detail: mip bias %.2f (render %.0f lines shown in %.0f)\n", b, render_h, shown_h);
+        g_lod_bias = b, g_lod_gen++;
+    }
+}
+VkSampler vk_sampler(NvnSamplerDesc *d) { sampler_fresh(d); return d->backend ? (VkSampler)d->backend : sampler_create(d, true); }
 VkSampler vk_sampler_for(NvnSamplerDesc *d, bool shadow) {
     if (shadow || !d->compare_mode || ENV("LARECOMP_KEEP_COMPARE")) return vk_sampler(d);
+    sampler_fresh(d);
     return d->backend_nocmp ? (VkSampler)d->backend_nocmp : sampler_create(d, false);
+}
+// Every sampler made, by its creation parameters: never destroyed (descriptor sets of frames in flight may hold any)
+// and shared by the descriptors that ask for the same one
+typedef struct { uint8_t key[96]; VkSampler s; } SamplerEnt;
+static SamplerEnt *g_smp;
+static int g_nsmp, g_capsmp;
+static VkSampler sampler_cached(const VkSamplerCreateInfo *si, const float border[4]) {
+    uint8_t k[96] = {0};
+    size_t o = 0;
+#define KP(x) (memcpy(k + o, &(x), sizeof(x)), o += sizeof(x))
+    KP(si->magFilter); KP(si->minFilter); KP(si->mipmapMode); KP(si->addressModeU); KP(si->addressModeV); KP(si->addressModeW);
+    KP(si->mipLodBias); KP(si->anisotropyEnable); KP(si->maxAnisotropy); KP(si->compareEnable); KP(si->compareOp);
+    KP(si->minLod); KP(si->maxLod); KP(si->borderColor);
+#undef KP
+    if (si->borderColor == VK_BORDER_COLOR_FLOAT_CUSTOM_EXT) memcpy(k + o, border, 16);
+    for (int i = 0; i < g_nsmp; i++) if (!memcmp(g_smp[i].key, k, sizeof k)) return g_smp[i].s;
+    VkSampler s;
+    VK_CHECK(vkCreateSampler(g_vk.dev, si, NULL, &s));
+    if (g_nsmp == g_capsmp) g_capsmp = g_capsmp ? g_capsmp * 2 : 256, g_smp = realloc(g_smp, (size_t)g_capsmp * sizeof *g_smp);
+    memcpy(g_smp[g_nsmp].key, k, sizeof k);
+    g_smp[g_nsmp++].s = s;
+    return s;
 }
 static VkSampler sampler_create(NvnSamplerDesc *d, bool cmp) {
     VkSamplerCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -1212,6 +1261,7 @@ static VkSampler sampler_create(NvnSamplerDesc *d, bool cmp) {
     if (mf <= 1) si.maxLod = si.minLod + 0.25f;  // not mipmapped: stay on the base level
     if (si.maxLod < si.minLod) si.maxLod = si.minLod;
     si.mipLodBias = d->lod_bias;
+    if (mf >= 2 && !d->compare_mode) si.mipLodBias += g_lod_bias;  // (texture detail per screen pixel: vk_tex_lod_bias)
     if (d->max_aniso > 1) { si.anisotropyEnable = VK_TRUE; si.maxAnisotropy = fminf(d->max_aniso, 16); }
     // Anisotropic filtering: the game's own by default (it asks for little or none, sized for the Switch). Raising it
     // (LARECOMP_ANISO=<n>, mipmapped, linearly filtered colour samplers) keeps paths and grass sharp at grazing angles but
@@ -1245,8 +1295,7 @@ static VkSampler sampler_create(NvnSamplerDesc *d, bool cmp) {
             si.pNext = &cb;
         } else si.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
     }
-    VkSampler s;
-    VK_CHECK(vkCreateSampler(g_vk.dev, &si, NULL, &s));
+    VkSampler s = sampler_cached(&si, d->border);
     if (cmp) d->backend = (void *)s;
     else d->backend_nocmp = (void *)s;
     return s;
@@ -1255,6 +1304,7 @@ static VkSampler sampler_create(NvnSamplerDesc *d, bool cmp) {
 // The sampler with linear filtering where it has nearest (the same wrap, levels, bias): for the game's small glow
 // buffers stretched over the screen (exec.c texture_info) - nearest made bloom, sun glare and particles blocky
 VkSampler vk_sampler_linear_for(NvnSamplerDesc *d) {
+    sampler_fresh(d);
     if (d->backend_lin) return (VkSampler)d->backend_lin;
     NvnSamplerDesc c = *d;
     c.backend = c.backend_nocmp = c.backend_lin = NULL;

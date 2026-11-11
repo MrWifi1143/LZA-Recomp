@@ -42,6 +42,7 @@ typedef struct {
     void *backend;
     void *backend_nocmp;  // (a depth-compare sampler as used by a shader that reads raw depth: renderer)
     void *backend_lin;    // (its linearly filtered twin: the glow buffers' smoothing, renderer)
+    uint32_t backend_gen; // (the renderer's texture-detail generation the three were made for: vk_tex_lod_bias)
 } NvnSamplerDesc;
 
 typedef struct {
