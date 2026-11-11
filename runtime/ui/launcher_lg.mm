@@ -880,8 +880,13 @@ extern "C" void launcher_lg_run(const char *root) {
         int threads = SDL_GetNumLogicalCPUCores(), ram_gb = (SDL_GetSystemRAM() + 512) / 1024;  // (not plat_cpu_count: cpupin narrows it)
         // resolution index into res_lines: 0 Auto, 1 540p, 2 720p, 3 1080p, 4 1440p, 5 4K; fps index: 0 30, 1 60
         if (igpu || vram_gb < 4) rec = {2, 0, threads <= 8, ""};
-        else if (vram_gb < 12) rec = {3, 1, threads <= 8, ""};
-        else rec = {4, 1, threads <= 8, ""};
+        else if (vram_gb < 8) rec = {3, 1, threads <= 8, ""};
+        else if (vram_gb < 12) rec = {4, 1, threads <= 8, ""};
+        else rec = {5, 1, threads <= 8, ""};
+        // a screen no taller than what this GPU can render: Automatic (the window's own size). A fixed height below the
+        // screen's is stretched to fit and looks soft (an 8 GB laptop on a 1440p screen got 1080p: "worse than 1080p")
+        const SDL_DisplayMode *dm = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
+        if (dm && dm->h > 0 && dm->h <= res_lines[rec.res]) rec.res = 0;
         static const char *const rn[] = {"Auto", "540p", "720p", "1080p", "1440p", "4K"};
         snprintf(rec.text, sizeof rec.text, "%s, %s fps%s", rn[rec.res], rec.fps ? "60" : "30", rec.nowait ? ", shader loading: don't wait" : "");
         snprintf(pc, sizeof pc, "%s (%s%d GB), %d CPU threads, %d GB RAM", gpu, igpu ? "integrated, " : "", vram_gb, threads, ram_gb);

@@ -553,7 +553,10 @@ void pla_options_present(void) {
 
 static void cfg_seen(uint64_t cfg, bool saving) {  // (the save's values, for the launcher)
     int v = (int)(*(const uint32_t *)(uintptr_t)(cfg + 0x68) & PLA_CFG_BITS);
-    bool done = saving && g_settings.game_opts_next >= 0 && v == (g_settings.game_opts_next & (int)PLA_CFG_BITS);
+    // saving: the launcher's values went into the field when the save loaded, so they are in the save now - done, even
+    // when the player changed some in the game since (only an exact match cleared them before, so a volume or camera
+    // speed changed in the game's Settings went back to the launcher's on every start)
+    bool done = saving && g_settings.game_opts_next >= 0;
     if (v == g_settings.game_opts && !done) return;
     g_settings.game_opts = v;
     if (done) g_settings.game_opts_next = -1;
