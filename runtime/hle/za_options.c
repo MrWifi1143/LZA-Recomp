@@ -696,7 +696,10 @@ void za_options_present(void) {
 
 static void cfg_seen(uint64_t cfg, bool saving) {  // (the save's values, for the launcher)
     int v = (int)(*(const uint64_t *)(uintptr_t)(cfg + 0x40) & ZA_CFG_BITS);
-    bool done = saving && g_settings.game_opts_next >= 0 && v == g_settings.game_opts_next;  // (in the save now)
+    // saving: the launcher's values went into the field when the save loaded, so they are in the save now - done, even
+    // when the player changed some in the game since (only an exact match cleared them before: a setting changed in the
+    // game went back to the launcher's on every start)
+    bool done = saving && g_settings.game_opts_next >= 0;
     if (v == g_settings.game_opts && !done) return;
     g_settings.game_opts = v;
     if (done) g_settings.game_opts_next = -1;

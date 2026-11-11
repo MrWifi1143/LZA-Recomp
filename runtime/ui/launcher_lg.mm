@@ -910,8 +910,14 @@ extern "C" void launcher_lg_run(const char *root) {
         // resolution index into res_lines below: 0 Auto, 1 540p, 2 720p, 3 1080p, 4 1440p, 5 4K; fps index: 0 30, 1 60
         if (igpu || vram_gb < 4) rec = {2, 0, 0, 0, threads <= 8, ""};
         else if (vram_gb < 8) rec = {3, 1, 0, 0, threads <= 8, ""};
-        else if (vram_gb < 12) rec = {3, 1, 1, 0, threads <= 8, ""};
-        else rec = {4, 1, 1, ram_gb >= 16 && threads >= 12 ? 1 : 0, threads <= 8, ""};
+        else if (vram_gb < 12) rec = {4, 1, 1, 0, threads <= 8, ""};
+        else rec = {5, 1, 1, ram_gb >= 16 && threads >= 12 ? 1 : 0, threads <= 8, ""};
+        {   // a screen no taller than what this GPU can render: Automatic (the window's own size). A fixed height below
+            // the screen's is stretched to fit and looks soft (an 8 GB laptop on a 1440p screen got 1080p)
+            static const int lines[] = {0, 540, 720, 1080, 1440, 2160};
+            const SDL_DisplayMode *dm = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
+            if (dm && dm->h > 0 && dm->h <= lines[rec.res]) rec.res = 0;
+        }
         if (ram_gb < 12) rec.shadows = 0, rec.crowd = 0;  // (both take game memory: hle/za_fixes.c)
         static const char *const rn[] = {"Auto", "540p", "720p", "1080p", "1440p", "4K"}, *const sn[] = {"Switch", "High", "Ultra"},
                                  *const cn[] = {"Switch", "2x", "4x", "Max"};
