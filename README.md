@@ -2,7 +2,8 @@
 
 <p align="center">
   <a href="https://discord.gg/wxqppgye97"><img alt="Join the Discord" src="https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
-  <a href="https://gitlab.com/mr.wifi1143/LZA-Recomp/-/releases"><img alt="Download" src="https://img.shields.io/badge/Download-Releases-FC6D26?style=for-the-badge&logo=gitlab&logoColor=white"></a>
+  <a href="https://github.com/MrWifi1143/LZA-Recomp/releases"><img alt="Download on GitHub" src="https://img.shields.io/badge/Download-GitHub-181717?style=for-the-badge&logo=github&logoColor=white"></a>
+  <a href="https://gitlab.com/mr.wifi1143/LZA-Recomp/-/releases"><img alt="Download on GitLab" src="https://img.shields.io/badge/Download-GitLab-FC6D26?style=for-the-badge&logo=gitlab&logoColor=white"></a>
   <img alt="Platforms: Windows and Linux" src="https://img.shields.io/badge/Platforms-Windows%20%7C%20Linux-2EA44F?style=for-the-badge">
 </p>
 
@@ -34,7 +35,7 @@ about both games. When you report a problem, attach `lasrecomp.log` (next to the
 
 ## Playing on Windows
 
-1. Download `LZA-Recomp-ZA-windows-v<version>.zip` from the [releases](https://gitlab.com/mr.wifi1143/LZA-Recomp/-/releases)
+1. Download `LZA-Recomp-ZA-windows-v<version>.zip` from the releases ([GitHub](https://github.com/MrWifi1143/LZA-Recomp/releases) or [GitLab](https://gitlab.com/mr.wifi1143/LZA-Recomp/-/releases))
    and unzip it somewhere you can write to, on a short path (e.g. `C:\Games\`; not Program Files, not a deeply nested folder).
 2. Put your dumped game files in one folder: the base game and the 2.0.2 update (`.nsp` / `.xci`, below).
 3. Run `ZARecomp.exe` (not code-signed: "More info" -> "Run anyway" if Windows asks), click **Set up game** ->
@@ -48,7 +49,13 @@ driver, ~25 GB free disk space during setup.
 
 ## Playing on Linux
 
-One line in a terminal (Arch / Manjaro / EndeavourOS, Debian 13+ / Ubuntu 25.04+ and their derivatives, Fedora): it
+**AppImage** (any recent x86-64 distro, Steam Deck / SteamOS and other immutable ones too): download
+`LZA-Recomp-ZA-linux-x86_64-v<version>.AppImage` from the releases, make it executable (`chmod +x`, or the file
+manager's Properties) and open it, then set up the game as on Windows (steps 2-5 above). The AppImage itself is never
+written to: settings, saves, game files and caches are in `~/.local/share/zarecomp`. It needs FUSE (`libfuse2` /
+`fuse3`); without it, start it with `--appimage-extract-and-run`.
+
+**From source:** one line in a terminal (Arch / Manjaro / EndeavourOS, Debian 13+ / Ubuntu 25.04+ and their derivatives, Fedora): it
 downloads this branch, installs what it needs (asks for your password only if something is missing), builds the
 program and starts it.
 
