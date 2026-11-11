@@ -176,6 +176,7 @@ typedef struct {
     int exit;                // -1 while running
     int files;               // chunk files written so far (complete)
     unsigned long long ci, n;  // functions written / all
+    double w;                // share of all the game code (by module size; 0 = a module the game doesn't have)
 } Gen;
 
 static void read_gen_log(Gen *g) {
@@ -331,6 +332,8 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
             g->exit = 0;
             continue;
         }
+        struct stat st;
+        g->w = stat(nso, &st) == 0 ? (double)st.st_size : 1;
         Args a = {0};
         add(&a, t.gen);
         if (t.gen_script[0]) add(&a, t.gen_script);
@@ -344,6 +347,11 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         if (!g->p) { snprintf(why, why_size, "the game code builder didn't start"); ok = false; }
     }
 
+    {  // (weights: share of all the code. Equal shares counted Z-A's two missing modules as done - 45% at once)
+        double sum = 0;
+        for (int i = 0; i < NGEN; i++) sum += gens[i].w;
+        for (int i = 0; i < NGEN; i++) gens[i].w = sum > 0 ? gens[i].w / sum : 0;
+    }
     Units units = {0};
     int queued[NGEN] = {0};  // chunk files of each module put in units so far
     bool tables[NGEN] = {false};
@@ -391,7 +399,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
                 add_unit(&units, src, work, stem);
                 tables[i] = true;
             }
-            gen_frac += (g->exit == 0 ? 1 : g->n ? (double)g->ci / (double)g->n : 0) / NGEN;  // (0..1 over all modules)
+            gen_frac += (g->exit == 0 ? 1 : g->n ? (double)g->ci / (double)g->n : 0) * g->w;  // (0..1, by module size)
         }
         if (!ok) break;
         for (int k = 0; k < units.n; k++) written += units.u[k].bytes;
