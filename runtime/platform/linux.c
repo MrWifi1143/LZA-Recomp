@@ -133,8 +133,19 @@ void plat_init(void) {
     setenv("MESA_SHADER_CACHE_MAX_SIZE", "4G", 0);           // (Mesa: RADV, ANV, NVK)
 }
 
+// The Linux release runs bin/lasrecomp through its own dynamic loader (lib/ld-linux-x86-64.so.2: its glibc, so it runs
+// on any distro, immutable ones too); its launcher script sets LARECOMP_LOADER (the loader) and LARECOMP_SELF (the
+// program). /proc/self/exe is then the loader: the program's path comes from LARECOMP_SELF, and starting itself again
+// (the re-exec after the start screen, the shader extractor) goes through the loader as well. Unset: as before.
+static const char *self_loader(void) {
+    static const char *l = (const char *)1;
+    if (l == (const char *)1) l = getenv("LARECOMP_LOADER") && *getenv("LARECOMP_LOADER") && getenv("LARECOMP_SELF") ? getenv("LARECOMP_LOADER") : NULL;
+    return l;
+}
+
 // (inside an AppImage: the binary in its mount, which stays mounted while this process lives - re-exec included)
 bool plat_exe_path(char *buf, size_t size) {
+    if (self_loader()) return (size_t)snprintf(buf, size, "%s", getenv("LARECOMP_SELF")) < size;
     ssize_t n = readlink("/proc/self/exe", buf, size - 1);
     if (n <= 0) return false;
     buf[n] = 0;
@@ -157,11 +168,30 @@ static char **self_argv(void) {
     return argv;
 }
 
+// argv for running a program: through the loader when it is this program and the loader is in use (see self_loader)
+static const char *const *via_loader(const char *const argv[], const char *buf[], int max) {
+    char self[4096];
+    if (!self_loader() || !plat_exe_path(self, sizeof self) || strcmp(argv[0], self)) return argv;
+    static char libdir[4096];
+    snprintf(libdir, sizeof libdir, "%s", self_loader());
+    char *s = strrchr(libdir, '/');
+    if (s) *s = 0;
+    int k = 0;
+    buf[k++] = self_loader(), buf[k++] = "--library-path", buf[k++] = libdir;
+    for (int i = 0; argv[i] && k < max - 1; i++) buf[k++] = argv[i];
+    buf[k] = NULL;
+    return buf;
+}
+
 void plat_exec(char *const argv[]) {
-    if (argv) { execv(argv[0], argv); return; }
+    if (argv) {
+        const char *buf[260], *const *a = via_loader((const char *const *)argv, buf, 260);
+        execv(a[0], (char *const *)a);
+        return;
+    }
     char path[4096];
-    char **av = self_argv();
-    if (av && plat_exe_path(path, sizeof path)) execv(path, av);
+    char **av = self_argv();  // (through the loader: its whole command line, the loader first)
+    if (av && (self_loader() || plat_exe_path(path, sizeof path))) execv(self_loader() ? self_loader() : path, av);
 }
 
 // ---- diagnostics
@@ -258,6 +288,8 @@ PlatProc plat_spawn(const char *const argv[], const char *log_path, bool append_
     posix_spawnattr_setflags(&at, POSIX_SPAWN_SETPGROUP);
     posix_spawnattr_setpgroup(&at, 0);
     pid_t pid;
+    const char *buf[260];
+    argv = via_loader(argv, buf, 260);  // (this program again, e.g. the shader extractor: through the loader if in use)
     int rc = posix_spawn(&pid, argv[0], &fa, &at, (char *const *)argv, environ);
     posix_spawnattr_destroy(&at);
     posix_spawn_file_actions_destroy(&fa);
