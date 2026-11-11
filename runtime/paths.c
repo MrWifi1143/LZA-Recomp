@@ -97,7 +97,7 @@ void rt_paths_init(void) {
 #ifdef _WIN32
         snprintf(root, sizeof root, "%s", g_exe_dir);
 #elif defined(__linux__)
-        // (the AppImage is read-only): $XDG_DATA_HOME/lasrecomp, ~/.local/share/lasrecomp by default
+        // (the AppImage is read-only): $XDG_DATA_HOME/plarecomp, ~/.local/share/plarecomp by default (Z-A: zarecomp)
         const char *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
         if (xdg && *xdg == '/') snprintf(root, sizeof root, "%s/plarecomp", xdg);
         else snprintf(root, sizeof root, "%s/.local/share/plarecomp", home && *home ? home : "/tmp");
