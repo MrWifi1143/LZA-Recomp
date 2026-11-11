@@ -6,6 +6,15 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsA`)
 
+## 2026-11-10: LegendsA-v1.2.0-rc2 (release candidate)
+
+Previous release: LegendsA-v1.2.0-rc1. Game version: Pokemon Legends: Arceus 1.1.1. Same game code as rc1: no rebuild
+on start, and copies already set up can take the hotfix zip (the program only).
+
+- Crash fix: the game could crash during an area change (seen right after Laventon's photo, about 24 minutes into a new
+  game; "signal 11 accessing 0x118" in lasrecomp.log). The area loader read a shared object the main thread had just
+  freed; that case is now handled (lasrecomp.log says "[race] area loader ..." when it happens).
+
 ## 2026-11-10: LegendsA-v1.2.0-rc1 (release candidate)
 
 Previous release: LegendsA-v1.1.1. Game version: Pokemon Legends: Arceus 1.1.1. The game code is built again once on
