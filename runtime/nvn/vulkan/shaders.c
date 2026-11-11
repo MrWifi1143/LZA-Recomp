@@ -477,6 +477,47 @@ static const char *builtin_src(const char *name, int *stage) {
                "  o = vec4(s / max(ws, 1e-6), 1.0);\n"
                "}\n";
     }
+    // A render bigger than its place in the window reduced to it, one axis per pass (exec.c post_process): a = (input
+    // texels per output pixel on this axis, 1: vertical, kernel, anti-ringing 0..1), b.xy = the input's size. The kernel
+    // is stretched to the output's pixels (radius 2, or 3 for Lanczos-3): 1440p -> 1080p (1.33x) reads 5-6 texels a
+    // pixel, 4K -> 1080p 8. The area average before it lost the detail between the output's pixels at a fractional
+    // ratio (1440p soft next to 4K on a 1080p screen, sharpening or not: the user, 2026-11-11). Anti-ringing: the result
+    // stays within the texels under the pixel's own footprint (no halo on the HUD's text or on high-contrast edges).
+    if (!strcmp(name, "down.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "float kern(float x) {\n"
+               "  x = abs(x);\n"
+               "  if (pc.a.z < 1.5)\n"  // Catmull-Rom
+               "    return x < 1.0 ? (1.5 * x - 2.5) * x * x + 1.0 : x < 2.0 ? ((-0.5 * x + 2.5) * x - 4.0) * x + 2.0 : 0.0;\n"
+               "  float r = pc.a.z < 2.5 ? 2.0 : 3.0;\n"  // Lanczos-2 / -3
+               "  if (x < 1e-4) return 1.0;\n"
+               "  if (x >= r) return 0.0;\n"
+               "  float px = 3.14159265 * x;\n"
+               "  return r * sin(px) * sin(px / r) / (px * px);\n"
+               "}\n"
+               "void main() {\n"
+               "  bool vt = pc.a.y > 0.5;\n"
+               "  ivec2 op = ivec2(gl_FragCoord.xy), ax = vt ? ivec2(0, 1) : ivec2(1, 0), base = vt ? ivec2(op.x, 0) : ivec2(0, op.y);\n"
+               "  int n = int(vt ? pc.b.y : pc.b.x) - 1;\n"
+               "  float s = pc.a.x, c = (float(vt ? op.y : op.x) + 0.5) * s, R = (pc.a.z > 2.5 ? 3.0 : 2.0) * s;\n"
+               "  float hf = 0.5 * max(s, 1.0);\n"
+               "  int i0 = int(ceil(c - R - 0.5)), i1 = min(int(floor(c + R - 0.5)), i0 + 31);\n"
+               "  int f0 = int(floor(c - hf)), f1 = int(floor(c + hf - 1e-4));\n"
+               "  vec3 acc = vec3(0.0), mn = vec3(1e9), mx = vec3(-1e9); float ws = 0.0;\n"
+               "  for (int i = i0; i <= i1; i++) {\n"
+               "    vec3 x = texelFetch(t, base + ax * clamp(i, 0, n), 0).rgb;\n"
+               "    float w = kern((float(i) + 0.5 - c) / s);\n"
+               "    acc += w * x; ws += w;\n"
+               "    if (i >= f0 && i <= f1) { mn = min(mn, x); mx = max(mx, x); }\n"
+               "  }\n"
+               "  vec3 r = acc / ws;\n"
+               "  o = vec4(mix(r, clamp(r, mn, mx), pc.a.w), 1.0);\n"
+               "}\n";
+    }
     if (!strcmp(name, "clear.vert")) {
         *stage = STAGE_VERTEX;
         return "#version 450\n"
