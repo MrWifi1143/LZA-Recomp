@@ -5175,12 +5175,16 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, 
     // counts as a square spread over two pixels, a blur the 2x reduction doesn't have: a pattern 3 pixels wide kept
     // 0.80 of its contrast, 0.89 from 4K (Lanczos-3: 0.99), and 1440p read soft next to 4K with any sharpening
     // (2026-11-11). A render at or below the window's size is untouched. LARECOMP_DOWNSCALE=area | cr | l2 | l3 (research).
-    static int dk = -1;
-    if (dk < 0) {
+    static int dk_env = -2;  // (-1: not set)
+    if (dk_env == -2) {
         const char *e = ENV("LARECOMP_DOWNSCALE");
-        dk = !e ? 3 : !strcmp(e, "area") ? 0 : !strcmp(e, "cr") ? 1 : !strcmp(e, "l2") ? 2 : 3;
+        dk_env = !e ? -1 : !strcmp(e, "area") ? 0 : !strcmp(e, "cr") ? 1 : !strcmp(e, "l2") ? 2 : 3;
     }
     bool down = !fsr && (ow + 1 < b->width || oh + 1 < b->height);
+    // a whole ratio (4K -> 1080p: 2x) keeps the area average: there it is a clean 2x2 box, and measured in the game it
+    // was a hair sharper than Lanczos-3 (detail 9.80 vs 9.69); 1440p -> 1080p gets Lanczos-3 (8.71 -> 9.02)
+    bool whole = ow && oh && b->width % ow == 0 && b->height % oh == 0 && b->width / ow == b->height / oh;
+    int dk = dk_env >= 0 ? dk_env : whole ? 0 : 3;
     if (!smaa && !fsr && !sharpen && !down) return v;
     extern void vk_frame_suspend(void);
     extern void vk_frame_resume(void);
