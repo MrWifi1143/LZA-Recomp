@@ -392,6 +392,24 @@ static void remove_tree(const char *dir) {
     SDL_EnumerateDirectory(dir, remove_entry, NULL);
     SDL_RemovePath(dir);
 }
+// The community's Discord: a small button beside the version, opened in the browser. Right-click: hide it (remembered in
+// larecomp.ini, discord_button = 0: the data folder, so it stays hidden across updates). Never opens by itself.
+static const char *const k_discord_url = "https://discord.gg/wxqppgye97";
+static void discord_button(void) {
+    if (g_settings.hide_discord) return;
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Discord")) SDL_OpenURL(k_discord_url);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", T("Help, bug reports, mods and news (opens in your browser). Right-click to hide.",
+                                  "Ajuda, bugs, mods e novidades (abre no navegador). Clique com o botão direito para esconder."));
+    if (ImGui::BeginPopupContextItem("discord_menu")) {
+        if (ImGui::MenuItem(T("Hide this button", "Esconder este botão"))) {
+            g_settings.hide_discord = true;
+            settings_save();
+        }
+        ImGui::EndPopup();
+    }
+}
 static void open_folder(const char *sub) {  // (in the data root, the working directory)
     SDL_CreateDirectory(sub);
     char *cwd = SDL_GetCurrentDirectory(), url[1200];
@@ -495,6 +513,7 @@ static void game_files_section(SDL_Window *win) {
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 900);
         ImGui::TextColored(k_red, "%s", T(en[k], pt[k]));
         ImGui::TextDisabled("%s", T(en_h[k], pt_h[k]));
+        if (ImGui::SmallButton(T("Get help on Discord", "Pedir ajuda no Discord"))) SDL_OpenURL(k_discord_url);  // (always: a failed setup is when it's needed)
         ImGui::PopTextWrapPos();
     } else {
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 900);
@@ -1323,6 +1342,7 @@ extern "C" void launcher_lg_run(const char *root) {
                                         "Estas configurações também estão no jogo: Menu > Help > Settings.\n"
                                         "Segure Shift ao iniciar o jogo para ver esta tela de novo."));
         ImGui::TextDisabled("v" RT_APP_VERSION);
+        discord_button();
         ImGui::End();
         pad_nav_update(io, pad_open);
     };
@@ -1405,6 +1425,7 @@ extern "C" void launcher_lg_run(const char *root) {
                 ImGui::SetTooltip("%s", T("Hold Shift while starting the game to see it again.", "Segure Shift ao iniciar o jogo para ver de novo."));
             ImGui::SetCursorScreenPos(ImVec2(bx, H - 40));
             ImGui::TextDisabled("v" RT_APP_VERSION);
+            discord_button();
             pad_hints(d, W - 34, H - 38, false, false);
         } else {
             static const char *const titles_en[] = {"", "Options", "Controls", "Game Files", "Mods"};

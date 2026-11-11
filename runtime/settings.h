@@ -39,6 +39,7 @@ typedef struct {
     bool reverb;         // room reverb effect
     bool movie_audio;
     bool show_fps;
+    bool hide_discord;   // the launcher's Discord button hidden (right-click on it): larecomp.ini discord_button = 0
     bool skip_start;     // the start screen goes straight to the game once it's ready (Shift held at start: shown)
     bool experimental;   // "Experimental settings" (start screen): frame rates above 60 offered - 120, 144, Unlimited - in the
                          // start screen and the game's Settings; off: 60 at most

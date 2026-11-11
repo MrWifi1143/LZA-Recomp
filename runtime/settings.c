@@ -65,6 +65,7 @@ static void parse_line(const char *line) {
     else if (!strcmp(key, "reverb")) g_settings.reverb = atoi(val) != 0;
     else if (!strcmp(key, "movie_audio")) g_settings.movie_audio = atoi(val) != 0;
     else if (!strcmp(key, "show_fps")) g_settings.show_fps = atoi(val) != 0;
+    else if (!strcmp(key, "discord_button")) g_settings.hide_discord = atoi(val) == 0;
     else if (!strcmp(key, "skip_start_screen")) g_settings.skip_start = atoi(val) != 0;
     else if (!strcmp(key, "mouse_camera")) g_settings.mouse_camera = atoi(val) != 0;
     else if (!strcmp(key, "mouse_invert_x")) g_settings.mouse_invert_x = atoi(val) != 0;
@@ -152,6 +153,7 @@ void settings_save(void) {
     fprintf(f, "reverb = %d\n", g_settings.reverb);
     fprintf(f, "movie_audio = %d\n", g_settings.movie_audio);
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
+    fprintf(f, "discord_button = %d\n", !g_settings.hide_discord);
     fprintf(f, "skip_start_screen = %d\n", g_settings.skip_start);
     fprintf(f, "experimental = %d\n", g_settings.experimental);
     fprintf(f, "mouse_camera = %d\n", g_settings.mouse_camera);
