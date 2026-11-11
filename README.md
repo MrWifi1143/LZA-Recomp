@@ -1,5 +1,11 @@
 # PL:A Recomp (LZ&A Recomp, branch `LegendsA`)
 
+<p align="center">
+  <a href="https://discord.gg/wxqppgye97"><img alt="Join the Discord" src="https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
+  <a href="https://gitlab.com/mr.wifi1143/LZA-Recomp/-/releases"><img alt="Download" src="https://img.shields.io/badge/Download-Releases-FC6D26?style=for-the-badge&logo=gitlab&logoColor=white"></a>
+  <img alt="Platforms: Windows and Linux" src="https://img.shields.io/badge/Platforms-Windows%20%7C%20Linux-2EA44F?style=for-the-badge">
+</p>
+
 A native PC port of **Pokémon Legends: Arceus** (Nintendo Switch, update 1.1.1) by **static recompilation**: the game's
 ARM64 code is translated to C and compiled into a regular Windows or Linux program, with a runtime standing in for
 the Switch's operating system (kernel, system services, NVN graphics on Vulkan, audio, controllers).
@@ -15,6 +21,12 @@ LZ&A Recomp has one branch per game:
 > This project was made largely with AI (Anthropic's Claude, through Claude Code), directed and tested by a human.
 
 ![The launcher](docs/launcher.png)
+
+## Community and support
+
+Join the **[LZ&A Recomp Discord](https://discord.gg/wxqppgye97)** for help with setup, bug reports, mods and news
+about both games. When you report a problem, attach `lasrecomp.log` (next to the exe) and say what PC you have
+(CPU, graphics card, RAM).
 
 ## Playing on Windows
 
