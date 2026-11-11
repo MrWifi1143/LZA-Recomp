@@ -6,7 +6,16 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsA`)
 
-## 2026-11-10: LegendsA-v1.2.0-rc2 (release candidate)
+## 2026-11-10: LegendsA-v1.2.0-rc3 (release candidate)
+
+Previous release: LegendsA-v1.2.0-rc1 (rc2 was withdrawn: its fix missed the case that crashed). Same game code as rc1:
+no rebuild on start, and copies already set up can take the hotfix zip (the program only).
+
+- Crash fix, checked in game: the area change right after Laventon's photo crashed every time on the same save; now
+  it goes through (lasrecomp.log: "[race] area loader ..."). The area loader thread reads an object through a weak
+  reference the main thread had just let go (expired, not missing - what rc2 missed).
+
+## 2026-11-10: LegendsA-v1.2.0-rc2 (withdrawn)
 
 Previous release: LegendsA-v1.2.0-rc1. Game version: Pokemon Legends: Arceus 1.1.1. Same game code as rc1: no rebuild
 on start, and copies already set up can take the hotfix zip (the program only).
