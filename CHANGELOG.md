@@ -6,6 +6,17 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsA`)
 
+## 2026-11-12: LegendsA-v1.2.1
+
+Previous release: LegendsA-v1.2.0. Game version: Pokemon Legends: Arceus 1.1.1. Same game code as 1.2.0: no rebuild on start, and copies
+already set up can take the hotfix zip (the program only).
+
+- With the render thread switched off (render_thread = 0 in larecomp.ini), the name keyboard no longer runs the
+  graphics from two threads at once (a crash on AMD graphics on Linux, found in Z-A).
+- Windows error box: a GPU crash ("device lost") and running out of graphics memory now say what happened, instead
+  of asking for a Vulkan 1.3 driver.
+
+
 ## 2026-11-11: LegendsA-v1.2.0-rc5 (release candidate)
 
 Previous release: LegendsA-v1.2.0-rc4. Game version: Pokemon Legends: Arceus 1.1.1. Same game code as rc1: no rebuild
