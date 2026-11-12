@@ -1,10 +1,17 @@
 // LARECOMP_WARP="<x> <y> <z>" (Legends Studio's "Play here"): the player put at that spot of the level once it has
-// loaded. Z-A's player character body - the one object of its class, vtable 0x7003be6218 - keeps the player's
-// position at +0x90 (its rotation matrix before it, at +0x60) and the game follows it: the character, its transform and
-// the camera move there and stay. The functions that step it each frame (0x7000081ce0, 0x700004c3e8) get it as x0,
-// which is how it is found. Written once it has existed for two seconds and stood still for one (the save's own
-// position applied, the fade-in over), then for a few presents more; once.
+// loaded. Z-A's character bodies (vtable 0x7003be6218) keep the position at +0x90 (the rotation matrix before it, at
+// +0x60) and the game follows it: writing the player's moves the character, its transform and the camera for good. The
+// functions that step a body each frame (0x7000081ce0, 0x700004c3e8) get it as x0, which is how they are found.
+//   The player's body isn't the only one of its class: the townspeople's bodies (Lumiose's crowd) are stepped through
+// 0x7000081ce0 as well (contrib/legendslua/research/za_npc_bodies.lua), so "the last body hooked" was any of them - the
+// warp kept seeing "a new body", never waited out its two seconds and never wrote (and LARECOMP_LOG_PLAYER logged
+// whoever came last; both functions step every body - in Lumiose dozens, 2026-11-11). The bodies are kept in a table
+// now; the player's is the oldest one still stepped: it exists from the title screen on, at the save's position, before
+// the level's people (checked in Lumiose: the first body seen was the player's, the warp put it at the Pokemon Center). Written once it has existed for two seconds and stood still for one
+// (the save's own position applied, the fade-in over), then for a few presents more; again (up to 3 times, within a
+// minute) when the game puts the player somewhere else at once - a save loaded after the title, where it was written.
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,45 +21,91 @@
 void rt_register_fnhook_at(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
 
 #define BODY_VTABLE 0x7003be6218ull
+#define STEP_A 0x7000081ce0ull  // (both step every character body)
+#define STEP_B 0x700004c3e8ull
 static float g_to[3];
-static volatile uint64_t g_body;
-static int g_state = -1;  // -1 off, 0 waiting, 1 writing, 2 done
+static int g_state = -1;  // -1 off, 0 waiting, 1 writing, 2 written (watching for the save putting it back), 3 finished
 static long g_log_every;  // (research) LARECOMP_LOG_PLAYER=<n>: the player's position every n frames ("[player] frame f x y z")
 
+#define NBODY 128
+static struct { uint64_t o, first, last; unsigned via; } g_bodies[NBODY];  // (via: the hooks that saw it, research)
+static pthread_mutex_t g_body_lock = PTHREAD_MUTEX_INITIALIZER;
+static volatile uint64_t g_frame;  // (the presents so far: warp_frame)
+
+static bool is_body(uint64_t o) { return o >= HEAP_BASE && o < HEAP_BASE + HEAP_MAX && *(const uint64_t *)(uintptr_t)o == BODY_VTABLE; }
+
 static int body_hook(Cpu *c, uint64_t addr) {
-    (void)addr;
     uint64_t o = c->x[0];
-    if ((g_state == 0 || g_log_every) && o >= HEAP_BASE && o < HEAP_BASE + HEAP_MAX && *(const uint64_t *)(uintptr_t)o == BODY_VTABLE) g_body = o;
+    if ((g_state < 0 || g_state == 3) && !g_log_every) return 0;  // (off, or finished)
+    if (!is_body(o)) return 0;
+    uint64_t f = g_frame;
+    unsigned via = addr == STEP_B ? 2 : 1;
+    pthread_mutex_lock(&g_body_lock);
+    int i = 0, free_slot = -1;
+    for (; i < NBODY; i++) {
+        if (g_bodies[i].o == o) break;
+        if (free_slot < 0 && (!g_bodies[i].o || f - g_bodies[i].last > 300)) free_slot = i;  // (gone for 10 s: reused)
+    }
+    bool fresh = i == NBODY;
+    if (fresh && free_slot >= 0) i = free_slot, g_bodies[i].o = o, g_bodies[i].first = f, g_bodies[i].via = 0;
+    unsigned was = i < NBODY ? g_bodies[i].via : 0;
+    if (i < NBODY) g_bodies[i].last = f, g_bodies[i].via |= via;
+    pthread_mutex_unlock(&g_body_lock);
+    if (g_log_every && i < NBODY && (fresh || !(was & via))) {  // (research: each body as each hook first sees it)
+        const float *p = (const float *)(uintptr_t)(o + 0x90);
+        LOG("[player] body %llx via %llx lr %llx frame %llu at %.2f %.2f %.2f\n", (unsigned long long)o, (unsigned long long)addr,
+            (unsigned long long)c->x[30], (unsigned long long)f, p[0], p[1], p[2]);
+    }
     return 0;
+}
+
+// the player's body now (0 none): the oldest one stepped in the last second
+static uint64_t player_body(uint64_t frame) {
+    uint64_t best = 0, best_first = ~0ull;
+    pthread_mutex_lock(&g_body_lock);
+    for (int i = 0; i < NBODY; i++) {
+        if (!g_bodies[i].o || frame - g_bodies[i].last > 30 || !is_body(g_bodies[i].o)) continue;
+        if (g_bodies[i].first < best_first) best = g_bodies[i].o, best_first = g_bodies[i].first;
+    }
+    pthread_mutex_unlock(&g_body_lock);
+    return best;
 }
 
 __attribute__((constructor)) static void warp_init(void) {
     g_log_every = getenv("LARECOMP_LOG_PLAYER") ? atol(getenv("LARECOMP_LOG_PLAYER")) : 0;
-    if (g_log_every) {
-        rt_register_fnhook_at(0x7000081ce0ull, body_hook);
-        rt_register_fnhook_at(0x700004c3e8ull, body_hook);
-    }
     const char *w = getenv("LARECOMP_WARP");
-    if (!w || sscanf(w, "%f %f %f", &g_to[0], &g_to[1], &g_to[2]) != 3) return;
-    g_state = 0;
-    if (!g_log_every) {
-        rt_register_fnhook_at(0x7000081ce0ull, body_hook);
-        rt_register_fnhook_at(0x700004c3e8ull, body_hook);
+    if (w && sscanf(w, "%f %f %f", &g_to[0], &g_to[1], &g_to[2]) == 3) g_state = 0;
+    if (g_log_every || g_state == 0) {
+        rt_register_fnhook_at(STEP_A, body_hook);
+        rt_register_fnhook_at(STEP_B, body_hook);
+        LOG("[warp] %s%s\n", g_state == 0 ? "the player goes to " : "", g_state == 0 ? w : "logging the player's position");
     }
 }
 
 void warp_frame(uint64_t frame) {  // (each game frame: runtime/hle/input.c)
-    if (g_log_every > 0 && frame % (uint64_t)g_log_every == 0 && g_body && *(const uint64_t *)(uintptr_t)g_body == BODY_VTABLE) {
-        const float *p = (const float *)(uintptr_t)(g_body + 0x90);
-        LOG("[player] frame %llu %.2f %.2f %.2f\n", (unsigned long long)frame, p[0], p[1], p[2]);
+    g_frame = frame;
+    if (g_state < 0 && !g_log_every) return;
+    uint64_t b = player_body(frame);
+    if (g_log_every > 0 && frame % (uint64_t)g_log_every == 0 && b) {
+        const float *p = (const float *)(uintptr_t)(b + 0x90);
+        LOG("[player] frame %llu %.2f %.2f %.2f (body %llx)\n", (unsigned long long)frame, p[0], p[1], p[2], (unsigned long long)b);
     }
-    if (g_state < 0 || g_state == 2) return;
-    static uint64_t body, since, still_since, writes;
+    if (g_state < 0 || g_state == 3) return;
+    static uint64_t body, since, still_since, writes, done_at, redo;
     static float last[3];
-    uint64_t b = g_body;
     if (!b) return;
     float *pos = (float *)(uintptr_t)(b + 0x90);
-    if (b != body || *(const uint64_t *)(uintptr_t)b != BODY_VTABLE) {  // (a new body: the level loaded again)
+    if (g_state == 2) {  // (written; the body exists from the title screen on: a save loaded after it puts the player back)
+        bool jump = fabsf(pos[0] - last[0]) + fabsf(pos[2] - last[2]) > 4.0f;
+        memcpy(last, pos, 12);
+        if (frame - done_at >= 1800 || redo >= 3) { g_state = 3; return; }
+        if (jump && b == body) {
+            redo++, g_state = 0, since = still_since = frame;
+            LOG("[warp] the player was put back at %.2f %.2f %.2f: again once it stands still\n", pos[0], pos[1], pos[2]);
+        }
+        return;
+    }
+    if (b != body) {  // (a new body: the level loaded again)
         body = b, since = still_since = frame, memcpy(last, pos, 12), g_state = 0;
         LOG("[warp] the player's body %llx, at %.2f %.2f %.2f\n", (unsigned long long)b, pos[0], pos[1], pos[2]);
         return;
@@ -64,7 +117,8 @@ void warp_frame(uint64_t frame) {  // (each game frame: runtime/hle/input.c)
         LOG("[warp] the player moved from %.2f %.2f %.2f to %.2f %.2f %.2f\n", pos[0], pos[1], pos[2], g_to[0], g_to[1], g_to[2]);
     }
     memcpy(pos, g_to, 12);
-    if (++writes >= 10) g_state = 2;
+    memcpy(last, g_to, 12);
+    if (++writes >= 10) g_state = 2, done_at = frame;
 }
 
 // LARECOMP_STORY="<n>" (Legends Studio's "Play here at a story point"): the level's spawn conditions see the story at
