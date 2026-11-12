@@ -61,7 +61,9 @@ static bool enabled(void) {
     static int on = -1;
     if (on < 0) {
         const char *v = ENV("LARECOMP_VCACHE");
-        on = (!v || atoi(v) != 0) && pagewatch_supported() && g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        // (LARECOMP_VCACHE=2: on an integrated GPU too - research: the PS5 behaving like a desktop Radeon, pages watched)
+        on = (!v || atoi(v) != 0) && pagewatch_supported() &&
+             (g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU || (v && atoi(v) == 2));
         if (on) LOG("[vk] vertex streams kept in VRAM, copied again when the game writes them\n");
     }
     return on;
