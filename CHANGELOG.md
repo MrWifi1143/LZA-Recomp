@@ -6,6 +6,15 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsA`)
 
+## 2026-11-11: LegendsA-v1.2.0-rc5 (release candidate)
+
+Previous release: LegendsA-v1.2.0-rc4. Game version: Pokemon Legends: Arceus 1.1.1. Same game code as rc1: no rebuild
+on start, and copies already set up can take the hotfix zip (the program only).
+
+- Ride Pokemon jump as high at any frame rate: above 30 fps the physics step took a whole 30 fps share of gravity each
+  frame, so a Wyrdeer jump at 144 fps topped out at ~0.5 m instead of ~2 m. Gravity is now scaled to each step's time
+  (measured: 30 fps 2.00 m, 60 fps 1.97 m, 144 fps 2.00 m). Reported on Discord ("Physics bound to framerate?").
+
 ## 2026-11-10: LegendsA-v1.2.0-rc3 (release candidate)
 
 Previous release: LegendsA-v1.2.0-rc1 (rc2 was withdrawn: its fix missed the case that crashed). Same game code as rc1:
