@@ -17,12 +17,18 @@
 // what a friend sends is replayed over loopback from 127.0.4.<k>:<their port> to this copy, where ldn.c receives it as
 // from any LAN player. A host advertises itself in its Steam rich presence (key "lzarecomp" = "hosting" - Z-A; Arceus:
 // "plarecomp", so the two games never see each other's rooms - LARECOMP_RELAY_KEY, set for the helper); a scan asks
-// every friend showing it. Only friends: messages from anyone else are refused (their sessions not accepted).
+// every friend showing it. Only friends: messages from anyone else are refused (their sessions not accepted) - except
+// a Discord invite's (runtime/discord.c): a host's invite carries its Steam id and a token made for this game; whoever
+// joins with it sends that token first (a hello), and the host lets that player in like a friend for this session.
+// Plugin -> helper 'K' the token (8 bytes), 'J' join (u64 host id + its token); helper -> plugin 'G' a guest joined (u64).
 //
 // The Steam API is not shipped: libsteam_api.so is loaded from the Steam install (Steam's own copy - SteamVR's - or any
 // game's), or LARECOMP_STEAM_API=<path>. LARECOMP_RELAY_FAKE=<this port>,<peer port> (tests): no Steam - the relay's
 // messages go over UDP on 127.0.0.1 between two copies of the game, the peer at 127.0.4.1.
 #define _GNU_SOURCE
+#ifdef _WIN32
+#define _CRT_RAND_S  // (rand_s: the Discord invite token)
+#endif
 #include <pthread.h>
 #include <errno.h>
 #include <stdbool.h>
@@ -30,6 +36,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -202,6 +209,35 @@ static void *g_msgs, *g_friends;
 static volatile int g_quit;
 #define FRIEND_IMMEDIATE 4
 #define SEND_UNRELIABLE_NO_NAGLE_AUTORESTART (1 | 32)
+#define SEND_RELIABLE 8
+
+// ---- Discord invites: players let in like friends for this session (a guest who sent this copy's token, or the host
+// whose invite this copy took), and the hello that carries a token
+static uint64_t g_trusted[32];
+static int g_ntrusted, g_npending;
+static uint8_t g_token[8];
+static bool g_have_token;
+static uint64_t g_hello_to;
+static uint8_t g_hello_token[8];
+static int g_hello_left;
+static const uint8_t k_hello[8] = {0xFF, 0xFF, 0xFF, 0xFF, 'L', 'Z', 'J', '1'};
+static bool trusted(uint64_t id) {
+    for (int i = 0; i < g_ntrusted; i++)
+        if (g_trusted[i] == id) return true;
+    return false;
+}
+static void trust(uint64_t id) {
+    if (!trusted(id) && g_ntrusted < 32) g_trusted[g_ntrusted++] = id;
+}
+static bool allowed(uint64_t id) { return S.HasFriend(g_friends, id, FRIEND_IMMEDIATE) || trusted(id); }
+static void send_hello(void) {
+    uint8_t m[16];
+    memcpy(m, k_hello, 8), memcpy(m + 8, g_hello_token, 8);
+    Identity who;
+    memset(&who, 0, sizeof who);
+    S.SetSteamID64(&who, g_hello_to);
+    S.Send(g_msgs, &who, m, sizeof m, SEND_RELIABLE, 0);
+}
 
 // Where Steam keeps games: its own folder and every library folder (steamapps/libraryfolders.vdf "path" lines)
 static int steam_libraries(char (*out)[512], int max) {
@@ -384,6 +420,15 @@ static void *from_game(void *arg) {  // (the plugin's frames: sends and the host
             S.Send(g_msgs, &who, buf + 8, n - 8, SEND_UNRELIABLE_NO_NAGLE_AUTORESTART, 0);
         } else if (h[0] == 'P' && n >= 1) {
             S.SetRichPresence(g_friends, relay_key(), buf[0] ? "hosting" : "");
+        } else if (h[0] == 'K' && n == 8) {  // (this copy's invite token: guests who send it are let in)
+            memcpy(g_token, buf, 8);
+            g_have_token = true;
+        } else if (h[0] == 'J' && n == 16) {  // (an invite taken: the host is let in, and told so with its token)
+            memcpy(&g_hello_to, buf, 8), memcpy(g_hello_token, buf + 8, 8);
+            trust(g_hello_to);
+            g_hello_left = 10;  // (again every ~2 s until the host answers, 10 times at most: Discord's join comes first)
+            send_hello();
+            LOG("[steamrelay] joining %llu (a Discord invite)\n", (unsigned long long)g_hello_to);
         }
         pthread_mutex_unlock(&g_steam_lock);
     }
@@ -413,8 +458,12 @@ int main(void) {
             if (cb.id == 1251 && cb.param) {  // SteamNetworkingMessagesSessionRequest_t: a friend's first message
                 const Identity *who = (const Identity *)cb.param;
                 uint64_t id = S.GetSteamID64(who);
-                if (S.HasFriend(g_friends, id, FRIEND_IMMEDIATE)) S.Accept(g_msgs, who);
-                else LOG("[steamrelay] refused a session from %llu (not a friend)\n", (unsigned long long)id);
+                if (allowed(id)) S.Accept(g_msgs, who);
+                else if (g_have_token && g_npending < 16) {  // (maybe a Discord invite's guest: its first message says)
+                    g_npending++;
+                    S.Accept(g_msgs, who);
+                    LOG("[steamrelay] a session from %llu (not a friend): only an invite's hello gets through\n", (unsigned long long)id);
+                } else LOG("[steamrelay] refused a session from %llu (not a friend)\n", (unsigned long long)id);
             }
             S.MD_FreeLast(pipe);
         }
@@ -422,16 +471,35 @@ int main(void) {
         int32_t n = S.Receive(g_msgs, 0, msg, 64);
         for (int i = 0; i < n; i++) {
             uint64_t id = S.GetSteamID64(&msg[i]->peer);
-            if (S.HasFriend(g_friends, id, FRIEND_IMMEDIATE)) out_frame('M', &id, 8, msg[i]->data, (size_t)msg[i]->size);
+            const uint8_t *d = msg[i]->data;
+            bool hello = msg[i]->size == 16 && !memcmp(d, k_hello, 8);
+            if (hello && g_have_token && !memcmp(d + 8, g_token, 8) && !allowed(id)) {
+                trust(id);
+                LOG("[steamrelay] %llu joined with this copy's Discord invite\n", (unsigned long long)id);
+                out_frame('G', &id, 8, NULL, 0);
+            } else if (!hello && allowed(id)) {
+                if (id == g_hello_to) g_hello_left = 0;  // (the host answered)
+                out_frame('M', &id, 8, msg[i]->data, (size_t)msg[i]->size);
+            }
             S.Release(msg[i]);
         }
         if (tick % 4000 == 0) {  // (~every 4 s: friends' rich presence kept fresh)
             int nf = S.FriendCount(g_friends, FRIEND_IMMEDIATE);
             for (int i = 0; i < nf; i++) S.RequestRichPresence(g_friends, S.FriendByIndex(g_friends, i, FRIEND_IMMEDIATE));
         }
+        if (tick % 2000 == 0 && g_hello_left > 0) g_hello_left--, send_hello();
         if (tick % 500 == 0) {  // (~every 0.5 s: who is hosting, for the game's scans)
             static uint8_t list[64 * 300];
             size_t k = 0;
+            for (int i = 0; i < g_ntrusted && k + 300 <= sizeof list; i++) {  // (Discord invites: their rooms are asked too)
+                if (S.HasFriend(g_friends, g_trusted[i], FRIEND_IMMEDIATE)) continue;
+                const char *name = S.FriendName(g_friends, g_trusted[i]);
+                if (!name || !name[0]) name = "a Discord friend";
+                size_t nl = strlen(name);
+                if (nl > 255) nl = 255;
+                memcpy(list + k, &g_trusted[i], 8), list[k + 8] = (uint8_t)nl, memcpy(list + k + 9, name, nl);
+                k += 9 + nl;
+            }
             int nf = S.FriendCount(g_friends, FRIEND_IMMEDIATE);
             for (int i = 0; i < nf && k + 300 <= sizeof list; i++) {
                 uint64_t f = S.FriendByIndex(g_friends, i, FRIEND_IMMEDIATE);
@@ -589,8 +657,19 @@ static void relay_send(uint32_t to, uint16_t from_port, uint16_t to_port, const 
     }
     free(m);
 }
+static volatile uint64_t g_scan_ms;  // (the game's last scan: it is looking for a room)
+static uint64_t now_ms(void) {
+#ifdef _WIN32
+    return GetTickCount64();
+#else
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000 + (uint64_t)t.tv_nsec / 1000000;
+#endif
+}
 static int relay_targets(uint32_t *out, int max) {
     int n = 0;
+    g_scan_ms = now_ms();
     if (g_fake != NO_SOCK) {
         if (max > 0) out[n++] = peer_addr(peer_of(g_fake_peer));
         return n;
@@ -603,7 +682,11 @@ static int relay_targets(uint32_t *out, int max) {
     pthread_mutex_unlock(&g_hosts_lock);
     return n;
 }
+static volatile int g_hosting;
+static uint64_t g_me;            // (this copy's Steam id; the fake relay: its port)
+static uint8_t g_invite[8];      // (this copy's Discord invite token)
 static void relay_hosting(int on) {
+    g_hosting = on;
     if (g_fake == NO_SOCK) {
         uint8_t b = on ? 1 : 0;
         to_helper('P', &b, 1, NULL, 0);
@@ -642,6 +725,10 @@ static void *pump(void *arg) {
             uint64_t from;
             memcpy(&from, m, 8);
             deliver(from, m + 8, n - 8);
+        } else if (h[0] == 'G' && n >= 8) {
+            uint64_t id;
+            memcpy(&id, m, 8);
+            LOG("[steamrelay] a player joined with this copy's Discord invite (%llu)\n", (unsigned long long)id);
         } else if (h[0] == 'H') {
             pthread_mutex_lock(&g_hosts_lock);
             g_nhosts = 0;
@@ -668,6 +755,54 @@ static void quit(void) {  // (hooks.shutdown: from exit())
     pthread_join(g_pump, NULL);
 }
 
+// ---- Discord invites (runtime/discord.c finds these by name in the loaded plugins)
+// While this copy hosts or looks for a room (a Link Code entered: the game searches, then hosts if it found none): the
+// invite's secret "<Steam id hex>.<token hex>" (1), or nothing to invite to (0)
+int larecomp_relay_invite(char *out, size_t size) {
+    if (!(g_hosting || (g_scan_ms && now_ms() - g_scan_ms < 10000)) || !g_me || size < 40) return 0;
+    char t[17];
+    for (int i = 0; i < 8; i++) snprintf(t + 2 * i, 3, "%02x", g_invite[i]);
+    snprintf(out, size, "%llx.%s", (unsigned long long)g_me, t);
+    return 1;
+}
+// An invite taken (its secret): the host is let in and asked for its rooms like a friend's (1), or a bad secret (0)
+int larecomp_relay_join(const char *secret) {
+    unsigned long long id = 0;
+    char t[17] = "";
+    if (!secret || sscanf(secret, "%llx.%16[0-9a-f]", &id, t) != 2 || strlen(t) != 16 || !id) return 0;
+    uint8_t b[16];
+    memcpy(b, &id, 8);
+    for (int i = 0; i < 8; i++) {
+        unsigned v;
+        sscanf(t + 2 * i, "%2x", &v);
+        b[8 + i] = (uint8_t)v;
+    }
+    if (g_fake != NO_SOCK) return 1;  // (tests: the fake relay's peer is already there)
+    to_helper('J', b, 16, NULL, 0);
+    return 1;
+}
+static void invite_token(void) {  // (random: who has it can join this copy's rooms)
+    bool ok = false;
+#ifdef _WIN32
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    uint64_t x = (uint64_t)q.QuadPart ^ ((uint64_t)GetCurrentProcessId() << 32) ^ (uint64_t)(uintptr_t)&q ^ GetTickCount64() * 0x9E3779B97F4A7C15ull;
+    for (int i = 0; i < 8; i++) {  // (splitmix64)
+        x += 0x9E3779B97F4A7C15ull;
+        uint64_t z = x;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull, z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        g_invite[i] = (uint8_t)(z ^ (z >> 31));
+    }
+    unsigned int r;
+    for (int i = 0; i < 2 && !rand_s(&r); i++) memcpy(g_invite + 4 * i, &r, 4), ok = true;
+#else
+    FILE *f = fopen("/dev/urandom", "rb");
+    ok = f && fread(g_invite, 1, 8, f) == 8;
+    if (f) fclose(f);
+#endif
+    (void)ok;
+}
+
 int larecomp_plugin_init(const LarecompPluginApi *api, LarecompPluginHooks *hooks) {
     A = api;
     if (api->abi < 3 || !api->ldn_relay_set || !api->ldn_relay_local) {
@@ -687,6 +822,7 @@ int larecomp_plugin_init(const LarecompPluginApi *api, LarecompPluginHooks *hook
         if (g_fake == NO_SOCK || bind(g_fake, (struct sockaddr *)&a, sizeof a)) { LOG("[steamrelay] fake relay: can't bind %u\n", mine); return 1; }
         nonblocking(g_fake);
         g_fake_peer = (uint16_t)peer;
+        g_me = mine;
         LOG("[steamrelay] fake relay (tests): port %u, the peer at %u is 127.0.4.%d\n", mine, peer, peer_of(peer));
     } else {
         env_set("LARECOMP_RELAY_KEY", api->title_id && api->title_id() == 0x01001F5010DFA000ull ? "plarecomp" : "lzarecomp");
@@ -703,6 +839,9 @@ int larecomp_plugin_init(const LarecompPluginApi *api, LarecompPluginHooks *hook
         }
         uint64_t me;
         memcpy(&me, b, 8);
+        g_me = me;
+        invite_token();
+        to_helper('K', g_invite, 8, NULL, 0);
         LOG("[steamrelay] online play with friends on, as Spacewar (in the helper: the game keeps its own Steam Input "
             "controller setup) - id %llu\n", (unsigned long long)me);
     }

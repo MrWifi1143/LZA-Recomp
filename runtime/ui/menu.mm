@@ -387,6 +387,8 @@ extern "C" int menu_keyboard_run(const char *initial, int max_len, const char *t
     g_kbd = 1;
     // (test) LARECOMP_KBD_AUTO=<text>: answer at once
     if (g_kbd_auto_once[0]) { snprintf(g_kbd_text, sizeof g_kbd_text, "%s", g_kbd_auto_once); g_kbd_auto_once[0] = 0; g_kbd = 2; }
+    // (test) LARECOMP_KBD_AUTO=@: answer at once with the text it opened with (a Discord invite's Link Code)
+    else if (getenv("LARECOMP_KBD_AUTO") && !strcmp(getenv("LARECOMP_KBD_AUTO"), "@")) g_kbd = 2;
     else if (getenv("LARECOMP_KBD_AUTO")) { snprintf(g_kbd_text, sizeof g_kbd_text, "%s", getenv("LARECOMP_KBD_AUTO")); g_kbd = 2; }
     else if (input_replay_text(g_kbd_text, (int)sizeof g_kbd_text)) g_kbd = 2;  // (LARECOMP_REPLAY: the recorded name)
     while (g_kbd.load() == 1 && !g_rt_unwind) {  // ~60 Hz (a reboot cancels)
@@ -448,7 +450,7 @@ static void quit_draw(ImGuiIO &io, float scale) {
 }
 
 // A short notice in the corner for a few seconds (the screenshot key: runtime/nvn/vulkan/device.c). Any thread.
-static char g_notice[192];
+static char g_notice[320];
 static std::atomic<uint64_t> g_notice_until{0};
 extern "C" void menu_notice_for(const char *text, unsigned ms) {
     snprintf(g_notice, sizeof g_notice, "%s", text);

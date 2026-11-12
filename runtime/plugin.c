@@ -36,6 +36,17 @@ uint64_t game_title_id(void);
 #define MAX_PLUGINS 8
 static LarecompPluginHooks g_hooks[MAX_PLUGINS];
 static int g_n;
+static void *g_handles[MAX_PLUGINS];
+
+// A function a loaded plugin exports by name (the first that has it; NULL: none) - optional extras outside the API
+// struct (the Steam relay's larecomp_relay_invite / larecomp_relay_join: runtime/discord.c)
+void *plugins_symbol(const char *name) {
+    for (int i = 0; i < g_n; i++) {
+        void *f = g_handles[i] ? dl_sym(g_handles[i], name) : NULL;
+        if (f) return f;
+    }
+    return NULL;
+}
 static pthread_mutex_t g_queue = PTHREAD_MUTEX_INITIALIZER;
 
 void vk_queue_lock(void) { pthread_mutex_lock(&g_queue); }
@@ -139,6 +150,7 @@ static void load_one(const char *path) {
     LarecompPluginHooks hk = {0};
     int r = init(&g_api, &hk);
     if (r) { LOG("[plugin] %s stays out (%d)\n", path, r); dl_close(h); return; }
+    g_handles[g_n] = h;
     g_hooks[g_n++] = hk;
     if (hk.cbuf_bound) g_plugins_cbuf = 1;
     LOG("[plugin] loaded %s\n", path);

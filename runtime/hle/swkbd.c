@@ -10,6 +10,8 @@
 #include "../hle.h"
 
 int menu_keyboard_run(const char *initial, int max_len, const char *title, char *out, int cap);  // runtime/ui/menu.mm
+int discord_link_code_prefill(char *out, size_t size, int max_len);  // runtime/discord.c (a Discord invite's code)
+void discord_link_code_entered(const char *text, int max_len);
 
 // UTF-16 (NUL-terminated, at most n units) -> UTF-8
 static void utf16_to_8(const uint16_t *in, int n, char *out, size_t cap) {
@@ -49,7 +51,12 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
     utf16_to_8((const uint16_t *)(uintptr_t)(arg + 0x24), 65, header, sizeof header);
     utf16_to_8((const uint16_t *)(uintptr_t)(arg + 0xa6), 129, sub, sizeof sub);
     utf16_to_8((const uint16_t *)(uintptr_t)(arg + 0x1a8), 257, guide, sizeof guide);
+    {   // a Link Code box (8 digits) after taking a Discord invite: the host's code is filled in, to confirm
+        char code[16];
+        if (!initial[0] && discord_link_code_prefill(code, sizeof code, max_len)) snprintf(initial, sizeof initial, "%s", code);
+    }
     int ok = menu_keyboard_run(initial, max_len, header[0] ? header : guide[0] ? guide : sub, text, sizeof text);
+    if (ok) discord_link_code_entered(text, max_len);  // (a Link Code typed here goes in this copy's invites)
     if (!ok) snprintf(text, sizeof text, "%s", initial);  // cancelled: keep what was there
     LOG("[swkbd] text entry \"%s\" / \"%s\" / \"%s\" (max %d, initial \"%s\"): %s \"%s\"\n", header, sub, guide, max_len, initial,
         ok ? "entered" : "cancelled", text);
