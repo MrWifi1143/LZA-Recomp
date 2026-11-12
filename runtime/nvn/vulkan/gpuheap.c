@@ -179,7 +179,7 @@ static void back_chunk(unsigned i) {
         if (r != VK_SUCCESS || !map_chunk(i, fd))
             FATAL("guest heap: GPU memory for %llx..%llx failed (%d): out of memory?\n", (unsigned long long)(HEAP_BASE + i * CHUNK),
                   (unsigned long long)(HEAP_BASE + (i + 1) * CHUNK), (int)r);
-        H.fd[i] = fd;  // (the allocation stays: the dma-buf and its mapping hold the memory)
+        __atomic_store_n(&H.fd[i], fd, __ATOMIC_RELEASE);  // (the allocation stays: the dma-buf and its mapping hold the memory)
         H.lazy_chunk[i] = false;
         H.backed++;
         if ((i + 1) * CHUNK > H.end) H.end = (i + 1) * CHUNK;
@@ -226,18 +226,26 @@ void gpuheap_touch(uint64_t addr, uint64_t n) {
     pthread_mutex_unlock(&H.lock);
 }
 
-// (the crash handler, SIGSEGV at addr) an unbacked chunk's first access: backed, true (the access retries)
+// (the crash handler, SIGSEGV at addr) an unbacked chunk's first access: backed, true (the access retries). A fault in
+// a chunk that is backed isn't this one's: it is pagewatch's (a page the renderer keeps a copy of, read-only until the
+// game writes it) - claimed here, the page stayed read-only and the store faulted forever: Z-A on a Radeon (vertex data
+// kept in VRAM, so pages watched) hung at the next load after the first (fast travel; a new game after the name).
 bool gpuheap_fault(uint64_t addr) {
     if (!H.lazy || addr < HEAP_BASE || addr - HEAP_BASE >= HEAP_MAX) return false;
     unsigned i = (unsigned)((addr - HEAP_BASE) / CHUNK);
-    if (!__atomic_load_n(&H.lazy_chunk[i], __ATOMIC_ACQUIRE) && H.fd[i] < 0) return false;
+    if (!__atomic_load_n(&H.lazy_chunk[i], __ATOMIC_ACQUIRE)) return false;
     pthread_mutex_lock(&H.lock);
-    bool ok = true;
     if (H.lazy_chunk[i]) back_chunk(i);
-    else ok = H.fd[i] >= 0;  // (backed meanwhile by another thread)
+    bool ok = H.fd[i] >= 0;
     __atomic_store_n(&g_gpuheap_gen, H.backed, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&H.lock);
     return ok;
+}
+// (the crash handler, after pagewatch_fault declined too) a fault in a chunk another thread backed between this
+// thread's access and gpuheap_fault: true (the access retries; the chunk is read-write now)
+bool gpuheap_backed_meanwhile(uint64_t addr) {
+    if (!H.lazy || addr < HEAP_BASE || addr - HEAP_BASE >= HEAP_MAX) return false;
+    return __atomic_load_n(&H.fd[(addr - HEAP_BASE) / CHUNK], __ATOMIC_ACQUIRE) >= 0;
 }
 unsigned gpuheap_backed_mb(void) { return H.backed * (unsigned)(CHUNK >> 20); }
 uint64_t gpuheap_unbacked(void) {  // (lazy chunks not backed yet: room the game may still take - texpack_room)
@@ -288,6 +296,7 @@ void gpuheap_guest_reset(void) {
 uint64_t g_gpuheap_end, g_gpuheap_gen;
 void gpuheap_touch(uint64_t addr, uint64_t n) { (void)addr, (void)n; }
 bool gpuheap_fault(uint64_t addr) { (void)addr; return false; }
+bool gpuheap_backed_meanwhile(uint64_t addr) { (void)addr; return false; }
 unsigned gpuheap_backed_mb(void) { return 0; }
 uint64_t gpuheap_unbacked(void) { return 0; }
 bool gpuheap_on(void) { return false; }
