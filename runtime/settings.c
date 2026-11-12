@@ -48,6 +48,11 @@ static void parse_line(const char *line) {
     char key[64];
     char val[1024];  // (mod: several names)
     if (sscanf(line, " %63[^= ] = %1023[^\n]", key, val) < 1) return;
+    if (!strcmp(key, "online_server")) {  // (may be empty)
+        if (sscanf(line, " %63[^= ] = %1023s", key, val) != 2) val[0] = 0;
+        strlcpy(g_settings.online_server, val, sizeof g_settings.online_server);
+        return;
+    }
     if (!strcmp(key, "game_lang") || !strcmp(key, "mod") || !strcmp(key, "plugins_off") || !strcmp(key, "plugins_on")) {  // (may be empty)
         if (sscanf(line, " %63[^= ] = %1023[^\n]", key, val) != 2) val[0] = 0;
         if (key[0] == 'g') strlcpy(g_settings.game_lang, val, sizeof g_settings.game_lang);
@@ -151,6 +156,7 @@ void settings_save(void) {
     fprintf(f, "mod = %s\n", g_settings.mod);
     fprintf(f, "plugins_off = %s\n", g_settings.plugins_off);
     fprintf(f, "plugins_on = %s\n", g_settings.plugins_on);
+    fprintf(f, "online_server = %s\n", g_settings.online_server);
     fprintf(f, "mouse_sens = %.3f\n", g_settings.mouse_sens);
     fprintf(f, "stick_deadzone = %.2f\n", g_settings.stick_deadzone);
     fprintf(f, "volume = %.2f\n", g_settings.volume);

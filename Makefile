@@ -261,6 +261,20 @@ $(RELAYH): contrib/steamrelay/steamrelay.c
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -Wall -DRELAY_HELPER $< -o $@ $(RELAYH_LIBS)
 
+# The online server (contrib/lzaserver): anyone can run it; players put its address in the Mods page (Online server)
+# and Link Play goes through it - players with the same Link Code meet there. Not part of the game.
+ifeq ($(PLATFORM),windows)
+LZASERVER := $(B)/lzaserver.exe
+LZASERVER_LIBS := -lws2_32
+else
+LZASERVER := $(B)/lzaserver
+LZASERVER_LIBS :=
+endif
+lzaserver: $(LZASERVER)
+$(LZASERVER): contrib/lzaserver/lzaserver.c
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -Wall $< -o $@ $(LZASERVER_LIBS)
+
 # Legends Lua (contrib/legendslua): Lua scripting of the game (hooks, memory, calls; scripts in <game folder>/lua/).
 # In <game folder>/plugins/; off until switched on in the Mods page.
 ifeq ($(PLATFORM),windows)
@@ -275,4 +289,4 @@ $(LUAMOD): contrib/legendslua/legendslua.c runtime/plugin.h $(wildcard third_par
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -Wall -shared -Iruntime -Ithird_party $(DEPINC) $< $(wildcard third_party/lua/*.c) -o $@ $(LUAMOD_FLAGS)
 
-.PHONY: all gen gen-objs runtime-objs win-exe dist legendslua steamrelay
+.PHONY: all gen gen-objs runtime-objs win-exe dist legendslua steamrelay lzaserver
