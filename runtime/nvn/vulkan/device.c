@@ -750,10 +750,17 @@ void backend_present(NvnTexture *t);
 void backend_represent(void);
 static void represent_job(void *unused) { (void)unused; backend_represent(); }
 static bool g_representing;  // (backend_present of the last frame again: stereo hands the plugins nothing then)
+static _Atomic uint64_t g_real_present_ns;  // (the game's last own present: backend_represent leaves the window to it)
 void backend_represent(void) {
     if (rt_active() && !rt_on_render_thread()) { rt_call(represent_job, NULL); return; }  // (the keyboard dialog: game thread)
+    // Render thread off (renderthread.c rt_off_lock): the game may go on presenting behind the dialog - then its frames
+    // carry the dialog, and showing the old frame in between would only flicker
+    if (!rt_active() && SDL_GetTicksNS() - atomic_load(&g_real_present_ns) < 100000000ull) { SDL_Delay(16); return; }
+    extern void rt_off_lock(void), rt_off_unlock(void);
+    if (!rt_active()) rt_off_lock();
     if (g_last_presented) g_representing = true, backend_present(g_last_presented), g_representing = false;
-    else SDL_Delay(16);
+    if (!rt_active()) rt_off_unlock();
+    if (!g_last_presented) SDL_Delay(16);
 }
 
 void backend_present(NvnTexture *t) {
@@ -763,6 +770,7 @@ void backend_present(NvnTexture *t) {
         if (g_heal_tex) { g_heal_tex = 0; backend_pool_written(0x7000000000ull, 0x1000000000ull); }
     }
     g_last_presented = t;
+    if (!g_representing) atomic_store(&g_real_present_ns, SDL_GetTicksNS());
     TexBackend *b = vk_tex(t, true);
     b->presented = true;
     vk_end_pass();
