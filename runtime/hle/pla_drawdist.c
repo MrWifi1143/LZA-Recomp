@@ -24,6 +24,7 @@ static const uint32_t k_off[5] = {0x434, 0x448, 0x44c, 0x458, 0x45c};
 static struct { uint64_t obj; float game[5], put[5]; } g_obj[NOBJ];
 static int g_log = -1;
 static void put_lodtab(void);
+#define LODTAB 0x700397caf0ull
 
 static float factor(void) { return g_settings.detail >= 0 && g_settings.detail <= 3 ? k_mul[g_settings.detail] : 1.0f; }
 static float *at(uint64_t obj, int i) { return (float *)(uintptr_t)(obj + k_off[i]); }
@@ -102,6 +103,14 @@ static int npc_radius_hook(Cpu *c, uint64_t addr) {
 // (research) LARECOMP_PLA_SLOTWATCH=1: each frame, the words +0x300..+0x460 of every NPC slot that changed (not +0x330,
 // the distance) - what flips when an NPC is hidden (hle/warp.c calls this each game frame)
 void pla_slot_watch(uint64_t frame) {
+    // The model LOD table is applied when the field's trees are set up (fade_hook), but in Jubilife it is still empty then
+    // ("model LOD table not there") and the game fills it in later: village models - its people too - kept the game's
+    // cut-offs at every setting (player report: far NPCs only appear walking closer, same at Switch and Max). Once a
+    // second: a table back at the game's values while the setting wants it further gets it now.
+    if (frame % 60 == 0 && factor() > 1.0f) {
+        const float *t = (const float *)(uintptr_t)LODTAB;
+        if (t[6] > 1.79f && t[6] < 1.81f) put_lodtab();  // (1.8: the game's own, not scaled yet)
+    }
     static int on = -1;
     if (on < 0) on = getenv("LARECOMP_PLA_SLOTWATCH") != NULL;
     if (!on) return;
@@ -307,7 +316,6 @@ static int lodfn_hook(Cpu *c, uint64_t addr) {
 // with the distance squared: the cutoffs / k^2 keep each level k times further out. The table is read every frame, so
 // a Settings change applies at once. Found 2026-11-08 from the user's save at the rock (frame-by-frame swap, mesh
 // flags diff, then the writer of the current level).
-#define LODTAB 0x700397caf0ull
 static const float k_lodtab[9] = {0.01f, 0.003f, 0.001f, 0.01f, 0.005f, 0.002f, 1.8f, 0.5f, 0.2f};
 static void put_lodtab(void) {
     float *t = (float *)(uintptr_t)LODTAB;
@@ -511,4 +519,22 @@ void pla_drawdist_configure(void) {
     if (getenv("LARECOMP_PLA_TERRHIST"))
         rt_register_fnhook_at(0x7002471048ull, terrhist_hook), rt_register_fnhook_at(0x7002b1b248ull, terrwalk_hook),
             rt_register_fnhook_at(0x7002b1b6ecull, terremit_hook);
+}
+
+// Wild Pokemon despawn distance: app_config event_culling_config's npc_distance (20 m; the file allows up to 100) is
+// how far away field Pokemon are culled - not only in events (the Nexus "Improved Pokemon De-Spawn Radius" mod sets it
+// to 999 and Pokemon stay out on the plains; player report 2026-11-11, with Max Draw Distance trees reaching 2500 m).
+// Set as the image opens (services/fs.c): High 60, Max 99 (the file allows up to 100). Takes effect at the next
+// start. LARECOMP_PLA_DESPAWN=0: the game's.
+void pla_rom_edits(void) {
+    if (getenv("LARECOMP_PLA_DESPAWN") && atoi(getenv("LARECOMP_PLA_DESPAWN")) == 0) return;
+    // (the value as stored: length 2, "20", NUL - its length stays 2 as the Nexus mod leaves it: "999" reads as 99)
+    static const uint8_t was[7] = {2, 0, 0, 0, '2', '0', 0}, high[7] = {2, 0, 0, 0, '6', '0', 0},
+                         max[7] = {2, 0, 0, 0, '9', '9', 0};
+    const uint8_t *p = g_settings.detail >= 3 ? max : g_settings.detail == 2 ? high : NULL;
+    if (!p) return;
+    const char *put = p == max ? "99" : "60";
+    extern int fs_rom_edit(const char *path, const void *expect, const void *put, size_t n);
+    int ok = fs_rom_edit("bin/misc/app_config/event_culling_config.bin", was, p, sizeof was);
+    LOG("[drawdist] Pokemon despawn distance (event_culling npc_distance) 20 -> %s%s\n", put, ok ? "" : ": not this file, left alone");
 }

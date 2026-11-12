@@ -340,6 +340,37 @@ static void apply_bpatches(void) {  // (every mod's, the last in the order first
     for (int i = n - 1; i >= 0; i--) bpatch_walk(roots[i], "", 0);
 }
 
+
+// The runtime's own edits of a game file (game settings that live in RomFS config files): the n bytes expect, found
+// exactly once in the file whose path ends with path, become put (another game version, a mod's copy of the file, or
+// no unique match: left alone). Laid over the image like a mod's .bpatch.
+static int g_rom_fd = -1;
+int fs_rom_edit(const char *path, const void *expect, const void *put, size_t n) {
+    size_t pl = strlen(path);
+    for (int i = 0; i < rom_nfiles; i++) {
+        size_t l = strlen(rom_files[i].path);
+        if (l < pl || strcmp(rom_files[i].path + l - pl, path)) continue;
+        uint64_t sz = rom_files[i].size;
+        if (g_rom_fd < 0 || sz > (1u << 20) || sz < n) return 0;
+        uint8_t *f = malloc(sz);
+        if (pread(g_rom_fd, f, sz, (off_t)rom_files[i].off) != (ssize_t)sz) { free(f); return 0; }
+        int64_t at = -1;
+        int hits = 0;
+        for (uint64_t o = 0; o + n <= sz; o++)
+            if (!memcmp(f + o, expect, n)) hits++, at = (int64_t)o;
+        free(f);
+        if (hits != 1) {
+            LOG("[fs] %s: the bytes to change found %d times - left alone\n", rom_files[i].path, hits);
+            return 0;
+        }
+        uint8_t *b = malloc(n);
+        memcpy(b, put, n);
+        add_patch(rom_files[i].off + (uint64_t)at, n, b);
+        return 1;
+    }
+    return 0;
+}
+
 static void rom_index(int fd) {
     uint64_t h[10];
     if (pread(fd, h, sizeof h, 0) != (ssize_t)sizeof h) return;
@@ -402,6 +433,8 @@ static void rom_index(int fd) {
     add_new_files(fd, h, dmeta, dsz, fsz);
     qsort(rom_files, rom_nfiles, sizeof *rom_files, rom_cmp);
     apply_bpatches();
+    g_rom_fd = fd;
+    { extern void pla_rom_edits(void); pla_rom_edits(); }  // (hle/pla_drawdist.c: settings that live in config files)
     free(dmeta);
     free(fmeta);
     LOG("[fs] romfs index: %d files\n", rom_nfiles);
