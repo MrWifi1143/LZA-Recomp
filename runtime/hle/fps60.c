@@ -643,6 +643,44 @@ static int pla_fall_time_hook(Cpu *c, uint64_t addr) {
     return 0;
 }
 
+// A character's physics step (f_7002ae3150: x0 the body, x1 its step info, [x1] the step's time) takes a fixed bite of
+// gravity out of the body's vertical speed each step - Wyrdeer: 24.5 / 30 = 0.8167 m/s a step, whatever the step's time.
+// At 144 fps that is 4.8x the gravity: ridden jumps topped out at ~0.5 m instead of ~2 m (player report, measured
+// 2026-11-11: 8.75 m/s take-off, the same at every frame rate). The speed falls only through gravity in the air: a step
+// that lowers the vertical speed alone (x and z unchanged) by a gravity-sized bite is scaled to the step's time
+// (30 * dt), in the body's speed (+0x124) and the motor's copy of it (+0x4c4). Landings and pushes change more than y
+// or raise it: left alone. LARECOMP_PLA_GRAVITY_SCALE=0: off.
+#define PLA_CHAR_STEP 0x7002ae3150ull
+static int pla_char_step_hook(Cpu *c, uint64_t addr) {
+    uint64_t b = c->x[0], info = c->x[1];
+    float *v = (float *)(uintptr_t)(b + 0x120), *m = (float *)(uintptr_t)(b + 0x4c0);
+    float dt;
+    memcpy(&dt, (const void *)(uintptr_t)info, 4);
+    float v0[3] = {v[0], v[1], v[2]}, m0 = m[1];
+    rt_call_original(c, addr);
+    if (!(dt > 0 && dt < 1.0f / 30 - 1e-4f)) return 1;  // (30 fps and slower: the game's own step)
+    float d = v[1] - v0[1];
+    // (the body's last step with a gravity bite: a step without one before it is the first in the air - the take-off)
+    static struct { uint64_t body; uint64_t frame; } air[16];
+    extern uint64_t renderer_game_frame(void);
+    uint64_t now = renderer_game_frame();
+    int slot = (int)((b >> 9) & 15);
+    if (d < -0.2f && d > -2.0f && fabsf(v[0] - v0[0]) < 1e-4f && fabsf(v[2] - v0[2]) < 1e-4f) {
+        float k = 30 * dt;
+        v[1] = v0[1] + d * k;
+        // At 30 fps the position moved with the speed before each whole bite: the arc runs as if it had started half a
+        // bite faster (8.75 -> 9.16 m/s for Wyrdeer: 2.0 m, not 1.6). Small steps lose that, so the first bite after the
+        // take-off gives it back - the jump tops out as at 30 fps.
+        static float boost = -1;  // (LARECOMP_PLA_GRAVITY_BOOST=<bites>: research - the take-off's share)
+        if (boost < 0) boost = getenv("LARECOMP_PLA_GRAVITY_BOOST") ? (float)atof(getenv("LARECOMP_PLA_GRAVITY_BOOST")) : 1.25f;
+        if (!(air[slot].body == b && now - air[slot].frame <= 2)) v[1] -= d * (1 - k) * boost;
+        air[slot].body = b, air[slot].frame = now;
+        if (fabsf(m[1] - (v0[1] + d)) < 1e-3f) m[1] = v[1];
+        (void)m0;
+    }
+    return 1;
+}
+
 // Research (LARECOMP_PLA_GATE30=<addr>[,<addr>...]): those functions run only on the updates where 30 fps time moved
 // on a frame (rt_pla_tick) - which per-update counting a behaviour comes from.
 static int pla_gate30_hook(Cpu *c, uint64_t addr) {
@@ -682,6 +720,8 @@ void pla60_configure(const char *exefs) {
                 rt_register_fnhook_at(PLA_THROW_FRAMES, pla_throw_frames_hook);
                 rt_register_fnhook_at(PLA_FALL_TIME, pla_fall_time_hook);
             }
+            if (!getenv("LARECOMP_PLA_GRAVITY_SCALE") || atoi(getenv("LARECOMP_PLA_GRAVITY_SCALE")))
+                rt_register_fnhook_at(PLA_CHAR_STEP, pla_char_step_hook);
             for (char *e = getenv("LARECOMP_PLA_GATE30"); e && *e;) {
                 uint64_t a = strtoull(e, &e, 16);
                 if (a) rt_register_fnhook_at(a, pla_gate30_hook);
