@@ -216,6 +216,11 @@ void plat_fatal_notice(void) {
                 size_t l = strlen(text);
                 snprintf(text + l, sizeof text - l, "\n\nThe graphics card stopped (a GPU crash). Please report it with the "
                          "file below and where it happened; updating the graphics driver may help.");
+            } else if (strstr(line, "failed: -2 ") || strstr(line, "failed: -1 ") || strstr(line, ": -2 (") || strstr(line, ": -1 (")) {
+                // (VK_ERROR_OUT_OF_DEVICE_MEMORY / OUT_OF_HOST_MEMORY: the driver works, memory ran out)
+                size_t l = strlen(text);
+                snprintf(text + l, sizeof text - l, "\n\nThe graphics card ran out of memory. Close other programs and try lower "
+                         "settings; integrated graphics share the PC's RAM, and 8 GB of RAM is very tight for this game.");
             } else if (strstr(line, "Vulkan") || strstr(line, "VK_") || strstr(line, "vk")) {
                 size_t l = strlen(text);
                 snprintf(text + l, sizeof text - l, "\n\n" RT_APP_NAME " needs a graphics driver with Vulkan 1.3: install the "
