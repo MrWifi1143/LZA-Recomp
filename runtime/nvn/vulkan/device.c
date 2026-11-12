@@ -181,6 +181,14 @@ static void create_device(void) {
             ext[n_ext++] = VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME;
         } else if (gpuheap_on())
             LOG("[vk] warning: the guest heap is GPU memory but the queue can't bind it: shader global memory reads return zero\n");
+        // the host import in 64 MB chunks as they're used (gpuheap.c decided at boot: integrated GPUs), bound into a
+        // sparse buffer (exec.c) - if this device and queue can; otherwise every chunk backed now and imported whole
+        extern bool gpuheap_lazy_host(void);
+        extern void gpuheap_host_cancel(void);
+        if (!g_vk.gpuheap && gpuheap_lazy_host()) {
+            g_vk.lazyhost = g_vk.host_import && g_vk.qfam < nq && (qp[g_vk.qfam].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT);
+            if (!g_vk.lazyhost) LOG("[vk] guest heap: this queue can't bind sparse memory\n"), gpuheap_host_cancel();
+        }
     }
     g_vk.mem_budget = has_ext(ep, ne, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
     if (g_vk.mem_budget) ext[n_ext++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
@@ -332,7 +340,13 @@ static void create_device(void) {
     b->robustBufferAccess = h->robustBufferAccess;  // guest shaders index cbufs freely: keep OOB reads harmless
     if (ENV("LARECOMP_NO_ROBUST")) b->robustBufferAccess = VK_FALSE;  // (research: what the bounds checks cost)
     b->shaderClipDistance = h->shaderClipDistance;
-    b->sparseBinding = b->sparseResidencyBuffer = g_vk.gpuheap;  // (exec.c: the heap window's sparse buffer)
+    if (g_vk.lazyhost && !(h->sparseBinding && h->sparseResidencyBuffer)) {  // (a plugin's device: not the one gpuheap.c looked at)
+        extern void gpuheap_host_cancel(void);
+        LOG("[vk] guest heap: no sparse buffers on this device\n");
+        gpuheap_host_cancel();
+        g_vk.lazyhost = false;
+    }
+    b->sparseBinding = b->sparseResidencyBuffer = g_vk.gpuheap || g_vk.lazyhost;  // (exec.c: the heap window's sparse buffer)
     if (!h->shaderInt64) LOG("[vk] warning: no shaderInt64 (64-bit address math in shaders)\n");
     if (!have12.uniformAndStorageBuffer8BitAccess) LOG("[vk] warning: no 8-bit uniform buffer access\n");
     float prio = 1.0f;
@@ -1496,7 +1510,8 @@ void backend_present(NvnTexture *t) {
                                       h, mp->memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ? "device" : "host",
                                       (unsigned long long)(mp->memoryHeaps[h].size >> 20), (unsigned long long)(bud[h].statistics.allocationBytes >> 20),
                                       bud[h].statistics.allocationCount, (unsigned long long)(bud[h].usage >> 20), (unsigned long long)(bud[h].budget >> 20));
-                    LOG("[mem]%s\n", line);
+                    extern unsigned vk_gmem_imported_mb(void);
+                    LOG("[mem]%s | guest heap imported %u MB%s\n", line, vk_gmem_imported_mb(), g_vk.lazyhost ? " (lazy)" : "");
                 }
             }
         max_gap = 0;

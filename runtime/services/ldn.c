@@ -785,6 +785,7 @@ SERVICE("bsd:u", bsd_u) {
             break;
         }
 #endif
+        pagewatch_prewrite(b->addr, b->size);  // (the kernel writes there: a watched page or a heap chunk not backed yet fails, not faults)
         kernel_block_begin();
         n = recvfrom(h, (void *)(uintptr_t)b->addr, (int)b->size, hf, (struct sockaddr *)&from, &fromlen);
         kernel_block_end();
