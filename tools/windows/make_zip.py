@@ -162,6 +162,7 @@ def main():
     if os.path.isdir('contrib/mods'):  # (mods that are only recomp settings - no game files: off until turned on)
         shutil.copytree('contrib/mods', os.path.join(D, 'mods'), dirs_exist_ok=True)
     shutil.copy('docs/release-README.txt', os.path.join(D, 'README.txt'))
+    shutil.copy('recomplauncher.json', D)  # (RecompLauncher: how it sets up, starts and configures the game)
     # licenses: this project's, then every bundled component's (THIRD-PARTY-NOTICES.md says which is which)
     Ls = os.path.join(D, 'licenses')
     shutil.copy('LICENSE', os.path.join(D, 'LICENSE.txt'))
