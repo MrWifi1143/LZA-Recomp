@@ -306,6 +306,12 @@ static void create_device(void) {
     b->independentBlend = h->independentBlend;
     b->occlusionQueryPrecise = h->occlusionQueryPrecise;  // (the game's SAMPLES_PASSED counters: exact counts)
     g_vk.oq_precise = h->occlusionQueryPrecise;
+    {   // LARECOMP_VK_OQ_PRECISE=0: "visible or not" queries instead of exact counts (research: an RX 9070 XT under RADV
+        // hung the GPU at a load on an occlusion query's box draw, right after the query's begin; with the queries off,
+        // LARECOMP_VK_SAMPLES, it loaded - does the cheaper kind do it too?)
+        const char *e = ENV("LARECOMP_VK_OQ_PRECISE");
+        if (e) g_vk.oq_precise = g_vk.oq_precise && atoi(e) != 0;
+    }
     b->dualSrcBlend = h->dualSrcBlend;
     b->fillModeNonSolid = h->fillModeNonSolid;
     b->samplerAnisotropy = h->samplerAnisotropy;
