@@ -286,8 +286,29 @@ static bool exists(const char *p) {
     return stat(p, &st) == 0 && S_ISREG(st.st_mode);
 }
 
-// prod.keys: next to the packages, then the usual places (~/.switch, the emulators' key folders).
+static char g_keys_file[1024], g_more[4][1024];  // (nxpkg_set_keys, nxpkg_add_path)
+static int g_nmore;
+static void slashes(char *p) { for (; *p; p++) if (*p == '\\') *p = '/'; }
+void nxpkg_set_keys(const char *file) { snprintf(g_keys_file, sizeof g_keys_file, "%s", file ? file : ""), slashes(g_keys_file); }
+void nxpkg_add_path(const char *path) {
+    if (path && *path && g_nmore < 4) snprintf(g_more[g_nmore], sizeof g_more[0], "%s", path), slashes(g_more[g_nmore++]);
+}
+
+static bool keys_try(Keys *k, const char *p) {
+    if (!exists(p)) return false;
+    Keys t;
+    memset(&t, 0, sizeof t);
+    keys_file(&t, p);
+    keys_derive(&t);
+    if (!t.have_header) return false;
+    *k = t;
+    snprintf(k->path, sizeof k->path, "%s", p);
+    return true;
+}
+
+// prod.keys: the one given (--keys), next to the packages, then the usual places (~/.switch, the emulators' key folders).
 static bool keys_find(Keys *k, const char *folder) {
+    if (g_keys_file[0] && keys_try(k, g_keys_file)) return true;
     char dirs[24][1024];
     int n = 0;
     snprintf(dirs[n++], sizeof dirs[0], "%s", folder);
@@ -323,15 +344,7 @@ static bool keys_find(Keys *k, const char *folder) {
         for (size_t j = 0; j < sizeof names / sizeof *names; j++) {
             char p[1100];
             snprintf(p, sizeof p, "%s/%s", dirs[i], names[j]);
-            if (!exists(p)) continue;
-            Keys t;
-            memset(&t, 0, sizeof t);
-            keys_file(&t, p);
-            keys_derive(&t);
-            if (!t.have_header) continue;
-            *k = t;
-            snprintf(k->path, sizeof k->path, "%s", p);
-            return true;
+            if (keys_try(k, p)) return true;
         }
     }
     return false;
@@ -929,6 +942,15 @@ NxPkg *nxpkg_open(const char *path, const uint64_t *titles, int *err, char *why,
     snprintf(sl ? sl + 1 : tk, sizeof tk - (size_t)(sl ? sl + 1 - tk : 0), "title.keys");
     title_keys_file(P, tk);
     scan(P, path, 0, false, NULL);
+    for (int i = 0; i < g_nmore; i++) {  // (nxpkg_add_path: not those inside `path`, read already)
+        size_t n = strlen(path);
+#ifdef _WIN32
+        bool inside = !_strnicmp(g_more[i], path, n) && (!g_more[i][n] || g_more[i][n] == '/');
+#else
+        bool inside = !strncmp(g_more[i], path, n) && (!g_more[i][n] || g_more[i][n] == '/');
+#endif
+        if (!inside) scan(P, g_more[i], 0, false, NULL);
+    }
     read_versions(P);
     for (int i = 0; i < P->nnca; i++)
         if (P->ncas[i].type == 0 || P->ncas[i].type >= 4)

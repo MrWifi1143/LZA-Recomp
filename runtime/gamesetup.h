@@ -5,6 +5,7 @@
 // (runtime/gamebuild.c). Runs on a background thread; the launcher polls its state.
 #pragma once
 #include <stdbool.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,6 +52,10 @@ bool game_za_unsupported(const char *exefs);
 const char *game_version(const char *exefs);
 // Starts a setup from the picked folder (NULL: only rebuild the game code from files set up already).
 void setup_start(const char *folder);
+// The setup without a window, for a launcher's setup step (runtime/main.c --prepare --game <path> [--game <update>]
+// [--game <DLC>] [--keys <prod.keys>]): `game` is the folder or the .nsp / .xci picked; lines "progress <0..1> <step>"
+// go to out as it runs. Returns the exit code: 0 ready to play, 20 + (SETUP_FAIL_* - SETUP_FAIL_NOT_FOUND) when it failed.
+int setup_prepare(const char *game, FILE *out);
 int setup_state(void);         // SETUP_*
 float setup_progress(void);    // 0..1 while running
 bool setup_running(void);
