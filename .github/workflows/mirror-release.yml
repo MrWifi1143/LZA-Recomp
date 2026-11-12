@@ -1,0 +1,57 @@
+# Copies each full (non-pre-release) release to the release-only repo that RecompLauncher installs from:
+#   LegendsA-v<ver>  -> MrWifi1143/PLA-Recomp  release v<ver>
+#   LegendsZA-v<ver> -> MrWifi1143/ZA-Recomp   release v<ver>
+# Only the Windows x64 zip and the Linux AppImage are copied (the launcher takes one file per system; hotfix zips stay
+# here). Pre-releases are skipped; promoting one to a full release copies it then. A release already in the target
+# repo is left alone, so publishing there by hand as well is harmless.
+# Needs the repository secret RELEASE_MIRROR_TOKEN: a fine-grained token with Contents read and write on
+# PLA-Recomp and ZA-Recomp only. Manual run (Actions tab): give a tag, e.g. LegendsA-v1.2.0.
+name: Mirror release to the RecompLauncher repos
+
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to copy (e.g. LegendsA-v1.2.0)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    steps:
+      - name: Copy the release
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          SRC: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          MIRROR_TOKEN: ${{ secrets.RELEASE_MIRROR_TOKEN }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            LegendsA-v*)  DEST=MrWifi1143/PLA-Recomp; VER=${TAG#LegendsA-v} ;;
+            LegendsZA-v*) DEST=MrWifi1143/ZA-Recomp;  VER=${TAG#LegendsZA-v} ;;
+            *) echo "Not a game release tag: $TAG (nothing to copy)"; exit 0 ;;
+          esac
+          [ -n "$MIRROR_TOKEN" ] || { echo "::error::Repository secret RELEASE_MIRROR_TOKEN is not set"; exit 1; }
+          PRE=$(gh release view "$TAG" -R "$SRC" --json isPrerelease -q .isPrerelease)
+          [ "$PRE" = false ] || { echo "$TAG is a pre-release: not copied"; exit 0; }
+          if GH_TOKEN=$MIRROR_TOKEN gh release view "v$VER" -R "$DEST" >/dev/null 2>&1; then
+            echo "$DEST already has v$VER: left alone"; exit 0
+          fi
+          mkdir assets
+          gh release download "$TAG" -R "$SRC" -D assets -p '*-windows-x64-*.zip' -p '*-linux-x86_64-*.AppImage'
+          ls -la assets
+          [ "$(ls assets | wc -l)" -ge 1 ] || { echo "::error::$TAG has no windows-x64 zip or linux-x86_64 AppImage"; exit 1; }
+          gh release view "$TAG" -R "$SRC" --json name -q .name > title.txt
+          gh release view "$TAG" -R "$SRC" --json body -q .body > notes.md
+          printf '\n\n---\nCopy of [%s](https://github.com/%s/releases/tag/%s) for RecompLauncher. Hotfix zips and older releases are there.\n' \
+            "$TAG" "$SRC" "$TAG" >> notes.md
+          GH_TOKEN=$MIRROR_TOKEN gh release create "v$VER" -R "$DEST" --target main --latest \
+            --title "$(cat title.txt)" --notes-file notes.md assets/*
+          echo "Copied $TAG to $DEST v$VER"
