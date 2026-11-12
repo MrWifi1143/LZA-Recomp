@@ -5,6 +5,19 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsZA`)
 
+## 2026-11-12: LegendsZA-v1.1.1
+
+Previous release: LegendsZA-v1.1.0. Game version: Pokemon Legends: Z-A 2.0.2. Same game code as 1.1.0: no rebuild on start, and copies
+already set up can take the hotfix zip (the program only).
+
+- AMD graphics on Linux: loads after the first one no longer hang (fast travel, and a new game right after the name
+  screen sat on the loading screen forever). Reproduced and fixed on RADV.
+- With the render thread switched off (render_thread = 0 in larecomp.ini), the name keyboard no longer crashes the
+  game on AMD graphics on Linux.
+- Windows error box: a GPU crash ("device lost") and running out of graphics memory now say what happened, instead
+  of asking for a Vulkan 1.3 driver.
+
+
 ## 2026-11-10: LegendsZA-v1.1.0-rc1 (release candidate)
 
 Previous release: LegendsZA-v1.0.2. Game version: Pokemon Legends: Z-A 2.0.2. The game code is built again once on the
