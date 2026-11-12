@@ -209,6 +209,25 @@ static bool container_at(const uint8_t *p, size_t avail, uint32_t *size) {
 static void compile(const WStage *v, const WStage *f) {
     static int pipes = -1;
     if (pipes < 0) pipes = ENV("LARECOMP_WARMUP_PIPELINES") && atoi(ENV("LARECOMP_WARMUP_PIPELINES")) != 0;
+    if (f && f->max > 0x230 && ENV("LARECOMP_SAVE_MSL")) {  // (research: every fragment program's GLSL by its stable hash -
+        // build/glsl/h<hash>_fs.glsl, the name exec.c's draws and LARECOMP_SKIP_FSHASH use - without drawing it)
+        extern uint64_t vk_fs_hash(uint64_t fs);
+        char path[96];
+        snprintf(path, sizeof path, "build/glsl/h%016llx_fs.glsl", (unsigned long long)vk_fs_hash((uint64_t)(uintptr_t)f->code));
+        FILE *t = fopen(path, "rb");
+        if (t) fclose(t);
+        else {
+            ShaderKey vk2 = {0}, fk2 = {0};
+            vk2.glsl = fk2.glsl = 1;
+            ShaderInfo *vi2 = maxwell_translate_consts(v->code, v->max, v->cn ? v->code + v->max : NULL, v->cn, STAGE_VERTEX, &vk2);
+            fk2.vs_out_mask = vi2 ? vi2->out_mask : 0;
+            ShaderInfo *fi2 = maxwell_translate_consts(f->code, f->max, f->cn ? f->code + f->max : NULL, f->cn, STAGE_FRAGMENT, &fk2);
+            FILE *o = fi2 && fi2->msl ? fopen(path, "w") : NULL;
+            if (o) fputs(fi2->msl, o), fclose(o);
+            if (fi2) maxwell_free(fi2);
+            if (vi2) maxwell_free(vi2);
+        }
+    }
     if (vk_ready()) { vk_warm_program(v->code, v->max, v->cn, f ? f->code : NULL, f ? f->max : 0, f ? f->cn : 0, pipes); return; }
     ShaderKey vk = {0}, fk = {0};
     vk.glsl = fk.glsl = 1;  // (flip_y and depth_minus_one 0: window origin and depth mode 1 in both Legends games)
