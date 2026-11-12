@@ -272,10 +272,19 @@ void vk_devlost_dump(void) {
     for (uint32_t i = 0; i < nc; i++) cd[i] = (VkCheckpointDataNV){.sType = VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV};
     get(g_vk.queue, &nc, cd);
     LOG("[vk] NVIDIA checkpoints - the last marks the GPU reached, per pipeline stage (%u):\n", nc);
+    unsigned lo = UINT32_MAX, hi = 0;
     for (uint32_t i = 0; i < nc; i++) {
         unsigned id = (unsigned)(uintptr_t)cd[i].pCheckpointMarker;
         bool known = id && id <= n && n - id < DL_N;
         LOG("[vk]   stage %#x: #%u %s\n", (unsigned)cd[i].stage, id, known ? dl_ring[(id - 1) % DL_N] : "(no note)");
+        if (known && id < lo) lo = id;
+        if (known && id > hi) hi = id;
+    }
+    // (the work between the oldest and newest mark was on the GPU when it stopped: one of these faulted)
+    if (lo <= hi) {
+        if (hi - lo > 400) lo = hi - 400;
+        LOG("[vk] on the GPU when it stopped (#%u..#%u):\n", lo, hi + 2);
+        for (unsigned id = lo; id <= hi + 2 && id <= n; id++) LOG("[vk]   #%u %s\n", id, dl_ring[(id - 1) % DL_N]);
     }
 }
 uint64_t vk_frame_counter(void);
