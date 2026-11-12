@@ -732,6 +732,8 @@ void input_frame(uint64_t frame) {
             snprintf(path, sizeof path, "%s/cmd", dir);
             FILE *f = fopen(path, "r");
             if (f) {
+                fseek(f, 0, SEEK_END);
+                if (ftell(f) < off) off = 0;  // (the file written anew, shorter: read it from the start)
                 fseek(f, off, SEEK_SET);
                 while ((qt + 1) % 256 != qh && fgets(line, sizeof line, f) && strchr(line, '\n')) {  // (a full queue: the
                     off = ftell(f);                                                                   // rest read later)
