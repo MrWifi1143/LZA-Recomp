@@ -515,6 +515,8 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
             if (path && path != last) {
                 last = path;
                 if (getenv("LARECOMP_LOG_FILES")) LOG("[fs] read %s\n", path);
+                extern void discord_file_read(const char *path);  // (runtime/discord.c: where the player is)
+                discord_file_read(path);
             }
         }
         {   // LARECOMP_LOG_READS=<file>: every RomFS read as "<offset hex> <size hex> <presented frame> <ms>" (research: which
