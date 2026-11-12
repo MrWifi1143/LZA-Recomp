@@ -1,16 +1,15 @@
 #!/bin/sh
-# Run ON the server, from a folder holding lzabot.py, discord_sync.py, lzabot.service (deploy.sh copies them).
-# Needs python3 (with venv); the token at ~/.config/lzarecomp/discord-token (deploy.sh copies it, mode 600).
+# Run ON the server from the folder deploy.sh fills (lzabot.py, discord_sync.py, lzabot.service, deps/).
+# deps/ = discord.py and its libraries, downloaded on the PC for the server's Python (no pip/venv/sudo needed here).
 set -eu
 D=$HOME/lzabot
 mkdir -p "$D" ~/.config/systemd/user
 cp lzabot.py discord_sync.py "$D"/
-[ -x "$D/venv/bin/python" ] || python3 -m venv "$D/venv"
-"$D/venv/bin/pip" install -q --upgrade discord.py
+rm -rf "$D/deps"; cp -r deps "$D/deps"
+PYTHONPATH="$D/deps" python3 -c "import discord; print('discord.py', discord.__version__)"
 cp lzabot.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now lzabot.service
+systemctl --user enable lzabot.service
 systemctl --user restart lzabot.service
-# keep it running while logged out (may ask for a password on some systems)
 loginctl enable-linger "$USER" 2>/dev/null || echo "note: run 'sudo loginctl enable-linger $USER' so the bot runs without a login"
-sleep 5; systemctl --user --no-pager status lzabot.service | head -12
+sleep 8; systemctl --user --no-pager status lzabot.service | head -6; journalctl --user -u lzabot -n 5 --no-pager

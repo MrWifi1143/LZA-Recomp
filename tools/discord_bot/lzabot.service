@@ -5,7 +5,8 @@ Wants=network-online.target
 
 [Service]
 WorkingDirectory=%h/lzabot
-ExecStart=%h/lzabot/venv/bin/python -u %h/lzabot/lzabot.py
+Environment=PYTHONPATH=%h/lzabot/deps
+ExecStart=/usr/bin/python3 -u %h/lzabot/lzabot.py
 Restart=always
 RestartSec=30
 
