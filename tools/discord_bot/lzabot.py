@@ -9,6 +9,10 @@ tools/discord_fixes.json at that tag) get their posts closed and a "Fixed in <ga
     python3 lzabot.py              run (online, polling, /known-issue command)
     python3 lzabot.py --once -n    one check, dry run, no Discord connection (for testing)
     python3 lzabot.py --promote <post id> [--title ..] [--game ..] [--note ..] [-n]   what /known-issue does
+    python3 lzabot.py --announce <tag> [-n]   post that release in #releases now
+
+Each new full release (not a release candidate) also gets one short post in #releases: the version as a link to the
+release page, the first few highlights of its notes (New / Fixed / Improved) and whether it is a hotfix.
 
 /known-issue (moderators: Manage Threads), used inside a post of another forum (#bug-reports ...): opens a
 #known-issues post with the report's title (or `title`), a link back, the reporter and a quote of the report, tagged
@@ -41,6 +45,8 @@ LINKS = os.path.expanduser("~/.local/state/lzabot/links.json")  # {post id: link
 KNOWN = "known-issues"
 GAME_TAGS = ("Arceus", "Z-A", "LegendsVR", "Legends Studio")
 POLL_S = 300
+ANNOUNCE = "releases"  # each full release (no release candidates) gets one short post here (announce)
+NAMES = {"LegendsA": "PL:A Recomp", "LegendsZA": "PL:Z-A Recomp"}
 
 
 def log(*a):
@@ -156,6 +162,60 @@ def promote(post_id, title="", game="", note="", dry_run=False, log=log):
     return kid, klink
 
 
+def highlights(notes, n=4):
+    """The bold lead of the first n bullets under the notes' New / Fixed / Improved headings."""
+    out, take = [], False
+    for line in notes.splitlines():
+        if line.startswith("#"):
+            take = re.sub(r"^#+\s*", "", line).lower().startswith(("new", "fixed", "improved", "changed"))
+            continue
+        m = re.match(r"^[-*] \*\*(.+?)\*\*(.*)", line) if take else None
+        if m:
+            h = m.group(1).strip()
+            if h.endswith(":"):  # (a label: the start of its sentence too, cut at a word)
+                rest = re.split(r"(?<=[.;])\s|, instead", m.group(2).strip())[0].rstrip(".;")
+                if len(rest) > 90:
+                    rest = rest[:90].rsplit(" ", 1)[0]
+                    if rest.count("(") > rest.count(")"):  # (not cut inside brackets)
+                        rest = rest[:rest.rfind("(")].rstrip()
+                    rest += "\u2026"
+                h = h + " " + rest
+            out.append(h.rstrip(".:"))
+            if len(out) == n:
+                break
+    return out
+
+
+def announce(tag, dry_run=False, log=log):
+    """One post in #releases for a full release: name + version (the link), its highlights, hotfix or not."""
+    game, ver = TAG.match(tag).groups()
+    if re.search(r"(rc|alpha|beta)", ver, re.I):
+        log(f"{tag}: release candidate - no #{ANNOUNCE} post")
+        return
+    notes = gl(f"/releases/{urllib.parse.quote(tag, safe='')}").get("description") or ""
+    lines = [f"- {h}" for h in highlights(notes)]
+    if re.search(r"^A hotfix", notes, re.M):  # (the notes of a hotfix start a line with it)
+        lines.append("Hotfix: same game code, nothing to rebuild. RecompLauncher updates by itself.")
+    else:
+        lines.append("RecompLauncher updates by itself.")
+    embed = {"title": f"{NAMES[game]} {ver}", "url": RELEASES + tag, "description": "\n".join(lines),
+             "color": 0xF2C94C if game == "LegendsA" else 0x3BB3E8, "footer": {"text": "Full notes and downloads: the link above"}}
+    chans = [c for c in ds.api("GET", f"/guilds/{ds.GUILD}/channels") if c["name"] == ANNOUNCE and c["type"] in (0, 5)]
+    if not chans:
+        log(f"{tag}: no #{ANNOUNCE} channel the bot can see - not posted")
+        return
+    if dry_run:
+        log(f"{tag}: would post in #{ANNOUNCE}: {json.dumps(embed, ensure_ascii=False)}")
+        return
+    msg = ds.api("POST", f"/channels/{chans[0]['id']}/messages", {"embeds": [embed]})
+    if chans[0]["type"] == 5:  # (an announcement channel: published to the servers that follow it)
+        try:
+            ds.api("POST", f"/channels/{chans[0]['id']}/messages/{msg['id']}/crosspost")
+        except SystemExit as e:
+            log(f"{tag}: posted, not published: {e}")
+    log(f"{tag}: posted in #{ANNOUNCE}")
+
+
 def fixes_between(prev, tag):
     commits = gl(f"/repository/compare?from={prev}&to={tag}&straight=false")["commits"]
     fixed = {}
@@ -190,6 +250,10 @@ def check(dry_run=False):
             log(f"{tag}: {sum(map(len, fixed.values()))} Discord-linked fix(es) since {older[0]}")
             if fixed:
                 ds.apply_fixes(fixed, f"{GAMES[game]} {ver}", RELEASES + tag, dry_run=dry_run, log=log)
+        try:
+            announce(tag, dry_run)
+        except (Exception, SystemExit) as e:  # (a missing permission must not stop the fixed-post replies)
+            log(f"{tag}: #{ANNOUNCE} post failed: {e!r}")
         if not dry_run:
             seen.add(tag)
             save_seen(seen)
@@ -203,7 +267,11 @@ def main():
     ap.add_argument("--title", default="")
     ap.add_argument("--game", default="", choices=("",) + GAME_TAGS)
     ap.add_argument("--note", default="")
+    ap.add_argument("--announce", metavar="TAG", help=f"post that release in #{ANNOUNCE} now (e.g. one from before this existed)")
     a = ap.parse_args()
+    if a.announce:
+        announce(a.announce, a.dry_run)
+        return
     if a.promote:
         print(promote(a.promote, a.title, a.game, a.note, a.dry_run)[1])
         return
