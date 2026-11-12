@@ -38,6 +38,7 @@ FORUMS = ("known-issues", "bug-reports")
 OPEN_TAGS = ("open",)
 CLOSED_TAGS = ("closed", "fixed", "resolved", "solved")
 PENDING_TAGS = ("fixed (unreleased)", "fixed in next release", "pending release")
+NO_PING = {"422199944418689055"}  # (mr.wifi: owns the known-issues posts - never pinged)
 TRAILER = re.compile(r"^\s*Discord:\s*(.+)$", re.I | re.M)
 HERE = os.path.dirname(os.path.abspath(__file__))
 MAPFILE = os.path.join(HERE, "discord_fixes.json")
@@ -187,6 +188,10 @@ def apply_fixes(fixed, name, url="", dry_run=False, no_reply=False, archive=Fals
         log("  tags -> closed" if changed else "  tags already closed")
         if not no_reply:
             msg = f"Fixed in **{name}**" + (f": {url}" if url else ".")
+            op = post.get("owner_id")
+            ping = op and op not in NO_PING and op != api("GET", "/users/@me")["id"]
+            if ping:
+                msg = f"<@{op}> {msg}"
             me = api("GET", "/users/@me")["id"]
             if any(m["author"]["id"] == me and f"**{name}**" in m.get("content", "")
                    for m in api("GET", f"/channels/{tid}/messages?limit=100")):
@@ -194,7 +199,8 @@ def apply_fixes(fixed, name, url="", dry_run=False, no_reply=False, archive=Fals
             elif dry_run:
                 log(f"  would reply: {msg}")
             else:
-                api("POST", f"/channels/{tid}/messages", {"content": msg, "allowed_mentions": {"parse": []}})
+                api("POST", f"/channels/{tid}/messages",
+                    {"content": msg, "allowed_mentions": {"parse": [], "users": [op] if ping else []}})
                 log("  replied")
         if archive and not dry_run:
             api("PATCH", f"/channels/{tid}", {"archived": True})
