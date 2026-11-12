@@ -172,8 +172,24 @@ static uint64_t push(Job j) {
     return t;
 }
 
+// Render thread off: the game's own threads use Vulkan directly, and the keyboard dialog's thread re-presents the last
+// frame (device.c backend_represent) while the game's renderer thread keeps submitting - two threads in the same command
+// buffers. NVIDIA took it; RADV crashed in vkQueueSubmit2 (RX 9070 XT, Z-A: the name entry of a new game). This lock
+// makes them take turns (recursive: a present may run lists, a job may present).
+static pthread_mutex_t off_lk;
+static pthread_once_t off_once = PTHREAD_ONCE_INIT;
+static void off_init(void) {
+    pthread_mutexattr_t a;
+    pthread_mutexattr_init(&a);
+    pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&off_lk, &a);
+    pthread_mutexattr_destroy(&a);
+}
+void rt_off_lock(void) { pthread_once(&off_once, off_init); pthread_mutex_lock(&off_lk); }
+void rt_off_unlock(void) { pthread_mutex_unlock(&off_lk); }
+
 void rt_submit(uint64_t handle) {
-    if (!rt_active()) { backend_execute(handle); return; }
+    if (!rt_active()) { rt_off_lock(); backend_execute(handle); rt_off_unlock(); return; }
     Job j = {.kind = RJ_EXEC, .handle = handle, .dirty = backend_dirty_seq()};
     push(j);
 }
@@ -182,7 +198,7 @@ void rt_submit(uint64_t handle) {
 // present used to run at its end (scripted input, function profile, reboot tests) happens here, in the game's order.
 void rt_present(NvnTexture *t) {
     if (!t) return;
-    if (!rt_active()) { backend_present(t); return; }
+    if (!rt_active()) { rt_off_lock(); backend_present(t); rt_off_unlock(); return; }
     pthread_mutex_lock(&lk);
     while (pres_enq - pres_fin >= MAX_PRESENTS)
         if (!wait_done()) { lk_unlock(); return; }
@@ -198,7 +214,8 @@ void rt_present(NvnTexture *t) {
 
 // Runs fn(arg) on the render thread, after everything queued before it, and returns when it is done.
 void rt_call(void (*fn)(void *), void *arg) {
-    if (!rt_active() || on_render_thread) { fn(arg); return; }
+    if (on_render_thread) { fn(arg); return; }
+    if (!rt_active()) { rt_off_lock(); fn(arg); rt_off_unlock(); return; }
     volatile int done = 0;
     Job j = {.kind = RJ_CALL, .fn = fn, .arg = arg, .done = &done};
     if (!push(j)) { return; }  // (a reboot: the call is dropped with the guest thread's work)
