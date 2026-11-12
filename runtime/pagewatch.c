@@ -109,6 +109,10 @@ bool pagewatch_written_since(uint64_t a, uint64_t n, uint32_t since) {
 // Read-only (before the caller copies the range: a store after this faults, so the copy can't miss it)
 void pagewatch_protect(uint64_t a, uint64_t n) {
     uint64_t lo = a & ~(PAGE - 1), hi = (a + n + PAGE - 1) & ~(PAGE - 1);
+#ifdef __linux__
+    gpuheap_touch(lo, hi - lo);  // (an unbacked GPU-memory chunk backed first: backing it maps it read-write, which would
+    // drop the protection unseen, and gpuheap_fault leaves faults in backed chunks to pagewatch_fault)
+#endif
     lock();
     for (uint64_t pa = lo; pa < hi; pa += PAGE) {
         uint64_t p = pidx(pa), bit = 1ull << (p & 63);
