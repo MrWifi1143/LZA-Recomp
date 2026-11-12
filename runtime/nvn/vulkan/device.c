@@ -1473,6 +1473,24 @@ void backend_present(NvnTexture *t) {
         if (last_fps_time > 0)
             LOG("[vk] t=%.1f frame %llu %.1f fps max %.0fms (%s)\n", now, (unsigned long long)total_frames,
                 frames / (now - last_fps_time), max_gap * 1000.0, renderer_stats());
+            {   // (research, LARECOMP_MEM_LOG=1: GPU memory per heap - what VMA holds, what the driver counts, the budget)
+                static int on = -1;
+                if (on < 0) on = ENV("LARECOMP_MEM_LOG") != NULL;
+                if (on && g_vk.vma) {
+                    VmaBudget bud[VK_MAX_MEMORY_HEAPS];
+                    vmaGetHeapBudgets(g_vk.vma, bud);
+                    const VkPhysicalDeviceMemoryProperties *mp;
+                    vmaGetMemoryProperties(g_vk.vma, &mp);
+                    char line[512];
+                    int n = 0;
+                    for (uint32_t h = 0; h < mp->memoryHeapCount && n < (int)sizeof line - 96; h++)
+                        n += snprintf(line + n, sizeof line - n, " | heap %u %s %llu MB: vma %llu MB in %u allocs, driver %llu, budget %llu",
+                                      h, mp->memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ? "device" : "host",
+                                      (unsigned long long)(mp->memoryHeaps[h].size >> 20), (unsigned long long)(bud[h].statistics.allocationBytes >> 20),
+                                      bud[h].statistics.allocationCount, (unsigned long long)(bud[h].usage >> 20), (unsigned long long)(bud[h].budget >> 20));
+                    LOG("[mem]%s\n", line);
+                }
+            }
         max_gap = 0;
         frames = 0;
         last_fps_time = now;
