@@ -2,7 +2,7 @@
   "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
   "format": 1,
   "name": "PL:A Recomp",
-  "repo": "MrWifi1143/LZA-Recomp",
+  "repo": "MrWifi1143/PLA-Recomp",
   "inputs": [
     {
       "id": "game",
