@@ -22,6 +22,10 @@
 // joins with it sends that token first (a hello), and the host lets that player in like a friend for this session.
 // Plugin -> helper 'K' the token (8 bytes), 'J' join (u64 host id + its token); helper -> plugin 'G' a guest joined (u64).
 //
+// An online server instead of Steam (contrib/lzaserver; larecomp.ini online_server = <host>[:port], the launcher's Mods
+// page, or LARECOMP_RELAY_SERVER): no Steam, no friends list - players who enter the same Link Code meet in a lobby
+// on the server, which passes their traffic on (larecomp_relay_code: runtime/hle/swkbd.c tells the code).
+//
 // The Steam API is not shipped: libsteam_api.so is loaded from the Steam install (Steam's own copy - SteamVR's - or any
 // game's), or LARECOMP_STEAM_API=<path>. LARECOMP_RELAY_FAKE=<this port>,<peer port> (tests): no Steam - the relay's
 // messages go over UDP on 127.0.0.1 between two copies of the game, the peer at 127.0.4.1.
@@ -60,6 +64,7 @@ static __attribute__((unused)) void nonblocking(sock_t s) { u_long on = 1; ioctl
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netdb.h>
 #include <strings.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -525,6 +530,29 @@ int main(void) {
 // ---- the fake relay (LARECOMP_RELAY_FAKE=<this port>,<peer port>): UDP on 127.0.0.1, the peer id = its port
 static sock_t g_fake = NO_SOCK;
 static uint16_t g_fake_peer;
+// ---- an online server (contrib/lzaserver): UDP to it, lobbies by Link Code
+static sock_t g_srv = NO_SOCK;
+static struct sockaddr_in g_srv_addr;
+static uint64_t g_srv_id;
+static uint8_t g_srv_game;            // (1 Arceus, 2 Z-A)
+static char g_srv_code[9];            // (the lobby: the Link Code last entered)
+static volatile int g_srv_hosting;
+static void srv_send(const void *p, size_t n) {
+    sendto(g_srv, (const char *)p, (int)n, 0, (const struct sockaddr *)&g_srv_addr, sizeof g_srv_addr);
+}
+static void srv_hello(void) {
+    uint8_t b[11] = {'H', 1};
+    memcpy(b + 2, &g_srv_id, 8), b[10] = g_srv_game;
+    srv_send(b, sizeof b);
+    if (g_srv_code[0]) {
+        uint8_t l[17] = {'L'};
+        memcpy(l + 1, &g_srv_id, 8), memcpy(l + 9, g_srv_code, 8);
+        srv_send(l, sizeof l);
+    }
+    uint8_t h[10] = {'P'};
+    memcpy(h + 1, &g_srv_id, 8), h[9] = (uint8_t)g_srv_hosting;
+    srv_send(h, sizeof h);
+}
 
 // ---- the helper (plugins/steamrelay-helper[.exe]): started with pipes for its stdin / stdout, its stderr the game's log
 #ifdef _WIN32
@@ -649,7 +677,15 @@ static void relay_send(uint32_t to, uint16_t from_port, uint16_t to_port, const 
     if (!m) return;
     m[0] = (uint8_t)(from_port >> 8), m[1] = (uint8_t)from_port, m[2] = (uint8_t)(to_port >> 8), m[3] = (uint8_t)to_port;
     memcpy(m + 4, p, n);
-    if (g_fake != NO_SOCK) {
+    if (g_srv != NO_SOCK) {
+        uint8_t *d = malloc(n + 4 + 17);
+        if (d) {
+            d[0] = 'D';
+            memcpy(d + 1, &g_srv_id, 8), memcpy(d + 9, &id, 8), memcpy(d + 17, m, n + 4);
+            srv_send(d, n + 4 + 17);
+            free(d);
+        }
+    } else if (g_fake != NO_SOCK) {
         struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)id), .sin_addr.s_addr = htonl(0x7F000001u)};
         sendto(g_fake, (const char *)m, (int)(n + 4), 0, (struct sockaddr *)&a, sizeof a);
     } else {
@@ -687,7 +723,10 @@ static uint64_t g_me;            // (this copy's Steam id; the fake relay: its p
 static uint8_t g_invite[8];      // (this copy's Discord invite token)
 static void relay_hosting(int on) {
     g_hosting = on;
-    if (g_fake == NO_SOCK) {
+    if (g_srv != NO_SOCK) {
+        g_srv_hosting = on;
+        srv_hello();
+    } else if (g_fake == NO_SOCK) {
         uint8_t b = on ? 1 : 0;
         to_helper('P', &b, 1, NULL, 0);
     }
@@ -707,7 +746,36 @@ static volatile int g_quit;
 static void *pump(void *arg) {
     (void)arg;
     static uint8_t m[70000];
+    uint64_t last_hello = 0;
     while (!g_quit) {
+        if (g_srv != NO_SOCK) {
+            uint64_t t = now_ms();
+            if (t - last_hello >= 2000) last_hello = t, srv_hello();
+            struct sockaddr_in a;
+            socklen_t al = sizeof a;
+            int n;
+            while ((n = (int)recvfrom(g_srv, (char *)m, sizeof m, 0, (struct sockaddr *)&a, &al)) > 0) {
+                if (a.sin_addr.s_addr != g_srv_addr.sin_addr.s_addr || a.sin_port != g_srv_addr.sin_port) continue;
+                if (m[0] == 'D' && n >= 9) {
+                    uint64_t from;
+                    memcpy(&from, m + 1, 8);
+                    deliver(from, m + 9, (size_t)n - 9);
+                } else if (m[0] == 'M' && n >= 2) {
+                    pthread_mutex_lock(&g_hosts_lock);
+                    g_nhosts = 0;
+                    for (int i = 0; i < m[1] && 2 + 9 * i + 9 <= n && g_nhosts < 64; i++) {
+                        memcpy(&g_hosts[g_nhosts].id, m + 2 + 9 * i, 8);
+                        snprintf(g_hosts[g_nhosts].name, sizeof g_hosts[g_nhosts].name, "an online player (%s)",
+                                 m[2 + 9 * i + 8] ? "hosting" : "searching");
+                        g_nhosts++;
+                    }
+                    pthread_mutex_unlock(&g_hosts_lock);
+                }
+                al = sizeof a;
+            }
+            nap_ms(1);
+            continue;
+        }
         if (g_fake != NO_SOCK) {
             struct sockaddr_in a;
             socklen_t al = sizeof a;
@@ -743,7 +811,7 @@ static void *pump(void *arg) {
             pthread_mutex_unlock(&g_hosts_lock);
         }
     }
-    if (g_fake == NO_SOCK && !g_quit) LOG("[steamrelay] the Steam helper ended: online play off until the game starts again\n");
+    if (g_fake == NO_SOCK && g_srv == NO_SOCK && !g_quit) LOG("[steamrelay] the Steam helper ended: online play off until the game starts again\n");
     return NULL;
 }
 
@@ -751,7 +819,7 @@ static void *pump(void *arg) {
 static pthread_t g_pump;
 static void quit(void) {  // (hooks.shutdown: from exit())
     g_quit = 1;
-    if (g_fake == NO_SOCK) helper_stop();
+    if (g_fake == NO_SOCK && g_srv == NO_SOCK) helper_stop();
     pthread_join(g_pump, NULL);
 }
 
@@ -777,10 +845,51 @@ int larecomp_relay_join(const char *secret) {
         sscanf(t + 2 * i, "%2x", &v);
         b[8 + i] = (uint8_t)v;
     }
-    if (g_fake != NO_SOCK) return 1;  // (tests: the fake relay's peer is already there)
+    if (g_fake != NO_SOCK || g_srv != NO_SOCK) return 1;  // (the fake relay's peer is there; a server: the code's lobby)
     to_helper('J', b, 16, NULL, 0);
     return 1;
 }
+// A Link Code entered (runtime/hle/swkbd.c, 8 digits): with an online server, this copy's lobby there
+void larecomp_relay_code(const char *code) {
+    if (g_srv == NO_SOCK || !code || strlen(code) != 8 || strspn(code, "0123456789") != 8) return;
+    memcpy(g_srv_code, code, 9);
+    srv_hello();
+    LOG("[steamrelay] online server: in the lobby of this Link Code\n");
+}
+
+// The online server's address: LARECOMP_RELAY_SERVER, or larecomp.ini's online_server (the launcher's Mods page)
+static bool server_config(char *out, size_t size) {
+    const char *e = getenv("LARECOMP_RELAY_SERVER");
+    if (e && e[0]) { snprintf(out, size, "%s", e); return true; }
+    char path[1100], line[512];
+    snprintf(path, sizeof path, "%s/larecomp.ini", A && A->abi >= 4 && A->data_root ? A->data_root() : ".");
+    FILE *f = fopen(path, "r");
+    bool ok = false;
+    while (f && !ok && fgets(line, sizeof line, f)) {
+        char v[256] = "";
+        if (sscanf(line, " online_server = %255s", v) == 1 && v[0]) snprintf(out, size, "%s", v), ok = true;
+    }
+    if (f) fclose(f);
+    return ok;
+}
+static bool server_start(const char *spec) {
+    char host[256];
+    unsigned port = 39200;
+    snprintf(host, sizeof host, "%s", spec);
+    char *c = strrchr(host, ':');
+    if (c) port = (unsigned)atoi(c + 1), *c = 0;
+    struct addrinfo hints = {0}, *res = NULL;
+    hints.ai_family = AF_INET, hints.ai_socktype = SOCK_DGRAM;
+    if (getaddrinfo(host, NULL, &hints, &res) || !res) { LOG("[steamrelay] online server %s: address not found\n", spec); return false; }
+    g_srv_addr = *(struct sockaddr_in *)res->ai_addr;
+    g_srv_addr.sin_port = htons((uint16_t)port);
+    freeaddrinfo(res);
+    g_srv = socket(AF_INET, SOCK_DGRAM, 0);
+    if (g_srv == NO_SOCK) return false;
+    nonblocking(g_srv);
+    return true;
+}
+
 static void invite_token(void) {  // (random: who has it can join this copy's rooms)
     bool ok = false;
 #ifdef _WIN32
@@ -816,7 +925,17 @@ int larecomp_plugin_init(const LarecompPluginApi *api, LarecompPluginHooks *hook
 #endif
     const char *fake = getenv("LARECOMP_RELAY_FAKE");
     unsigned mine, peer;
-    if (fake && sscanf(fake, "%u,%u", &mine, &peer) == 2) {
+    char server[256];
+    if (server_config(server, sizeof server)) {  // (an online server: no Steam)
+        if (!server_start(server)) return 1;
+        invite_token();
+        memcpy(&g_srv_id, g_invite, 8);  // (a random id; the invite token is made again below)
+        invite_token();
+        g_me = g_srv_id;
+        g_srv_game = api->title_id && api->title_id() == 0x01001F5010DFA000ull ? 1 : 2;
+        srv_hello();
+        LOG("[steamrelay] online play through the server %s (players with the same Link Code meet there)\n", server);
+    } else if (fake && sscanf(fake, "%u,%u", &mine, &peer) == 2) {
         g_fake = socket(AF_INET, SOCK_DGRAM, 0);
         struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)mine), .sin_addr.s_addr = htonl(0x7F000001u)};
         if (g_fake == NO_SOCK || bind(g_fake, (struct sockaddr *)&a, sizeof a)) { LOG("[steamrelay] fake relay: can't bind %u\n", mine); return 1; }

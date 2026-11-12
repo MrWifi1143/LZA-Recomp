@@ -1356,10 +1356,26 @@ extern "C" void launcher_lg_run(const char *root) {
             ImGui::EndTable();
         }
         ImGui::Spacing();
-        ImGui::TextDisabled("%s", T("Mods that are on load in their order (the arrows): where two change the same file or texture, the higher one wins. "
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));  // (wrapped: it is long)
+        ImGui::TextWrapped("%s", T("Mods that are on load in their order (the arrows): where two change the same file or texture, the higher one wins. "
                                     "Plugins load as the game starts: a change restarts it once when you press Play.",
                                     "Mods ligados carregam na ordem (as setas): onde dois mudam o mesmo arquivo ou textura, o de cima vence. "
                                     "Plugins carregam ao iniciar: uma mudança reinicia o jogo uma vez ao apertar Jogar."));
+        ImGui::PopStyleColor();
+        // (contrib/steamrelay + contrib/lzaserver: Link Play through a server someone runs, in place of Steam friends)
+        ImGui::Spacing();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(T("Online server", "Servidor online"));
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputTextWithHint("##server", T("address:port - empty: Steam friends", "endereço:porta - vazio: amigos da Steam"),
+                                 g_settings.online_server, sizeof g_settings.online_server);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        ImGui::TextWrapped("%s", T("With the Steam relay plugin on: players who enter the same Link Code meet on that server. "
+                                    "Applies the next time the game starts.",
+                                    "Com o plugin Steam relay ligado: quem digitar o mesmo Código de Conexão se encontra nesse servidor. "
+                                    "Vale a partir da próxima vez que o jogo iniciar."));
+        ImGui::PopStyleColor();
         if (ImGui::BeginPopupModal("##remove", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
             bool tr = mod_sel < nmods;
             int i = tr ? mod_sel : mod_sel - nmods;

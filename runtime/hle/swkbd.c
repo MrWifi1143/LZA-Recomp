@@ -57,6 +57,11 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
     }
     int ok = menu_keyboard_run(initial, max_len, header[0] ? header : guide[0] ? guide : sub, text, sizeof text);
     if (ok) discord_link_code_entered(text, max_len);  // (a Link Code typed here goes in this copy's invites)
+    if (ok && max_len == 8 && strlen(text) == 8 && strspn(text, "0123456789") == 8) {  // (an online server's lobby: contrib/steamrelay)
+        extern void *plugins_symbol(const char *name);
+        void (*code)(const char *) = (void (*)(const char *))plugins_symbol("larecomp_relay_code");
+        if (code) code(text);
+    }
     if (!ok) snprintf(text, sizeof text, "%s", initial);  // cancelled: keep what was there
     LOG("[swkbd] text entry \"%s\" / \"%s\" / \"%s\" (max %d, initial \"%s\"): %s \"%s\"\n", header, sub, guide, max_len, initial,
         ok ? "entered" : "cancelled", text);
