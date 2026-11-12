@@ -1,0 +1,13 @@
+[Unit]
+Description=LZ&A Helper Discord bot (online status + closes fixed posts on release)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=%h/lzabot
+ExecStart=%h/lzabot/venv/bin/python -u %h/lzabot/lzabot.py
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target

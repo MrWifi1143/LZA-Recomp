@@ -175,34 +175,38 @@ def resolve(ids):
     return res
 
 
+def apply_fixes(fixed, name, url="", dry_run=False, no_reply=False, archive=False, log=print):
+    """fixed = {thread id: [(short hash, subject)]}: close each post and reply once per release name."""
+    for tid, (forum, post) in resolve(fixed).items():
+        closed = tag_id(forum, CLOSED_TAGS)
+        drop = {tag_id(forum, OPEN_TAGS), tag_id(forum, PENDING_TAGS)} - {None}
+        log(f"#{forum['name']}: {post['name']}  <- {', '.join(c for c, _ in fixed[tid])}")
+        if closed is None:
+            log(f"  (no Closed/Fixed tag in #{forum['name']}: tags left as they are)")
+        changed = set_tags(forum, post, closed, drop, dry_run)
+        log("  tags -> closed" if changed else "  tags already closed")
+        if not no_reply:
+            msg = f"Fixed in **{name}**" + (f": {url}" if url else ".")
+            me = api("GET", "/users/@me")["id"]
+            if any(m["author"]["id"] == me and f"**{name}**" in m.get("content", "")
+                   for m in api("GET", f"/channels/{tid}/messages?limit=100")):
+                log("  already replied for this release")
+            elif dry_run:
+                log(f"  would reply: {msg}")
+            else:
+                api("POST", f"/channels/{tid}/messages", {"content": msg, "allowed_mentions": {"parse": []}})
+                log("  replied")
+        if archive and not dry_run:
+            api("PATCH", f"/channels/{tid}", {"archived": True})
+            log("  archived")
+
+
 def cmd_release(a):
     fixed = fixes_in(f"{a.since}..{a.until}")
     if not fixed:
         print(f"no Discord-linked fixes in {a.since}..{a.until}")
         return
-    for tid, (forum, post) in resolve(fixed).items():
-        closed = tag_id(forum, CLOSED_TAGS)
-        drop = {tag_id(forum, OPEN_TAGS), tag_id(forum, PENDING_TAGS)} - {None}
-        commits = fixed[tid]
-        print(f"#{forum['name']}: {post['name']}  <- {', '.join(c for c, _ in commits)}")
-        if closed is None:
-            print(f"  (no Closed/Fixed tag in #{forum['name']}: tags left as they are)")
-        changed = set_tags(forum, post, closed, drop, a.dry_run)
-        print("  tags -> closed" if changed else "  tags already closed")
-        if not a.no_reply:
-            msg = f"Fixed in **{a.name}**" + (f": {a.url}" if a.url else ".")
-            me = api("GET", "/users/@me")["id"]
-            if any(m["author"]["id"] == me and f"**{a.name}**" in m.get("content", "")
-                   for m in api("GET", f"/channels/{tid}/messages?limit=100")):
-                print("  already replied for this release")
-            elif a.dry_run:
-                print(f"  would reply: {msg}")
-            else:
-                api("POST", f"/channels/{tid}/messages", {"content": msg, "allowed_mentions": {"parse": []}})
-                print("  replied")
-        if a.archive and not a.dry_run:
-            api("PATCH", f"/channels/{tid}", {"archived": True})
-            print("  archived")
+    apply_fixes(fixed, a.name, a.url, a.dry_run, a.no_reply, a.archive)
 
 
 def cmd_pending(a):
