@@ -89,6 +89,7 @@ cp docs/icon/icon_1024.png "$D/icon.png"
 cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$D/"
 [ -f data/shader_manifest.txt ] && cp data/shader_manifest.txt "$D/"  # (Z-A: the warm-up's first programs)
 cp docs/release-README-linux.txt "$D/README.txt"
+cp recomplauncher.json "$D/"  # (RecompLauncher; the AppImage has it at /recomplauncher.json)
 # licenses: this project's, then every bundled component's (THIRD-PARTY-NOTICES.md says which is which)
 cp LICENSE "$D/LICENSE.txt"
 cp LICENSE-LASRecomp "$D/licenses/LICENSE-LASRecomp.txt"
