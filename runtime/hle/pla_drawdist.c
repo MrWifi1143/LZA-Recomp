@@ -30,11 +30,14 @@ static float *at(uint64_t obj, int i) { return (float *)(uintptr_t)(obj + k_off[
 
 static void put(int s) {
     float k = factor();
+    float r = 1.0f;  // (the view distance's raise: the fades move with it, or far trees stand there without leaves)
     for (int i = 0; i < 5; i++) {
-        float base = g_obj[s].game[i];
+        float base = g_obj[s].game[i] * (i == 1 || i == 2 ? r : 1.0f);
         // Max: the tree view distance from 500 m (the game's kTreeVisibleDistance is 200), as the Nexus "Max Draw
         // Distance" mod sets it - x5 = 2500 m: the far hills keep their trees (player report, 2026-11-11)
-        if (i == 0 && g_settings.detail == 3 && base < 500.0f) base = 500.0f;
+        static int tbase = -1;  // (LARECOMP_PLA_TREE_BASE=0: the game's 200 m, research A/B)
+        if (tbase < 0) tbase = !(getenv("LARECOMP_PLA_TREE_BASE") && atoi(getenv("LARECOMP_PLA_TREE_BASE")) == 0);
+        if (i == 0 && g_settings.detail == 3 && tbase && base > 1.0f && base < 500.0f) r = 500.0f / base, base = 500.0f;
         *at(g_obj[s].obj, i) = g_obj[s].put[i] = base * k;
     }
     if (g_log) LOG("[drawdist] %llx x%g: trees visible %.0f m, fade %.0f..%.0f m\n", (unsigned long long)g_obj[s].obj, k,
