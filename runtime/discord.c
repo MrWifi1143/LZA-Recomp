@@ -11,6 +11,8 @@
 // is "<host Steam id>.<token>.<Link Code>": the relay lets in whoever brings the token (larecomp_relay_invite /
 // larecomp_relay_join), and the joining copy fills the code into its Link Code box (runtime/hle/swkbd.c). Joining
 // doesn't move anyone in the game: the player still goes to the trade (Simona / Link Play) and confirms the code.
+// Asking to join isn't accepted by the game (anyone in a shared server sees the status): the host sends a friend the
+// chat's invite card, and that friend's Join takes it.
 // LARECOMP_DISCORD_JOIN=<secret> (tests): as if Discord had sent that join.
 #include <SDL3/SDL.h>
 #include <stdarg.h>
@@ -361,21 +363,15 @@ static int dc_thread(void *arg) {
                     char secret[128];
                     if (jstr(buf, "\"data\"", "secret", secret, sizeof secret)) take_invite(secret);
                 } else if (op == OP_FRAME && strstr(buf, "\"evt\":\"ACTIVITY_JOIN_REQUEST\"")) {
-                    // (a friend asks to join this copy's status: let them - they still need the code's room to trade)
-                    char uid[32] = "", name[64] = "", acc[200];
-                    jstr(buf, "\"user\"", "id", uid, sizeof uid);
+                    // (someone asks to join: not let in from here - the status is seen in every shared server. The
+                    // player lets a friend in by sending them Discord's invite card: chat + > Invite)
+                    char name[64] = "", msg[200];
                     jstr(buf, "\"user\"", "username", name, sizeof name);
-                    if (uid[0]) {
-                        snprintf(acc, sizeof acc, "{\"cmd\":\"SEND_ACTIVITY_JOIN_INVITE\",\"nonce\":\"%llu\",\"args\":{\"user_id\":\"%s\"}}",
-                                 (unsigned long long)nonce++, uid);
-                        dc_send(OP_FRAME, acc);
-                        char msg[160];
-                        snprintf(msg, sizeof msg, "%s is joining you from Discord", name[0] ? name : "A friend");
-                        menu_notice_for(msg, 8000);
-                        LOG("[discord] %s asked to join: accepted\n", name[0] ? name : uid);
-                    }
-                }
-                else if (op == OP_CLOSE) { LOG("[discord] Discord closed the connection: %.200s\n", buf); dc_close(); break; }
+                    snprintf(msg, sizeof msg, "%s asked to join on Discord.\nTo let them in, invite them from a chat: + > Invite to %s.",
+                             name[0] ? name : "Someone", RT_APP_NAME);
+                    menu_notice_for(msg, 10000);
+                    LOG("[discord] %s asked to join (not accepted here: an invite from the chat lets them in)\n", name[0] ? name : "someone");
+                } else if (op == OP_CLOSE) { LOG("[discord] Discord closed the connection: %.200s\n", buf); dc_close(); break; }
             }
         }
         if (CONNECTED) {
