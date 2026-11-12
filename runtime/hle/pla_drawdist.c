@@ -80,7 +80,9 @@ static struct { uint64_t slot; int32_t game, put; } g_slot[NSLOT];
 static int g_nslot;
 
 static void put_slot(int s) {
-    int32_t r = (int32_t)(g_slot[s].game * factor() + 0.5f);
+    static float rk = -1;  // (LARECOMP_PLA_NPC_RADIUS=<k>: research - the NPC slots' factor alone)
+    if (rk < 0) rk = getenv("LARECOMP_PLA_NPC_RADIUS") ? (float)atof(getenv("LARECOMP_PLA_NPC_RADIUS")) : 0;
+    int32_t r = (int32_t)(g_slot[s].game * (rk > 0 ? rk : factor()) + 0.5f);
     int32_t *f = (int32_t *)(uintptr_t)(g_slot[s].slot + 0x450);
     f[0] = r, f[1] = r - 10, f[2] = r + 20;
     g_slot[s].put = r;
@@ -191,6 +193,7 @@ static int npc_hide_hook(Cpu *c, uint64_t addr) {
     if (g_npc_keep && (c->x[1] & 1) && (c->x[30] == 0x70017377c4ull || c->x[30] == 0x7001736d38ull)) return 1;
     return 0;
 }
+
 
 // Far Pokemon animating at 1/2 .. 1/8 rate (app_config field_anime_framerate_config): the field's animation-rate
 // manager, built by f_70018d24f8, keeps how many Pokemon each rate level takes - +0xc0 5 at the full rate, +0xc8 3 at
