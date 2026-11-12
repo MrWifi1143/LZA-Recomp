@@ -3329,45 +3329,112 @@ static VkDescriptorBufferInfo gmem_info(void);
 // Without the host import (gpuheap.c: the heap window is GPU memory, dma-buf chunks mapped at their guest addresses):
 // one sparse buffer over the whole window, each chunk imported and bound into it as gpuheap backs it. Bound before the
 // work that may read it is submitted (a fence: binds are few, at load).
+// The lazy host import (g_vk.lazyhost, gpuheap.c: integrated GPUs) is the same buffer, each chunk a host memory import
+// of its 64 MB of guest memory, made once the chunk is first used: the import pins what it covers, and on an integrated
+// GPU that comes out of the GPU's own budget (Intel UHD, 8 GB, Windows: the whole 3.8 GB import failed, text was blank).
 #define GMEM_MAX_CHUNKS 256
 static VkDeviceMemory gmem_chunk[GMEM_MAX_CHUNKS];
+static uint64_t gmem_chunk_size;
+static unsigned gmem_chunks_imported;  // (lazy host import: chunks imported, for the log)
+unsigned vk_gmem_imported_mb(void);
+unsigned vk_gmem_imported_mb(void) {  // (the guest heap's host memory imported)
+    return g_vk.lazyhost ? (unsigned)((gmem_chunks_imported * gmem_chunk_size) >> 20) : gmem_mem ? (unsigned)(gmem_size >> 20) : 0;
+}
+// (lazy host import) chunk k's guest memory imported: the memory, false if the driver refused
+static bool gmem_host_chunk(unsigned k, uint64_t chunk, uint32_t type_bits, VkDeviceMemory *mem) {
+    static PFN_vkGetMemoryHostPointerPropertiesEXT props;
+    if (!props) props = (PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(g_vk.dev, "vkGetMemoryHostPointerPropertiesEXT");
+    void *p = (void *)(uintptr_t)(HEAP_BASE + (uint64_t)k * chunk);
+    VkMemoryHostPointerPropertiesEXT mp = {.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+    VkResult r = props ? props(g_vk.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, p, &mp) : VK_ERROR_EXTENSION_NOT_PRESENT;
+    uint32_t bits = mp.memoryTypeBits & type_bits;
+    if (r != VK_SUCCESS || !bits) {
+        LOG("[vk] guest heap chunk %u: host pointer properties %d, memory types %#x (the buffer takes %#x)\n", k, (int)r, mp.memoryTypeBits, type_bits);
+        return false;
+    }
+    VkImportMemoryHostPointerInfoEXT imp = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
+                                            .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, .pHostPointer = p};
+    VkMemoryAllocateFlagsInfo af = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .pNext = &imp,
+                                    .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
+    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &af, .allocationSize = chunk,
+                               .memoryTypeIndex = (uint32_t)__builtin_ctz(bits)};
+    r = vkAllocateMemory(g_vk.dev, &ai, NULL, mem);
+    if (r != VK_SUCCESS) {
+        LOG("[vk] guest heap chunk %u: import failed (%d, %llu MB imported so far)\n", k, (int)r,
+            (unsigned long long)((gmem_chunks_imported * chunk) >> 20));
+        *mem = VK_NULL_HANDLE;
+        return false;
+    }
+    return true;
+}
+// (lazy host import) the device can't take the chunks after all: everything backed now, the whole import instead (gmem_info)
+static void gmem_lazy_fallback(void) {
+    extern void gpuheap_host_cancel(void);
+    gpuheap_host_cancel();
+    if (gmem_buf) vkDestroyBuffer(g_vk.dev, gmem_buf, NULL);
+    gmem_buf = VK_NULL_HANDLE;
+    g_vk.lazyhost = false;
+}
 static bool gmem_sparse_bind(void) {
-    extern int gpuheap_take(uint64_t *off, int *fds, int max);
-    extern uint64_t gpuheap_end(void), gpuheap_chunk_size(void), g_gpuheap_end;
-    if (gmem_buf && __atomic_load_n(&g_gpuheap_end, __ATOMIC_ACQUIRE) == gmem_size) return true;  // (nothing new)
+    extern int gpuheap_take(uint64_t *off, int *fds, int max), gpuheap_take_host(uint64_t *off, int max);
+    extern uint64_t gpuheap_end(void), gpuheap_chunk_size(void), g_gpuheap_end, g_gpuheap_gen;
+    static uint64_t gen_bound = UINT64_MAX;  // (lazy chunks are backed below gpuheap's end: g_gpuheap_gen counts them)
+    uint64_t gen = __atomic_load_n(&g_gpuheap_gen, __ATOMIC_ACQUIRE);
+    if (gmem_buf && __atomic_load_n(&g_gpuheap_end, __ATOMIC_ACQUIRE) == gmem_size && gen == gen_bound) return true;  // (nothing new)
+    bool host = g_vk.lazyhost;
+    VkExternalMemoryBufferCreateInfo eb = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+                                           .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
     if (!gmem_buf) {
-        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = HEAP_MAX,
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = host ? &eb : NULL, .size = HEAP_MAX,
                                  .flags = VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT,
                                  .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
                                           VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
                                           (g_vk.xfb ? VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT : 0)};
-        if (vkCreateBuffer(g_vk.dev, &bi, NULL, &gmem_buf) != VK_SUCCESS) { gmem_buf = VK_NULL_HANDLE; return false; }
+        if (vkCreateBuffer(g_vk.dev, &bi, NULL, &gmem_buf) != VK_SUCCESS) {
+            gmem_buf = VK_NULL_HANDLE;
+            if (host) LOG("[vk] guest heap: no sparse buffer for the lazy import\n"), gmem_lazy_fallback();
+            return false;
+        }
         VkBufferDeviceAddressInfo dai = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = gmem_buf};
         gmem_addr = vkGetBufferDeviceAddress(g_vk.dev, &dai);
     }
+    gen_bound = gen;
     uint64_t off[GMEM_MAX_CHUNKS];
     int fds[GMEM_MAX_CHUNKS];
-    int n = gpuheap_take(off, fds, GMEM_MAX_CHUNKS);
+    int n = host ? gpuheap_take_host(off, GMEM_MAX_CHUNKS) : gpuheap_take(off, fds, GMEM_MAX_CHUNKS);
     if (n) {
         VkMemoryRequirements req;
         vkGetBufferMemoryRequirements(g_vk.dev, gmem_buf, &req);
-        PFN_vkGetMemoryFdPropertiesKHR fdprops = (PFN_vkGetMemoryFdPropertiesKHR)vkGetDeviceProcAddr(g_vk.dev, "vkGetMemoryFdPropertiesKHR");
+        PFN_vkGetMemoryFdPropertiesKHR fdprops = host ? NULL : (PFN_vkGetMemoryFdPropertiesKHR)vkGetDeviceProcAddr(g_vk.dev, "vkGetMemoryFdPropertiesKHR");
         VkSparseMemoryBind binds[GMEM_MAX_CHUNKS];
         uint64_t chunk = gpuheap_chunk_size();
         for (int i = 0; i < n; i++) {
-            VkMemoryFdPropertiesKHR fp = {.sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
-            if (fdprops) fdprops(g_vk.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, fds[i], &fp);
-            uint32_t bits = fp.memoryTypeBits & req.memoryTypeBits;
-            if (!bits) FATAL("guest heap: the GPU memory can't back the heap buffer (types %#x / %#x)\n", fp.memoryTypeBits, req.memoryTypeBits);
-            VkImportMemoryFdInfoKHR imp = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
-                                           .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, .fd = fds[i]};
-            VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &imp, .allocationSize = chunk,
-                                       .memoryTypeIndex = (uint32_t)__builtin_ctz(bits)};
             unsigned k = (unsigned)(off[i] / chunk);
-            VkResult r = k < GMEM_MAX_CHUNKS ? vkAllocateMemory(g_vk.dev, &ai, NULL, &gmem_chunk[k]) : VK_ERROR_OUT_OF_DEVICE_MEMORY;
-            if (r != VK_SUCCESS) FATAL("guest heap: importing its GPU memory failed (%d)\n", (int)r);
+            if (host) {
+                if (k >= GMEM_MAX_CHUNKS || !gmem_host_chunk(k, chunk, req.memoryTypeBits, &gmem_chunk[k])) {
+                    if (!gmem_chunks_imported && i == 0) {  // (the very first: this device can't, the whole import instead)
+                        gmem_lazy_fallback();
+                        return false;
+                    }
+                    FATAL("guest heap: importing %llu MB more of it for the GPU failed (%llu MB imported): out of graphics memory?\n",
+                          (unsigned long long)(chunk >> 20), (unsigned long long)((gmem_chunks_imported * chunk) >> 20));
+                }
+                gmem_chunks_imported++;
+            } else {
+                VkMemoryFdPropertiesKHR fp = {.sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
+                if (fdprops) fdprops(g_vk.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, fds[i], &fp);
+                uint32_t bits = fp.memoryTypeBits & req.memoryTypeBits;
+                if (!bits) FATAL("guest heap: the GPU memory can't back the heap buffer (types %#x / %#x)\n", fp.memoryTypeBits, req.memoryTypeBits);
+                VkImportMemoryFdInfoKHR imp = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+                                               .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, .fd = fds[i]};
+                VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &imp, .allocationSize = chunk,
+                                           .memoryTypeIndex = (uint32_t)__builtin_ctz(bits)};
+                VkResult r = k < GMEM_MAX_CHUNKS ? vkAllocateMemory(g_vk.dev, &ai, NULL, &gmem_chunk[k]) : VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                if (r != VK_SUCCESS) FATAL("guest heap: importing its GPU memory failed (%d)\n", (int)r);
+            }
             binds[i] = (VkSparseMemoryBind){.resourceOffset = off[i], .size = chunk, .memory = gmem_chunk[k]};
+            gmem_chunk_size = chunk;
         }
         VkSparseBufferMemoryBindInfo bb = {.buffer = gmem_buf, .bindCount = (uint32_t)n, .pBinds = binds};
         VkBindSparseInfo si = {.sType = VK_STRUCTURE_TYPE_BIND_SPARSE_INFO, .bufferBindCount = 1, .pBufferBinds = &bb};
@@ -3384,8 +3451,20 @@ static bool gmem_sparse_bind(void) {
     }
     uint64_t end = gpuheap_end();
     if (end != gmem_size) LOG("[vk] guest heap bound for shader global memory: %llu MB (sparse)\n", (unsigned long long)(end >> 20));
+    if (n && host) {
+        static unsigned shown;
+        unsigned mb = vk_gmem_imported_mb();
+        if (mb >= shown + 256 || !shown || ENV("LARECOMP_LOG_GPUHEAP"))
+            LOG("[vk] guest heap: %u MB imported (%u chunks, frame %llu)\n", mb, gmem_chunks_imported, (unsigned long long)vk_frame_counter()), shown = mb;
+    }
     gmem_size = end;
     return true;
+}
+// (vcache.c, before it write-protects guest pages it keeps a copy of) chunks backed so far imported now: an import
+// can't pin a read-only page (the driver asks for write access)
+void vk_gmem_sync(void);
+void vk_gmem_sync(void) {
+    if (g_vk.lazyhost) gmem_info();
 }
 
 // What shaders read and write the guest heap through (binding GMEM_BUFFER_INDEX): its GPU address and the size imported,
@@ -3402,10 +3481,12 @@ static VkDescriptorBufferInfo gmem_ref_info(void) {
 static VkDescriptorBufferInfo gmem_info(void) {
     static int off = -1;
     if (off < 0) off = ENV("LARECOMP_VK_NO_GMEM") != NULL || (!g_vk.host_import && !g_vk.gpuheap);
-    if (!off && g_vk.gpuheap) {  // (the heap window is GPU memory: gpuheap.c)
-        if (!gmem_sparse_bind()) LOG("[vk] guest heap: no sparse buffer: shader global memory reads return zero\n"), off = 1;
+    if (!off && (g_vk.gpuheap || g_vk.lazyhost)) {  // (the heap window is GPU memory, or imported in chunks: gpuheap.c)
+        bool ok = gmem_sparse_bind();
+        if (!ok && !g_vk.lazyhost && !g_vk.gpuheap) LOG("[vk] guest heap: no lazy import here: imported whole\n");  // (below)
+        else if (!ok) LOG("[vk] guest heap: no sparse buffer: shader global memory reads return zero\n"), off = 1;
         uint64_t max = g_vk.props.limits.maxStorageBufferRange;  // (a storage buffer binding: shaders use gmem_ref_info)
-        if (gmem_buf) return (VkDescriptorBufferInfo){gmem_buf, 0, gmem_size < max ? (gmem_size ? gmem_size : 256) : max};
+        if (gmem_buf && (g_vk.gpuheap || g_vk.lazyhost)) return (VkDescriptorBufferInfo){gmem_buf, 0, gmem_size < max ? (gmem_size ? gmem_size : 256) : max};
     }
     extern uint64_t g_stdheap_used;  // (runtime/hle/heaps.c: the StandardAllocator block above the heap)
     uint64_t heap = kernel_heap_size(), std_end = g_stdheap_used ? STDHEAP_BASE + g_stdheap_used - HEAP_BASE : 0;
@@ -3487,7 +3568,8 @@ static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSi
     static int copy = -1;
     if (copy < 0) copy = ENV("LARECOMP_VK_COPY_VERTICES") != NULL;
     if (copy || addr < HEAP_BASE) return false;
-    if (addr + size > HEAP_BASE + gmem_size && kernel_heap_size() != gmem_tried) { gmem_tried = kernel_heap_size(); gmem_info(); }
+    if (g_vk.lazyhost) gmem_info();  // (chunks the game started using since: imported and bound before this draw is submitted)
+    else if (addr + size > HEAP_BASE + gmem_size && kernel_heap_size() != gmem_tried) { gmem_tried = kernel_heap_size(); gmem_info(); }
     if (!gmem_buf || addr + size > HEAP_BASE + gmem_size) return false;
     *buf = gmem_buf;
     *off = addr - HEAP_BASE;
@@ -3535,6 +3617,7 @@ void vk_exec_reset(void) {
     }
     for (int i = 0; i < GMEM_MAX_CHUNKS; i++)  // (gpuheap's chunks: imported again after the guest reset)
         if (gmem_chunk[i]) vkFreeMemory(g_vk.dev, gmem_chunk[i], NULL), gmem_chunk[i] = VK_NULL_HANDLE;
+    gmem_chunks_imported = 0;
     gmem_size = gmem_tried = 0;
     st_defaults();
 }

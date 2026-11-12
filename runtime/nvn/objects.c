@@ -255,6 +255,8 @@ NVN(nvnBufferInitialize) {
     G(uint64_t, A(0), 0x10) = off;
     G(uint64_t, A(0), 0x18) = G(uint64_t, A(1), 0x18);
     G(uint64_t, A(0), 0x20) = next_debug_id++;
+    extern void gpuheap_touch(uint64_t addr, uint64_t n);
+    gpuheap_touch(G(uint64_t, A(0), 0), G(uint64_t, A(0), 0x18));  // (the GPU may write it unseen: backed now, gpuheap.c)
     RET(1);
 }
 NVN(nvnBufferFinalize) { (void)c; }
