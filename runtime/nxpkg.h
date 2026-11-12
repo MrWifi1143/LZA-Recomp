@@ -28,6 +28,10 @@ typedef struct NxPkg NxPkg;
 // itself, ~/.switch, the emulators' key folders). titles: the wanted base program ids, best first, 0-terminated.
 // NULL = failed: *err (NXPKG_*) and why (a short message for the log).
 NxPkg *nxpkg_open(const char *path, const uint64_t *titles, int *err, char *why, size_t why_size);
+// Given on the command line (runtime/main.c: --keys, the --game paths after the first - a launcher's setup step): a
+// prod.keys file tried before the usual places, and more packages read along with `path` (the update's .nsp, the DLC's).
+void nxpkg_set_keys(const char *file);
+void nxpkg_add_path(const char *path);
 void nxpkg_close(NxPkg *p);
 // True when `path` holds .nsp / .xci / .nsz / .xcz (a file, or a folder searched a few levels deep).
 bool nxpkg_any(const char *path);

@@ -11,6 +11,7 @@
 #include "settings.h"
 #include "hle.h"
 #include "kernel.h"
+#include "nxpkg.h"
 
 const char *g_romfs_dir;
 
@@ -126,6 +127,8 @@ static void teardown(void) {
 
 static bool g_oodle_server;  // --oodle-server: runtime/oodle_server.c
 static bool g_extract_shaders;  // --extract-shaders: the same file (the shader warm-up's first step on Z-A)
+static FILE *g_prepare;  // --prepare: the setup without a window (a launcher's setup step: gamesetup.h setup_prepare)
+static const char *g_game;  // --game <folder or .nsp / .xci>: the game picked for --prepare (more --game: the update, the DLC)
 
 static void boot(const char *root) {
     char exefs[1024], romfs[1024], npdm_path[1024];
@@ -186,6 +189,19 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "--extract-shaders")) {
             g_extract_shaders = true;
             setenv("LARECOMP_LOG_STDERR", "1", 1);
+        } else if (!strcmp(argv[i], "--prepare")) {  // (its progress lines go to the real stdout; the log after the last run's)
+            int fd = dup(1);
+            g_prepare = fd >= 0 ? fdopen(fd, "w") : NULL;
+            if (!g_prepare) g_prepare = stderr;  // (no stdout: into the log)
+            setenv("LASRECOMP_LOG_APPEND", "1", 1);
+        } else if (!strncmp(argv[i], "--game", 6) || !strncmp(argv[i], "--keys", 6)) {  // (--game <path> or --game=<path>)
+            const char *v = argv[i][6] == '=' ? argv[i] + 7 : !argv[i][6] && i + 1 < argc ? argv[i + 1] : NULL;
+            bool keys = argv[i][2] == 'k';
+            if (!v) continue;
+            if (!argv[i][6]) argv[++i] = "--";  // (the path: not the game root)
+            if (keys) nxpkg_set_keys(v);  // (prod.keys for the .nsp / .xci: runtime/nxpkg.c)
+            else if (!g_game) g_game = v;
+            else nxpkg_add_path(v);
         }
     plat_init();
 #ifdef _WIN32
@@ -203,6 +219,7 @@ int main(int argc, char **argv) {
         else if (argv[i][0] != '-') root = arg_root;
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
+    if (g_prepare) exit(setup_prepare(g_game, g_prepare));
     if (g_oodle_server || g_extract_shaders) {  // (Legends Studio's decoder / the warm-up's extraction, runtime/oodle_server.c: no window)
         boot(root);
         for (;;) SDL_Delay(1000);

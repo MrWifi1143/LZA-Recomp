@@ -366,3 +366,38 @@ void setup_start(const char *folder) {
     pthread_create(&t, NULL, setup_thread, NULL);
     pthread_detach(t);
 }
+
+int setup_prepare(const char *game, FILE *out) {
+    static const char *const step[] = {"", "Looking for the game files", "Reading the game files out of the packages",
+                                       "Copying the game files", "Building the game data image", "Reading the game code",
+                                       "Recompiling the game code", "Finishing"};
+    static const char *const fail[] = {"No game files found there", "Compressed game files (.nsz / .xcz): decompress them first",
+                                       "Not Pokemon Legends: Z-A", "The files couldn't be copied (disk space?)",
+                                       "The game code didn't build (lasrecomp.log)", "The game code builder is missing from this copy",
+                                       "This needs Pokemon Legends: Z-A version 2.0.2 (the base game and the 2.0.2 update)",
+                                       "No keys found for the game files (prod.keys)", "Your keys can't open the game files",
+                                       "Only the update was found, not the base game", "The game files couldn't be read"};
+    if (!game || !*game) { fprintf(out, "progress 0 No game given (--game <folder or .nsp / .xci>)\n"); return 2; }
+    LOG("[setup] --prepare %s\n", game);
+    setup_start(game);
+    int last_st = -1, last_pct = -1, last_min = -2;
+    float p = 0;
+    while (setup_running()) {
+        int st = setup_state(), pct = (int)(setup_progress() * 100), m = setup_minutes_left();
+        p = setup_progress();
+        if (st >= 1 && st <= 7 && (st != last_st || pct != last_pct || m != last_min)) {
+            if (st == SETUP_COMPILING && m > 0) fprintf(out, "progress %.2f %s (about %d minute%s left)\n", p, step[st], m, m == 1 ? "" : "s");
+            else fprintf(out, "progress %.2f %s\n", p, step[st]);
+            fflush(out);
+            last_st = st, last_pct = pct, last_min = m;
+        }
+        SDL_Delay(200);
+    }
+    int st = setup_state();
+    if (st == SETUP_DONE) { fprintf(out, "progress 1 Ready to play\n"); fflush(out); return 0; }
+    int k = st - SETUP_FAIL_NOT_FOUND;
+    bool known = k >= 0 && k < (int)(sizeof fail / sizeof *fail);
+    fprintf(out, "progress %.2f %s\n", p, known ? fail[k] : "The setup failed (lasrecomp.log)");
+    fflush(out);
+    return known ? 20 + k : 1;
+}

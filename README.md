@@ -6,6 +6,9 @@
   <a href="https://gitlab.com/mr.wifi1143/LZA-Recomp/-/releases"><img alt="Download on GitLab" src="https://img.shields.io/badge/Download-GitLab-FC6D26?style=for-the-badge&logo=gitlab&logoColor=white"></a>
   <img alt="Platforms: Windows and Linux" src="https://img.shields.io/badge/Platforms-Windows%20%7C%20Linux-2EA44F?style=for-the-badge">
 </p>
+<p align="center">
+  <a href="https://recomplauncher.com"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+</p>
 
 A native PC port of **Pokémon Legends: Z-A** (Nintendo Switch, **version 2.0.2**) by **static recompilation**: the game's
 ARM64 code is translated to C and compiled into a regular Windows or Linux program, with a runtime standing in for
@@ -96,6 +99,10 @@ it, the game runs as without the DLC.
 `arc/data.trpfs`), extracted with the 2.0.2 update applied (e.g. `hac2l -k prod.keys --titlekeys=title.keys
 --basenca=<base program>.nca --exefsdir=game/exefs --romfsdir=game/romfs <update program>.nca`), plus an optional
 `dlc` folder beside them with the DLC's RomFS.
+
+**Without a window** (launchers, scripts): `ZARecomp --prepare --game <base .nsp / .xci or folder> [--game <update .nsp>] [--game <DLC .nsp>]
+[--keys <prod.keys>]` sets the game up as **Select game folder...** does and prints `progress <0..1> <step>` lines;
+it exits with 0 when the game is ready to play. [RecompLauncher](https://recomplauncher.com) uses it (`recomplauncher.json`).
 
 Which update is a dump? `lasrecomp.log` lists the packages found with their versions: update v393216 (patch v6) is
 **2.0.2**; v262144 (v4) is 2.0.0. The update's `control.nacp`
