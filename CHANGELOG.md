@@ -6,6 +6,8 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsA`)
 
+- Add to Steam (start screen, Options): puts the game in your Steam library as a non-Steam game, with its own
+  artwork (cover, banner, hero, logo). Steam can stay open; restart it to see the artwork. Suggested on Discord.
 - Discord Rich Presence: "Playing PL:A Recomp", the area you are in (Jubilife Village, the Obsidian Fieldlands ...),
   resolution and frame rate, time played. Needs Discord running and Activity Privacy sharing on; a launcher checkbox
   ("Show what you're playing on Discord") turns it off.
