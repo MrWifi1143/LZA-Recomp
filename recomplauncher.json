@@ -1,0 +1,637 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "name": "PL:Z-A Recomp",
+  "repo": "MrWifi1143/LZA-Recomp",
+  "inputs": [
+    {
+      "id": "game",
+      "label": "Your own Pokémon Legends: Z-A: the base game's .nsp or .xci, or the folder with the base game and the 2.0.2 update (.nsp / .xci, or the extracted exefs and romfs).",
+      "role": "game",
+      "formats": [
+        {
+          "type": "file",
+          "extensions": [
+            "nsp",
+            "xci"
+          ],
+          "requires": [
+            "keys"
+          ]
+        },
+        {
+          "type": "folder",
+          "requires": [
+            "keys"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "update",
+      "label": "The 2.0.2 update (.nsp). Not needed when the folder you picked has it. Other versions (2.0.0) don't work.",
+      "role": "update",
+      "optional": true,
+      "formats": [
+        {
+          "type": "file",
+          "extensions": [
+            "nsp"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dlc",
+      "label": "Mega Dimension, the DLC (.nsp), if you own it. Not needed to play.",
+      "role": "dlc",
+      "optional": true,
+      "formats": [
+        {
+          "type": "file",
+          "extensions": [
+            "nsp"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "keys",
+      "label": "prod.keys, dumped from your own Switch (Lockpick_RCM).",
+      "role": "key",
+      "shared": "switch.prod-keys"
+    }
+  ],
+  "prepare": {
+    "program": [
+      "ZARecomp.exe",
+      "ZARecomp"
+    ],
+    "args": [
+      "--prepare",
+      "--game={input:game}",
+      "--game={input:update}",
+      "--game={input:dlc}",
+      "--keys={input:keys}"
+    ],
+    "label": "Reading your game files and building the game code for your PC (once, 10-30 minutes)",
+    "timeout": 10800
+  },
+  "start": {
+    "program": [
+      "ZARecomp.exe",
+      "ZARecomp"
+    ]
+  },
+  "config": [
+    {
+      "id": "main",
+      "format": "ini",
+      "file": [
+        {
+          "path": "{install}/larecomp.ini",
+          "if": "{install}/ZARecomp.exe"
+        },
+        {
+          "path": "{install}/larecomp.ini",
+          "if": "{install}/lasrecomp"
+        },
+        {
+          "path": "{local}/zarecomp/larecomp.ini"
+        }
+      ]
+    }
+  ],
+  "saves": [
+    "{install}/save",
+    "{local}/zarecomp/save"
+  ],
+  "folders": {
+    "data": [
+      {
+        "path": "{install}",
+        "if": "{install}/ZARecomp.exe"
+      },
+      {
+        "path": "{install}",
+        "if": "{install}/lasrecomp"
+      },
+      {
+        "path": "{local}/zarecomp"
+      }
+    ],
+    "saves": [
+      {
+        "path": "{install}/save",
+        "if": "{install}/ZARecomp.exe"
+      },
+      {
+        "path": "{install}/save",
+        "if": "{install}/lasrecomp"
+      },
+      {
+        "path": "{local}/zarecomp/save"
+      }
+    ],
+    "logs": [
+      {
+        "path": "{install}",
+        "if": "{install}/ZARecomp.exe"
+      },
+      {
+        "path": "{install}",
+        "if": "{install}/lasrecomp"
+      },
+      {
+        "path": "{local}/zarecomp"
+      }
+    ]
+  },
+  "exit_codes": {
+    "20": "No game files were found in what you picked. Pick the folder with your .nsp / .xci files, or the one with exefs and romfs.",
+    "21": "Those are compressed game files (.nsz / .xcz). Decompress them first (nsz -D), or dump them as .nsp / .xci.",
+    "22": "That isn't Pokémon Legends: Z-A. Pick your own Pokémon Legends: Z-A.",
+    "23": "The game files couldn't be copied. Check there are about 25 GB free and try again.",
+    "24": "The game code didn't build. Check there are a few GB free and try again; details in lasrecomp.log.",
+    "25": "The game code builder is missing from this copy. Reinstall the recomp.",
+    "26": "This needs Pokémon Legends: Z-A version 2.0.2: the base game and the 2.0.2 update. Update the game on your Switch and dump it again.",
+    "27": "No keys were found for your game files. Add the prod.keys dumped from your own Switch.",
+    "28": "Your keys can't open those game files. Dump prod.keys again from your Switch on its current system version.",
+    "29": "Only the update was found, not the base game. Add the base game's .nsp / .xci too.",
+    "30": "Those game files couldn't be read. The dump may be damaged; details in lasrecomp.log."
+  },
+  "groups": [
+    {
+      "id": "Display"
+    },
+    {
+      "id": "Graphics"
+    },
+    {
+      "id": "Game"
+    }
+  ],
+  "settings": [
+    {
+      "id": "window",
+      "label": "Window",
+      "group": "Display",
+      "help": "Windowed opens a 1280 x 720 window. F11 or Alt+Enter switches while playing.",
+      "choices": [
+        {
+          "label": "Windowed",
+          "set": {
+            "fullscreen": "0"
+          }
+        },
+        {
+          "label": "Fullscreen",
+          "set": {
+            "fullscreen": "1"
+          }
+        }
+      ],
+      "defaults": {
+        "fullscreen": "0"
+      }
+    },
+    {
+      "id": "resolution",
+      "label": "Resolution",
+      "group": "Display",
+      "help": "What the game draws at. Automatic follows the window's size; lower is faster on a small graphics card.",
+      "choices": [
+        {
+          "label": "Automatic",
+          "set": {
+            "render_height": "0"
+          }
+        },
+        {
+          "label": "540p",
+          "set": {
+            "render_height": "540"
+          }
+        },
+        {
+          "label": "720p",
+          "set": {
+            "render_height": "720"
+          }
+        },
+        {
+          "label": "1080p",
+          "set": {
+            "render_height": "1080"
+          }
+        },
+        {
+          "label": "1440p",
+          "set": {
+            "render_height": "1440"
+          }
+        },
+        {
+          "label": "4K",
+          "set": {
+            "render_height": "2160"
+          }
+        }
+      ],
+      "defaults": {
+        "render_height": "0"
+      }
+    },
+    {
+      "id": "frame_rate",
+      "label": "Frame rate",
+      "group": "Display",
+      "help": "30 is the game's own. At 60 and above the game's per-frame systems are adjusted so it runs at the right speed (no generated frames). Above 60 is experimental.",
+      "choices": [
+        {
+          "label": "30 fps",
+          "set": {
+            "fps": "30"
+          }
+        },
+        {
+          "label": "60 fps",
+          "set": {
+            "fps": "60"
+          }
+        },
+        {
+          "label": "120 fps (experimental)",
+          "set": {
+            "fps": "120",
+            "experimental": "1"
+          }
+        },
+        {
+          "label": "144 fps (experimental)",
+          "set": {
+            "fps": "144",
+            "experimental": "1"
+          }
+        }
+      ],
+      "defaults": {
+        "fps": "30",
+        "experimental": "0"
+      }
+    },
+    {
+      "id": "frame_timing",
+      "label": "Frame rate dips",
+      "group": "Display",
+      "advanced": true,
+      "help": "Full speed keeps the game at its real speed when a frame takes longer. Slow down steps it a fixed amount per frame, as before.",
+      "choices": [
+        {
+          "label": "Keep full speed",
+          "set": {
+            "frame_timing": "real_time"
+          }
+        },
+        {
+          "label": "Slow down",
+          "set": {
+            "frame_timing": "fixed"
+          }
+        }
+      ],
+      "defaults": {
+        "frame_timing": "real_time"
+      }
+    },
+    {
+      "id": "fps_counter",
+      "label": "Show FPS",
+      "group": "Display",
+      "help": "The frame rate in a corner of the game.",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "show_fps": "0"
+          }
+        },
+        {
+          "label": "On",
+          "set": {
+            "show_fps": "1"
+          }
+        }
+      ],
+      "defaults": {
+        "show_fps": "0"
+      }
+    },
+    {
+      "id": "antialiasing",
+      "label": "Anti-aliasing",
+      "group": "Graphics",
+      "help": "SMAA smooths jagged edges; the game has none of its own. Costs little.",
+      "choices": [
+        {
+          "label": "SMAA",
+          "set": {
+            "smaa": "1"
+          }
+        },
+        {
+          "label": "Off",
+          "set": {
+            "smaa": "0"
+          }
+        }
+      ],
+      "defaults": {
+        "smaa": "1"
+      }
+    },
+    {
+      "id": "upscaler",
+      "label": "Upscaling",
+      "group": "Graphics",
+      "advanced": true,
+      "help": "How a resolution below your window's is fitted to it. FSR 1 is sharper than bilinear.",
+      "choices": [
+        {
+          "label": "FSR 1",
+          "set": {
+            "upscaler": "fsr1"
+          }
+        },
+        {
+          "label": "Bilinear",
+          "set": {
+            "upscaler": "bilinear"
+          }
+        }
+      ],
+      "defaults": {
+        "upscaler": "fsr1"
+      }
+    },
+    {
+      "id": "shadows",
+      "label": "Shadows",
+      "group": "Graphics",
+      "help": "The shadow maps' size. Switch is the console's own; higher is sharper and costs more.",
+      "choices": [
+        {
+          "label": "Switch (1024)",
+          "set": {
+            "shadows": "0"
+          }
+        },
+        {
+          "label": "High (2048)",
+          "set": {
+            "shadows": "1"
+          }
+        },
+        {
+          "label": "Ultra (4096)",
+          "set": {
+            "shadows": "2"
+          }
+        }
+      ],
+      "defaults": {
+        "shadows": "0"
+      }
+    },
+    {
+      "id": "shadow_smoothing",
+      "label": "Smooth shadow edges",
+      "group": "Graphics",
+      "help": "Softens the stair-stepped edges of shadows.",
+      "choices": [
+        {
+          "label": "On",
+          "set": {
+            "shadow_smoothing": "1"
+          }
+        },
+        {
+          "label": "Off",
+          "set": {
+            "shadow_smoothing": "0"
+          }
+        }
+      ],
+      "defaults": {
+        "shadow_smoothing": "1"
+      }
+    },
+    {
+      "id": "draw_distance_people",
+      "label": "Draw distance (people)",
+      "group": "Graphics",
+      "help": "How far people are shown in Lumiose. Switch is the console's own; farther costs more, mostly by day.",
+      "choices": [
+        {
+          "label": "Switch",
+          "set": {
+            "crowd": "0"
+          }
+        },
+        {
+          "label": "2x",
+          "set": {
+            "crowd": "1"
+          }
+        },
+        {
+          "label": "4x",
+          "set": {
+            "crowd": "2"
+          }
+        },
+        {
+          "label": "Max",
+          "set": {
+            "crowd": "3"
+          }
+        }
+      ],
+      "defaults": {
+        "crowd": "0"
+      }
+    },
+    {
+      "id": "draw_distance_detail",
+      "label": "Draw distance (detail)",
+      "group": "Graphics",
+      "help": "How far trees, rocks and small detail are drawn. Switch is the console's own; farther costs more.",
+      "choices": [
+        {
+          "label": "Switch",
+          "set": {
+            "detail_distance": "0"
+          }
+        },
+        {
+          "label": "2x",
+          "set": {
+            "detail_distance": "1"
+          }
+        },
+        {
+          "label": "4x",
+          "set": {
+            "detail_distance": "2"
+          }
+        },
+        {
+          "label": "Max",
+          "set": {
+            "detail_distance": "3"
+          }
+        }
+      ],
+      "defaults": {
+        "detail_distance": "0"
+      }
+    },
+    {
+      "id": "shader_loading",
+      "label": "Shader loading",
+      "group": "Graphics",
+      "advanced": true,
+      "help": "The first time something is seen its shaders are built. Wait may stutter then; Don't wait may show it a moment late.",
+      "choices": [
+        {
+          "label": "Wait",
+          "set": {
+            "shader_loading": "wait"
+          }
+        },
+        {
+          "label": "Don't wait",
+          "set": {
+            "shader_loading": "nowait"
+          }
+        }
+      ],
+      "defaults": {
+        "shader_loading": "wait"
+      }
+    },
+    {
+      "id": "button_prompts",
+      "label": "Button prompts",
+      "group": "Game",
+      "help": "Which buttons the game shows. Auto follows what you last played with.",
+      "choices": [
+        {
+          "label": "Auto",
+          "set": {
+            "button_prompts": "auto"
+          }
+        },
+        {
+          "label": "Xbox",
+          "set": {
+            "button_prompts": "xbox"
+          }
+        },
+        {
+          "label": "PlayStation",
+          "set": {
+            "button_prompts": "playstation"
+          }
+        },
+        {
+          "label": "Nintendo Switch",
+          "set": {
+            "button_prompts": "switch"
+          }
+        },
+        {
+          "label": "Keyboard and mouse",
+          "set": {
+            "button_prompts": "keyboard"
+          }
+        }
+      ],
+      "defaults": {
+        "button_prompts": "auto"
+      }
+    },
+    {
+      "id": "background",
+      "label": "In the background",
+      "group": "Game",
+      "help": "What the game does while its window isn't in front.",
+      "choices": [
+        {
+          "label": "Keep playing",
+          "set": {
+            "background": "0"
+          }
+        },
+        {
+          "label": "Mute",
+          "set": {
+            "background": "1"
+          }
+        },
+        {
+          "label": "Pause",
+          "set": {
+            "background": "2"
+          }
+        }
+      ],
+      "defaults": {
+        "background": "0"
+      }
+    },
+    {
+      "id": "start_screen",
+      "label": "Recomp's launcher",
+      "group": "Game",
+      "help": "Its own launcher has more options, controller and key remapping, and mods. Skipped, Play goes straight into the game; hold Shift while it starts to see the launcher again.",
+      "choices": [
+        {
+          "label": "Show it",
+          "set": {
+            "skip_start_screen": "0"
+          }
+        },
+        {
+          "label": "Skip it",
+          "set": {
+            "skip_start_screen": "1"
+          }
+        }
+      ],
+      "defaults": {
+        "skip_start_screen": "0"
+      }
+    }
+  ],
+  "actions": [
+    {
+      "id": "saves",
+      "label": "Saves",
+      "help": "Your save (save_0/main), the Switch's own file: PKHeX opens it.",
+      "open": "saves"
+    },
+    {
+      "id": "data",
+      "label": "Recomp folder",
+      "help": "Settings (larecomp.ini), the log (lasrecomp.log), mods and the set-up game files.",
+      "open": "data"
+    },
+    {
+      "id": "shader_cache",
+      "label": "Shader cache",
+      "help": "Shaders built so far, so later play doesn't stutter. Clearing only helps if graphics look wrong after an update.",
+      "clear": "data/cache"
+    }
+  ]
+}

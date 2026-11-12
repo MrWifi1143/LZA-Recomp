@@ -54,6 +54,7 @@ T=$R/tools/windows
 make -s PLATFORM=windows B=build/win CC=$T/zcc DEPS=$W/deps steamrelay legendslua
 mkdir -p "$D/plugins" && cp build/win/plugins/steamrelay.dll build/win/plugins/steamrelay-helper.exe build/win/plugins/legendslua.dll "$D/plugins/"
 cp docs/release-README.txt "$D/README.txt"
+cp recomplauncher.json "$D/"  # (RecompLauncher: how it sets up, starts and configures the game)
 # licenses: this project's, then every bundled component's (THIRD-PARTY-NOTICES.md says which is which)
 cp LICENSE "$D/LICENSE.txt"
 cp LICENSE-LASRecomp "$D/licenses/LICENSE-LASRecomp.txt"
