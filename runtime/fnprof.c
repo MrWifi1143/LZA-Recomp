@@ -129,6 +129,8 @@ void fnprof_frame(uint64_t frame) {
         if (slots[i].addr) { rows[n][0] = slots[i].addr; rows[n][1] = slots[i].count; rows[n][2] = slots[i].first; rows[n][3] = slots[i].lr; rows[n][4] = slots[i].frame; n++; }
     qsort(rows, n, sizeof rows[0], cmp);
     const char *out = getenv("LARECOMP_FNPROF_OUT") ? getenv("LARECOMP_FNPROF_OUT") : "build/fnprof.txt";  // (parallel runs)
+    char outn[700];
+    if (getenv("LARECOMP_FNPROF_LIVE")) snprintf(outn, sizeof outn, "%s.%ld", out, from), out = outn;  // (live: one file a window)
     FILE *f = fopen(out, "w");
     for (int i = 0; f && i < n; i++)
         fprintf(f, "%llx %llu %llu %llx %llu\n", (unsigned long long)rows[i][0], (unsigned long long)rows[i][1],
@@ -137,6 +139,8 @@ void fnprof_frame(uint64_t frame) {
     free(rows);
     LOG("[fnprof] %d functions, written %s (frames %ld-%ld)\n", n, out, from, to);
     from = -1;
+    if (getenv("LARECOMP_FNPROF_LIVE"))  // (another window may follow: counted afresh)
+        for (int i = 0; i < NSLOT; i++) slots[i].count = 0, slots[i].first = 0, slots[i].lr = 0, slots[i].frame = 0;
 }
 
 // LARECOMP_FNPROF=0:<to>: profile from process start (threads the game starts before the first frame)

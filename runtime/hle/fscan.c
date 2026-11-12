@@ -135,7 +135,9 @@ void fscan_present(uint64_t frame) {
                     step2 = w && !strcmp(w, "step2") ? 1 : w && !strcmp(w, "young1") ? 2 : w && !strcmp(w, "fstep") ? 3 : 0;
                 }
                 bool pick = step2 == 3 ? true : step2 == 1 ? fabsf(fabsf(d1) - 2) < 1e-3f : step2 == 2 ? fabsf(fabsf(d1) - 1) < 1e-3f && fabsf(a) < 10 : fabsf(d1) >= 0.25f;
-                if (pick && g_nauto < (step2 ? 4 : 3)) g_auto[g_nauto++] = HEAP_BASE + i * 4;
+                static int nauto = -1;  // (LARECOMP_FSCAN_NAUTO=<n>: watch only the first n - one at a time names each one's writer)
+                if (nauto < 0) nauto = getenv("LARECOMP_FSCAN_NAUTO") ? atoi(getenv("LARECOMP_FSCAN_NAUTO")) : 4;
+                if (pick && g_nauto < (step2 ? 4 : 3) && g_nauto < nauto) g_auto[g_nauto++] = HEAP_BASE + i * 4;
             }  // (auto: frame-stepped floats first)
             { extern void trace_watch_add(uint64_t addr); if (getenv("LARECOMP_FSCAN_WATCH")) trace_watch_add(HEAP_BASE + i * 4); }  // (storetrace.c, a trace build)
             hits++;
