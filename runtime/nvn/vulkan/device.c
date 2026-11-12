@@ -217,6 +217,13 @@ static void create_device(void) {
     LOG("[vk] pipeline libraries: %s\n", gpl ? "yes (pipelines linked from parts)" : "no (whole pipelines)");
     bool fault = has_ext(ep, ne, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);  // device-lost diagnostics (vk_device_fault_report)
     if (fault) ext[n_ext++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
+    {   // LARECOMP_VK_DEVLOST_TRACE=1: NVIDIA's checkpoints too - how far the GPU got in each command list (exec.c dl_mark)
+        extern bool g_vk_checkpoints;
+        const char *t = ENV("LARECOMP_VK_DEVLOST_TRACE");
+        g_vk_checkpoints = t && atoi(t) && has_ext(ep, ne, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+        if (g_vk_checkpoints) ext[n_ext++] = VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME;
+        if (t && atoi(t)) LOG("[vk] device-lost trace on%s\n", g_vk_checkpoints ? ", with NVIDIA checkpoints" : " (no checkpoints on this driver)");
+    }
     // LARECOMP_PIPE_STATS: what the driver says about each compiled shader (registers, spills, ...), exec.c pipe_exec_report
     g_pipe_exec_stats = ENV("LARECOMP_PIPE_STATS") && has_ext(ep, ne, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
     if (g_pipe_exec_stats) ext[n_ext++] = VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;

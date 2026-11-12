@@ -105,6 +105,11 @@ void vk_wait_seq(uint64_t seq) {
     rt_trace('g', 0);
     stat_wait_ns += SDL_GetTicksNS() - t0;
     cum_wait += SDL_GetTicksNS() - t0;
+    {   // (LARECOMP_VK_DEVLOST_SELFTEST=<submission>: the device-loss dump once there, the game going on - checks the trace)
+        static uint64_t at = UINT64_MAX;
+        if (at == UINT64_MAX) at = ENV("LARECOMP_VK_DEVLOST_SELFTEST") ? strtoull(ENV("LARECOMP_VK_DEVLOST_SELFTEST"), NULL, 10) : 0;
+        if (at && seq >= at && r == VK_SUCCESS) { at = 0; extern void vk_devlost_dump(void); vk_devlost_dump(); }
+    }
     if (r == VK_TIMEOUT) LOG("[vk] GPU did not finish submission %llu within 10 s (device lost?)\n", (unsigned long long)seq);
     else if (r != VK_SUCCESS) {
         extern void vk_devlost_dump(void);
@@ -227,22 +232,51 @@ static int gps_n;
 static int gp_stat[GP_MAX];  // mark -> its index in gps_qp + 1 (0: none)
 // LARECOMP_VK_DEVLOST_TRACE=1: the last 64 GPU operations, dumped on device loss (with LARECOMP_SYNC_SUBMIT=1 the
 // dump ends with the command list that faulted).
-static char dl_ring[64][128];
-static unsigned dl_n;
+#define DL_N 4096
+static char dl_ring[DL_N][160];
+static _Atomic unsigned dl_n;
 static int dl_on = -1;
-static void dl_note(const char *fmt, ...) {
+bool g_vk_checkpoints;  // (device.c: VK_NV_device_diagnostic_checkpoints enabled)
+// Returns the note's id (1-based; 0 when the trace is off), the marker dl_mark puts in the command list
+static unsigned dl_note(const char *fmt, ...) {
     if (dl_on < 0) dl_on = ENV("LARECOMP_VK_DEVLOST_TRACE") ? atoi(ENV("LARECOMP_VK_DEVLOST_TRACE")) : 0;
-    if (!dl_on) return;
+    if (!dl_on) return 0;
+    unsigned id = atomic_fetch_add(&dl_n, 1) + 1;
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(dl_ring[dl_n++ & 63], sizeof dl_ring[0], fmt, ap);
+    vsnprintf(dl_ring[(id - 1) % DL_N], sizeof dl_ring[0], fmt, ap);
     va_end(ap);
+    return id;
+}
+// (with checkpoints) the GPU records reaching note id here: after a device loss vk_devlost_dump names the last draws it ran
+static void dl_mark(VkCommandBuffer cb, unsigned id) {
+    static PFN_vkCmdSetCheckpointNV set;
+    if (!id || !g_vk_checkpoints) return;
+    if (!set) set = (PFN_vkCmdSetCheckpointNV)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetCheckpointNV");
+    if (set) set(cb, (void *)(uintptr_t)id);
 }
 void vk_dl_note_upload(void *img, uint32_t w, uint32_t h, uint32_t lv) { dl_note("  upload %p %ux%u lv%u", img, w, h, lv); }
 void vk_devlost_dump(void) {
-    if (!dl_on) return;
-    LOG("[vk] last GPU operations before the device loss (oldest first):\n");
-    for (unsigned i = dl_n > 64 ? dl_n - 64 : 0; i < dl_n; i++) LOG("[vk]   %s\n", dl_ring[i & 63]);
+    static int once;
+    if (!dl_on || once++) return;
+    unsigned n = atomic_load(&dl_n);
+    LOG("[vk] last GPU operations recorded before the device loss (oldest first):\n");
+    for (unsigned i = n > 96 ? n - 96 : 0; i < n; i++) LOG("[vk]   #%u %s\n", i + 1, dl_ring[i % DL_N]);
+    if (!g_vk_checkpoints) return;
+    PFN_vkGetQueueCheckpointDataNV get = (PFN_vkGetQueueCheckpointDataNV)vkGetDeviceProcAddr(g_vk.dev, "vkGetQueueCheckpointDataNV");
+    if (!get) return;
+    VkCheckpointDataNV cd[64];
+    uint32_t nc = 0;
+    get(g_vk.queue, &nc, NULL);
+    if (nc > 64) nc = 64;
+    for (uint32_t i = 0; i < nc; i++) cd[i] = (VkCheckpointDataNV){.sType = VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV};
+    get(g_vk.queue, &nc, cd);
+    LOG("[vk] NVIDIA checkpoints - the last marks the GPU reached, per pipeline stage (%u):\n", nc);
+    for (uint32_t i = 0; i < nc; i++) {
+        unsigned id = (unsigned)(uintptr_t)cd[i].pCheckpointMarker;
+        bool known = id && id <= n && n - id < DL_N;
+        LOG("[vk]   stage %#x: #%u %s\n", (unsigned)cd[i].stage, id, known ? dl_ring[(id - 1) % DL_N] : "(no note)");
+    }
 }
 uint64_t vk_frame_counter(void);
 static uint64_t gp_frame;  // the frame counter when the profiled frame began (parity: LARECOMP_EXP_ALT)
@@ -1552,6 +1586,8 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
     if (color) memcpy(pc, color, 16);
     pc[4] = dval;
     vkCmdPushConstants(cb, pc_layout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, pc);
+    dl_mark(cb, dl_note("runtime pass (exec.c:%d)", __LINE__));
+
     vkCmdDraw(cb, 3, 1, 0, 0);
 }
 
@@ -4163,6 +4199,8 @@ static void draw_texture(CmdRec *r) {
                    dst[2] / gw * 2 - 1, up ? 1 - dst[3] / gh * 2 : dst[3] / gh * 2 - 1,
                    src[0] / tw, src[1] / th, src[2] / tw, src[3] / th};
     vkCmdPushConstants(cb, drawtex_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 32, pc);
+    dl_mark(cb, dl_note("runtime pass (exec.c:%d)", __LINE__));
+
     vkCmdDraw(cb, 6, 1, 0, 0);
     if (g_debug_frame)
         LOG("[drawtex] tex %ux%u f%#x (%.1f,%.1f)-(%.1f,%.1f) -> rt %ux%u (%.1f,%.1f)-(%.1f,%.1f) blend %d\n", e->tex->width,
@@ -4458,13 +4496,14 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
                                         ((const uint32_t *)(uintptr_t)st.sbuf[5][k].addr)[0], ((const uint32_t *)(uintptr_t)st.sbuf[5][k].addr)[1]);
         LOG("\n");
     }
-    dl_note("dispatch %ux%ux%u cs %llx gmem %d", gx, gy, gz, (unsigned long long)st.program->stages[5].code_addr, cp->si->uses_gmem);
+    unsigned dl_id = dl_note("dispatch %ux%ux%u cs %llx gmem %d", gx, gy, gz, (unsigned long long)st.program->stages[5].code_addr, cp->si->uses_gmem);
     gpuw_stores(cp->si, st.sbuf[5], 16, "compute shader", st.program->stages[5].code_addr);
     for (int i = 0; i < 16; i++) if (st.sbuf[5][i].addr) gpuw_note(st.sbuf[5][i].addr, st.sbuf[5][i].size);  // (any storage buffer it has bound)
     nfeedback = 0;
     VkDescriptorSet ds = stage_set(&cp->p, cp->p.set_layout[0], 0, 5, cp->si, NULL, NULL, gx, gy, gz, NULL);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, 0, 1, &ds, 0, NULL);
+    dl_mark(cb, dl_id);
     if (g_dispatch_indirect) {
         // The group counts are the GPU's (written by an earlier pass): from the argument words to the dispatch, and into
         // the driver constants the shader reads them from (c0[0x200..0x208], cbuf_info)
@@ -5301,6 +5340,9 @@ static void draw_(CmdRec *r, bool indexed) {
             g_vk.begin_xfb(cb, 0, 0, NULL, NULL);
         }
     }
+    dl_mark(cb, dl_note("draw vs %llx fs %016llx fsaddr %llx %s %u inst %u", (unsigned long long)st.program->stages[0].code_addr,
+                        (unsigned long long)g_cur_fs_hash, (unsigned long long)st.program->stages[1].code_addr,
+                        use_index ? "elements" : "arrays", use_index ? icount : count, inst));
     if (exp_hit && exp_mode == 1) { /* skipped */ }
     else if (g_draw_indirect) {
         gmem_info();
@@ -6120,6 +6162,8 @@ static void post_pass(VkCommandBuffer cb, const char *fs, const VkImageView *src
     vkCmdSetViewport(cb, 0, 1, &vp);
     vkCmdSetScissor(cb, 0, 1, &sc);
     vkCmdPushConstants(cb, post_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, pc);
+    dl_mark(cb, dl_note("runtime pass (exec.c:%d)", __LINE__));
+
     vkCmdDraw(cb, 3, 1, 0, 0);
     vkCmdEndRendering(cb);
 }
@@ -6189,6 +6233,8 @@ void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, floa
     VkViewport vp = {vx, vy, vw, vh, 0, 1};
     vkCmdSetViewport(cb, 0, 1, &vp);
     vkCmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 32, pv);
+    dl_mark(cb, dl_note("runtime pass (exec.c:%d)", __LINE__));
+
     vkCmdDraw(cb, 3, 1, 0, 0);
     VkViewport full = {0, 0, (float)g_vk.sc_extent.width, (float)g_vk.sc_extent.height, 0, 1};
     vkCmdSetViewport(cb, 0, 1, &full);
@@ -6274,6 +6320,8 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
     vkCmdSetScissor(cb, 0, 1, &sc);
     float pv[8] = {renderer_origin_lower_left() && !strstr(path, "window") ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
     vkCmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 32, pv);
+    dl_mark(cb, dl_note("runtime pass (exec.c:%d)", __LINE__));
+
     vkCmdDraw(cb, 3, 1, 0, 0);
     vkCmdEndRendering(cb);
     vk_full_barrier(cb);
