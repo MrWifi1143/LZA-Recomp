@@ -1070,6 +1070,13 @@ static void oq_init(void) {
     const char *e = ENV("LARECOMP_VK_SAMPLES");
     oq_mode = 0, oq_fixed = e ? strtoull(e, NULL, 0) : OQ_VISIBLE;
     if (e) { LOG("[vk] occlusion queries off: every report %llu\n", (unsigned long long)oq_fixed); return; }
+    // RDNA4 (RX 9000) under RADV: occlusion queries hung the GPU at loads (RX 9070 XT, Mesa 26.2: the box draw right after
+    // a query begin; exact or not, both hung; RADV_DEBUG=hang dump: no fault, the shaders trivial). Off there: every
+    // report says visible (more drawn, nothing wrong). LARECOMP_VK_OQ=1 tries them anyway.
+    if (strstr(g_vk.props.deviceName, "RADV GFX12") && !(ENV("LARECOMP_VK_OQ") && atoi(ENV("LARECOMP_VK_OQ")))) {
+        LOG("[vk] occlusion queries off on RDNA4 under RADV (they hung the GPU there): every report says visible\n");
+        return;
+    }
     VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_OCCLUSION,
                                 .queryCount = OQ_SLOTS};
     if (!g_vk.oq_host_reset || vkCreateQueryPool(g_vk.dev, &qi, NULL, &oq_pool) != VK_SUCCESS) {
