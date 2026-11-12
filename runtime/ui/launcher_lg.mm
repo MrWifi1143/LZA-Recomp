@@ -1153,6 +1153,8 @@ extern "C" void launcher_lg_run(const char *root) {
     auto settings_game = [&]() {
         const char *const bg_names[] = {T("Keep playing", "Continuar jogando"), T("Mute", "Silenciar"), T("Pause", "Pausar")};
         ImGui::Combo(T("In background", "Em segundo plano"), &bg_i, bg_names, 3);
+        // (runtime/discord.c: "Playing" with the area and frame rate on the player's Discord profile; applies at once)
+        ImGui::Checkbox(T("Show what you're playing on Discord", "Mostrar o que você está jogando no Discord"), &g_settings.discord_presence);
         const char *const pk_names[] = {T("Off", "Desligado"), T("This PC", "Este PC"), T("Network", "Rede")};
         ImGui::Combo(T("PKHeX Link (LiveHeX, port 6000)", "PKHeX Link (LiveHeX, porta 6000)"), &pk_i, pk_names, 3);
         // (runtime/nvn/glyphs.c: the game's button icons redrawn for the controller in use)

@@ -229,8 +229,11 @@ int main(int argc, char **argv) {
         extern void plugins_load(void);
         plugins_load();  // (runtime/plugin.h: before the Vulkan backend, whose instance / device they may extend)
     }
+    { extern void discord_start(void); discord_start(); }  // (runtime/discord.c: Discord Rich Presence, if Discord runs)
     for (bool title = !skip_launcher || force_launcher;;) {
         if (title) {  // start screen: resolution, fullscreen, anti-aliasing, translation, keys (runtime/ui/launcher_lg.mm)
+            extern void discord_set_screen(int screen);
+            discord_set_screen(0);
             extern void launcher_lg_run(const char *root);
             launcher_lg_run(root);
         } else {  // no start screen: the warm-up, if needed, in the background while the game runs
@@ -273,6 +276,7 @@ int main(int argc, char **argv) {
         }
         { extern void wildbattle_configure(void); wildbattle_configure(); }  // (runtime/hle/wildbattle.c: the wild battles option)
         { extern void plugins_game_start(void); plugins_game_start(); }  // (runtime/plugin.h: the runtime's hooks are set)
+        { extern void discord_set_screen(int screen); discord_set_screen(1); }
         boot(root);
         int kind = ui_run();  // window and input on the main thread; returns when a reboot is requested
         teardown();
