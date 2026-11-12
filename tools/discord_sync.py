@@ -34,10 +34,11 @@ import urllib.request
 
 API = "https://discord.com/api/v10"
 GUILD = os.environ.get("LZARECOMP_DISCORD_GUILD", "1569929395542425721")  # LZ&A Recomp (--guild: a test server)
-FORUMS = ("known-issues", "bug-reports")
+FORUMS = ("known-issues", "bug-reports", "suggestions")
 OPEN_TAGS = ("open",)
-CLOSED_TAGS = ("closed", "fixed", "resolved", "solved")
+CLOSED_TAGS = ("closed", "fixed", "added", "resolved", "solved")
 PENDING_TAGS = ("fixed (unreleased)", "fixed in next release", "pending release")
+WORK_TAGS = ("planned", "in progress")  # (#suggestions: dropped when the release ships it)
 NO_PING = {"422199944418689055"}  # (mr.wifi: owns the known-issues posts - never pinged)
 TRAILER = re.compile(r"^\s*Discord:\s*(.+)$", re.I | re.M)
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -181,13 +182,15 @@ def apply_fixes(fixed, name, url="", dry_run=False, no_reply=False, archive=Fals
     for tid, (forum, post) in resolve(fixed).items():
         closed = tag_id(forum, CLOSED_TAGS)
         drop = {tag_id(forum, OPEN_TAGS), tag_id(forum, PENDING_TAGS)} - {None}
+        drop |= {t["id"] for t in forum.get("available_tags", []) if t["name"].strip().lower() in WORK_TAGS}
         log(f"#{forum['name']}: {post['name']}  <- {', '.join(c for c, _ in fixed[tid])}")
         if closed is None:
             log(f"  (no Closed/Fixed tag in #{forum['name']}: tags left as they are)")
         changed = set_tags(forum, post, closed, drop, dry_run)
         log("  tags -> closed" if changed else "  tags already closed")
         if not no_reply:
-            msg = f"Fixed in **{name}**" + (f": {url}" if url else ".")
+            word = "Added" if forum["name"] == "suggestions" else "Fixed"
+            msg = f"{word} in **{name}**" + (f": {url}" if url else ".")
             op = post.get("owner_id")
             ping = op and op not in NO_PING and op != api("GET", "/users/@me")["id"]
             if ping:
