@@ -235,6 +235,11 @@ int main(int argc, char **argv) {
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
     if (g_prepare) exit(setup_prepare(g_game, g_prepare));
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--add-to-steam")) {  // (the start screen's Add to Steam, without a window: runtime/steam_shortcut.c)
+            extern int steam_shortcut_add_now(void);
+            exit(steam_shortcut_add_now());
+        }
     if (g_oodle_server || g_extract_shaders || g_build_trees) {  // (Legends Studio's decoder / the warm-up's extraction / a mod's trees, runtime/oodle_server.c: no window)
         boot(root);
         for (;;) SDL_Delay(1000);

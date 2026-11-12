@@ -46,6 +46,7 @@ mkdir -p "$D/gamelib-src"
 cp runtime/{cpu.h,simd.h,simd_fp.h,gamelib.h} tools/gamelib_entry.c runtime/hle/hle_symbols.txt "$D/gamelib-src/"
 for z in data/pgo/*.clang21.profdata.zst; do [ -f "$z" ] && zstd -q -d -f "$z" -o "$D/gamelib-src/pgo.profdata"; done  # (zig is clang 22: Makefile PGO)
 cp docs/icon/icon_1024.png "$D/icon.png"
+mkdir -p "$D/steam" && cp docs/icon/steam/*.png "$D/steam/"  # (Add to Steam's library artwork: runtime/steam_shortcut.c)
 cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$D/"
 # Legends Lua (contrib/legendslua): shipped, off until switched on in the start screen's Mods page
 make -s PLATFORM=windows B=build/win CC=$R/tools/windows/zcc DEPS=$W/deps steamrelay legendslua

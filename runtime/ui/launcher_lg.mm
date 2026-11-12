@@ -1142,6 +1142,22 @@ extern "C" void launcher_lg_run(const char *root) {
         ImGui::SameLine();
         if (ImGui::Button(T("Open the save folder", "Abrir a pasta de saves"))) open_folder("save");
         if (save_msg[0]) ImGui::TextDisabled("%s", save_msg);
+#if !defined(__APPLE__)
+        {   // Add to Steam (runtime/steam_shortcut.c): a non-Steam shortcut with the library artwork
+            extern void steam_shortcut_add(void);
+            extern const char *steam_shortcut_status(void);
+            extern bool steam_shortcut_busy(void);
+            ImGui::Spacing();
+            ImGui::SeparatorText("Steam");
+            ImGui::BeginDisabled(steam_shortcut_busy());
+            if (ImGui::Button(T("Add to Steam", "Adicionar à Steam"))) steam_shortcut_add();
+            ImGui::EndDisabled();
+            const char *st = steam_shortcut_status();
+            if (st[0]) ImGui::SameLine(), ImGui::TextDisabled("%s", st);
+            else ImGui::SameLine(), ImGui::TextDisabled("%s", T("Puts the game in your Steam library, with its artwork.",
+                                                                "Coloca o jogo na sua biblioteca da Steam, com a arte."));
+        }
+#endif
         if (ImGui::BeginPopupModal("##delsave", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
             ImGui::Text("%s", T("Delete all save data?", "Apagar todos os dados salvos?"));
             ImGui::Spacing();
