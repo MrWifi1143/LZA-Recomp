@@ -183,10 +183,12 @@ static void create_device(void) {
             LOG("[vk] warning: the guest heap is GPU memory but the queue can't bind it: shader global memory reads return zero\n");
         // the host import in 64 MB chunks as they're used (gpuheap.c decided at boot: integrated GPUs), bound into a
         // sparse buffer (exec.c) - if this device and queue can; otherwise every chunk backed now and imported whole
-        extern bool gpuheap_lazy_host(void);
+        // (the chunk table, gpuheap_chunk_table: no sparse buffer, each chunk a buffer of its own - any queue)
+        extern bool gpuheap_lazy_host(void), gpuheap_chunk_table(void);
         extern void gpuheap_host_cancel(void);
         if (!g_vk.gpuheap && gpuheap_lazy_host()) {
-            g_vk.lazyhost = g_vk.host_import && g_vk.qfam < nq && (qp[g_vk.qfam].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT);
+            g_vk.lazyhost = g_vk.host_import &&
+                            (gpuheap_chunk_table() || (g_vk.qfam < nq && (qp[g_vk.qfam].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT)));
             if (!g_vk.lazyhost) LOG("[vk] guest heap: this queue can't bind sparse memory\n"), gpuheap_host_cancel();
         }
     }
@@ -340,13 +342,14 @@ static void create_device(void) {
     b->robustBufferAccess = h->robustBufferAccess;  // guest shaders index cbufs freely: keep OOB reads harmless
     if (ENV("LARECOMP_NO_ROBUST")) b->robustBufferAccess = VK_FALSE;  // (research: what the bounds checks cost)
     b->shaderClipDistance = h->shaderClipDistance;
-    if (g_vk.lazyhost && !(h->sparseBinding && h->sparseResidencyBuffer)) {  // (a plugin's device: not the one gpuheap.c looked at)
+    extern bool g_maxwell_gmem_table;  // (the chunk table needs no sparse buffer)
+    if (g_vk.lazyhost && !g_maxwell_gmem_table && !(h->sparseBinding && h->sparseResidencyBuffer)) {  // (a plugin's device: not the one gpuheap.c looked at)
         extern void gpuheap_host_cancel(void);
         LOG("[vk] guest heap: no sparse buffers on this device\n");
         gpuheap_host_cancel();
         g_vk.lazyhost = false;
     }
-    b->sparseBinding = b->sparseResidencyBuffer = g_vk.gpuheap || g_vk.lazyhost;  // (exec.c: the heap window's sparse buffer)
+    b->sparseBinding = b->sparseResidencyBuffer = g_vk.gpuheap || (g_vk.lazyhost && !g_maxwell_gmem_table);  // (exec.c: the heap window's sparse buffer)
     if (!h->shaderInt64) LOG("[vk] warning: no shaderInt64 (64-bit address math in shaders)\n");
     if (!have12.uniformAndStorageBuffer8BitAccess) LOG("[vk] warning: no 8-bit uniform buffer access\n");
     float prio = 1.0f;

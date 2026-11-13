@@ -568,6 +568,11 @@ static void extract_packed_shaders(void) {
 
 static void *run(void *arg) {
     (void)arg;
+    // The guest heap's import decided first (gpuheap.c, normally at the game's first SetHeapSize): it picks how the
+    // translations reach global memory (g_maxwell_gmem_table: the chunk table) and with it their cache folder, and the
+    // warm-up translates before the game - its work would land in the other folder
+    extern bool gpuheap_lazy_host(void);
+    gpuheap_lazy_host();
     if (g_background) lower_priority();
     uint64_t t0 = plat_now_ns();
     set_init(&g_set, 1 << 17, 1 << 18);
