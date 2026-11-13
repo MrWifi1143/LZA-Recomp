@@ -191,10 +191,13 @@ static int ver_cmp(const char *a, const char *b) {
     }
 }
 
+const char *update_current_version(void);
 static const char *current_version(void) {
     const char *as = getenv("LARECOMP_UPDATE_AS");
     return as && *as ? as : RT_APP_VERSION;
 }
+
+const char *update_current_version(void) { return current_version(); }  // (the launcher's version text: LARECOMP_UPDATE_AS too)
 
 static void tmp_dir(char *out, size_t n) {
     snprintf(out, n, "%s/cache", rt_data_root());
