@@ -25,6 +25,7 @@ extern "C" {
 #define RT_APP_VERSION "1.2.1"             // the release (the GitHub release: LegendsA-v<version>)
 #define RT_DISCORD_APP_ID "1570331890584395837"                // Discord Rich Presence: the Discord application (runtime/discord.c; "" off)
 #define RT_SHOT_PREFIX "PLA"                   // screenshots' file names (F12)
+#define RT_UPDATE_REPO "MrWifi1143/PLA-Recomp"     // updates: the releases of this GitHub repository (runtime/update.c)
 
 void rt_paths_init(void);         // first thing in main(), after plat_init
 const char *rt_data_root(void);   // absolute

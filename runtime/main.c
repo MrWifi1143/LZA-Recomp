@@ -240,6 +240,10 @@ void rt_restart_process(int to_launcher) {
     if (sl > 0) self[sl] = 0;                                        // would name the new process "exe")
     else snprintf(self, sizeof self, "%s", g_argv[0]);
     av[0] = g_argv[0];
+    // (an AppImage: the AppImage file again - this program's path is inside its mount, gone once this one exits, and
+    // an update (runtime/update.c) has put the new version in the AppImage's place)
+    const char *appimage = getenv("APPIMAGE");
+    if (appimage && *appimage) snprintf(self, sizeof self, "%s", appimage), av[0] = self;
     for (int i = 0; i < n; i++) av[i + 1] = (char *)args[i];
     av[n + 1] = NULL;
     pid_t pid = fork();

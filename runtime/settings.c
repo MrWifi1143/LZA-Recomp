@@ -29,6 +29,7 @@ static const char *settings_file(void) {
     .movie_audio = true,                                                    \
     .show_fps = false,                                                      \
     .discord_presence = true,                                               \
+    .check_updates = true,                                               \
     .render_thread = true,                                                  \
     .vertex_read = VREAD_AUTO,                                              \
     .upscaler = UPSCALE_SHARP,                                              \
@@ -68,6 +69,7 @@ static void parse_line(const char *line) {
     else if (!strcmp(key, "movie_audio")) g_settings.movie_audio = atoi(val) != 0;
     else if (!strcmp(key, "show_fps")) g_settings.show_fps = atoi(val) != 0;
     else if (!strcmp(key, "discord_button")) g_settings.hide_discord = atoi(val) == 0;
+    else if (!strcmp(key, "check_updates")) g_settings.check_updates = atoi(val) != 0;
     else if (!strcmp(key, "discord_presence")) g_settings.discord_presence = atoi(val) != 0;
     else if (!strcmp(key, "skip_start_screen")) g_settings.skip_start = atoi(val) != 0;
     else if (!strcmp(key, "mouse_camera")) g_settings.mouse_camera = atoi(val) != 0;
@@ -159,6 +161,7 @@ void settings_save(void) {
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
     fprintf(f, "discord_button = %d\n", !g_settings.hide_discord);
     fprintf(f, "discord_presence = %d\n", g_settings.discord_presence);
+    fprintf(f, "check_updates = %d\n", g_settings.check_updates);
     fprintf(f, "skip_start_screen = %d\n", g_settings.skip_start);
     fprintf(f, "experimental = %d\n", g_settings.experimental);
     fprintf(f, "mouse_camera = %d\n", g_settings.mouse_camera);

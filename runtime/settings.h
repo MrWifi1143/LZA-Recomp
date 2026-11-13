@@ -42,6 +42,7 @@ typedef struct {
     bool movie_audio;
     bool show_fps;
     bool hide_discord;   // the launcher's Discord button hidden (right-click on it): larecomp.ini discord_button = 0
+    bool check_updates;  // at start, a look at the latest release; the launcher offers it (runtime/update.c; larecomp.ini check_updates)
     bool discord_presence;  // Discord Rich Presence: "Playing" with the area and frame rate on the player's profile (runtime/discord.c)
     bool skip_start;     // the start screen goes straight to the game once it's ready (Shift held at start: shown)
     bool experimental;   // "Experimental settings" (start screen): frame rates above 60 offered - 120, 144, Unlimited - in the

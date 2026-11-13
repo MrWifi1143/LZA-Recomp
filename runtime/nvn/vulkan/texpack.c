@@ -26,9 +26,7 @@
 #include "../../rt.h"
 #include "../../mods.h"
 
-#define MINIZ_NO_STDIO
-#define MINIZ_NO_ARCHIVE_APIS
-#define MINIZ_NO_TIME
+#define MINIZ_NO_TIME  // (the zip reader too: runtime/update.c unpacks the Windows release with it, through miniz.h)
 #if defined(__clang__) || defined(__GNUC__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wall"
