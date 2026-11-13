@@ -785,8 +785,33 @@ static uint64_t real_step(uint64_t real) {
     return dt > hi ? hi : dt;
 }
 
+// Menus at the game's own 30 fps. The game's menus repeat a held direction after a count of frames (9 at 30 fps: 0.3 s,
+// then every 4-5), so above 30 fps a quick tap already repeated: at 144 fps an 83 ms tap moved the satchel's cursor
+// two rows (measured 2026-11-12: 30 fps, taps of 33-167 ms = one row; 144 fps, 83 ms and longer = two). While a menu
+// with a cursor is up and the player's camera has stopped (a menu that pauses the world: the satchel, the Pokedex,
+// the main menu, a talk's choices - not the battle's or the field's own), the game runs at 30 (legends_set_fps, as the
+// Settings screen does) and goes back to the chosen rate once no such menu has been up for a few frames.
+// LARECOMP_MENU_30=0: off.
+static void pla_menu30(void) {
+    static int on = -1, in_menu, frames;
+    if (on < 0) on = !getenv("LARECOMP_MENU_30") || atoi(getenv("LARECOMP_MENU_30")) != 0;
+    if (!on || !g_pla60_build) return;
+    int menu_cursor_items(void);
+    extern uint64_t g_field_camera_frame, renderer_game_frame(void);
+    uint64_t f = renderer_game_frame();
+    bool menu = g_settings.fps > 30 && menu_cursor_items() > 0 && f - g_field_camera_frame > 8;
+    if (menu != (bool)in_menu) frames++;
+    else frames = 0;
+    if (frames >= (in_menu ? 10 : 3)) {  // (in quickly; out once it's really gone - a menu redrawn every other frame)
+        in_menu = menu, frames = 0;
+        legends_set_fps(in_menu ? 30 : g_settings.fps);
+        LOG("[fps60] %s\n", in_menu ? "a menu: 30 fps while it's up" : "menu closed");
+    }
+}
+
 // each present: the table entry, once the game is loaded (read-only data: the page made writable first)
 void pla60_present(void) {
+    pla_menu30();
     { extern void fscan_present(uint64_t frame); extern uint64_t renderer_present_count(void); fscan_present(renderer_present_count()); }
     { extern void pla_options_present(void); pla_options_present(); }
     { void pla_step_stats(void); pla_step_stats(); }
