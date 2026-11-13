@@ -97,7 +97,7 @@ static int free_hook(Cpu *c, uint64_t addr) {
 // The graphics setup (0x70029d6a64) gets the three GPU memory pools' sizes from 0x700277d798 (config +0x28: 300 MB,
 // +0x30: 250 MB, +0x38: 40 MB - command memory). Our command records are several times NVN's own, so 40 MB ran dry in
 // busy scenes (after the Commander / the photo: the crash above). LARECOMP_PLA_CMDMEM_MB overrides (40 = the game's).
-static uint32_t g_cmdmem_mb = 280;  // (7x: what the heap window has room for - 256 MB above the 2.75 GB block)
+static uint32_t g_cmdmem_mb = 280;  // (7x; the pools come out of the game's StandardAllocator block, hle/heaps.c)
 // The 300 MB pool (+0x28) holds the field's buffers - the grass patches among them: a bigger grass block (Draw
 // Distance, hle/pla_drawdist.c) filled it ("pool FULL" with LARECOMP_PLA_CMDPOOL=1, then the crash above at grass block
 // 16). 800 MB by default (LARECOMP_PLA_GFXMEM_MB, 300 = the game's); the heap window grew 512 MB for it (rt.h HEAP_MAX).

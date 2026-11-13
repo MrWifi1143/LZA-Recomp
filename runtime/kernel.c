@@ -870,6 +870,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     case 0x01: {  // SetHeapSize
         uint64_t size = x[1];
         if (size > HEAP_MAX) { x[0] = R_OUT_OF_RESOURCE; break; }
+        if (size != heap_size) LOG("[kernel] SetHeapSize %#llx\n", (unsigned long long)size);
         heap_size = size;
         if (HEAP_BASE + size > STDHEAP_BASE) {
             extern uint64_t g_stdheap_used;

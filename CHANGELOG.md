@@ -20,6 +20,10 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
   settles on the next steady one (144 -> 72 -> 48, 120 -> 60, Unlimited 180 / 120 / 90 / 72 ...) and goes back up when
   it can, instead of mixing one- and two-period steps on uneven frames. Fixed timing is unchanged. Reported on Discord
   (RTX 4060 laptop, 144 Hz).
+- Heavy mod setups (draw distance + HD texture + more Pokemon mods together) no longer crash when the game's memory
+  runs out (StandardAllocator FAILED in the log, often right as the field loads): the game gets 190 MB more of its
+  memory block, and once that is full it keeps going in extra memory beyond it instead of crashing (the log says
+  "the game's memory block ... is full"). Reported on an RTX 3070 Ti.
 
 ## 2026-11-12: LegendsA-v1.2.1
 

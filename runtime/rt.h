@@ -45,7 +45,11 @@ int rt_log(const char *fmt, ...);
 // The game's virtual-memory StandardAllocator (PLA: Initialize(NULL, 32 GB)) gets this fixed block of the heap window
 // instead (runtime/hle/heaps.c): shader global memory (LDG/STG) reaches the heap window only (imported as a GPU buffer,
 // pinned), and the allocator spreads its allocations over its whole reservation. Above the heap SetHeapSize gives.
-#define STDHEAP_BASE (HEAP_BASE + 0x0010000000ull)
+// (PLA's SetHeapSize asks 16 MB: 64 MB leaves it room)
+#define STDHEAP_BASE (HEAP_BASE + 0x0004000000ull)
+// Past the window, up to the alias region: CPU-only memory the block spills into once it is full (runtime/hle/heaps.c)
+#define STDHEAP_SPILL_BASE (HEAP_BASE + HEAP_MAX)
+#define STDHEAP_SPILL_SIZE (ALIAS_BASE - STDHEAP_SPILL_BASE)
 
 // Write tracking for heap pages host code keeps copies of (runtime/pagewatch.c)
 bool pagewatch_supported(void);
@@ -55,7 +59,8 @@ uint32_t pagewatch_now(void);  // the write clock: take it before pagewatch_prot
 bool pagewatch_written_since(uint64_t addr, uint64_t n, uint32_t since);
 void pagewatch_protect(uint64_t addr, uint64_t n);
 void pagewatch_reset(void);
-#define STDHEAP_SIZE 0x00B0000000ull     // 2.75 GB
+#define STDHEAP_SIZE (HEAP_BASE + HEAP_MAX - STDHEAP_BASE)  // the rest of the window: 3.69 GB (was a Switch-like 2.75 GB
+                                                            // plus hle/pla_cmdpool.c's pools, capped at 3.5 GB)
 
 // ---- loader.c
 typedef struct Module {
