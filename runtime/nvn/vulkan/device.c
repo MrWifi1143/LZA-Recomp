@@ -42,6 +42,11 @@ static bool headless(void) {
     return g_headless;
 }
 
+// Held while the Vulkan loader loads and sets up the driver: the window and instance here (main thread) and gpuheap.c's
+// probe instance (the game's thread, at its first SetHeapSize) ran at the same moment, and NVIDIA's libGLX_nvidia isn't
+// safe to start from two threads - a null call inside the loader at start (most runs on some rented RTX 50 boxes)
+pthread_mutex_t g_vk_loader_lock = PTHREAD_MUTEX_INITIALIZER;
+
 // LARECOMP_VK_VALIDATION=1: Khronos validation layer (MSYS2 package vulkan-validation-layers)
 static void create_instance(void) {
     Uint32 n_sdl = 0;
@@ -1424,6 +1429,11 @@ void ui_window_init(void) {
     else if (g_hint_w > 0) win_w = g_hint_w, win_h = g_hint_h;
     SDL_WindowFlags wflags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (ENV("LARECOMP_HIDDEN")) wflags |= SDL_WINDOW_HIDDEN;
+    {   // gpuheap.c decides first (it takes the lock itself; create_device asks it below with the lock held)
+        extern bool gpuheap_on(void);
+        (void)gpuheap_on();
+    }
+    pthread_mutex_lock(&g_vk_loader_lock);
     window = SDL_CreateWindow(RT_APP_NAME, win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     rt_window_icon(window);
@@ -1433,6 +1443,7 @@ void ui_window_init(void) {
     if (!headless() && !SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
     pick_device();
     create_device();
+    pthread_mutex_unlock(&g_vk_loader_lock);
     create_swapchain();
     vk_exec_init();
     vk_shaders_init();

@@ -276,7 +276,12 @@ off:
 
 static int heap_state(void) {
     pthread_mutex_lock(&H.lock);
-    if (H.state == UNDECIDED) decide();
+    if (H.state == UNDECIDED) {
+        extern pthread_mutex_t g_vk_loader_lock;  // (device.c: never two threads starting the Vulkan driver at once)
+        pthread_mutex_lock(&g_vk_loader_lock);
+        decide();
+        pthread_mutex_unlock(&g_vk_loader_lock);
+    }
     int st = H.state;
     pthread_mutex_unlock(&H.lock);
     return st;
