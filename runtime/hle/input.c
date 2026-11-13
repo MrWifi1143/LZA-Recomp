@@ -981,6 +981,12 @@ static void fill_state(Cpu *c) {
     if (id != npad_id_used(NULL)) return;  // only the one controller (npad_id_used) is connected
     extern uint64_t g_watch_lo, g_watch_hi;
     if (!g_pad_obj) g_pad_obj = c->x[1] - 8;
+    if (!g_watch_lo && getenv("LARECOMP_WATCH_ABS")) {  // (research: <lo>,<hi> guest addresses, hex - who writes there)
+        unsigned long long lo = 0, hi = 0;
+        sscanf(getenv("LARECOMP_WATCH_ABS"), "%llx,%llx", &lo, &hi);
+        g_watch_lo = lo, g_watch_hi = hi;
+        LOG("[input] watching %llx..%llx\n", lo, hi);
+    }
     if (!g_watch_lo && getenv("LARECOMP_WATCH_PAD")) {
         unsigned lo = 0x98 + 0x10, hi = 0x98 + 0x48;  // offsets from the controller manager
         sscanf(getenv("LARECOMP_WATCH_PAD"), "%x,%x", &lo, &hi);
