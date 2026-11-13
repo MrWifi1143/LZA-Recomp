@@ -124,6 +124,13 @@ static void require_cpu(void) {}
 #endif
 
 void plat_init(void) {
+    // No core file: the game maps several GB of guest memory, and systemd-coredump writing one (11.8 GB, 2026-11-12) filled
+    // the root partition before giving up - the crash handler's backtrace in lasrecomp.log is what a report needs.
+    // LARECOMP_CORE=1: keep the system's limit.
+    if (!getenv("LARECOMP_CORE") || atoi(getenv("LARECOMP_CORE")) == 0) {
+        struct rlimit rl = {0, 0};
+        setrlimit(RLIMIT_CORE, &rl);
+    }
     log_to_file_without_terminal();
     require_cpu();
     // The drivers' shader disk caches hold what the shader warm-up builds (runtime/nvn/vulkan/warmup.c: thousands of
