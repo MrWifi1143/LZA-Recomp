@@ -377,6 +377,26 @@ static void dl_mark(VkCommandBuffer cb, unsigned id) {
     if (set) set(cb, (void *)(uintptr_t)id);
 }
 void vk_dl_note_upload(void *img, uint32_t w, uint32_t h, uint32_t lv) { dl_note("  upload %p %ux%u lv%u", img, w, h, lv); }
+// (LARECOMP_VK_DEVLOST_TRACE: the GLSL of every translated program by its fragment hash - the dump prints the code of
+// the programs that were on the GPU when it stopped, so one crash says which code the driver choked on)
+#define DL_PROGS 8192
+static struct { uint64_t fs; const char *vs_glsl, *fs_glsl; } dl_progs[DL_PROGS];
+static _Atomic unsigned dl_nprogs;
+void vk_dl_note_program(uint64_t fs_hash, const char *vs, const char *fs) {
+    unsigned i = atomic_fetch_add(&dl_nprogs, 1);
+    if (i < DL_PROGS) dl_progs[i].fs = fs_hash, dl_progs[i].vs_glsl = vs, dl_progs[i].fs_glsl = fs;
+}
+static void dl_print_program(uint64_t fs) {
+    unsigned n = atomic_load(&dl_nprogs);
+    if (n > DL_PROGS) n = DL_PROGS;
+    for (unsigned i = n; i-- > 0;)
+        if (dl_progs[i].fs == fs) {
+            LOG("[vk] ---- program of fs %016llx: vertex GLSL ----\n%s\n[vk] ---- fragment GLSL ----\n%s\n[vk] ---- end of program ----\n",
+                (unsigned long long)fs, dl_progs[i].vs_glsl ? dl_progs[i].vs_glsl : "(none)", dl_progs[i].fs_glsl ? dl_progs[i].fs_glsl : "(none)");
+            return;
+        }
+    LOG("[vk] (no GLSL kept for fs %016llx)\n", (unsigned long long)fs);
+}
 void vk_devlost_dump(void) {
     static int once;
     if (!dl_on || once++) return;
@@ -413,6 +433,18 @@ void vk_devlost_dump(void) {
                 LOG("[vk]      indirect args at %llx: recorded %u %u %u %u %u, now %u %u %u %u %u\n", (unsigned long long)a, r[0], r[1], r[2],
                     r[3], r[4], w[0], w[1], w[2], w[3], w[4]);
             }
+        }
+        uint64_t seen[32]; int ns = 0;  // (and the code of each program among them, once)
+        for (unsigned id = hi + 2 < n ? hi + 2 : n; id >= lo && ns < 32; id--) {
+            const char *f = strstr(dl_ring[(id - 1) % DL_N], " fs ");
+            if (!strstr(dl_ring[(id - 1) % DL_N], "draw ") || !f) continue;
+            uint64_t h = strtoull(f + 4, NULL, 16);
+            bool dup = false;
+            for (int k = 0; k < ns; k++) dup |= seen[k] == h;
+            if (dup) continue;
+            seen[ns++] = h;
+            dl_print_program(h);
+            if (id == 0) break;
         }
     }
 }
@@ -2179,6 +2211,11 @@ static void translate_program(void *arg) {
     }
     if (p->vkey.xfb_count[0]) xfb_rewrite(p);
     p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
+    if (dl_on < 0) dl_on = ENV("LARECOMP_VK_DEVLOST_TRACE") ? atoi(ENV("LARECOMP_VK_DEVLOST_TRACE")) : 0;
+    if (dl_on > 0 && p->code[1]) {  // (LARECOMP_VK_DEVLOST_TRACE: the GLSL kept for the dump)
+        extern uint64_t vk_fs_hash(uint64_t fs);
+        vk_dl_note_program(vk_fs_hash(p->code[1]), p->vi->msl, p->fi ? p->fi->msl : NULL);
+    }
     save_glsl(p->vi->msl, p->code[0], "vs");
     save_glsl(p->fi->msl, p->code[1], "fs");
     if (ENV("LARECOMP_SAVE_MSL") && p->code[1]) {  // (and by the stable hash: build/glsl/h<hash>_fs.glsl, what overrides match)
