@@ -32,13 +32,23 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBi
     return VK_FALSE;
 }
 
+// LARECOMP_HEADLESS=1 (tests on a machine without a display - a rented GPU): no window surface or swapchain; the
+// window's images are plain images the frames are drawn into and never shown (SDL's offscreen video driver for the
+// window: it needs VK_EXT_headless_surface, which NVIDIA doesn't have - so no surface at all). Captures of the game
+// image (LARECOMP_SHOT_AT) and of the window image (LARECOMP_WINDOW_SHOT(S)) work as with a window.
+static int g_headless = -1;
+static bool headless(void) {
+    if (g_headless < 0) g_headless = ENV("LARECOMP_HEADLESS") && atoi(ENV("LARECOMP_HEADLESS")) != 0;
+    return g_headless;
+}
+
 // LARECOMP_VK_VALIDATION=1: Khronos validation layer (MSYS2 package vulkan-validation-layers)
 static void create_instance(void) {
     Uint32 n_sdl = 0;
     const char *const *sdl_ext = SDL_Vulkan_GetInstanceExtensions(&n_sdl);
     const char *ext[48];
     uint32_t n_ext = 0;
-    for (Uint32 i = 0; i < n_sdl && n_ext < 14; i++) ext[n_ext++] = sdl_ext[i];
+    for (Uint32 i = 0; i < n_sdl && n_ext < 14 && !headless(); i++) ext[n_ext++] = sdl_ext[i];
     {   // plugins' extensions (the VR mod: OpenXR's), once each
         const char *pe[24];
         uint32_t np = plugins_vk_instance_extensions(pe, 24);
@@ -116,7 +126,8 @@ static void pick_device(void) {
     g_vk.qfam = UINT32_MAX;
     for (uint32_t i = 0; i < nq; i++) {
         VkBool32 present = VK_FALSE;
-        vkGetPhysicalDeviceSurfaceSupportKHR(g_vk.phys, i, g_vk.surface, &present);
+        if (headless()) present = VK_TRUE;
+        else vkGetPhysicalDeviceSurfaceSupportKHR(g_vk.phys, i, g_vk.surface, &present);
         if ((qp[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && (qp[i].queueFlags & VK_QUEUE_COMPUTE_BIT) && present) { g_vk.qfam = i; break; }
     }
     free(qp);
@@ -406,7 +417,43 @@ static VkPresentModeKHR present_mode(void) {
     return got;
 }
 
+static void create_headless_images(void) {
+    int w, h;
+    SDL_GetWindowSizeInPixels(window, &w, &h);
+    if (w <= 0 || h <= 0) w = 1920, h = 1080;
+    static VkDeviceMemory mem[3];
+    for (uint32_t i = 0; i < g_vk.sc_count; i++) {
+        vkDestroyImageView(g_vk.dev, g_vk.sc_views[i], NULL);
+        vkDestroyImage(g_vk.dev, g_vk.sc_images[i], NULL);
+        vkFreeMemory(g_vk.dev, mem[i], NULL);
+    }
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
+    g_vk.sc_count = 3, g_vk.sc_format = VK_FORMAT_B8G8R8A8_UNORM, g_vk.sc_extent = (VkExtent2D){(uint32_t)w, (uint32_t)h};
+    for (uint32_t i = 0; i < 3; i++) {
+        VkImageCreateInfo ic = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = g_vk.sc_format,
+                                .extent = {(uint32_t)w, (uint32_t)h, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+                                .tiling = VK_IMAGE_TILING_OPTIMAL,
+                                .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
+        VK_CHECK(vkCreateImage(g_vk.dev, &ic, NULL, &g_vk.sc_images[i]));
+        VkMemoryRequirements mr;
+        vkGetImageMemoryRequirements(g_vk.dev, g_vk.sc_images[i], &mr);
+        uint32_t t = 0;
+        while (t < mp.memoryTypeCount && !((mr.memoryTypeBits >> t) & 1 && (mp.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))) t++;
+        VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = t};
+        VK_CHECK(vkAllocateMemory(g_vk.dev, &ai, NULL, &mem[i]));
+        VK_CHECK(vkBindImageMemory(g_vk.dev, g_vk.sc_images[i], mem[i], 0));
+        VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = g_vk.sc_images[i],
+                                    .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = g_vk.sc_format,
+                                    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        VK_CHECK(vkCreateImageView(g_vk.dev, &vi, NULL, &g_vk.sc_views[i]));
+    }
+    g_vk.swapchain = (VkSwapchainKHR)(uintptr_t)1;  // (never given to Vulkan: "there are window images")
+    LOG("[vk] headless: %dx%d images instead of a window\n", w, h);
+}
+
 static void create_swapchain(void) {
+    if (headless()) { create_headless_images(); return; }
     VkSurfaceCapabilitiesKHR caps;
     VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_vk.phys, g_vk.surface, &caps));
     int w, h;
@@ -501,7 +548,8 @@ bool vk_frame_begin(const float clear[4]) {
     slot = (slot + 1) % FRAMES;
     if (!acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
     vk_wait_seq(slot_seq[slot]);
-    VkResult r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
+    if (headless()) cur_frame.image = (cur_frame.image + 1) % g_vk.sc_count;  // (no acquire: the next plain image)
+    VkResult r = headless() ? VK_SUCCESS : vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
         recreate_swapchain();
         r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
@@ -512,7 +560,7 @@ bool vk_frame_begin(const float clear[4]) {
         return false;
     }
     acquire_fails = 0;
-    cur_frame.acquired = acquire_sem[slot];
+    cur_frame.acquired = headless() ? VK_NULL_HANDLE : acquire_sem[slot];
     slot_seq[slot] = vk_pending_seq();
     VkCommandBuffer cb = vk_cmd();
     image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -579,16 +627,21 @@ void vk_frame_end(const char *shot_path) {
         plugins_window_frame(cb, wi, g_vk.sc_format, g_vk.sc_extent.width, g_vk.sc_extent.height);
         image_barrier(cb, wi, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     }
-    image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                  headless() ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     uint32_t img = cur_frame.image;
     if (!done_sem[img]) done_sem[img] = binary_semaphore();
     uint64_t seq = vk_pending_seq();
-    vk_submit_extra(cur_frame.acquired, done_sem[img], VK_NULL_HANDLE);
-    VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &done_sem[img],
-                           .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
-    vk_queue_lock();
-    VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
-    vk_queue_unlock();
+    VkResult r = VK_SUCCESS;
+    if (headless()) vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE);  // (nothing shown)
+    else {
+        vk_submit_extra(cur_frame.acquired, done_sem[img], VK_NULL_HANDLE);
+        VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &done_sem[img],
+                               .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
+        vk_queue_lock();
+        r = vkQueuePresentKHR(g_vk.queue, &pi);
+        vk_queue_unlock();
+    }
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) recreate_swapchain();
     cur_frame.ok = false;
     if (shot_path) {
@@ -1346,6 +1399,7 @@ void ui_window_init(void) {
     atexit(quick_exit_handler);
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     settings_load();
+    if (headless()) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) FATAL("SDL_Init: %s\n", SDL_GetError());
     input_load_user_mappings();
     int win_w = 1280, win_h = 720;
@@ -1359,7 +1413,7 @@ void ui_window_init(void) {
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
     if (g_settings.fullscreen && !g_hint_w && !ENV("LARECOMP_WINDOW") && !ENV("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
     create_instance();
-    if (!SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
+    if (!headless() && !SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
     pick_device();
     create_device();
     create_swapchain();
