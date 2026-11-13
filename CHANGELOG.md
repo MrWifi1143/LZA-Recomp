@@ -11,6 +11,9 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 - Discord Rich Presence: "Playing PL:A Recomp", the area you are in (Jubilife Village, the Obsidian Fieldlands ...),
   resolution and frame rate, time played. Needs Discord running and Activity Privacy sharing on; a launcher checkbox
   ("Show what you're playing on Discord") turns it off.
+- Sharper picture at resolutions that aren't a whole multiple of 1080 lines (a native 1440p screen, 1200, 1600,
+  1440 on a 1080p screen): the game's lighting pass read its scene buffers on the 1080 grid and stretched the result,
+  so 1440 looked blockier and softer than 1080 (blocky leaves, stair-stepped edges). Reported on a 1440p monitor.
 
 ## 2026-11-12: LegendsA-v1.2.1
 
