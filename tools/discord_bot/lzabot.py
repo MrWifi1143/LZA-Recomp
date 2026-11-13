@@ -10,9 +10,12 @@ tools/discord_fixes.json at that tag) get their posts closed and a "Fixed in <ga
     python3 lzabot.py --once -n    one check, dry run, no Discord connection (for testing)
     python3 lzabot.py --promote <post id> [--title ..] [--game ..] [--note ..] [-n]   what /known-issue does
     python3 lzabot.py --announce <tag> [-n]   post that release in #releases now
+    python3 lzabot.py --updates-button [-n]   post the "Get update pings" button message in #releases (once)
 
 Each new full release (not a release candidate) also gets one short post in #releases: the version as a link to the
-release page, the first few highlights of its notes (New / Fixed / Improved) and whether it is a hotfix.
+release page, the first few highlights of its notes (New / Fixed / Improved) and whether it is a hotfix. The post
+pings the Updates role; members give themselves that role (or take it off) with the button in #releases or /updates.
+The bot needs Manage Roles (its own role above Updates) and, in #releases, Mention @everyone/All Roles.
 
 /known-issue (moderators: Manage Threads), used inside a post of another forum (#bug-reports ...): opens a
 #known-issues post with the report's title (or `title`), a link back, the reporter and a quote of the report, tagged
@@ -47,6 +50,43 @@ GAME_TAGS = ("Arceus", "Z-A", "LegendsVR", "Legends Studio")
 POLL_S = 300
 ANNOUNCE = "releases"  # each full release (no release candidates) gets one short post here (announce)
 NAMES = {"LegendsA": "PL:A Recomp", "LegendsZA": "PL:Z-A Recomp"}
+UPDATES = "updates"  # the role pinged by the #releases post; members toggle it (button / /updates)
+UPDATES_BUTTON = "lzabot:updates"  # custom_id of the persistent button
+
+
+def updates_role():
+    """The Updates role's id, or None."""
+    return next((r["id"] for r in ds.api("GET", f"/guilds/{ds.GUILD}/roles")
+                 if r["name"].strip().lower() == UPDATES), None)
+
+
+def toggle_updates(user_id, has):
+    """Give or take the Updates role: returns the text for the member."""
+    rid = updates_role()
+    if not rid:
+        return "There's no Updates role yet - ask a moderator."
+    had = has(rid)
+    try:
+        ds.api("DELETE" if had else "PUT", f"/guilds/{ds.GUILD}/members/{user_id}/roles/{rid}", {})
+    except SystemExit as e:
+        log(f"updates role for {user_id} failed: {e}")
+        return "Couldn't change your roles right now - please tell a moderator."
+    return ("Update pings off. Press the button again (or /updates) to turn them back on." if had else
+            "\N{BELL} You'll get pinged when a new version is out. Press again (or /updates) to turn it off.")
+
+
+def post_updates_button(dry_run=False):
+    chans = [c for c in ds.api("GET", f"/guilds/{ds.GUILD}/channels") if c["name"] == ANNOUNCE and c["type"] in (0, 5)]
+    body = {"content": "\N{BELL} **Want a ping when a new version is out?**\nPress the button to get the Updates role. "
+                       "Press it again to take it off. `/updates` works anywhere too.",
+            "allowed_mentions": {"parse": []},
+            "components": [{"type": 1, "components": [{"type": 2, "style": 1, "label": "Get update pings",
+                                                       "emoji": {"name": "\N{BELL}"}, "custom_id": UPDATES_BUTTON}]}]}
+    if dry_run or not chans:
+        log(f"would post in #{ANNOUNCE}: {json.dumps(body, ensure_ascii=False)}" if chans else f"no #{ANNOUNCE}")
+        return
+    ds.api("POST", f"/channels/{chans[0]['id']}/messages", body)
+    log(f"button posted in #{ANNOUNCE}")
 
 
 def log(*a):
@@ -204,10 +244,15 @@ def announce(tag, dry_run=False, log=log):
     if not chans:
         log(f"{tag}: no #{ANNOUNCE} channel the bot can see - not posted")
         return
+    body = {"embeds": [embed], "allowed_mentions": {"parse": []}}
+    rid = updates_role()
+    if rid:
+        body["content"] = f"<@&{rid}>"
+        body["allowed_mentions"]["roles"] = [rid]
     if dry_run:
-        log(f"{tag}: would post in #{ANNOUNCE}: {json.dumps(embed, ensure_ascii=False)}")
+        log(f"{tag}: would post in #{ANNOUNCE}: {json.dumps(body, ensure_ascii=False)}")
         return
-    msg = ds.api("POST", f"/channels/{chans[0]['id']}/messages", {"embeds": [embed]})
+    msg = ds.api("POST", f"/channels/{chans[0]['id']}/messages", body)
     if chans[0]["type"] == 5:  # (an announcement channel: published to the servers that follow it)
         try:
             ds.api("POST", f"/channels/{chans[0]['id']}/messages/{msg['id']}/crosspost")
@@ -268,7 +313,11 @@ def main():
     ap.add_argument("--game", default="", choices=("",) + GAME_TAGS)
     ap.add_argument("--note", default="")
     ap.add_argument("--announce", metavar="TAG", help=f"post that release in #{ANNOUNCE} now (e.g. one from before this existed)")
+    ap.add_argument("--updates-button", action="store_true", help=f"post the update-pings button in #{ANNOUNCE}")
     a = ap.parse_args()
+    if a.updates_button:
+        post_updates_button(a.dry_run)
+        return
     if a.announce:
         announce(a.announce, a.dry_run)
         return
@@ -302,6 +351,25 @@ def main():
             kid, text = None, f"Discord refused it: {e}"
         await interaction.followup.send(text if not kid else f"Opened {text}", ephemeral=True)
 
+    async def updates(interaction: discord.Interaction):
+        roles = {r.id for r in getattr(interaction.user, "roles", [])}
+        text = await asyncio.to_thread(toggle_updates, interaction.user.id, lambda rid: int(rid) in roles)
+        await interaction.response.send_message(text, ephemeral=True)
+
+    @tree.command(name="updates", description="Turn pings for new LZ&A Recomp versions on or off", guild=guild)
+    @app_commands.guild_only()
+    async def updates_cmd(interaction: discord.Interaction):
+        await updates(interaction)
+
+    class UpdatesButton(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=None)
+
+        @discord.ui.button(label="Get update pings", emoji="\N{BELL}", style=discord.ButtonStyle.primary,
+                           custom_id=UPDATES_BUTTON)
+        async def press(self, interaction: discord.Interaction, button: discord.ui.Button):
+            await updates(interaction)
+
     async def poll():
         while True:
             try:
@@ -313,11 +381,14 @@ def main():
     @client.event
     async def on_ready():
         log(f"online as {client.user}")
+        if not getattr(client, "_view", False):
+            client._view = True
+            client.add_view(UpdatesButton())  # (the #releases button keeps working across restarts)
         if not getattr(client, "_synced", False):
             client._synced = True
             try:
                 await tree.sync(guild=guild)
-                log("/known-issue registered")
+                log("/known-issue + /updates registered")
             except Exception as e:
                 log(f"command sync failed: {e!r}")
         await client.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="for fixes"))
