@@ -432,7 +432,11 @@ void input_handle_event(const SDL_Event *e) {
         bool cam = g_settings.mouse_camera, down = e->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
         bool menu = menu_mouse_active();  // (a menu is up: the pointer is for it - a held mouse is let go)
         // aiming takes the mouse (the gyro); with the mouse camera a click does too (and is only that: no press)
-        if (!mouse_win && w && !menu && (gyro_aiming || (cam && down))) {
+        // (a scripted test run - LARECOMP_INPUT / LARECOMP_REPLAY - never takes the mouse: the pointer stays the user's
+        // while a test window aims beside what they're doing)
+        static int scripted = -1;
+        if (scripted < 0) scripted = getenv("LARECOMP_INPUT") || getenv("LARECOMP_REPLAY") || getenv("LARECOMP_NO_MOUSE_GRAB");
+        if (!mouse_win && w && !menu && !scripted && (gyro_aiming || (cam && down))) {
             mouse_win = w;
             SDL_SetWindowRelativeMouseMode(w, true);
             touch_down = 0;
