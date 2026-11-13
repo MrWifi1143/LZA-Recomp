@@ -923,6 +923,7 @@ extern "C" void launcher_lg_run(const char *root) {
     static const int fps_vals[] = {30, 60, 72, 120, 144, FPS_UNLIMITED};
     auto fps_index = [](int f) { for (int i = 0; i < 6; i++) if (fps_vals[i] == f) return i; return 0; };
     int fps_i = fps_index(g_settings.fps);
+    int wide_i = g_settings.ultrawide ? 1 : 0;  // (Aspect ratio: 0 16:9, 1 fill the window - hle/za_fixes.c)
     bool experimental = g_settings.experimental;
     // Recommended settings for this PC, from the GPU (integrated or not, its VRAM), the CPU threads and the RAM: shown
     // with an Apply button, and applied at once on a first start (no larecomp.ini yet). Measured 2026-10-28: Z-A's CPU
@@ -976,6 +977,7 @@ extern "C" void launcher_lg_run(const char *root) {
         res = 0;
         for (int i = 0; i < 6; i++) if (res_lines[i] == d.res_height) res = i;
         full = d.fullscreen, smaa = d.antialias == AA_SMAA, showfps = d.show_fps, realtime = !d.fixed_steps, experimental = d.experimental;
+        wide_i = d.ultrawide ? 1 : 0;
         fps_i = fps_index(d.fps);
         wildb = d.wild_battle, prompts_i = d.button_prompts, crowd_i = d.crowd, detail_i = d.detail, shadows_i = d.shadows;
         smooth_sh = d.shadow_smooth, bg_i = d.background, pk_i = d.pkhex_link, shl_i = d.shader_nowait;
@@ -1068,6 +1070,11 @@ extern "C" void launcher_lg_run(const char *root) {
     // The settings, shown by both screens: the launcher's Options tabs, or the classic screen's one list
     auto settings_display = [&]() {
         ImGui::Combo(T("Resolution", "Resolução"), &res, g_pt ? res_pt : res_en, 6);
+        {   // (a window or screen wider than 16:9: the world seen wider, the interface in a 16:9 box; from the game's start)
+            const char *const wide_names[] = {T("16:9 (bars on a wider screen)", "16:9 (barras numa tela mais larga)"),
+                                              T("Fill the window (ultrawide)", "Preencher a janela (ultrawide)")};
+            ImGui::Combo(T("Aspect ratio", "Proporção da tela"), &wide_i, wide_names, 2);
+        }
         if (ImGui::Checkbox(T("Fullscreen", "Tela cheia"), &full) && classic) SDL_SetWindowFullscreen(win, full);  // (launcher: at Play)
         ImGui::Checkbox(T("Anti-aliasing (SMAA)", "Suavizar serrilhado (SMAA)"), &smaa);
         static const char *const fps_names_en[] = {"30 fps", "60 fps", "72 fps", "120 fps", "144 fps", "Unlimited"};  // (above 60: Experimental settings)
@@ -1611,6 +1618,7 @@ extern "C" void launcher_lg_run(const char *root) {
     }
     g_settings.res_height = res_lines[res];
     g_settings.fullscreen = full;
+    g_settings.ultrawide = wide_i == 1;
     g_settings.antialias = smaa ? AA_SMAA : AA_OFF;
     if (!experimental && fps_i > 1) fps_i = 1;
     g_settings.experimental = experimental;
