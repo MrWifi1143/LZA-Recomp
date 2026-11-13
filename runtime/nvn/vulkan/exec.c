@@ -4403,6 +4403,20 @@ static void draw_(CmdRec *r, bool indexed) {
                 skip[nskip++] = strtoull(p, (char **)&p, 16);
                 while (*p == ',') p++;
             }
+            // NVIDIA Blackwell (RTX 50 / RTX PRO, device ids 0x2B00-0x2FFF) on drivers 590+: the evolution effect's
+            // particle programs make the GPU hit an illegal instruction ("address ip invalid", device lost) on their first
+            // draws - every run on a rented RTX 5090 / RTX PRO 6000 (drivers 595.91, 620.70), never on 580.65 or on an RTX
+            // 4090 with 615.78. No change to their code or how their data is read stopped it reliably (2026-11-13); skipped
+            // there, the evolution plays without its green swirl and sparks. LARECOMP_RTX50_EFFECT_SKIP=0 draws them, =1
+            // skips them on any GPU (tests).
+            const char *e = ENV("LARECOMP_RTX50_EFFECT_SKIP");
+            uint32_t dev = g_vk.props.deviceID, drv_major = g_vk.props.driverVersion >> 22;
+            bool affected = g_vk.props.vendorID == 0x10DE && dev >= 0x2B00 && dev < 0x3000 && drv_major >= 590;
+            if (e ? atoi(e) != 0 : affected) {
+                static const uint64_t evo_fx[] = {0xd4b724dff777ada1ull, 0x9a0e142739934ba3ull, 0xa1e298a3651201faull, 0xbf8588553ae3d71eull};
+                for (unsigned i = 0; i < sizeof evo_fx / sizeof evo_fx[0] && nskip < 16; i++) skip[nskip++] = evo_fx[i];
+                LOG("[vk] NVIDIA Blackwell driver %u: the evolution effect's particle programs skipped (they crash it)\n", drv_major);
+            }
         }
         for (int i = 0; i < nskip; i++) if (last_hash == skip[i]) { stat_skipped++; return; }
         if (g_debug_frame && ENV("LARECOMP_LOG_FSHASH")) LOG("[fshash] fs=%llx hash %016llx\n", (unsigned long long)fs, (unsigned long long)last_hash);
