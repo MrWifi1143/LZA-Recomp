@@ -14,6 +14,7 @@ bool update_can_install(void);    // false: a link to the release page instead (
 float update_progress(void);      // 0..1 while downloading
 void update_install_start(void);  // download + put in place, in the background
 void update_open_page(void);
+const char *update_current_version(void);  // RT_APP_VERSION (LARECOMP_UPDATE_AS: that, for tests)
 #ifdef __cplusplus
 }
 #endif

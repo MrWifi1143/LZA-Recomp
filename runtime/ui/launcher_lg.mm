@@ -399,11 +399,13 @@ static const char *const k_discord_url = "https://discord.gg/wxqppgye97";
 // Next to the version: the newer release, if any (runtime/update.c) - "Update" downloads it and puts it in place, then
 // "Restart" starts the new version (the launcher again). Folder installs get "Download" (the release page).
 extern "C" void rt_restart_process(int to_launcher);  // (main.c)
-static void update_line(void) {
+static void update_line(bool same_line = true) {  // (false: a row of its own)
+    bool first = true;
+    auto next = [&]() { if (!first || same_line) ImGui::SameLine(); first = false; };
     const ImVec4 gold(0.95f, 0.78f, 0.36f, 1.0f), red(0.95f, 0.45f, 0.40f, 1.0f);
     switch (update_state()) {
     case UPD_AVAILABLE:
-        ImGui::SameLine();
+        next();
         ImGui::TextColored(gold, "%s %s", T("Update available:", "Atualização disponível:"), update_version());
         ImGui::SameLine();
         if (update_can_install()) {
@@ -414,21 +416,21 @@ static void update_line(void) {
         } else if (ImGui::SmallButton(T("Download", "Baixar"))) update_open_page();
         break;
     case UPD_DOWNLOADING:
-        ImGui::SameLine();
+        next();
         ImGui::TextColored(gold, "%s %s: %d%%", T("Downloading", "Baixando"), update_version(), (int)(update_progress() * 100.0f));
         break;
     case UPD_INSTALLING:
-        ImGui::SameLine();
+        next();
         ImGui::TextColored(gold, "%s %s...", T("Installing", "Instalando"), update_version());
         break;
     case UPD_DONE:
-        ImGui::SameLine();
+        next();
         ImGui::TextColored(gold, "%s %s.", update_version(), T("is installed", "instalada"));
         ImGui::SameLine();
         if (ImGui::SmallButton(T("Restart now", "Reiniciar agora"))) rt_restart_process(1);
         break;
     case UPD_FAILED:
-        ImGui::SameLine();
+        next();
         ImGui::TextColored(red, "%s", T("Update failed", "A atualização falhou"));
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", update_error());
         ImGui::SameLine();
@@ -1414,7 +1416,7 @@ extern "C" void launcher_lg_run(const char *root) {
                                         "Hold Shift while starting the game to see this screen again.",
                                         "Estas configurações também estão no jogo: Menu > Help > Settings.\n"
                                         "Segure Shift ao iniciar o jogo para ver esta tela de novo."));
-        ImGui::TextDisabled("v" RT_APP_VERSION);
+        ImGui::TextDisabled("v%s", update_current_version());
         update_line();
         discord_button();
         ImGui::End();
@@ -1493,13 +1495,16 @@ extern "C" void launcher_lg_run(const char *root) {
                 }
                 y += 58 + 10;
             }
+            if (update_state() >= UPD_AVAILABLE) {  // (the update, a row of its own: next to the version it pushed Discord off)
+                ImGui::SetCursorScreenPos(ImVec2(bx, H - 126));
+                update_line(false);
+            }
             ImGui::SetCursorScreenPos(ImVec2(bx, H - 86));
             ImGui::Checkbox(T("Skip the launcher", "Pular o launcher"), &skipstart);
             if (skipstart && ImGui::IsItemHovered())
                 ImGui::SetTooltip("%s", T("Hold Shift while starting the game to see it again.", "Segure Shift ao iniciar o jogo para ver de novo."));
             ImGui::SetCursorScreenPos(ImVec2(bx, H - 40));
-            ImGui::TextDisabled("v" RT_APP_VERSION);
-            update_line();
+            ImGui::TextDisabled("v%s", update_current_version());
             discord_button();
             pad_hints(d, W - 34, H - 38, false, false);
         } else {
