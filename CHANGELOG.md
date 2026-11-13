@@ -10,6 +10,12 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 - Discord Rich Presence: "Playing PL:Z-A Recomp", where you are (Lumiose City), resolution and frame rate, time
   played. Needs Discord running and Activity Privacy sharing on; a launcher checkbox ("Show what you're playing on
   Discord") turns it off.
+- Frame Timing "Real Time": no more judder when the game doesn't hold the chosen frame rate (144 or Unlimited at
+  ~120 fps, an uneven load) - most visible on a run seen from the side. Each frame now goes out exactly when the time
+  it shows has come, a steady whole number of the frame rate's periods apart: when the PC can't hold the rate it
+  settles on the next steady one (144 -> 72 -> 48, 120 -> 60, Unlimited 180 / 120 / 90 / 72 ...) and goes back up when
+  it can, instead of mixing one- and two-period steps on uneven frames. Fixed timing is unchanged. Reported for
+  Arceus (RTX 4060 laptop, 144 Hz); Z-A stepped the same way.
 
 ## 2026-11-12: LegendsZA-v1.1.1
 
