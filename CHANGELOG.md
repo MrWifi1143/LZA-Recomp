@@ -14,6 +14,12 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 - Sharper picture at resolutions that aren't a whole multiple of 1080 lines (a native 1440p screen, 1200, 1600,
   1440 on a 1080p screen): the game's lighting pass read its scene buffers on the 1080 grid and stretched the result,
   so 1440 looked blockier and softer than 1080 (blocky leaves, stair-stepped edges). Reported on a 1440p monitor.
+- Frame Timing "Real Time": no more judder when the game doesn't hold the chosen frame rate (144 or Unlimited at
+  ~120 fps, an uneven load) - most visible on a run seen from the side. Each frame now goes out exactly when the time
+  it shows has come, a steady whole number of the frame rate's periods apart: when the PC can't hold the rate it
+  settles on the next steady one (144 -> 72 -> 48, 120 -> 60, Unlimited 180 / 120 / 90 / 72 ...) and goes back up when
+  it can, instead of mixing one- and two-period steps on uneven frames. Fixed timing is unchanged. Reported on Discord
+  (RTX 4060 laptop, 144 Hz).
 
 ## 2026-11-12: LegendsA-v1.2.1
 
