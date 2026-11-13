@@ -2819,9 +2819,16 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         // (each word's address made in 64 bits - glsl_gmem_words: a uint index into a runtime array wrapped at 4 GB)
         sp(&s, "layout(buffer_reference, std430, buffer_reference_align = 4) %sbuffer GWord { uint v; };\n",
            c->uses_gmem_store ? "" : "readonly ");
-        sp(&s, "layout(std140, set = %d, binding = %d) uniform GMemBase { uint64_t gbase; uint64_t gsize; } gmb_;\n", set,
-           GMEM_BUFFER_INDEX);
-        sp(&s, "#define GW(i) GWord(gmb_.gbase + uint64_t(i) * 4ul)\n");
+        if (!g_maxwell_gmem_table) {
+            sp(&s, "layout(std140, set = %d, binding = %d) uniform GMemBase { uint64_t gbase; uint64_t gsize; } gmb_;\n", set,
+               GMEM_BUFFER_INDEX);
+            sp(&s, "#define GW(i) GWord(gmb_.gbase + uint64_t(i) * 4ul)\n");
+        } else {  // (g_maxwell_gmem_table: each 64 MB chunk at its own GPU address, from a table - two to a uvec4 slot)
+            sp(&s, "layout(std140, set = %d, binding = %d) uniform GMemBase { uint64_t gbase; uint64_t gsize; u64vec2 gtab[%d]; } gmb_;\n",
+               set, GMEM_BUFFER_INDEX, MAXWELL_GMEM_TABLE_N / 2);
+            sp(&s, "#define GW(i) GWord(gmb_.gtab[(uint(i) >> 25u) & %du][(uint(i) >> 24u) & 1u] + uint64_t(uint(i) & 0xFFFFFFu) * 4ul)\n",
+               MAXWELL_GMEM_TABLE_N / 2 - 1);
+        }
     }
     if (c->uses_rscale && stage != STAGE_VERTEX) {
         sp(&s, "layout(std140, set = %d, binding = 18) uniform RScale { vec4 rscale[65]; };\n", set);
@@ -3470,14 +3477,16 @@ static const char k_xlat_build[] = __DATE__ " " __TIME__;
 const char *maxwell_build_id(void) { return k_xlat_build; }
 _Thread_local bool maxwell_plain_glsl;  // (shader.h)  // (runtime/nvn/vulkan/warmup.c: its marker)
 bool g_maxwell_warp_slices;  // (shader.h)
+bool g_maxwell_gmem_table;   // (shader.h)
 
 const char *maxwell_cache_tag(void) {
-    static char tags[2][17];  // (by g_maxwell_warp_slices: device.c may set it after a first call)
-    char *tag = tags[g_maxwell_warp_slices];
+    static char tags[2][2][17];  // (by g_maxwell_warp_slices / g_maxwell_gmem_table: device.c may set them after a first call)
+    char *tag = tags[g_maxwell_warp_slices][g_maxwell_gmem_table];
     if (!tag[0]) {
         uint64_t h = 0xcbf29ce484222325ull;
         for (const char *p = k_xlat_build; *p; p++) h = (h ^ (uint8_t)*p) * 0x100000001b3ull;
         if (g_maxwell_warp_slices) h = (h ^ 0x5a) * 0x100000001b3ull;  // (translations for sliced subgroups: their own)
+        if (g_maxwell_gmem_table) h = (h ^ 0x7c) * 0x100000001b3ull;  // (global memory through the chunk table: its own)
         snprintf(tag, 17, "%016llx", (unsigned long long)h);
     }
     return tag;

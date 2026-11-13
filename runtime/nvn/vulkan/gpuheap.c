@@ -67,6 +67,7 @@ static struct {
     bool handed[NCHUNK];  // given to the game's device (gpuheap_take / gpuheap_take_host)
     uint64_t end;         // window bytes from HEAP_BASE that are (or may be, lazily) backed
     bool lazy;            // (RADV, lazy host import: see the top)
+    bool table;           // (HOSTIMPORT) no sparse buffer: each chunk its own import and buffer, a table (g_maxwell_gmem_table)
     bool lazy_chunk[NCHUNK];  // (backed when the allocator hands out memory in it)
     unsigned backed;      // chunks backed
 } H = {.lock = PTHREAD_MUTEX_INITIALIZER};
@@ -118,9 +119,14 @@ static bool has_ext(VkExtensionProperties *e, uint32_t n, const char *name) {
 // memory is scarce - an integrated GPU (its memory is the system's, the driver's budget for it a part), or a heap the
 // import may land in under 6 GB - and only if the device can bind imported host memory into a sparse buffer.
 // LARECOMP_LAZY_IMPORT=1: wherever it can.
+// Where it can't (the "why" cases: AMD's Windows driver can't back a sparse buffer with host memory, and its whole 3.8 GB
+// import failed on 8 GB of RAM - blank text, missing models): the chunk table instead (H.table, g_maxwell_gmem_table) -
+// each chunk imported as a buffer of its own and shaders find a word's chunk through a table of their GPU addresses
+// (exec.c gmem_table_bind, gmem_ref_info). LARECOMP_CHUNK_TABLE=1: the chunk table wherever the host import is (a test,
+// sparse or not); =0: never (the whole import where sparse can't).
 static bool host_lazy_wanted(const VkPhysicalDeviceFeatures *f) {
-    const char *lz = ENV("LARECOMP_LAZY_IMPORT");
-    bool force = lz && *lz == '1';
+    const char *lz = ENV("LARECOMP_LAZY_IMPORT"), *ct = ENV("LARECOMP_CHUNK_TABLE");
+    bool force = lz && *lz == '1', table_on = ct && *ct == '1', table_off = ct && *ct == '0';
     VkPhysicalDeviceProperties p;
     vkGetPhysicalDeviceProperties(H.phys, &p);
     VkPhysicalDeviceMemoryProperties mp;
@@ -133,7 +139,7 @@ static bool host_lazy_wanted(const VkPhysicalDeviceFeatures *f) {
     }
     uint64_t heap = host_heap ? host_heap : any_heap;
     bool integrated = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU, small = heap < (6ull << 30);
-    if (!force && !integrated && !small) return false;
+    if (!force && !table_on && !integrated && !small) return false;
     const char *why = NULL;
     uint32_t nq = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(H.phys, &nq, NULL);
@@ -154,13 +160,20 @@ static bool host_lazy_wanted(const VkPhysicalDeviceFeatures *f) {
         if (!(xp.externalMemoryProperties.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT))
             why = "host memory can't back a sparse buffer";
     }
+    const char *who = table_on ? "LARECOMP_CHUNK_TABLE=1" : force ? "LARECOMP_LAZY_IMPORT=1" : integrated ? "integrated GPU" : "small heap";
+    if (table_on || (why && !table_off)) {
+        H.table = true;
+        LOG("[vk] guest heap: imported in %llu MB chunks as they're first used (chunk table: %s; %s, %llu MB heap)\n",
+            CHUNK >> 20, why ? why : "sparse binding not used", who, (unsigned long long)(heap >> 20));
+        return true;
+    }
     if (why) {
         LOG("[vk] guest heap: imported whole (%s: no lazy import; %s, %llu MB heap)\n", why,
             integrated ? "integrated GPU" : "small heap", (unsigned long long)(heap >> 20));
         return false;
     }
-    LOG("[vk] guest heap: imported in %llu MB chunks as they're first used (%s, %llu MB heap)\n", CHUNK >> 20,
-        force ? "LARECOMP_LAZY_IMPORT=1" : integrated ? "integrated GPU" : "small heap", (unsigned long long)(heap >> 20));
+    LOG("[vk] guest heap: imported in %llu MB chunks as they're first used (%s, %llu MB heap)\n", CHUNK >> 20, who,
+        (unsigned long long)(heap >> 20));
     return true;
 }
 
@@ -253,6 +266,8 @@ static void decide(void) {
     if (lazy_ok && host && host_lazy_wanted(&f)) {
         H.state = HOSTIMPORT;
         H.lazy = true;
+        extern bool g_maxwell_gmem_table;  // (the translator's GLSL for it: decided here, before the first translation -
+        g_maxwell_gmem_table = H.table;    // warmup.c asks first - and kept, whatever happens to the import later)
     }
 off:
     if (H.dev) vkDestroyDevice(H.dev, NULL), H.dev = VK_NULL_HANDLE;
@@ -268,6 +283,7 @@ static int heap_state(void) {
 }
 bool gpuheap_on(void) { return heap_state() == DMABUF; }      // the heap window is GPU memory (device.c, exec.c)
 bool gpuheap_lazy_host(void) { return heap_state() == HOSTIMPORT; }  // the host import in chunks as they're used
+bool gpuheap_chunk_table(void) { return heap_state() == HOSTIMPORT && H.table; }  // ... each its own buffer (no sparse)
 
 // (H.lock held) HOSTIMPORT: chunk i made read-write (Linux) / committed (Windows); exec.c imports it next
 static void host_back(unsigned i) {
@@ -500,6 +516,7 @@ void gpuheap_guest_reset(void) {
 #else  // (macOS: no Vulkan renderer)
 uint64_t g_gpuheap_end, g_gpuheap_gen;
 bool gpuheap_lazy_host(void) { return false; }
+bool gpuheap_chunk_table(void) { return false; }
 int gpuheap_take_host(uint64_t *off, int max) { (void)off, (void)max; return 0; }
 void gpuheap_host_cancel(void) {}
 void gpuheap_touch(uint64_t addr, uint64_t n) { (void)addr, (void)n; }
