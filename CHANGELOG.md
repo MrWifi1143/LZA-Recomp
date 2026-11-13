@@ -24,6 +24,8 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
   runs out (StandardAllocator FAILED in the log, often right as the field loads): the game gets 190 MB more of its
   memory block, and once that is full it keeps going in extra memory beyond it instead of crashing (the log says
   "the game's memory block ... is full"). Reported on an RTX 3070 Ti.
+- Mods whose folder name has a comma in it ("Max Draw Distance for Pokemon, NPCs and Trees") now load; before, they
+  were silently left off and the Mods page showed them off again.
 
 ## 2026-11-12: LegendsA-v1.2.1
 

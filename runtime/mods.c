@@ -72,7 +72,8 @@ int mods_list(char names[][128], int max) {
 
 // Each mod's romfs/ folder, found once (NULL: it has none - a texture pack alone, say)
 static int ncache;  // (romfs_of's: mods_forget empties it)
-void mods_forget(void) { ncache = 0; }  // (a mod's romfs/ made since it was looked for: runtime/oodle_server.c trees_prepare)
+static int ncached = -1;  // (mods_active's parsed list, below: dropped too)
+void mods_forget(void) { ncache = 0; __atomic_store_n(&ncached, -1, __ATOMIC_RELAXED); }  // (a mod's romfs/ made since it was looked for: runtime/oodle_server.c trees_prepare)
 static const char *romfs_of(const char *name) {
     static struct { char name[128]; char dir[1024]; bool ok; } cache[MODS_MAX];
     if (!name || !*name) return NULL;
@@ -89,14 +90,30 @@ static const char *romfs_of(const char *name) {
 
 // The mods that are on, in their load order (the first wins where two change the same file): LARECOMP_MOD=<name>[,...]
 // (Legends Studio's "Play": for this run, in place of the settings' - which stay as they were), else g_settings.mod -
-// one name, or several separated by commas (the start screen's Mods page writes them)
-int mods_active(char names[][128], int max) {
-    const char *e = getenv("LARECOMP_MOD");
-    const char *list = e ? e : g_settings.mod;
+// one name, or several separated by commas (the start screen's Mods page writes them). A folder name with commas in it
+// ("Max Draw Distance for Pokemon, NPCs and Trees": its romfs never loaded, and the Mods page showed it off again) is
+// taken whole: at each name, the longest run of comma-joined parts that names a folder under mods/ wins. Parsed once
+// per list (the RomFS reader asks for every file).
+static int mods_parse(const char *list, char names[][128], int max) {
     int n = 0;
     while (list && *list && n < max) {
-        const char *c = strchr(list, ',');
-        size_t len = c ? (size_t)(c - list) : strlen(list);
+        const char *c = strchr(list, ','), *end = c ? c : list + strlen(list);
+        {   // (a longer name with commas in it that is a folder)
+            const char *best = NULL;
+            for (const char *e = c ? strchr(c + 1, ',') : NULL;; e = strchr(e + 1, ',')) {
+                const char *stop = e ? e : list + strlen(list);
+                if (c && stop > c) {
+                    const char *a = list, *b = stop;
+                    while (a < b && *a == ' ') a++;
+                    while (b > a && b[-1] == ' ') b--;
+                    char p[200];
+                    if (b - a < 128 && snprintf(p, sizeof p, "mods/%.*s", (int)(b - a), a) < (int)sizeof p && is_dir(p)) best = stop;
+                }
+                if (!e) break;
+            }
+            if (best) end = best, c = *best ? best : NULL;
+        }
+        size_t len = (size_t)(end - list);
         while (len && (*list == ' ')) list++, len--;
         while (len && list[len - 1] == ' ') len--;
         if (len && len < 128) {
@@ -108,6 +125,22 @@ int mods_active(char names[][128], int max) {
         if (!c) break;
         list = c + 1;
     }
+    return n;
+}
+int mods_active(char names[][128], int max) {
+    const char *e = getenv("LARECOMP_MOD");
+    const char *list = e ? e : g_settings.mod;
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    static char last[2048], cached[MODS_MAX][128];
+    if (!list) list = "";
+    pthread_mutex_lock(&lock);
+    if (ncached < 0 || strcmp(last, list)) {
+        snprintf(last, sizeof last, "%s", list);
+        ncached = mods_parse(list, cached, MODS_MAX);
+    }
+    int n = ncached < max ? ncached : max;
+    memcpy(names, cached, (size_t)n * sizeof cached[0]);
+    pthread_mutex_unlock(&lock);
     return n;
 }
 
