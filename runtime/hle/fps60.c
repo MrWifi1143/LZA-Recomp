@@ -643,6 +643,54 @@ static int pla_fall_time_hook(Cpu *c, uint64_t addr) {
     return 0;
 }
 
+// Thrown food being eaten (f_700190d778, x0 = the bait, x1 = its clock set; state [+0x680] 2 from the moment a Pokemon
+// starts eating it, f_700190d9fc): each update adds its clock's timer 1 - 1/30 s an update, whatever the frame rate - to
+// the time eaten [+0x688] and at the eating time [+0x684] (the Pokemon's, 10 s for a Springy Mushroom) the bait is gone
+// (state 3); it shrinks a quarter at a time on the way. The Pokemon's own eating runs on real time (its behaviour tree
+// waits FinishEatingSeconds): at 60 fps the berry was gone half way through (5 s of 10, measured), at 144 after ~2 s -
+// a Pokemon started eating and the food vanished (player report, Arceus 1.2.1 at 60 fps). When the timer hands the
+// 30 fps step, the step added is the frame time for the update instead (the time eaten moved down by the difference
+// first: the game's own add and "eaten?" check see the right amount). LARECOMP_PLA_BAIT_SCALE=0: off.
+#define PLA_BAIT_UPDATE 0x700190d778ull
+static int pla_bait_hook(Cpu *c, uint64_t addr) {
+    uint64_t bait = c->x[0], set = c->x[1];
+    if (!g_pla60_patched || !bait || !set || *(const int32_t *)(uintptr_t)(bait + 0x680) != 2) return 0;
+    uint64_t clocks = *(const uint64_t *)(uintptr_t)set;
+    uint64_t vt = clocks >= 0x7000000000ull ? *(const uint64_t *)(uintptr_t)clocks : 0;
+    if (vt < 0x7000000000ull) return 0;
+    uint64_t saved[32];
+    memcpy(saved, c->x, sizeof saved);
+    c->x[0] = clocks, c->x[1] = 1;  // (the step the game is about to read: timer 1's, ns at +8)
+    guest_call(c, *(const uint64_t *)(uintptr_t)vt);
+    uint64_t t = c->x[0];
+    memcpy(c->x, saved, sizeof saved);
+    if (t < 0x7000000000ull || *(const int64_t *)(uintptr_t)(t + 8) != 33333334) return 0;  // (not the 30 fps step)
+    float d = (float)(33333334.0 / 1e9), real = (float)((double)g_pla60_dt / 1e9), e0;
+    float *eaten = (float *)(uintptr_t)(bait + 0x688);
+    memcpy(&e0, eaten, 4);
+    *eaten = e0 + real - d;
+    rt_call_original(c, addr);
+    if (*(const int32_t *)(uintptr_t)(bait + 0x680) == 2) *eaten = e0 + real;  // (exact, not finished yet)
+    return 1;
+}
+
+// A thrown bait lying on the ground: its timed part ([bait+0x5f0], f_7001cb9b6c each update; f_7001cb9ba4 the same through
+// the second base, this - 0x48) counts [+0x1f0] down by one an update while [+0x1f5] is set, from the item's lifetime in
+// frames (bin/capture/throwable_param_table.bin: 300 for every food = 10 s at 30 fps, copied by f_7001a6e5e8), and at 0
+// the bait is gone. At 60 fps food vanished after 5 s, at 144 after ~2 s - Pokemon walking up to it found nothing, or
+// reached it as it went (measured 2026-11-12: 300 updates at 30 and at 60). A Pokemon starting to eat clears +0x1f5. Above
+// 30 fps the count goes down only on the updates where 30 fps time moved on a frame (rt_pla_tick): one undone otherwise.
+// LARECOMP_PLA_BAIT_SCALE=0 turns it off with the eating time's.
+#define PLA_TIMED_TICK 0x7001cb9b6cull
+#define PLA_TIMED_TICK2 0x7001cb9ba4ull  // (this + 0x48)
+static int pla_timed_tick_hook(Cpu *c, uint64_t addr) {
+    uint64_t o = c->x[0] - (addr == PLA_TIMED_TICK2 ? 0x48 : 0);
+    if (!g_pla60_patched || !*(const uint8_t *)(uintptr_t)(o + 0x1f5) || rt_pla_tick(0x9b6c)) return 0;
+    int32_t *left = (int32_t *)(uintptr_t)(o + 0x1f0);
+    if (*left > 0) (*left)++;  // (the game's own then takes it back: no frame counted this update)
+    return 0;
+}
+
 // A character's physics step (f_7002ae3150: x0 the body, x1 its step info, [x1] the step's time) takes a fixed bite of
 // gravity out of the body's vertical speed each step - Wyrdeer: 24.5 / 30 = 0.8167 m/s a step, whatever the step's time.
 // At 144 fps that is 4.8x the gravity: ridden jumps topped out at ~0.5 m instead of ~2 m (player report, measured
@@ -719,6 +767,11 @@ void pla60_configure(const char *exefs) {
             if (!getenv("LARECOMP_PLA_THROW_SCALE") || atoi(getenv("LARECOMP_PLA_THROW_SCALE"))) {
                 rt_register_fnhook_at(PLA_THROW_FRAMES, pla_throw_frames_hook);
                 rt_register_fnhook_at(PLA_FALL_TIME, pla_fall_time_hook);
+            }
+            if (!getenv("LARECOMP_PLA_BAIT_SCALE") || atoi(getenv("LARECOMP_PLA_BAIT_SCALE"))) {
+                rt_register_fnhook_at(PLA_BAIT_UPDATE, pla_bait_hook);
+                rt_register_fnhook_at(PLA_TIMED_TICK, pla_timed_tick_hook);
+                rt_register_fnhook_at(PLA_TIMED_TICK2, pla_timed_tick_hook);
             }
             if (!getenv("LARECOMP_PLA_GRAVITY_SCALE") || atoi(getenv("LARECOMP_PLA_GRAVITY_SCALE")))
                 rt_register_fnhook_at(PLA_CHAR_STEP, pla_char_step_hook);
