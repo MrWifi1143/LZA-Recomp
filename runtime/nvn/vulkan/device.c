@@ -788,12 +788,15 @@ void backend_present(NvnTexture *t) {
         // render scale + placement in the window (the game's 16:9 image, fitted): runtime/nvn/output_scale.c;
         // with the GPU time per frame (exec.c, submission timestamps): dynamic resolution raises it again by that
         OutScale os;
-        output_scale(dw, dh, false, SDL_GetTicksNS() / 1e9, vk_gpu_frame_update(), &os);
+        // (Aspect ratio "Fill the window": a window wider than 16:9 reshapes the render targets - output_scale.c)
+        output_scale(dw, dh, g_settings.ultrawide && dw > dh * (16.0 / 9.0) * 1.005, SDL_GetTicksNS() / 1e9, vk_gpu_frame_update(), &os);
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh;
         float crop[4] = {0, 0, 1, 1};  // uv origin and size: the whole image
-        {   // where the game image is in the window (pixels): the mouse as a finger on the touch screen (hle/input.c)
+        {   // where the game image is in the window (pixels): the mouse as a finger on the touch screen (hle/input.c) - in an
+            // image of another shape than 16:9 (ultrawide), the interface's centred 16:9 box in it (exec.c draw_)
             extern double g_present_rect[4];
-            g_present_rect[0] = vx, g_present_rect[1] = vy, g_present_rect[2] = vw, g_present_rect[3] = vh;
+            double bw = fmin(vw, vh * (16.0 / 9.0)), bh = fmin(vh, vw * (9.0 / 16.0));
+            g_present_rect[0] = vx + (vw - bw) / 2, g_present_rect[1] = vy + (vh - bh) / 2, g_present_rect[2] = bw, g_present_rect[3] = bh;
         }
         renderer_set_scale((float)sx, (float)sy);
         { extern void vk_tex_lod_bias(double render_h, double shown_h); if (b && b->height > 1 && vh > 1) vk_tex_lod_bias(b->height, vh); }
