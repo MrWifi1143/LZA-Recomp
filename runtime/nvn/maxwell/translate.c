@@ -87,6 +87,9 @@ typedef struct {
     uint32_t *const *brx_to;
     const int *brx_nto;
     int nbrx;
+    const uint8_t *label;     // (c->fwd: the block starts, label[pc / 8], and how many instructions: skip_bra)
+    size_t nlabel;
+    int skip_open;            // (c->fwd: ifs opened by skip_bra, closed where this block ends)
 } Ctx;
 
 static uint64_t bits(uint64_t w, int lo, int n) { return (w >> lo) & ((n == 64) ? ~0ull : ((1ull << n) - 1)); }
@@ -1189,6 +1192,23 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     }
     bool guarded = !(pr == PT && !prn);
     if (pr == PT && prn) return;  // @!pt: never executes
+    // A predicated forward BRA to the very next block (@P BRA past the rest of this one): an if around the rest of the
+    // block instead of "if (P) { b<to> = true; break; }" - the same paths (the block's end sets b<to> anyway), but
+    // structured. The break out of the block from one side, joined with the fall-through at the next block, made
+    // NVIDIA's RTX 50 (Blackwell) driver build vertex code that ran an invalid instruction: device lost at the catch
+    // effect in Legends: Arceus (VK_EXT_device_fault "address ip invalid"; the same shader as an if ran - 2026-11-12).
+    if (c->fwd && c->label && guarded && (w & 0xfff0000000000020ull) == 0xe240000000000000ull &&
+        (bits(w, 0, 5) == 15 || bits(w, 0, 5) == 7 || bits(w, 0, 5) == 8 || !c->ccz_modelled)) {  // (no flags test: BRA's own)
+        uint32_t to = norm_target((int64_t)pc + 8 + sbits(w, 20, 24));
+        size_t k = pc / 8 + 1;
+        while (k < c->nlabel && !c->label[k]) k++;
+        if (to > pc && k < c->nlabel && to == (uint32_t)(k * 8)) {
+            c->uses_branches = true;
+            sp(&c->body, "  if (!(%s)) {  // (pc %x: the rest of this block)\n", P(pr, prn), to);
+            c->skip_open++;
+            return;
+        }
+    }
     if (guarded) sp(&c->body, "  if (%s) {\n", P(pr, prn));
 
 #define OPM(val, mask) ((w & (uint64_t)(mask)) == (uint64_t)(val))
@@ -3220,10 +3240,12 @@ static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, const ui
     if (annotate < 0) annotate = getenv("LARECOMP_SAVE_MSL") != NULL;
     c->branchy = any_branch;
     c->flow_to = flow_to;
+    c->label = c->fwd ? label : NULL, c->nlabel = end, c->skip_open = 0;
     for (size_t i = 0; i < end && !c->fail; i++) {
         if (i % 4 == 0) continue;
         uint32_t pc = (uint32_t)(i * 8);
         if (any_branch && label[i] && c->fwd) {  // (the block before falls into this one: its flag)
+            for (; c->skip_open; c->skip_open--) sp(&c->body, "  }\n");  // (skip_bra's ifs end with their block)
             if (i > 1) sp(&c->body, "    b%u = true;\n  } while (false);\n  if (exit_now) break;\n", pc);
             fwd_loops_end(c, label, lend, i);
             if (lend[i]) sp(&c->body, "  for (uint g%u = 0u; g%u < 100000u; g%u++) {\n", pc, pc, pc);
@@ -3240,11 +3262,13 @@ static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, const ui
         info->num_insts++;
     }
     if (c->fwd) {
+        for (; c->skip_open; c->skip_open--) sp(&c->body, "  }\n");
         sp(&c->body, "  } while (false);\n  if (exit_now) break;\n");
         fwd_loops_end(c, label, lend, end);
     }
     for (int b = 0; b < nbrx; b++) free(brx_to[b]);
     c->nbrx = 0;
+    c->label = NULL;
     free(lend);
     free(label);
     free(flow_to);
