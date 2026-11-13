@@ -2737,6 +2737,13 @@ static const char glsl_prelude[] =
 // compute stages take each guest texel's centre. Fragment shaders at an integer scale k (4K = 2) add the fragment's own
 // position inside its k x k block: a fetch at the fragment's position (soft particles fading on the depth buffer) is
 // then exact at every pixel instead of once per k x k block (square artifacts on particles at 4K, 2026-10-18).
+// Any other scale (1440 lines = 4/3, 1200, 1800, ...) the same way: the fragment's position inside its guest pixel,
+// fract(gl_FragCoord / s), placed in texel c's footprint - for a fetch at the fragment's own guest pixel that is the
+// fragment's own host pixel (c + fract(F / s) = F / s). Taking each guest texel's centre there instead read the game's
+// full-screen passes (the deferred lighting's G-buffer fetches, its texelFetch at the pixel) on the 1080 grid, then
+// stretched nearest to the 1440 target: at a native 1440p window the picture looked like a low resolution blown up,
+// worse than 1080 (blocky foliage, staircased edges; reports on 1440p monitors 2026-11). For integer k this is the
+// k x k block formula above, unchanged.
 static const char glsl_rsc[] =
     "uvec2 rsc(uvec2 c, vec4 s) { return (s.x == 1.0f && s.y == 1.0f) ? c : uvec2(floor((vec2(c) + 0.5f) * s.xy)); }\n";
 static const char glsl_rsc_fragment[] =
@@ -2744,6 +2751,8 @@ static const char glsl_rsc_fragment[] =
     "  if (s.x == 1.0f && s.y == 1.0f) return c;\n"
     "  if (s.x >= 1.0f && s.y >= 1.0f && fract(s.x) == 0.0f && fract(s.y) == 0.0f)\n"
     "    return uvec2(vec2(c) * s.xy + mod(floor(gl_FragCoord.xy), s.xy));\n"
+    "  if (s.x >= 1.0f && s.y >= 1.0f)\n"
+    "    return uvec2(floor((vec2(c) + fract(gl_FragCoord.xy / s.xy)) * s.xy));\n"
     "  return uvec2(floor((vec2(c) + 0.5f) * s.xy));\n"
     "}\n";
 // The half <-> float helpers (glsl_finish: glsl_h2f_exact or glsl_h2f_native, then glsl_prelude_half).
