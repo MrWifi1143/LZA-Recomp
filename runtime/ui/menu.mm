@@ -397,29 +397,43 @@ extern "C" int menu_keyboard_run(const char *initial, int max_len, const char *t
     return ok;
 }
 
-// "Close the game?" - Não has the focus first (Enter / A by reflex keeps playing); B / Esc answer Não.
+// "Leave the game?" (Esc, F1, Minus+Plus): back to the game's title screen or to the launcher (the program starts
+// again: main.c rt_restart_process), or quit. "Keep playing" has the focus first (Enter / A by reflex keeps
+// playing); B / Esc keep playing too.
 static void quit_draw(ImGuiIO &io, float scale) {
     ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 110));
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::Begin("##quit", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                                      ImGuiWindowFlags_AlwaysAutoResize);
     ImGui::PushFont(g_mlang == 2 ? g_font : g_menu_font);  // (Baloo has no Cyrillic: Segoe UI for Russian)
-    ImGui::TextUnformatted(M("Close the game?", "Deseja fechar o jogo?", "Закрыть игру?"));
+    ImGui::TextUnformatted(M("Leave the game?", "Sair do jogo?", "Выйти из игры?"));
     ImGui::TextDisabled("%s", M("Progress since the last save will be lost.", "O progresso desde o último save será perdido.",
                                 "Прогресс после последнего сохранения будет потерян."));
     ImGui::Spacing();
     float bw = 220 * scale;
     static bool focus_no;
-    if (!focus_no) { ImGui::SetKeyboardFocusHere(1); focus_no = true; }
-    if (ImGui::Button(M("Yes", "Sim", "Да"), ImVec2(bw, 0))) {
+    bool keep = false;
+    if (!focus_no) { ImGui::SetKeyboardFocusHere(); focus_no = true; }
+    keep = ImGui::Button(M("Keep playing", "Continuar jogando", "Продолжить игру"), ImVec2(bw, 0));
+    ImGui::SameLine();
+    if (ImGui::Button(M("Title screen", "Tela de título", "Титульный экран"), ImVec2(bw, 0))) {
+        settings_save();
+        rt_restart_process(0);
+        keep = true;
+    }
+    if (ImGui::Button(M("Launcher", "Launcher", "Лаунчер"), ImVec2(bw, 0))) {
+        settings_save();
+        rt_restart_process(1);
+        keep = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(M("Quit", "Fechar o jogo", "Закрыть игру"), ImVec2(bw, 0))) {
         settings_save();
         SDL_Event q = {};
         q.type = SDL_EVENT_QUIT;
         SDL_PushEvent(&q);
     }
-    ImGui::SameLine();
-    bool no = ImGui::Button(M("No", "Não", "Нет"), ImVec2(bw, 0));
-    if (no || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+    if (keep || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
         set_open(false);
         focus_no = false;
     }

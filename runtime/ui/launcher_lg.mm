@@ -823,7 +823,7 @@ extern "C" void launcher_lg_run(const char *root) {
     settings_load();
     const char *mode = getenv("LARECOMP_START_SCREEN");
     bool classic = mode && *mode ? !strcmp(mode, "classic") : RT_CLASSIC_START_SCREEN;
-    bool skip_now = g_settings.skip_start && !getenv("LARECOMP_LAUNCHER_SHOT");
+    bool skip_now = g_settings.skip_start && !getenv("LARECOMP_LAUNCHER_SHOT") && !getenv("LARECOMP_SHOW_LAUNCHER");  // (main.c rt_restart_process: asked for)
     bool sized = !classic && !skip_now;
     int lw = k_launcher_w, lh = k_launcher_h;
     if (getenv("LARECOMP_LAUNCHER_SIZE")) sscanf(getenv("LARECOMP_LAUNCHER_SIZE"), "%dx%d", &lw, &lh);

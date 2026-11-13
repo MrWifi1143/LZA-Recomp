@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <windows.h>  // (rt_restart_process: CreateProcess)
+#endif
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
@@ -77,6 +80,24 @@ int rt_reboot_requested(void) { return g_reboot; }
 // vanilla in place, or go back to the start screen (with LARECOMP_LAUNCHER_AUTOPLAY it plays the saved choice).
 // Frames count on across reboots. Called by the presenter every frame.
 void reboot_test_frame(uint64_t frame) {
+    {   // LARECOMP_RESTART_AT=<frame>:<game | launcher> (test): the in-game box's "Title screen" / "Launcher" at that frame
+        static int init;
+        static uint64_t at;
+        static int to_launcher;
+        if (!init) {
+            init = 1;
+            const char *e = getenv("LARECOMP_RESTART_AT");
+            if (e && strchr(e, ':')) at = strtoull(e, NULL, 10), to_launcher = !strcmp(strchr(e, ':') + 1, "launcher");
+        }
+        if (at && frame == at) {
+#ifdef _WIN32
+            _putenv("LARECOMP_RESTART_AT=");
+#else
+            unsetenv("LARECOMP_RESTART_AT");  // (the new process: no test again)
+#endif
+            rt_restart_process(to_launcher);
+        }
+    }
     static const char *next;
     static int init;
     if (!init) { init = 1; next = getenv("LARECOMP_REBOOT_AT"); }
@@ -185,7 +206,57 @@ static void boot(const char *root) {
     kernel_run_main(t, t->handle, 0, init_fn, main_fn, fini_fn);
 }
 
+static int g_argc;
+static char **g_argv;
+
+void rt_restart_process(int to_launcher) {
+    const char *args[64];
+    int n = 0;
+    for (int i = 1; i < g_argc && n < 60; i++)
+        if (strcmp(g_argv[i], "--play")) args[n++] = g_argv[i];
+    if (!to_launcher) args[n++] = "--play";
+    LOG("[restart] starting again (%s)\n", to_launcher ? "the launcher" : "the game");
+    // (the launcher even with "skip the start screen" on: launcher_lg.mm)
+#ifdef _WIN32
+    _putenv(to_launcher ? "LARECOMP_SHOW_LAUNCHER=1" : "LARECOMP_SHOW_LAUNCHER=");
+#else
+    if (to_launcher) setenv("LARECOMP_SHOW_LAUNCHER", "1", 1);
+    else unsetenv("LARECOMP_SHOW_LAUNCHER");
+#endif
+#ifdef _WIN32
+    char exe[1024], cmd[8192];
+    DWORD el = GetModuleFileNameA(NULL, exe, sizeof exe);
+    if (!el || el >= sizeof exe) { LOG("[restart] no exe path\n"); return; }
+    int k = snprintf(cmd, sizeof cmd, "\"%s\"", exe);
+    for (int i = 0; i < n && k < (int)sizeof cmd - 4; i++) k += snprintf(cmd + k, sizeof cmd - k, " \"%s\"", args[i]);
+    STARTUPINFOA si = {.cb = sizeof si};
+    PROCESS_INFORMATION pi;
+    if (!CreateProcessA(exe, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) { LOG("[restart] CreateProcess failed (%lu)\n", GetLastError()); return; }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+#else
+    char *av[66], self[4096];
+    ssize_t sl = readlink("/proc/self/exe", self, sizeof self - 1);  // (the program's own path: execv of /proc/self/exe
+    if (sl > 0) self[sl] = 0;                                        // would name the new process "exe")
+    else snprintf(self, sizeof self, "%s", g_argv[0]);
+    av[0] = g_argv[0];
+    for (int i = 0; i < n; i++) av[i + 1] = (char *)args[i];
+    av[n + 1] = NULL;
+    pid_t pid = fork();
+    if (pid == 0) {  // (a new process: this one's GPU device, audio and files close with it)
+        execv(self, av);
+        execvp(g_argv[0], av);
+        _exit(127);
+    }
+    if (pid < 0) { LOG("[restart] fork failed\n"); return; }
+#endif
+    SDL_Event q = {0};
+    q.type = SDL_EVENT_QUIT;  // (this one closes the way the window's close button does)
+    SDL_PushEvent(&q);
+}
+
 int main(int argc, char **argv) {
+    g_argc = argc, g_argv = argv;
 #if defined(__linux__) && defined(PR_SET_PTRACER)
     // A hang can be looked at while it hangs (eu-stack / gdb -p): Yama's ptrace_scope 1 lets only a debugger that
     // started the game attach; any of the user's own processes may now (LARECOMP_DEBUGGABLE=0: as the system says)
