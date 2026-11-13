@@ -107,6 +107,10 @@ uint32_t ipc_connect_named_port(const char *name);
 // ---- in-place reboot (main.c): switch seeds or go back to the start screen without leaving the process
 enum { RT_REBOOT_NONE, RT_REBOOT_GAME, RT_REBOOT_TITLE };  // GAME: boot again at once (new seed); TITLE: start screen
 void rt_request_reboot(int kind);  // any thread; the window loop (ui_run) returns it and main() carries it out
+// Any thread: start this program again - at the launcher, or (to_launcher 0) straight into the game (--play) - and
+// close this one (the in-game "Leave the game?" box: runtime/ui/menu.mm). A new process, not the in-place reboot:
+// that one is Let's Go's and doesn't reset the Legends games' own state (heap blocks, pools, caches).
+void rt_restart_process(int to_launcher);
 int rt_reboot_requested(void);
 extern volatile int g_rt_unwind;   // set while guest threads are being stopped (kernel.c)
 void rt_unwind_point(void);        // guest threads: unwind to thread_main if a reboot is stopping them
