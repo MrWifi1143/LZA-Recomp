@@ -179,7 +179,8 @@ static int timeline_step(Cpu *c, uint64_t addr) {
     if (last[k].player == c->x[19] && now - last[k].at < 100000000ull) dt = now - last[k].at;
     else if (now - last[k].at >= 100000000ull && last[k].player == c->x[19]) dt = 100000000ull;
     last[k].player = c->x[19], last[k].at = now;
-    float scale = (float)((double)dt / 33333333.3), nt = old + (t - old) * scale;
+    extern uint64_t pla60_nominal_ns(void);  // (the game's own step: 33.3 ms in its 30 fps mode, 16.7 in its own 60)
+    float scale = (float)((double)dt / (double)pla60_nominal_ns()), nt = old + (t - old) * scale;
     static int seen;
     if (seen < 6 && getenv("LARECOMP_ZA_CUTSCENE_LOG")) seen++, LOG("[za] timeline %g -> %g (was %g)\n", old, nt, t);
     {   // (LARECOMP_ZA_CUTSCENE_LOG=2: each player's calls, real time and advance, once a second)

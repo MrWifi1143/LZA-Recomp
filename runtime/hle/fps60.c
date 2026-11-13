@@ -435,6 +435,27 @@ static uint64_t g_pla60_entry;  // the interval-2 frame time of the running buil
 static uint64_t g_pla60_build;  // (that entry of the running build, also at 30)
 static bool g_pla60_patched;
 static uint64_t g_pla60_ns = 16666667;  // the frame time: 60 fps, 120, 144, FPS_UNLIMITED's, or LARECOMP_LEGENDS_FPS=<n>
+// Z-A's own 60 fps mode (the Switch 2's): the game reads a frame-rate mode byte ([[display+0x40]+0x20], 0x7001b296d8 in
+// 0x7001b29660) - 1 its 30 fps mode, which steps the world by table entry 1 (33.3 ms); 0 its 60 fps mode, entry 0
+// (16.7 ms). Before, the game stayed in its 30 fps mode with entry 1 at our frame time: the world's time was right, but
+// what the game tunes per mode stayed tuned for 30 - moves that home in on their target (Rollout, Flame Wheel) missed
+// right after starting. Now the mode byte is 0 and entry 0 holds our frame time (as the community static 60 fps patch
+// for 2.0.2 does: that byte read as 0). The compensations made for 30 fps steps (menu animations, cutscene timelines)
+// scale against 16.7 ms then. LARECOMP_ZA_NATIVE60=0: the old way.
+static bool g_za_native;
+static uint64_t g_pla60_nominal = 33333334;  // the game's own step in the mode it runs in (30: 33.3 ms, native 60: 16.7)
+uint64_t pla60_nominal_ns(void) { return g_pla60_nominal; }
+static int za_mode_hook(Cpu *c, uint64_t addr) {  // (0x7001b29660 entry: x0 = the display object)
+    (void)addr;
+    if (!g_za_native || !g_pla60_entry) return 0;
+    uint64_t o = c->x[0] ? *(const uint64_t *)(uintptr_t)(c->x[0] + 0x40) : 0;
+    if (!o) return 0;
+    volatile int8_t *m = (volatile int8_t *)(uintptr_t)(o + 0x20);
+    static int logged;
+    if (*m != 0 && logged++ < 4) LOG("[fps60] Z-A frame mode %d -> 0 (its own 60 fps mode)\n", (int)*m);
+    *m = 0;
+    return 0;
+}
 bool pla60_enabled(void) { return g_pla60_entry != 0; }
 uint64_t pla60_period_ns(void) { return g_pla60_ns; }
 
@@ -572,8 +593,19 @@ void pla60_configure(const char *exefs) {
     for (size_t i = 0; i < sizeof k_legends60 / sizeof *k_legends60; i++)
         if (!memcmp(id, k_legends60[i].id, 8)) {
             g_pla60_build = k_legends60[i].entry;
+            {   // (Z-A 2.0.2: its own 60 fps mode, table entry 0 - see g_za_native)
+                const char *nv = getenv("LARECOMP_ZA_NATIVE60");
+                g_za_native = g_pla60_build == 0x7000000000ull + 0x3393E28 && !(nv && atoi(nv) == 0);
+                if (g_za_native) {
+                    g_pla60_build = 0x7000000000ull + 0x3393E20;
+                    static bool mh;
+                    if (!mh) mh = true, rt_register_fnhook_at(0x7001b29660ull, za_mode_hook);
+                }
+                g_pla60_nominal = g_za_native ? 16666667 : 33333334;
+                if (g_za_native) LOG("[fps60] Z-A in its own 60 fps mode (frame time table entry 0)\n");
+            }
             if (on) g_pla60_entry = g_pla60_build, LOG("[fps60] %s at %.0f fps\n", k_legends60[i].name, 1e9 / (double)g_pla60_ns);
-            g_ui_scale = on ? (float)((double)g_pla60_ns / 33333334.0) : 1.0f;  // (the hooks also at 30: the rate may change)
+            g_ui_scale = on ? (float)((double)g_pla60_ns / (double)g_pla60_nominal) : 1.0f;  // (the hooks also at 30: the rate may change)
             {
                 static bool dth;
                 const char *r = getenv("LARECOMP_DT_READERS");
@@ -610,13 +642,15 @@ bool legends_set_fps(int fps) {
     if (!g_pla60_build) return false;
     uint64_t ns = fps == 60 ? 16666667 : fps > 30 ? 1000000000ull / (uint64_t)fps : 33333334;
     volatile uint64_t *ft = (volatile uint64_t *)(uintptr_t)g_pla60_build;
-    bool loaded = g_pla60_patched || *ft == 33333334u;  // (the game's data there: else pla60_present patches it later)
+    uint64_t orig = g_za_native ? 16666667u : 33333334u;  // (the entry's own value)
+    bool loaded = g_pla60_patched || *ft == orig;  // (the game's data there: else pla60_present patches it later)
+    if (g_za_native && fps <= 30) ns = orig;  // (30: the game's own mode again - za_mode_hook stops - and entry 0 its own)
     if (loaded) {
         plat_protect(g_pla60_build & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);
         *ft = ns;
     }
     g_pla60_ns = fps > 30 ? ns : 16666667;
-    g_ui_scale = fps > 30 ? (float)((double)ns / 33333334.0) : 1.0f;
+    g_ui_scale = fps > 30 ? (float)((double)ns / (double)g_pla60_nominal) : 1.0f;
     g_pla60_entry = fps > 30 ? g_pla60_build : 0;
     g_pla60_patched = fps > 30 && loaded;
     LOG("[fps60] %d fps from now on\n", fps);
@@ -695,8 +729,11 @@ void pla60_present(void) {
                 bal -= (int64_t)dt;
                 if (bal < -(int64_t)g_pla60_ns) bal = -(int64_t)g_pla60_ns;
             }
+            // (native mode: while the game's byte at main+0x610B980 is set, one exact period - the community dynamic
+            // 60 fps patch does the same there: "the rolling mechanic" softlocked on uneven steps)
+            if (g_za_native && *(const volatile uint8_t *)(uintptr_t)(0x7000000000ull + 0x610B980)) dt = g_pla60_ns;
             *ft = dt;
-            g_ui_scale = (float)((double)dt / 33333334.0);
+            g_ui_scale = (float)((double)dt / (double)g_pla60_nominal);
             static int dtlog = -1;  // (research: LARECOMP_DT_LOG=1 - each second: steps written, their sum against the real time)
             if (dtlog < 0) dtlog = getenv("LARECOMP_DT_LOG") && atoi(getenv("LARECOMP_DT_LOG")) > 0;
             if (dtlog) {
@@ -713,7 +750,7 @@ void pla60_present(void) {
             }
         } else if (was_dyn) {  // (switched to Fixed in game: the period again)
             *ft = g_pla60_ns;
-            g_ui_scale = (float)((double)g_pla60_ns / 33333334.0);
+            g_ui_scale = (float)((double)g_pla60_ns / (double)g_pla60_nominal);
         }
         was_dyn = dyn;
         last = now;
@@ -721,7 +758,7 @@ void pla60_present(void) {
     }
     if (!g_pla60_entry) return;
     volatile uint64_t *ft = (volatile uint64_t *)(uintptr_t)g_pla60_entry;
-    if (*ft != 33333334u) return;
+    if (*ft != (g_za_native ? 16666667u : 33333334u)) return;
     plat_protect(g_pla60_entry & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);
     *ft = g_pla60_ns;
     if (getenv("LARECOMP_LEGENDS_DT_FPS")) *ft = 1000000000ull / (uint64_t)atoi(getenv("LARECOMP_LEGENDS_DT_FPS"));  // (research: the world's frame time apart from the pacing)
