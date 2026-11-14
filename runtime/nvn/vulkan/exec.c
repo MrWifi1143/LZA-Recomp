@@ -234,6 +234,8 @@ static int gp_stat[GP_MAX];  // mark -> its index in gps_qp + 1 (0: none)
 // dump ends with the command list that faulted).
 #define DL_N 4096
 static char dl_ring[DL_N][160];
+static uint64_t dl_args[DL_N];      // (an indirect draw's argument words' address: 0 none)
+static uint32_t dl_args_rec[DL_N][5];  // (their values when the draw was recorded)
 static _Atomic unsigned dl_n;
 static int dl_on = -1;
 bool g_vk_checkpoints;  // (device.c: VK_NV_device_diagnostic_checkpoints enabled)
@@ -245,6 +247,7 @@ static unsigned dl_note(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(dl_ring[(id - 1) % DL_N], sizeof dl_ring[0], fmt, ap);
+    dl_args[(id - 1) % DL_N] = 0;
     va_end(ap);
     return id;
 }
@@ -284,7 +287,15 @@ void vk_devlost_dump(void) {
     if (lo <= hi) {
         if (hi - lo > 400) lo = hi - 400;
         LOG("[vk] on the GPU when it stopped (#%u..#%u):\n", lo, hi + 2);
-        for (unsigned id = lo; id <= hi + 2 && id <= n; id++) LOG("[vk]   #%u %s\n", id, dl_ring[(id - 1) % DL_N]);
+        for (unsigned id = lo; id <= hi + 2 && id <= n; id++) {
+            LOG("[vk]   #%u %s\n", id, dl_ring[(id - 1) % DL_N]);
+            uint64_t a = dl_args[(id - 1) % DL_N];
+            if (a) {  // (an indirect draw: its counts when recorded and now)
+                const uint32_t *w = (const uint32_t *)(uintptr_t)a, *r = dl_args_rec[(id - 1) % DL_N];
+                LOG("[vk]      indirect args at %llx: recorded %u %u %u %u %u, now %u %u %u %u %u\n", (unsigned long long)a, r[0], r[1], r[2],
+                    r[3], r[4], w[0], w[1], w[2], w[3], w[4]);
+            }
+        }
     }
 }
 uint64_t vk_frame_counter(void);
@@ -5349,9 +5360,16 @@ static void draw_(CmdRec *r, bool indexed) {
             g_vk.begin_xfb(cb, 0, 0, NULL, NULL);
         }
     }
-    dl_mark(cb, dl_note("draw vs %llx fs %016llx fsaddr %llx %s %u inst %u", (unsigned long long)st.program->stages[0].code_addr,
-                        (unsigned long long)g_cur_fs_hash, (unsigned long long)st.program->stages[1].code_addr,
-                        use_index ? "elements" : "arrays", use_index ? icount : count, inst));
+    {
+        unsigned id = dl_note("draw vs %llx fs %016llx fsaddr %llx %s %u inst %u%s", (unsigned long long)st.program->stages[0].code_addr,
+                              (unsigned long long)g_cur_fs_hash, (unsigned long long)st.program->stages[1].code_addr,
+                              use_index ? "elements" : "arrays", use_index ? icount : count, inst, g_draw_indirect ? " INDIRECT" : "");
+        if (id) {
+            dl_args[(id - 1) % DL_N] = g_draw_indirect;
+            if (g_draw_indirect) memcpy(dl_args_rec[(id - 1) % DL_N], (const void *)(uintptr_t)g_draw_indirect, 20);
+        }
+        dl_mark(cb, id);
+    }
     if (exp_hit && exp_mode == 1) { /* skipped */ }
     else if (g_draw_indirect) {
         gmem_info();
