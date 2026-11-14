@@ -691,6 +691,31 @@ static int pla_timed_tick_hook(Cpu *c, uint64_t addr) {
     return 0;
 }
 
+// The balloon races' timer (Request 15 and the later races): the race's event script lowers it by 1/30 s every update
+// through a Lua binding (f_70021f4e50) into the timer object's setter (f_7001e41aa8: s0 -> [x0 + 0x284]). At 60 fps the
+// 45 s ran out in 22.5 s and the race couldn't be won (player report; measured 2026-11-13: 21.4 timer seconds in 10.7 s
+// at 60). A drop of under 0.05 s - one update's - is scaled to the frame time for the update (1/2 at 60); setting the
+// timer (the start's 45) is left alone. LARECOMP_PLA_RACE_SCALE=0: off.
+#define PLA_RACE_TIMER_SET 0x7001e41aa8ull
+static int pla_race_timer_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    float old, nv;
+    uint32_t w = (uint32_t)c->v[0];
+    memcpy(&old, (const void *)(uintptr_t)(c->x[0] + 0x284), 4);
+    memcpy(&nv, &w, 4);
+    float d = old - nv;
+    if (d > 0 && d < 0.05f) {
+        uint32_t db;
+        memcpy(&db, &d, 4);
+        db = rt_scale30_f32(db);
+        memcpy(&d, &db, 4);
+        nv = old - d;
+        memcpy(&w, &nv, 4);
+        c->v[0] = w;
+    }
+    return 0;
+}
+
 // A character's physics step (f_7002ae3150: x0 the body, x1 its step info, [x1] the step's time) takes a fixed bite of
 // gravity out of the body's vertical speed each step - Wyrdeer: 24.5 / 30 = 0.8167 m/s a step, whatever the step's time.
 // At 144 fps that is 4.8x the gravity: ridden jumps topped out at ~0.5 m instead of ~2 m (player report, measured
@@ -781,6 +806,8 @@ void pla60_configure(const char *exefs) {
             }
             if (!getenv("LARECOMP_PLA_GRAVITY_SCALE") || atoi(getenv("LARECOMP_PLA_GRAVITY_SCALE")))
                 rt_register_fnhook_at(PLA_CHAR_STEP, pla_char_step_hook);
+            if (!getenv("LARECOMP_PLA_RACE_SCALE") || atoi(getenv("LARECOMP_PLA_RACE_SCALE")))
+                rt_register_fnhook_at(PLA_RACE_TIMER_SET, pla_race_timer_hook);
             for (char *e = getenv("LARECOMP_PLA_GATE30"); e && *e;) {
                 uint64_t a = strtoull(e, &e, 16);
                 if (a) rt_register_fnhook_at(a, pla_gate30_hook);
