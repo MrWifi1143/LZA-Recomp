@@ -288,6 +288,13 @@ static void create_device(void) {
     {   // subgroup size control (vk_sg32): only where 32 is possible but not the only size
         extern bool g_maxwell_warp_slices;  // (LARECOMP_WARP_SLICES=1: the sliced warp operations anywhere - a 32-wide
         g_maxwell_warp_slices = ENV("LARECOMP_WARP_SLICES") != NULL;  // subgroup is one slice: the same results, a test)
+        extern bool g_maxwell_no_break;  // (AMD's own drivers: shaders without break - maxwell/shader.h; LARECOMP_XLAT_NO_BREAK=0/1)
+        VkPhysicalDeviceDriverProperties dp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+        VkPhysicalDeviceProperties2 dp2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &dp};
+        vkGetPhysicalDeviceProperties2(g_vk.phys, &dp2);
+        const char *nb = ENV("LARECOMP_XLAT_NO_BREAK");
+        g_maxwell_no_break = nb ? atoi(nb) != 0 : dp.driverID == VK_DRIVER_ID_AMD_PROPRIETARY || dp.driverID == VK_DRIVER_ID_AMD_OPEN_SOURCE;
+        if (g_maxwell_no_break) LOG("[vk] driver %u (%s): shaders without break\n", (unsigned)dp.driverID, dp.driverName);
         VkPhysicalDeviceVulkan13Features h13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
         VkPhysicalDeviceFeatures2 hf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &h13};
         vkGetPhysicalDeviceFeatures2(g_vk.phys, &hf);
