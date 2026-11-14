@@ -1370,6 +1370,11 @@ extern "C" void launcher_lg_run(const char *root) {
         ImGui::SetNextItemWidth(-1);
         ImGui::InputTextWithHint("##server", T("address:port - empty: Steam friends", "endereço:porta - vazio: amigos da Steam"),
                                  g_settings.online_server, sizeof g_settings.online_server);
+        {
+            bool w = g_settings.world_players != 0;
+            if (ImGui::Checkbox(T("Show other players walking around (online server)", "Mostrar outros jogadores andando (servidor online)"), &w))
+                g_settings.world_players = w;
+        }
         ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
         ImGui::TextWrapped("%s", T("With the Steam relay plugin on: players who enter the same Link Code meet on that server. "
                                     "Applies the next time the game starts.",

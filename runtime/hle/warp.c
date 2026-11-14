@@ -17,6 +17,8 @@
 #include <string.h>
 
 #include "../hle.h"
+#include "../platform.h"
+#include "../settings.h"
 
 void rt_register_fnhook_at(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
 
@@ -34,11 +36,12 @@ static volatile uint64_t g_frame;  // (the presents so far: warp_frame)
 
 static bool is_body(uint64_t o) { return o >= HEAP_BASE && o < HEAP_BASE + HEAP_MAX && *(const uint64_t *)(uintptr_t)o == BODY_VTABLE; }
 
-static int ghost_step(Cpu *c, uint64_t addr, uint64_t o);  // (below: LARECOMP_GHOST)
-static int g_ghost_on;
+static int ghost_step(Cpu *c, uint64_t addr, uint64_t o);  // (below: the shared world)
+static volatile int g_world;   // (the shared world on: sending and showing - below)
+static bool g_body_hooks;      // (body_hook registered)
 static int body_hook(Cpu *c, uint64_t addr) {
     uint64_t o = c->x[0];
-    if ((g_state < 0 || g_state == 3) && !g_log_every && !g_ghost_on) return 0;  // (off, or finished)
+    if ((g_state < 0 || g_state == 3) && !g_log_every && !g_world) return 0;  // (off, or finished)
     if (!is_body(o)) return 0;
     uint64_t f = g_frame;
     unsigned via = addr == STEP_B ? 2 : 1;
@@ -53,7 +56,7 @@ static int body_hook(Cpu *c, uint64_t addr) {
     unsigned was = i < NBODY ? g_bodies[i].via : 0;
     if (i < NBODY) g_bodies[i].last = f, g_bodies[i].via |= via;
     pthread_mutex_unlock(&g_body_lock);
-    if (g_ghost_on) { int r = ghost_step(c, addr, o); if (r) return r; }
+    if (g_world) { int r = ghost_step(c, addr, o); if (r) return r; }
     if (g_log_every && i < NBODY && (fresh || !(was & via))) {  // (research: each body as each hook first sees it)
         const float *p = (const float *)(uintptr_t)(o + 0x90);
         LOG("[player] body %llx via %llx lr %llx frame %llu at %.2f %.2f %.2f\n", (unsigned long long)o, (unsigned long long)addr,
@@ -80,7 +83,8 @@ __attribute__((constructor)) static void warp_init(void) {
     if (w && sscanf(w, "%f %f %f", &g_to[0], &g_to[1], &g_to[2]) == 3) g_state = 0;
     extern void ghost_init(void);
     ghost_init();
-    if (g_log_every || g_state == 0 || g_ghost_on) {
+    if (g_log_every || g_state == 0 || g_world) {
+        g_body_hooks = true;
         rt_register_fnhook_at(STEP_A, body_hook);
         rt_register_fnhook_at(STEP_B, body_hook);
         LOG("[warp] %s%s\n", g_state == 0 ? "the player goes to " : "", g_state == 0 ? w : "logging the player's position");
@@ -90,7 +94,7 @@ __attribute__((constructor)) static void warp_init(void) {
 static void ghost_frame(uint64_t frame);
 void warp_frame(uint64_t frame) {  // (each game frame: runtime/hle/input.c)
     g_frame = frame;
-    if (g_ghost_on) ghost_frame(frame);
+    ghost_frame(frame);
     if (g_state < 0 && !g_log_every) return;
     uint64_t b = player_body(frame);
     if (g_log_every > 0 && frame % (uint64_t)g_log_every == 0 && b) {
@@ -198,101 +202,179 @@ __attribute__((constructor)) static void story_init(void) {
     LOG("[warp] story at phase %d%s\n", g_story, g_story_all ? " for everything" : " for the spawn conditions");
 }
 
-// ---- (research) LARECOMP_GHOST=<my port>,<peer port>[,<peer host>]: a second player in the field, as a stand-in.
-// Each copy sends its player's position and facing over UDP every frame; the other shows them with a character of its
-// own level standing in. The stand-in is a story/station NPC near our player (a character body 3-40 m away that isn't
-// stepped - the crowd's models follow their own animation, not their bodies, 2026-11-13), moved through its transform
-// node: a node (vtable 0x7003be0d28) keeps its local scale at +0xc0, rotation at +0xd0 (quaternion xyzw) and
-// translation at +0xe0, and 0x7001ccf27c (x0 the node; called many times a frame) makes its world matrices (+0x40,
-// +0x80) from them - writing the translation moves the model (found 2026-11-14 by shifting every copy of a station
-// NPC's x and halving: the world matrices themselves are overwritten). The character's own node is the one whose
-// translation is its body's position. The stand-in keeps its own model, animation and collision (where it stood):
-// a test that another player can be shown in Lumiose outside a battle, not the game's own remote player.
-#ifndef _WIN32  // (sockets and process_vm_readv: Linux research only)
+// ---- The shared world: other players walking around Lumiose (opt-in: larecomp.ini world_players = 1, the launcher's
+// Mods page, with an online server - contrib/lzaserver - joined through the relay plugin; or LARECOMP_GHOST=<my port>,
+// <peer port>[,<peer host>] for two copies over UDP, a test). Each copy sends its player's position, speed and facing
+// ~20 times a second; the others show each player with a character of their own level standing in: a story/station NPC
+// near our player (a character body 3-40 m away that isn't stepped - the crowd's models follow their own animation, not
+// their bodies, 2026-11-13), moved through its transform node. A node (vtable 0x7003be0d28) keeps its local scale at
+// +0xc0, rotation at +0xd0 (quaternion xyzw) and translation at +0xe0, and 0x7001ccf27c (x0 the node; called many times
+// a frame) makes its world matrices (+0x40, +0x80) from them - writing the translation moves the model (found 2026-11-14
+// by shifting every copy of a station NPC's x and halving: the world matrices themselves are overwritten). A
+// character's own node is the one whose translation is its body's position. The stand-in keeps its own model, animation
+// and collision (where it stood); its Talk prompt follows it - and A there asks that player to trade (below).
+//   (The game's own remote player - Private Battles' - is an ordinary character whose movement comes from the network,
+// 2026-11-14: a stand-in until that can be made in the field.)
+#define NODE_VTABLE 0x7003be0d28ull
+#define NODE_UPDATE 0x7001ccf27cull
+#define MAXPEER 4
+#define PEER_TIMEOUT_NS 5000000000ull
+#ifdef _WIN32
+#include <windows.h>
+#endif
+static uint64_t world_now_ns(void) { return plat_now_ns(); }
+typedef struct {
+    uint64_t id;                     // (the player's own random id; 0 a free slot)
+    float pos[3], vel[3], yaw;       // (as last heard)
+    float shown[3];                  // (where the stand-in is drawn: smoothed toward pos + vel * age)
+    uint64_t heard_ns;
+    volatile uint64_t body, node;    // (the stand-in's body, then its node)
+} Peer;
+static Peer g_peers[MAXPEER];
+static uint64_t g_self;               // (this copy's id in the world)
+static volatile int g_scanning;
+static volatile uint64_t g_me_body, g_me_node;  // (our player's body and node: the node has the model's facing)
+static bool g_hooked;
+
+// ---- packets (both ways the same, little-endian): {u8 type, u8 version 1, u8[6], u64 from, ...}
+//   type 2 where:  f32 x y z, f32 yaw, f32 vx vy vz
+//   type 3 trade asked, 4 trade answered: u64 to, u32 code
+typedef struct { uint8_t type, ver, pad[6]; uint64_t from; union { struct { float p[3], yaw, v[3]; } w; struct { uint64_t to; uint32_t code; } t; }; } WorldPkt;
+
+// transport: the online server through the relay plugin, else (tests) UDP
+static void (*w_send)(const void *, size_t);
+static int (*w_recv)(uint64_t *, void *, size_t);
+static void (*w_enable)(int);
+static int (*w_avail)(void);
+#ifndef _WIN32
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
-#define _GNU_SOURCE_UNUSED
 #include <unistd.h>
 #include <fcntl.h>
-#include <time.h>
-static uint64_t ghost_now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
+static int g_udp = -1;
+static struct sockaddr_in g_udp_peer;
+static float g_off;  // (LARECOMP_GHOST_OFFSET=<m>: one copy shown beside itself, a loopback test)
+static void udp_send(const void *p, size_t n) { sendto(g_udp, p, n, 0, (struct sockaddr *)&g_udp_peer, sizeof g_udp_peer); }
+static int udp_recv(uint64_t *from, void *p, size_t cap) {
+    ssize_t n = recv(g_udp, p, cap, 0);
+    (void)from;
+    return n > 0 ? (int)n : 0;
+}
 ssize_t process_vm_readv(pid_t, const struct iovec *, unsigned long, const struct iovec *, unsigned long, unsigned long);
-#define NODE_VTABLE 0x7003be0d28ull
-#define NODE_UPDATE 0x7001ccf27cull
-static int g_ghost_fd = -1;
-static struct sockaddr_in g_ghost_peer;
-static float g_peer[4];              // (the peer's player: x y z, yaw)
-static volatile uint64_t g_peer_at;  // (frame of the last packet)
-static float g_off;                  // (LARECOMP_GHOST_OFFSET=<m>: research - beside the peer's spot, a loopback test on one copy)
-static volatile uint64_t g_stand_body, g_stand_node;  // (the stand-in's body, then its node)
-static volatile int g_scanning;
-static volatile uint64_t g_me_body, g_me_node;  // (our player's body and node: the node has the model's facing)
+#else
+static const float g_off = 0;
+#endif
+static void world_send(const WorldPkt *k, size_t n) { if (w_send) w_send(k, n); }
+#ifndef _WIN32
+static bool g_udp_test(void) { return g_udp >= 0; }
+#else
+static bool g_udp_test(void) { return false; }
+#endif
 
+// guest memory read for the heap scan, an unmapped or uncommitted range: false
+static bool heap_read(uint64_t a, void *out, size_t n) {
+#ifdef _WIN32
+    MEMORY_BASIC_INFORMATION mb;
+    if (!VirtualQuery((const void *)(uintptr_t)a, &mb, sizeof mb) || mb.State != MEM_COMMIT ||
+        (mb.Protect & (PAGE_NOACCESS | PAGE_GUARD)) || (uint64_t)(uintptr_t)mb.BaseAddress + mb.RegionSize < a + n) return false;
+    memcpy(out, (const void *)(uintptr_t)a, n);
+    return true;
+#else
+    struct iovec l = {out, n}, r = {(void *)(uintptr_t)a, n};
+    return process_vm_readv(getpid(), &l, 1, &r, 1, 0) == (ssize_t)n;
+#endif
+}
+
+static Peer *peer_of_node(uint64_t n) {
+    for (int i = 0; i < MAXPEER; i++) if (g_peers[i].id && g_peers[i].node == n) return &g_peers[i];
+    return NULL;
+}
 static int node_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     uint64_t n = c->x[0];
-    uint64_t mb = g_me_body;
-    if (mb && !g_me_node && n >= HEAP_BASE && n < HEAP_BASE + HEAP_MAX && *(const uint64_t *)(uintptr_t)n == NODE_VTABLE &&
-        !memcmp((const void *)(uintptr_t)(n + 0xe0), (const void *)(uintptr_t)(mb + 0x90), 4) &&
-        !memcmp((const void *)(uintptr_t)(n + 0xe8), (const void *)(uintptr_t)(mb + 0x98), 4)) {
-        g_me_node = n;
-        LOG("[ghost] our player's node %llx\n", (unsigned long long)n);
-    }
-    if (!g_stand_body) return 0;
-    if (n == g_stand_node) {
-        if (g_frame - g_peer_at > 30 || *(const uint64_t *)(uintptr_t)n != NODE_VTABLE) return 0;
+    if (!g_world || n < HEAP_BASE || n >= HEAP_BASE + HEAP_MAX) return 0;
+    Peer *p = peer_of_node(n);
+    if (p) {
+        if (*(const uint64_t *)(uintptr_t)n != NODE_VTABLE) return 0;
         float *q = (float *)(uintptr_t)(n + 0xd0), *t = (float *)(uintptr_t)(n + 0xe0);
-        q[0] = 0, q[1] = sinf(g_peer[3] * 0.5f), q[2] = 0, q[3] = cosf(g_peer[3] * 0.5f);
-        t[0] = g_peer[0] + g_off, t[1] = g_peer[1], t[2] = g_peer[2];
+        q[0] = 0, q[1] = sinf(p->yaw * 0.5f), q[2] = 0, q[3] = cosf(p->yaw * 0.5f);
+        t[0] = p->shown[0] + g_off, t[1] = p->shown[1], t[2] = p->shown[2];
         return 0;
     }
-    if (!g_stand_node && n >= HEAP_BASE && n < HEAP_BASE + HEAP_MAX && *(const uint64_t *)(uintptr_t)n == NODE_VTABLE &&
-        !memcmp((const void *)(uintptr_t)(n + 0xe0), (const void *)(uintptr_t)(g_stand_body + 0x90), 4) &&
-        !memcmp((const void *)(uintptr_t)(n + 0xe8), (const void *)(uintptr_t)(g_stand_body + 0x98), 4)) {
-        g_stand_node = n;
-        LOG("[ghost] the stand-in's node %llx\n", (unsigned long long)n);
+    if (*(const uint64_t *)(uintptr_t)n != NODE_VTABLE) return 0;
+    const void *nt = (const void *)(uintptr_t)(n + 0xe0);
+    uint64_t mb = g_me_body;
+    if (mb && !g_me_node && !memcmp(nt, (const void *)(uintptr_t)(mb + 0x90), 4) &&
+        !memcmp((const void *)(uintptr_t)(n + 0xe8), (const void *)(uintptr_t)(mb + 0x98), 4)) {
+        g_me_node = n;
+        LOG("[world] our player's node %llx\n", (unsigned long long)n);
+    }
+    for (int i = 0; i < MAXPEER; i++) {  // (a stand-in's node: the one at its body's spot)
+        Peer *s = &g_peers[i];
+        uint64_t b = s->body;
+        if (!s->id || !b || s->node) continue;
+        if (!memcmp(nt, (const void *)(uintptr_t)(b + 0x90), 4) && !memcmp((const void *)(uintptr_t)(n + 0xe8), (const void *)(uintptr_t)(b + 0x98), 4)) {
+            s->node = n;
+            LOG("[world] player %016llx shown by the character at node %llx\n", (unsigned long long)s->id, (unsigned long long)n);
+        }
     }
     return 0;
 }
 
-// every character body in the heap (a background thread, once): the nearest one 3-40 m from `me` not stepped lately
+// every character body in the heap (a background thread): for each player without a stand-in, the nearest body 3-40 m
+// from `me` that isn't stepped and isn't standing in already
 static uint64_t g_scan_me;
 static void *scan_bodies(void *arg) {
     (void)arg;
-    uint64_t me = g_scan_me, best_o = 0;
-    float px = ((const float *)(uintptr_t)(me + 0x90))[0], pz = ((const float *)(uintptr_t)(me + 0x90))[2], best = 1e9f;
+    uint64_t me = g_scan_me;
+    float px = ((const float *)(uintptr_t)(me + 0x90))[0], pz = ((const float *)(uintptr_t)(me + 0x90))[2];
+    enum { NC = 16 };
+    uint64_t cand[NC];
+    float cd[NC];
+    int nc = 0, count = 0;
     const size_t chunk = 1u << 20;
     uint64_t *buf = malloc(chunk);
-    int count = 0;
     for (uint64_t a = HEAP_BASE; buf && a < HEAP_BASE + HEAP_MAX; a += chunk) {
-        struct iovec l = {buf, chunk}, r = {(void *)(uintptr_t)a, chunk};
-        if (process_vm_readv(getpid(), &l, 1, &r, 1, 0) != (ssize_t)chunk) continue;
-        for (size_t k = 0; k < chunk / 8; k++) {
+        if (!heap_read(a, buf, chunk)) continue;
+        for (size_t k = 0; k + 0xa0 / 8 < chunk / 8; k++) {
             if (buf[k] != BODY_VTABLE) continue;
             uint64_t o = a + k * 8;
-            if (o == me || chunk - k * 8 < 0xa0) continue;
+            if (o == me) continue;
             count++;
             const float *q = (const float *)((const char *)buf + k * 8 + 0x90);
             float d = sqrtf((q[0] - px) * (q[0] - px) + (q[2] - pz) * (q[2] - pz));
-            bool stepped = false;
+            if (!(d > 3 && d < 40)) continue;
+            bool skip = false;
             pthread_mutex_lock(&g_body_lock);
-            for (int i = 0; i < NBODY; i++) if (g_bodies[i].o == o && g_frame - g_bodies[i].last <= 30) stepped = true;
+            for (int i = 0; i < NBODY; i++) if (g_bodies[i].o == o && g_frame - g_bodies[i].last <= 30) skip = true;
             pthread_mutex_unlock(&g_body_lock);
-            if (!stepped && d > 3 && d < 40 && d < best) best = d, best_o = o;
+            for (int i = 0; i < MAXPEER; i++) if (g_peers[i].body == o) skip = true;
+            if (skip) continue;
+            if (nc == NC && d >= cd[NC - 1]) continue;  // (kept sorted, nearest first)
+            int j = nc < NC ? nc++ : NC - 1;
+            while (j > 0 && cd[j - 1] > d) cand[j] = cand[j - 1], cd[j] = cd[j - 1], j--;
+            cand[j] = o, cd[j] = d;
         }
     }
     free(buf);
-    LOG("[ghost] %d character bodies; the stand-in: %llx, %.1f m from us\n", count, (unsigned long long)best_o, best);
-    g_stand_body = best_o;
+    int used = 0;
+    for (int i = 0; i < MAXPEER && used < nc; i++)
+        if (g_peers[i].id && !g_peers[i].body) {
+            g_peers[i].node = 0, g_peers[i].body = cand[used];
+            LOG("[world] player %016llx: stand-in %llx, %.1f m from us (%d characters)\n", (unsigned long long)g_peers[i].id,
+                (unsigned long long)cand[used], cd[used], count);
+            used++;
+        }
     g_scanning = 0;
     return NULL;
 }
 
-// The walk-up trade: A pressed by the stand-in (the game's own Talk is kept from it) asks the other player; them
+// ---- the walk-up trade: A by a player's stand-in (the stand-in's own Talk is kept from the game) asks that player; them
 // doing the same answers. Both games then go to Link Play -> Link Trade -> Nearby Players with the same Link Code
-// (pressed through runtime/hle/input.c's queue; the code typed by menu.mm's name entry): the game's own trade from there.
+// (pressed through runtime/hle/input.c's queue; the code typed by menu.mm's name entry; with an online server the relay
+// plugin takes the code as the lobby, so the trade goes through the server too): the game's own trade from there.
 #define TRADE_NEAR 2.5f
 #define BTN_A_BIT 1ull
 void input_macro(const char *lines);
@@ -302,11 +384,13 @@ extern volatile uint64_t g_input_swallow;
 void menu_notice_for(const char *text, unsigned ms);
 extern char g_kbd_auto_once[32];
 static int g_trade;            // 0 nothing, 1 we asked, 2 they asked
-static uint32_t g_trade_code;  // (8 digits, below 2^24: exact in the packet's float)
+static uint64_t g_trade_with;  // (that player)
+static uint32_t g_trade_code;
 static uint64_t g_trade_at;
-static void trade_send(int accept, uint32_t code) {
-    float out[5] = {accept ? 4.0f : 3.0f, (float)code, 0, 0, 0};
-    for (int i = 0; i < 3; i++) sendto(g_ghost_fd, out, sizeof out, 0, (struct sockaddr *)&g_ghost_peer, sizeof g_ghost_peer);
+static void trade_send(int accept, uint64_t to, uint32_t code) {
+    WorldPkt k = {.type = (uint8_t)(accept ? 4 : 3), .ver = 1, .from = g_self};
+    k.t.to = to, k.t.code = code;
+    for (int i = 0; i < 3; i++) world_send(&k, 16 + 12);
 }
 static void trade_start(uint32_t code) {
     snprintf(g_kbd_auto_once, sizeof g_kbd_auto_once, "%08u", code);
@@ -316,29 +400,33 @@ static void trade_start(uint32_t code) {
     char t[96];
     snprintf(t, sizeof t, "Trading with the other player (Link Code %04u %04u)", code / 10000, code % 10000);
     menu_notice_for(t, 8000);
-    LOG("[ghost] trade: Link Code %08u\n", code);
+    LOG("[world] trade: Link Code %08u\n", code);
     g_trade = 0;
 }
-static void trade_message(bool accept, uint32_t code, uint64_t frame) {
-    if (accept) {
-        if (g_trade == 1 && code == g_trade_code) trade_start(code);
+static void trade_message(const WorldPkt *k, uint64_t frame) {
+    if (k->t.to != g_self) return;
+    if (k->type == 4) {
+        if (g_trade == 1 && k->from == g_trade_with && k->t.code == g_trade_code) trade_start(k->t.code);
         return;
     }
-    if (g_trade == 2 && code == g_trade_code) return;  // (a repeat)
-    if (g_trade == 1 && code > g_trade_code) return;   // (both asked at once: the lower code stands)
-    g_trade = 2, g_trade_code = code, g_trade_at = frame;
-    menu_notice_for("The other player wants to trade! Walk up to them and press A.", 8000);
-    LOG("[ghost] trade asked by the other player (code %08u)\n", code);
+    if (g_trade == 2 && k->from == g_trade_with && k->t.code == g_trade_code) return;  // (a repeat)
+    if (g_trade == 1 && k->from == g_trade_with && k->t.code > g_trade_code) return;  // (both asked at once: the lower code)
+    g_trade = 2, g_trade_with = k->from, g_trade_code = k->t.code, g_trade_at = frame;
+    menu_notice_for("Another player wants to trade! Walk up to them and press A.", 8000);
+    LOG("[world] trade asked by %016llx (code %08u)\n", (unsigned long long)k->from, k->t.code);
 }
 static void trade_frame(uint64_t me, uint64_t frame) {
-    uint64_t n = g_stand_node;
-    bool near = false;
-    if (me && n && frame - g_peer_at < 30) {
-        const float *p = (const float *)(uintptr_t)(me + 0x90), *t = (const float *)(uintptr_t)(n + 0xe0);
-        near = (p[0] - t[0]) * (p[0] - t[0]) + (p[2] - t[2]) * (p[2] - t[2]) < TRADE_NEAR * TRADE_NEAR && fabsf(p[1] - t[1]) < 2;
-    }
+    Peer *by = NULL;
+    if (me)
+        for (int i = 0; i < MAXPEER; i++) {
+            Peer *p = &g_peers[i];
+            if (!p->id || !p->node) continue;
+            const float *a = (const float *)(uintptr_t)(me + 0x90);
+            float dx = a[0] - p->shown[0] - g_off, dz = a[2] - p->shown[2];
+            if (dx * dx + dz * dz < TRADE_NEAR * TRADE_NEAR && fabsf(a[1] - p->shown[1]) < 2) by = p;
+        }
     bool busy = input_macro_busy();
-    g_input_swallow = near && !busy ? BTN_A_BIT : 0;  // (the stand-in's own Talk never starts)
+    g_input_swallow = by && !busy ? BTN_A_BIT : 0;  // (the stand-in's own Talk never starts)
     static bool was;
     bool a = (input_buttons_now() & BTN_A_BIT) != 0, press = a && !was;
     was = a;
@@ -346,83 +434,151 @@ static void trade_frame(uint64_t me, uint64_t frame) {
         if (g_trade == 1) menu_notice_for("No answer to the trade request.", 4000);
         g_trade = 0;
     }
-    static uint64_t hint_at;  // (by the stand-in: what A does there, in the corner while near)
-    if (near && !busy && frame - hint_at >= 30) {
+    bool theirs = by && g_trade && by->id == g_trade_with;
+    static uint64_t hint_at;  // (by a stand-in: what A does there, in the corner while by)
+    if (by && !busy && frame - hint_at >= 30) {
         hint_at = frame;
-        menu_notice_for(g_trade == 2 ? "A: accept the other player's trade" : g_trade == 1 ? "Trade asked: waiting for the other player" :
-                        "A: ask the other player to trade", 700);
+        menu_notice_for(theirs && g_trade == 2 ? "A: accept this player's trade" : theirs && g_trade == 1 ? "Trade asked: waiting for them" :
+                        "A: ask this player to trade", 700);
     }
-    if (!near || busy || !press) return;
-    if (g_trade == 2) {
-        trade_send(1, g_trade_code);
+    if (!by || busy || !press) return;
+    if (theirs && g_trade == 2) {
+        trade_send(1, g_trade_with, g_trade_code);
         trade_start(g_trade_code);
-    } else if (g_trade == 0) {
-        g_trade_code = 10000000u + (uint32_t)(ghost_now_ns() / 1000 % 6777216u);
-        g_trade = 1, g_trade_at = frame;
-        trade_send(0, g_trade_code);
-        menu_notice_for("Trade request sent. Waiting for the other player to walk up to you and press A.", 6000);
-        LOG("[ghost] trade asked (code %08u)\n", g_trade_code);
+    } else if (!theirs || g_trade == 0) {
+        g_trade_code = 10000000u + (uint32_t)(world_now_ns() / 1000 % 89999999u);
+        g_trade = 1, g_trade_with = by->id, g_trade_at = frame;
+        trade_send(0, g_trade_with, g_trade_code);
+        menu_notice_for("Trade request sent. Waiting for them to walk up to you and press A.", 6000);
+        LOG("[world] trade asked of %016llx (code %08u)\n", (unsigned long long)g_trade_with, g_trade_code);
     } else {
-        trade_send(0, g_trade_code);  // (again, in case it was lost)
+        trade_send(0, g_trade_with, g_trade_code);  // (again, in case it was lost)
     }
 }
 
-void ghost_init(void) {
+static void hooks_on(void) {
+    if (g_hooked) return;
+    g_hooked = true;
+    rt_register_fnhook_at(NODE_UPDATE, node_hook);
+    if (!g_body_hooks) g_body_hooks = true, rt_register_fnhook_at(STEP_A, body_hook), rt_register_fnhook_at(STEP_B, body_hook);
+}
+void ghost_init(void) {  // (the test transport: LARECOMP_GHOST=<my port>,<peer port>[,<peer host>], Linux)
+    if (!g_self) {  // (random: the clock, this copy's stack address and its process, mixed - splitmix64)
+#ifdef _WIN32
+        uint64_t pid = GetCurrentProcessId();
+#else
+        uint64_t pid = (uint64_t)getpid();
+#endif
+        uint64_t x = plat_now_ns() ^ (uint64_t)(uintptr_t)&pid * 0x9E3779B97F4A7C15ull ^ pid << 32;
+        x += 0x9E3779B97F4A7C15ull, x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull, x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+        g_self = (x ^ (x >> 31)) | 1;
+    }
+#ifndef _WIN32
     const char *e = getenv("LARECOMP_GHOST");
     int mine = 0, peer = 0;
     char host[64] = "127.0.0.1";
     if (!e || sscanf(e, "%d,%d,%63s", &mine, &peer, host) < 2) return;
-    g_ghost_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    g_udp = socket(AF_INET, SOCK_DGRAM, 0);
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)mine), .sin_addr.s_addr = htonl(INADDR_ANY)};
-    if (g_ghost_fd < 0 || bind(g_ghost_fd, (struct sockaddr *)&a, sizeof a)) { LOG("[ghost] can't bind %d\n", mine); return; }
-    fcntl(g_ghost_fd, F_SETFL, O_NONBLOCK);
-    g_ghost_peer.sin_family = AF_INET, g_ghost_peer.sin_port = htons((uint16_t)peer);
-    inet_pton(AF_INET, host, &g_ghost_peer.sin_addr);
+    if (g_udp < 0 || bind(g_udp, (struct sockaddr *)&a, sizeof a)) { LOG("[world] can't bind UDP %d\n", mine); return; }
+    fcntl(g_udp, F_SETFL, O_NONBLOCK);
+    g_udp_peer.sin_family = AF_INET, g_udp_peer.sin_port = htons((uint16_t)peer);
+    inet_pton(AF_INET, host, &g_udp_peer.sin_addr);
     g_off = getenv("LARECOMP_GHOST_OFFSET") ? (float)atof(getenv("LARECOMP_GHOST_OFFSET")) : 0;
-    g_ghost_on = 1;
-    rt_register_fnhook_at(NODE_UPDATE, node_hook);
-    LOG("[ghost] on: port %d, peer %s:%d\n", mine, host, peer);
+    w_send = udp_send, w_recv = udp_recv;
+    g_world = 1;
+    LOG("[world] test transport: UDP %d -> %s:%d\n", mine, host, peer);
+#endif
 }
+
+// the online server's shared world, when the setting is on and the relay plugin has a server (checked once a second)
+static void world_transport(uint64_t frame) {
+    static uint64_t checked;
+    if (g_udp_test() || frame - checked < 60) return;
+    checked = frame;
+    void *plugins_symbol(const char *name);
+    if (!w_avail) {
+        w_avail = (int (*)(void))plugins_symbol("larecomp_world_available");
+        w_enable = (void (*)(int))plugins_symbol("larecomp_world_enable");
+        w_send = (void (*)(const void *, size_t))plugins_symbol("larecomp_world_send");
+        w_recv = (int (*)(uint64_t *, void *, size_t))plugins_symbol("larecomp_world_recv");
+        if (!w_avail || !w_enable || !w_send || !w_recv) { w_avail = NULL, w_send = NULL, w_recv = NULL; return; }
+    }
+    int want = g_settings.world_players && w_avail();
+    if (want == g_world) return;
+    w_enable(want);
+    g_world = want;
+    LOG("[world] %s\n", want ? "on: other players on the online server are shown" : "off");
+    if (!want) memset(g_peers, 0, sizeof g_peers);  // (their stand-ins go back where they stood)
+}
+
 static void ghost_frame(uint64_t frame) {
+    world_transport(frame);
+    if (!g_world) return;
+    hooks_on();
+    uint64_t now = world_now_ns();
     uint64_t me = player_body(frame);
     if (me != g_me_body) g_me_body = me, g_me_node = 0;
     uint64_t mn = g_me_node;
     if (mn && *(const uint64_t *)(uintptr_t)mn != NODE_VTABLE) g_me_node = mn = 0;
-    if (me && mn) {  // (send ours: the body's position, the node's facing - a turn about y, quaternion xyzw at +0xd0)
+    static uint64_t sent_ns;
+    static float last[3];
+    if (me && mn && now - sent_ns >= 50000000ull) {  // (ours, 20 a second: the body's position, the node's facing)
         const float *b = (const float *)(uintptr_t)(me + 0x90), *q = (const float *)(uintptr_t)(mn + 0xd0);
-        float out[5] = {2.0f, b[0], b[1], b[2], 2.0f * atan2f(q[1], q[3])};
-        sendto(g_ghost_fd, out, sizeof out, 0, (struct sockaddr *)&g_ghost_peer, sizeof g_ghost_peer);
+        float dt = sent_ns ? (float)(now - sent_ns) / 1e9f : 1;
+        WorldPkt k = {.type = 2, .ver = 1, .from = g_self};
+        for (int i = 0; i < 3; i++) k.w.p[i] = b[i], k.w.v[i] = dt < 0.5f ? (b[i] - last[i]) / dt : 0, last[i] = b[i];
+        k.w.yaw = 2.0f * atan2f(q[1], q[3]);
+        world_send(&k, 16 + 28);
+        sent_ns = now;
     }
-    float in[5];
-    while (recv(g_ghost_fd, in, sizeof in, 0) == (ssize_t)sizeof in) {
-        if (in[0] == 2.0f) memcpy(g_peer, in + 1, 16), g_peer_at = frame;
-        else if (in[0] == 3.0f || in[0] == 4.0f) trade_message(in[0] == 4.0f, (uint32_t)in[1], frame);
+    WorldPkt in;
+    uint64_t via;
+    int n;
+    while (w_recv && (n = w_recv(&via, &in, sizeof in)) >= 16) {
+        if (in.ver != 1 || in.from == g_self) continue;
+        if (in.type == 3 || in.type == 4) { if (n >= 28) trade_message(&in, frame); continue; }
+        if (in.type != 2 || n < 44) continue;
+        Peer *p = NULL, *free_p = NULL;
+        for (int i = 0; i < MAXPEER; i++) {
+            if (g_peers[i].id == in.from) p = &g_peers[i];
+            else if (!g_peers[i].id && !free_p) free_p = &g_peers[i];
+        }
+        if (!p && free_p) {
+            p = free_p;
+            memset(p, 0, sizeof *p);
+            p->id = in.from;
+            memcpy(p->shown, in.w.p, 12);
+            LOG("[world] player %016llx is here\n", (unsigned long long)in.from);
+            menu_notice_for("Another player is nearby.", 3000);
+        }
+        if (!p) continue;  // (more players than stand-ins)
+        memcpy(p->pos, in.w.p, 12), memcpy(p->vel, in.w.v, 12), p->yaw = in.w.yaw, p->heard_ns = now;
+    }
+    bool want_scan = false;
+    for (int i = 0; i < MAXPEER; i++) {
+        Peer *p = &g_peers[i];
+        if (!p->id) continue;
+        if (now - p->heard_ns > PEER_TIMEOUT_NS) {  // (gone quiet: their stand-in goes back)
+            LOG("[world] player %016llx left\n", (unsigned long long)p->id);
+            memset(p, 0, sizeof *p);
+            continue;
+        }
+        if (p->body && !is_body(p->body)) p->body = p->node = 0;  // (the stand-in went with its level)
+        if (!p->body) want_scan = true;
+        float age = (float)(now - p->heard_ns) / 1e9f;  // (shown: toward where they should be now, smoothly)
+        if (age > 0.25f) age = 0.25f;
+        for (int k = 0; k < 3; k++) {
+            float target = p->pos[k] + p->vel[k] * age, d = target - p->shown[k];
+            p->shown[k] = fabsf(d) > 8 ? target : p->shown[k] + d * 0.35f;  // (a jump of 8 m - a warp: at once)
+        }
     }
     trade_frame(me, frame);
-    if (g_stand_body && !is_body(g_stand_body)) {  // (gone with its level: another one)
-        LOG("[ghost] the stand-in %llx is gone\n", (unsigned long long)g_stand_body);
-        g_stand_body = g_stand_node = 0;
-    }
     static uint64_t scanned_at;
-    if (!g_stand_body && !g_scanning && me && frame - g_peer_at < 30 && (!scanned_at || frame - scanned_at > 600)) {
+    if (want_scan && !g_scanning && me && mn && (!scanned_at || frame - scanned_at > 600)) {
         pthread_t t;
         g_scanning = 1, g_scan_me = me, scanned_at = frame;
         if (pthread_create(&t, NULL, scan_bodies, NULL)) g_scanning = 0; else pthread_detach(t);
     }
-    static uint64_t logged;
-    if (!g_me_node && me && frame - logged >= 300) {
-        logged = frame;
-        const float *b = (const float *)(uintptr_t)(me + 0x90);
-        LOG("[ghost] our body %llx at %.2f %.2f %.2f: its node not found yet\n", (unsigned long long)me, b[0], b[1], b[2]);
-    }
-    if (g_stand_node && frame - logged >= 300) {
-        logged = frame;
-        LOG("[ghost] peer at %.2f %.2f %.2f yaw %.2f\n", g_peer[0], g_peer[1], g_peer[2], g_peer[3]);
-    }
 }
 static int ghost_step(Cpu *c, uint64_t addr, uint64_t o) { (void)c, (void)addr, (void)o; return 0; }
-#else
-void ghost_init(void) {}
-static void ghost_frame(uint64_t frame) { (void)frame; }
-static int ghost_step(Cpu *c, uint64_t addr, uint64_t o) { (void)c, (void)addr, (void)o; return 0; }
-#endif

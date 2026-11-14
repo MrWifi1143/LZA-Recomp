@@ -537,6 +537,12 @@ static uint64_t g_srv_id;
 static uint8_t g_srv_game;            // (1 Arceus, 2 Z-A)
 static char g_srv_code[9];            // (the lobby: the Link Code last entered)
 static volatile int g_srv_hosting;
+// The shared world (lzaserver 'W' / 'X'): the game's other players walking around, opt-in (runtime/hle/warp.c). What
+// arrives waits in a small queue for the game to take (larecomp_world_recv) - only the newest per player matters.
+static volatile int g_world_on;
+static struct { uint64_t from; uint8_t n, p[96]; } g_wq[64];
+static int g_wq_head, g_wq_tail;
+static pthread_mutex_t g_wq_lock = PTHREAD_MUTEX_INITIALIZER;
 static void srv_send(const void *p, size_t n) {
     sendto(g_srv, (const char *)p, (int)n, 0, (const struct sockaddr *)&g_srv_addr, sizeof g_srv_addr);
 }
@@ -552,6 +558,9 @@ static void srv_hello(void) {
     uint8_t h[10] = {'P'};
     memcpy(h + 1, &g_srv_id, 8), h[9] = (uint8_t)g_srv_hosting;
     srv_send(h, sizeof h);
+    uint8_t w[10] = {'W'};
+    memcpy(w + 1, &g_srv_id, 8), w[9] = (uint8_t)g_world_on;
+    srv_send(w, sizeof w);
 }
 
 // ---- the helper (plugins/steamrelay-helper[.exe]): started with pipes for its stdin / stdout, its stderr the game's log
@@ -756,7 +765,15 @@ static void *pump(void *arg) {
             int n;
             while ((n = (int)recvfrom(g_srv, (char *)m, sizeof m, 0, (struct sockaddr *)&a, &al)) > 0) {
                 if (a.sin_addr.s_addr != g_srv_addr.sin_addr.s_addr || a.sin_port != g_srv_addr.sin_port) continue;
-                if (m[0] == 'D' && n >= 9) {
+                if (m[0] == 'X' && n >= 9 && n <= 9 + 96) {
+                    pthread_mutex_lock(&g_wq_lock);
+                    int nt = (g_wq_tail + 1) % 64;
+                    if (nt == g_wq_head) g_wq_head = (g_wq_head + 1) % 64;  // (full: the oldest dropped)
+                    memcpy(&g_wq[g_wq_tail].from, m + 1, 8), g_wq[g_wq_tail].n = (uint8_t)(n - 9);
+                    memcpy(g_wq[g_wq_tail].p, m + 9, (size_t)n - 9);
+                    g_wq_tail = nt;
+                    pthread_mutex_unlock(&g_wq_lock);
+                } else if (m[0] == 'D' && n >= 9) {
                     uint64_t from;
                     memcpy(&from, m + 1, 8);
                     deliver(from, m + 9, (size_t)n - 9);
@@ -855,6 +872,33 @@ void larecomp_relay_code(const char *code) {
     memcpy(g_srv_code, code, 9);
     srv_hello();
     LOG("[steamrelay] online server: in the lobby of this Link Code\n");
+}
+
+// The shared world (runtime/hle/warp.c): 1 when an online server is in use (the world needs one)
+int larecomp_world_available(void) { return g_srv != NO_SOCK; }
+void larecomp_world_enable(int on) {
+    if (g_srv == NO_SOCK || g_world_on == !!on) return;
+    g_world_on = !!on;
+    srv_hello();
+    LOG("[steamrelay] online server: %s the shared world\n", on ? "in" : "out of");
+}
+void larecomp_world_send(const void *p, size_t n) {  // (to everyone in the shared world; up to 96 bytes)
+    if (g_srv == NO_SOCK || !g_world_on || n > 96) return;
+    uint8_t b[9 + 96] = {'X'};
+    memcpy(b + 1, &g_srv_id, 8), memcpy(b + 9, p, n);
+    srv_send(b, 9 + n);
+}
+int larecomp_world_recv(uint64_t *from, void *p, size_t cap) {  // (the oldest waiting: its length, 0 none)
+    int n = 0;
+    pthread_mutex_lock(&g_wq_lock);
+    if (g_wq_head != g_wq_tail) {
+        *from = g_wq[g_wq_head].from;
+        n = g_wq[g_wq_head].n < cap ? g_wq[g_wq_head].n : (int)cap;
+        memcpy(p, g_wq[g_wq_head].p, (size_t)n);
+        g_wq_head = (g_wq_head + 1) % 64;
+    }
+    pthread_mutex_unlock(&g_wq_lock);
+    return n;
 }
 
 // The online server's address: LARECOMP_RELAY_SERVER, or larecomp.ini's online_server (the launcher's Mods page)

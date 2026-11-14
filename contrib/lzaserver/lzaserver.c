@@ -11,8 +11,13 @@
 //                     'L' id code[8]                          join the lobby of that Link Code (8 ASCII digits)
 //                     'P' id hosting(1)                       the client's game hosts a network / no longer
 //                     'D' id to payload                       pass payload to another client of the same lobby
+//                     'W' id on(1)                            in the shared world or not (opt-in, game setting)
+//                     'X' id payload (up to 96 bytes)         to everyone in the shared world of the same game (where
+//                                                             the player is, ~20 times a second: players see each
+//                                                             other walking around)
 //   server -> client  'M' n (id hosting(1)) x n               the lobby's other members, every second
 //                     'D' from payload                        a lobby member's payload
+//                     'X' from payload                        a shared-world player's payload
 // A packet whose id isn't the one that address said hello with is dropped (no speaking for others).
 #include <errno.h>
 #include <stdbool.h>
@@ -51,6 +56,7 @@ typedef struct {
     uint64_t id;
     struct sockaddr_in addr;
     uint8_t game, hosting;
+    bool world;    // (in the shared world: 'W')
     char code[9];  // ("" not in a lobby)
     uint64_t seen, window;
     uint32_t count;
@@ -59,7 +65,7 @@ typedef struct {
 static Client *g_c;
 static int g_max = 256;
 static sock_t g_s;
-static uint64_t g_fwd_packets, g_fwd_bytes;
+static uint64_t g_fwd_packets, g_fwd_bytes, g_world_packets;
 
 static const char *who(const Client *c, char *b) {
     snprintf(b, 64, "%s:%u", inet_ntoa(c->addr.sin_addr), ntohs(c->addr.sin_port));
@@ -170,6 +176,22 @@ int main(int argc, char **argv) {
                     }
                 } else if (buf[0] == 'P' && n >= 10) {
                     c->hosting = buf[9] ? 1 : 0;
+                } else if (buf[0] == 'W' && n >= 10) {
+                    bool on = buf[9] != 0;
+                    if (on != c->world) printf("  %016llx %s the shared world (%s)\n", (unsigned long long)id, on ? "in" : "out of",
+                                               c->game == 1 ? "Arceus" : "Z-A");
+                    c->world = on;
+                } else if (buf[0] == 'X' && n >= 10 && n <= 9 + 96) {
+                    if (!c->world) continue;
+                    out[0] = 'X';
+                    memcpy(out + 1, &id, 8);
+                    memcpy(out + 9, buf + 9, (size_t)n - 9);
+                    for (int i = 0; i < g_max; i++) {
+                        Client *t = &g_c[i];
+                        if (t == c || !t->used || !t->world || t->game != c->game) continue;
+                        send_to(t, out, (size_t)n);
+                        g_world_packets++;
+                    }
                 } else if (buf[0] == 'D' && n >= 17) {
                     uint64_t to;
                     memcpy(&to, buf + 9, 8);
@@ -195,9 +217,10 @@ int main(int argc, char **argv) {
         if (now - last_stats >= 60000) {
             int nc = 0;
             for (int i = 0; i < g_max; i++) nc += g_c[i].used;
-            if (nc || g_fwd_packets) printf("  %d players, %llu packets (%llu bytes) passed on in the last minute\n", nc,
-                                            (unsigned long long)g_fwd_packets, (unsigned long long)g_fwd_bytes);
-            g_fwd_packets = g_fwd_bytes = 0, last_stats = now;
+            if (nc || g_fwd_packets || g_world_packets)
+                printf("  %d players, %llu packets (%llu bytes) passed on in lobbies, %llu in the shared world in the last minute\n",
+                       nc, (unsigned long long)g_fwd_packets, (unsigned long long)g_fwd_bytes, (unsigned long long)g_world_packets);
+            g_fwd_packets = g_fwd_bytes = g_world_packets = 0, last_stats = now;
         }
     }
 }
