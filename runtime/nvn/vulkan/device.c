@@ -878,11 +878,9 @@ void backend_present(NvnTexture *t) {
         output_scale(dw, dh, false, SDL_GetTicksNS() / 1e9, vk_gpu_frame_update(), &os);
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh;
         float crop[4] = {0, 0, 1, 1};  // uv origin and size: the whole image
-        {   // where the game image is in the window (pixels): the mouse as a finger on the touch screen (hle/input.c) - in an
-            // image of another shape than 16:9 (ultrawide), the interface's centred 16:9 box in it (exec.c draw_)
+        {   // where the game image is in the window (pixels): the mouse as a finger on the touch screen (hle/input.c)
             extern double g_present_rect[4];
-            double bw = fmin(vw, vh * (16.0 / 9.0)), bh = fmin(vh, vw * (9.0 / 16.0));
-            g_present_rect[0] = vx + (vw - bw) / 2, g_present_rect[1] = vy + (vh - bh) / 2, g_present_rect[2] = bw, g_present_rect[3] = bh;
+            g_present_rect[0] = vx, g_present_rect[1] = vy, g_present_rect[2] = vw, g_present_rect[3] = vh;
         }
         renderer_set_scale((float)sx, (float)sy);
         VkCommandBuffer cb = vk_cmd();
