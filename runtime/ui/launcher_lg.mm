@@ -41,6 +41,7 @@ extern "C" {
 #include "plugin.h"
 #include "paths.h"
 #include "settings.h"
+#include "update.h"
 void settings_save(void);
 void ui_window_init(void);
 void ui_window_size_hint(int w, int h);  // (nvn/vulkan/device.c)
@@ -395,6 +396,52 @@ static void remove_tree(const char *dir) {
 // The community's Discord: a small button beside the version, opened in the browser. Right-click: hide it (remembered in
 // larecomp.ini, discord_button = 0: the data folder, so it stays hidden across updates). Never opens by itself.
 static const char *const k_discord_url = "https://discord.gg/wxqppgye97";
+// Next to the version: the newer release, if any (runtime/update.c) - "Update" downloads it and puts it in place, then
+// "Restart" starts the new version (the launcher again). Folder installs get "Download" (the release page).
+extern "C" void rt_restart_process(int to_launcher);  // (main.c)
+static void update_line(bool same_line = true) {  // (false: a row of its own)
+    bool first = true;
+    auto next = [&]() { if (!first || same_line) ImGui::SameLine(); first = false; };
+    const ImVec4 gold(0.95f, 0.78f, 0.36f, 1.0f), red(0.95f, 0.45f, 0.40f, 1.0f);
+    switch (update_state()) {
+    case UPD_AVAILABLE:
+        next();
+        ImGui::TextColored(gold, "%s %s", T("Update available:", "Atualização disponível:"), update_version());
+        ImGui::SameLine();
+        if (update_can_install()) {
+            if (ImGui::SmallButton(T("Update", "Atualizar"))) update_install_start();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", T("Downloads it and puts it in place; your saves, settings and game files stay.",
+                                          "Baixa e instala; seus saves, configurações e arquivos do jogo ficam."));
+        } else if (ImGui::SmallButton(T("Download", "Baixar"))) update_open_page();
+        break;
+    case UPD_DOWNLOADING:
+        next();
+        ImGui::TextColored(gold, "%s %s: %d%%", T("Downloading", "Baixando"), update_version(), (int)(update_progress() * 100.0f));
+        break;
+    case UPD_INSTALLING:
+        next();
+        ImGui::TextColored(gold, "%s %s...", T("Installing", "Instalando"), update_version());
+        break;
+    case UPD_DONE:
+        next();
+        ImGui::TextColored(gold, "%s %s.", update_version(), T("is installed", "instalada"));
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T("Restart now", "Reiniciar agora"))) rt_restart_process(1);
+        break;
+    case UPD_FAILED:
+        next();
+        ImGui::TextColored(red, "%s", T("Update failed", "A atualização falhou"));
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", update_error());
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T("Try again", "Tentar de novo"))) update_install_start();
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T("Release page", "Página da versão"))) update_open_page();
+        break;
+    default:
+        break;
+    }
+}
 static void discord_button(void) {
     if (g_settings.hide_discord) return;
     ImGui::SameLine();
@@ -821,6 +868,8 @@ extern "C" void launcher_lg_run(const char *root) {
     pick_language();
     // the launcher's window is made at its own size (a window resized later isn't always given the size: Wayland)
     settings_load();
+    update_cleanup();
+    update_check_start();  // (in the background; also when the launcher is skipped: the game mentions it)
     const char *mode = getenv("LARECOMP_START_SCREEN");
     bool classic = mode && *mode ? !strcmp(mode, "classic") : RT_CLASSIC_START_SCREEN;
     bool skip_now = g_settings.skip_start && !getenv("LARECOMP_LAUNCHER_SHOT") && !getenv("LARECOMP_SHOW_LAUNCHER");  // (main.c rt_restart_process: asked for)
@@ -896,7 +945,6 @@ extern "C" void launcher_lg_run(const char *root) {
     static const int fps_vals[] = {30, 60, 72, 120, 144, FPS_UNLIMITED};
     auto fps_index = [](int f) { for (int i = 0; i < 6; i++) if (fps_vals[i] == f) return i; return 0; };
     int fps_i = fps_index(g_settings.fps);
-    int wide_i = g_settings.ultrawide ? 1 : 0;  // (Aspect ratio: 0 16:9, 1 fill the window - nvn/output_scale.c)
     bool experimental = g_settings.experimental;
     // Recommended settings for this PC (from Z-A's start screen; by the GPU, the CPU threads and the RAM): shown with an
     // Apply button, and applied at once on a first start (no larecomp.ini yet)
@@ -944,7 +992,6 @@ extern "C" void launcher_lg_run(const char *root) {
         res = 0;
         for (int i = 0; i < 6; i++) if (res_lines[i] == d.res_height) res = i;
         full = d.fullscreen, smaa = d.antialias == AA_SMAA, showfps = d.show_fps, realtime = !d.fixed_steps, experimental = d.experimental;
-        wide_i = d.ultrawide ? 1 : 0;
         fps_i = fps_index(d.fps);
         wildb = d.wild_battle, prompts_i = d.button_prompts, smooth_sh = d.shadow_smooth, shcol_i = d.shadow_color, bg_i = d.background, pk_i = d.pkhex_link;
         detail_i = d.detail, shadows_i = d.shadows, sharp_i = d.sharpen;
@@ -1038,11 +1085,6 @@ extern "C" void launcher_lg_run(const char *root) {
     // The settings, shown by both screens: the launcher's Options tabs, or the classic screen's one list
     auto settings_display = [&]() {
         ImGui::Combo(T("Resolution", "Resolução"), &res, g_pt ? res_pt : res_en, 6);
-        {   // (a window or screen wider than 16:9: the world seen wider, the interface in a 16:9 box)
-            const char *const wide_names[] = {T("16:9 (bars on a wider screen)", "16:9 (barras numa tela mais larga)"),
-                                              T("Fill the window (ultrawide)", "Preencher a janela (ultrawide)")};
-            ImGui::Combo(T("Aspect ratio", "Proporção da tela"), &wide_i, wide_names, 2);
-        }
         if (ImGui::Checkbox(T("Fullscreen", "Tela cheia"), &full) && classic) SDL_SetWindowFullscreen(win, full);  // (launcher: at Play)
         ImGui::Checkbox(T("Anti-aliasing (SMAA)", "Suavizar serrilhado (SMAA)"), &smaa);
         static const char *const fps_names_en[] = {"30 fps", "60 fps", "72 fps", "120 fps", "144 fps", "Unlimited"};  // (above 60: Experimental settings)
@@ -1134,6 +1176,7 @@ extern "C" void launcher_lg_run(const char *root) {
         ImGui::Combo(T("In background", "Em segundo plano"), &bg_i, bg_names, 3);
         // (runtime/discord.c: "Playing" with the area and frame rate on the player's Discord profile; applies at once)
         ImGui::Checkbox(T("Show what you're playing on Discord", "Mostrar o que você está jogando no Discord"), &g_settings.discord_presence);
+        ImGui::Checkbox(T("Check for updates at start", "Procurar atualizações ao iniciar"), &g_settings.check_updates);
         const char *const pk_names[] = {T("Off", "Desligado"), T("This PC", "Este PC"), T("Network", "Rede")};
         ImGui::Combo(T("PKHeX Link (LiveHeX, port 6000)", "PKHeX Link (LiveHeX, porta 6000)"), &pk_i, pk_names, 3);
         // (runtime/nvn/glyphs.c: the game's button icons redrawn for the controller in use)
@@ -1366,7 +1409,8 @@ extern "C" void launcher_lg_run(const char *root) {
                                         "Hold Shift while starting the game to see this screen again.",
                                         "Estas configurações também estão no jogo: Menu > Help > Settings.\n"
                                         "Segure Shift ao iniciar o jogo para ver esta tela de novo."));
-        ImGui::TextDisabled("v" RT_APP_VERSION);
+        ImGui::TextDisabled("v%s", update_current_version());
+        update_line();
         discord_button();
         ImGui::End();
         pad_nav_update(io, pad_open);
@@ -1444,12 +1488,16 @@ extern "C" void launcher_lg_run(const char *root) {
                 }
                 y += 58 + 10;
             }
+            if (update_state() >= UPD_AVAILABLE) {  // (the update, a row of its own: next to the version it pushed Discord off)
+                ImGui::SetCursorScreenPos(ImVec2(bx, H - 126));
+                update_line(false);
+            }
             ImGui::SetCursorScreenPos(ImVec2(bx, H - 86));
             ImGui::Checkbox(T("Skip the launcher", "Pular o launcher"), &skipstart);
             if (skipstart && ImGui::IsItemHovered())
                 ImGui::SetTooltip("%s", T("Hold Shift while starting the game to see it again.", "Segure Shift ao iniciar o jogo para ver de novo."));
             ImGui::SetCursorScreenPos(ImVec2(bx, H - 40));
-            ImGui::TextDisabled("v" RT_APP_VERSION);
+            ImGui::TextDisabled("v%s", update_current_version());
             discord_button();
             pad_hints(d, W - 34, H - 38, false, false);
         } else {
@@ -1590,7 +1638,6 @@ extern "C" void launcher_lg_run(const char *root) {
     }
     g_settings.res_height = res_lines[res];
     g_settings.fullscreen = full;
-    g_settings.ultrawide = wide_i == 1;
     g_settings.antialias = smaa ? AA_SMAA : AA_OFF;
     if (!experimental && fps_i > 1) fps_i = 1;
     g_settings.experimental = experimental;

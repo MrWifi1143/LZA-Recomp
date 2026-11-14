@@ -36,11 +36,17 @@ static bool lazy_commit(uint64_t a) {
 
 static bool g_report_crashes;
 bool pagewatch_fault(uint64_t addr);  // (runtime/pagewatch.c)
+bool gpuheap_fault(uint64_t addr);    // (runtime/nvn/vulkan/gpuheap.c: the lazy host import's chunks)
+void gpuheap_touch(uint64_t addr, uint64_t n);
 
 static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *ep) {
     EXCEPTION_RECORD *er = ep->ExceptionRecord;
     if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || er->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
     uint64_t fa = er->ExceptionInformation[1];
+    // a heap chunk's first access (gpuheap.c: the GPU imports guest memory in chunks as they're used - the whole chunk
+    // committed now, then imported; lazy_commit would commit just this part, unseen). Only chunks not backed yet:
+    // faults in backed ones are lazy_commit's (after a reboot's decommit) and pagewatch's.
+    if (er->ExceptionInformation[0] != 8 && gpuheap_fault(fa)) return EXCEPTION_CONTINUE_EXECUTION;
     // (an execute fault on a read-write page would be "retried" by lazy_commit forever)
     if (er->ExceptionInformation[0] != 8 && lazy_commit(fa)) return EXCEPTION_CONTINUE_EXECUTION;
     // a store to a page kept read-only to see it written (runtime/pagewatch.c: vertex data cached in VRAM)
@@ -65,6 +71,7 @@ bool plat_reset_guest(uint64_t lo, uint64_t hi) {
 
 void plat_commit(uint64_t addr, uint64_t size) {
     if (!size) return;
+    gpuheap_touch(addr, size);  // (a heap chunk not imported yet: committed whole and marked used first, gpuheap.c)
     uint64_t a = addr & ~0xFFFull, e = (addr + size + 0xFFF) & ~0xFFFull;
     if (!VirtualAlloc((void *)(uintptr_t)a, e - a, MEM_COMMIT, PAGE_READWRITE))
         fprintf(stderr, "[plat] commit %llx+%llx failed (%lu)\n", (unsigned long long)addr,

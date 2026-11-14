@@ -143,6 +143,8 @@ def main():
             with open(z, 'rb') as fi, open(os.path.join(G, 'pgo.profdata'), 'wb') as fo:
                 zstandard.ZstdDecompressor().copy_stream(fi, fo)
     shutil.copy('docs/icon/icon_1024.png', os.path.join(D, 'icon.png'))
+    if os.path.isdir('docs/icon/steam'):  # (Add to Steam's library artwork: runtime/steam_shortcut.c)
+        shutil.copytree('docs/icon/steam', os.path.join(D, 'steam'), dirs_exist_ok=True)
     shutil.copy('third_party/fonts/Baloo2/Baloo2-SemiBold.ttf', D)
     if os.path.isfile('data/shader_manifest.txt'):  # (the warm-up's first programs: runtime/nvn/vulkan/warmup.c)
         shutil.copy('data/shader_manifest.txt', D)

@@ -19,8 +19,6 @@ typedef struct {
                          // game down), not the time that really passed (the default; FPS_UNLIMITED always: hle/fps60.c)
     int res_mode;        // RES_MATCH, 1..4 (N x the Switch's 1080p), RES_DYNAMIC, RES_Q75/50/25 (share of the display)
     int res_height;      // the launcher's render height in lines (720 / 1080 / 1440 / 2160); 0: res_mode decides
-    bool ultrawide;      // Aspect ratio "Fill the window": a window wider than 16:9 is filled - the world seen wider (the same
-                         // height), the interface in a centred 16:9 box; off: 16:9 with bars (nvn/output_scale.c, hle/pla_wide.c)
     int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
     float volume;        // master volume, 1 = 100%
@@ -42,6 +40,7 @@ typedef struct {
     bool movie_audio;
     bool show_fps;
     bool hide_discord;   // the launcher's Discord button hidden (right-click on it): larecomp.ini discord_button = 0
+    bool check_updates;  // at start, a look at the latest release; the launcher offers it (runtime/update.c; larecomp.ini check_updates)
     bool discord_presence;  // Discord Rich Presence: "Playing" with the area and frame rate on the player's profile (runtime/discord.c)
     bool skip_start;     // the start screen goes straight to the game once it's ready (Shift held at start: shown)
     bool experimental;   // "Experimental settings" (start screen): frame rates above 60 offered - 120, 144, Unlimited - in the

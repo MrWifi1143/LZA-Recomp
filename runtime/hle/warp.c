@@ -167,8 +167,7 @@ static void works_write(void) {
 
 static volatile uint64_t g_seen_body;  // (the player's body as last found, warp or not: LARECOMP_LIVE's state shows it)
 
-// (the camera update's hook is hle/pla_wide.c's - one hook an address - which calls this first)
-int warp_cam_hook(Cpu *c, uint64_t addr) {
+static int cam_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     if ((g_state == 0 || g_state == 3) && in_heap(c->x[0])) g_cam = c->x[0];
     if (g_area_state == 2) {
@@ -283,6 +282,7 @@ __attribute__((constructor)) static void warp_init(void) {
             add_works(buf, FLAGS_MAP);
         }
     }
+    rt_register_fnhook_at(0x7002994b70ull, cam_hook);
     rt_register_fnhook_at(0x7002fee4e0ull, body_hook);
 }
 

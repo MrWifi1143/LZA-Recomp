@@ -6,8 +6,14 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsA`)
 
+## 2026-11-13: LegendsA-v1.3.0
+
+Previous release: LegendsA-v1.2.1. Game version: Pokemon Legends: Arceus 1.1.1. Same game code as 1.2.1: no rebuild on start, and copies
+already set up can take the hotfix zip (the program only).
+
 - Add to Steam (start screen, Options): puts the game in your Steam library as a non-Steam game, with its own
-  artwork (cover, banner, hero, logo). Steam can stay open; restart it to see the artwork. Suggested on Discord.
+  artwork (cover, banner, hero, logo). On Linux Steam can stay open (restart it to see the artwork); on Windows the
+  game closes Steam, adds itself and starts Steam again. Suggested on Discord.
 - Discord Rich Presence: "Playing PL:A Recomp", the area you are in (Jubilife Village, the Obsidian Fieldlands ...),
   resolution and frame rate, time played. Needs Discord running and Activity Privacy sharing on; a launcher checkbox
   ("Show what you're playing on Discord") turns it off.
@@ -26,6 +32,23 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
   "the game's memory block ... is full"). Reported on an RTX 3070 Ti.
 - Mods whose folder name has a comma in it ("Max Draw Distance for Pokemon, NPCs and Trees") now load; before, they
   were silently left off and the Mods page showed them off again.
+- Updates: the launcher looks for a newer release at start and shows one line when there is one; a click downloads it,
+  puts it in place (Windows zip: changed files swapped, your mods kept; Linux AppImage: replaced) and offers a
+  restart. Nothing happens without the click; Options -> "Check for updates at start" turns the look off. From this
+  version on - this one still has to be installed by hand.
+- In-game "Leave the game?" box: back to the title screen or the launcher, besides quitting.
+- AMD Radeon on Windows (AMD's driver): the crash arriving in Jubilife and characters drawn without eyes are fixed.
+  AMD's shader compiler mishandled the block structure our shaders used; on AMD's driver they are now written without
+  it. Confirmed on an RX 6600 XT.
+- A rare crash right at start on NVIDIA (two threads starting the graphics driver at once) is fixed.
+- Blank text on PCs with little graphics memory (Intel integrated graphics, AMD on Windows) is fixed: the game's
+  memory is handed to the GPU in 64 MB pieces as it is used.
+- Linux: a crash no longer writes a huge core file (one filled a root partition).
+- RTX 50 (Blackwell): the GPU crash when a Poke Ball hits and the catch effect starts is fixed.
+- RTX 50 with NVIDIA drivers 590 and newer: evolutions no longer crash the GPU. On those cards the evolution plays
+  without two of its particle effects (the green swirl and sparks); other cards are unchanged.
+- Menus above 30 fps: a quick tap no longer moves the cursor two options.
+- Above 30 fps: thrown food lasts as long as at 30 fps (it vanished before Pokemon finished eating).
 
 ## 2026-11-12: LegendsA-v1.2.1
 

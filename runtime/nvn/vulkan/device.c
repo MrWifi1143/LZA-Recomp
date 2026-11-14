@@ -42,6 +42,11 @@ static bool headless(void) {
     return g_headless;
 }
 
+// Held while the Vulkan loader loads and sets up the driver: the window and instance here (main thread) and gpuheap.c's
+// probe instance (the game's thread, at its first SetHeapSize) ran at the same moment, and NVIDIA's libGLX_nvidia isn't
+// safe to start from two threads - a null call inside the loader at start (most runs on some rented RTX 50 boxes)
+pthread_mutex_t g_vk_loader_lock = PTHREAD_MUTEX_INITIALIZER;
+
 // LARECOMP_VK_VALIDATION=1: Khronos validation layer (MSYS2 package vulkan-validation-layers)
 static void create_instance(void) {
     Uint32 n_sdl = 0;
@@ -190,6 +195,16 @@ static void create_device(void) {
             ext[n_ext++] = VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME;
         } else if (gpuheap_on())
             LOG("[vk] warning: the guest heap is GPU memory but the queue can't bind it: shader global memory reads return zero\n");
+        // the host import in 64 MB chunks as they're used (gpuheap.c decided at boot: integrated GPUs), bound into a
+        // sparse buffer (exec.c) - if this device and queue can; otherwise every chunk backed now and imported whole
+        // (the chunk table, gpuheap_chunk_table: no sparse buffer, each chunk a buffer of its own - any queue)
+        extern bool gpuheap_lazy_host(void), gpuheap_chunk_table(void);
+        extern void gpuheap_host_cancel(void);
+        if (!g_vk.gpuheap && gpuheap_lazy_host()) {
+            g_vk.lazyhost = g_vk.host_import &&
+                            (gpuheap_chunk_table() || (g_vk.qfam < nq && (qp[g_vk.qfam].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT)));
+            if (!g_vk.lazyhost) LOG("[vk] guest heap: this queue can't bind sparse memory\n"), gpuheap_host_cancel();
+        }
     }
     g_vk.mem_budget = has_ext(ep, ne, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
     if (g_vk.mem_budget) ext[n_ext++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
@@ -269,6 +284,13 @@ static void create_device(void) {
     {   // subgroup size control (vk_sg32): only where 32 is possible but not the only size
         extern bool g_maxwell_warp_slices;  // (LARECOMP_WARP_SLICES=1: the sliced warp operations anywhere - a 32-wide
         g_maxwell_warp_slices = ENV("LARECOMP_WARP_SLICES") != NULL;  // subgroup is one slice: the same results, a test)
+        extern bool g_maxwell_no_break;  // (AMD's own drivers: shaders without break - maxwell/shader.h; LARECOMP_XLAT_NO_BREAK=0/1)
+        VkPhysicalDeviceDriverProperties dp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+        VkPhysicalDeviceProperties2 dp2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &dp};
+        vkGetPhysicalDeviceProperties2(g_vk.phys, &dp2);
+        const char *nb = ENV("LARECOMP_XLAT_NO_BREAK");
+        g_maxwell_no_break = nb ? atoi(nb) != 0 : dp.driverID == VK_DRIVER_ID_AMD_PROPRIETARY || dp.driverID == VK_DRIVER_ID_AMD_OPEN_SOURCE;
+        if (g_maxwell_no_break) LOG("[vk] driver %u (%s): shaders without break\n", (unsigned)dp.driverID, dp.driverName);
         VkPhysicalDeviceVulkan13Features h13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
         VkPhysicalDeviceFeatures2 hf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &h13};
         vkGetPhysicalDeviceFeatures2(g_vk.phys, &hf);
@@ -320,7 +342,14 @@ static void create_device(void) {
     b->robustBufferAccess = h->robustBufferAccess;  // guest shaders index cbufs freely: keep OOB reads harmless
     if (ENV("LARECOMP_NO_ROBUST")) b->robustBufferAccess = VK_FALSE;  // (research: what the bounds checks cost)
     b->shaderClipDistance = h->shaderClipDistance;
-    b->sparseBinding = b->sparseResidencyBuffer = g_vk.gpuheap;  // (exec.c: the heap window's sparse buffer)
+    extern bool g_maxwell_gmem_table;  // (the chunk table needs no sparse buffer)
+    if (g_vk.lazyhost && !g_maxwell_gmem_table && !(h->sparseBinding && h->sparseResidencyBuffer)) {  // (a plugin's device: not the one gpuheap.c looked at)
+        extern void gpuheap_host_cancel(void);
+        LOG("[vk] guest heap: no sparse buffers on this device\n");
+        gpuheap_host_cancel();
+        g_vk.lazyhost = false;
+    }
+    b->sparseBinding = b->sparseResidencyBuffer = g_vk.gpuheap || (g_vk.lazyhost && !g_maxwell_gmem_table);  // (exec.c: the heap window's sparse buffer)
     if (!have12.uniformAndStorageBuffer8BitAccess) LOG("[vk] warning: no 8-bit uniform buffer access\n");
     if (!h->shaderInt64) LOG("[vk] warning: no shaderInt64 (64-bit address math in shaders)\n");
     float prio = 1.0f;
@@ -841,15 +870,12 @@ void backend_present(NvnTexture *t) {
         // render scale + placement in the window (the game's 16:9 image, fitted): runtime/nvn/output_scale.c;
         // with the GPU time per frame (exec.c, submission timestamps): dynamic resolution raises it again by that
         OutScale os;
-        // (Aspect ratio "Fill the window": a window wider than 16:9 reshapes the render targets - output_scale.c)
-        output_scale(dw, dh, g_settings.ultrawide && dw > dh * (16.0 / 9.0) * 1.005, SDL_GetTicksNS() / 1e9, vk_gpu_frame_update(), &os);
+        output_scale(dw, dh, false, SDL_GetTicksNS() / 1e9, vk_gpu_frame_update(), &os);
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh;
         float crop[4] = {0, 0, 1, 1};  // uv origin and size: the whole image
-        {   // where the game image is in the window (pixels): the mouse as a finger on the touch screen (hle/input.c) - in an
-            // image of another shape than 16:9 (ultrawide), the interface's centred 16:9 box in it (exec.c draw_)
+        {   // where the game image is in the window (pixels): the mouse as a finger on the touch screen (hle/input.c)
             extern double g_present_rect[4];
-            double bw = fmin(vw, vh * (16.0 / 9.0)), bh = fmin(vh, vw * (9.0 / 16.0));
-            g_present_rect[0] = vx + (vw - bw) / 2, g_present_rect[1] = vy + (vh - bh) / 2, g_present_rect[2] = bw, g_present_rect[3] = bh;
+            g_present_rect[0] = vx, g_present_rect[1] = vy, g_present_rect[2] = vw, g_present_rect[3] = vh;
         }
         renderer_set_scale((float)sx, (float)sy);
         { extern void vk_tex_lod_bias(double render_h, double shown_h); if (b && b->height > 1 && vh > 1) vk_tex_lod_bias(b->height, vh); }
@@ -1407,6 +1433,11 @@ void ui_window_init(void) {
     else if (g_hint_w > 0) win_w = g_hint_w, win_h = g_hint_h;
     SDL_WindowFlags wflags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (ENV("LARECOMP_HIDDEN")) wflags |= SDL_WINDOW_HIDDEN;
+    {   // gpuheap.c decides first (it takes the lock itself; create_device asks it below with the lock held)
+        extern bool gpuheap_on(void);
+        (void)gpuheap_on();
+    }
+    pthread_mutex_lock(&g_vk_loader_lock);
     window = SDL_CreateWindow(RT_APP_NAME, win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     rt_window_icon(window);
@@ -1416,6 +1447,7 @@ void ui_window_init(void) {
     if (!headless() && !SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
     pick_device();
     create_device();
+    pthread_mutex_unlock(&g_vk_loader_lock);
     create_swapchain();
     vk_exec_init();
     vk_shaders_init();
