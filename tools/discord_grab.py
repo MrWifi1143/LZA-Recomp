@@ -13,7 +13,7 @@ message id is remembered (~/.local/state/lzarecomp/grab.json), and a post with a
 Saved under --out (default /mnt/ssd/PLA/testout/discord): <forum>/<post id>-<title>/thread.md (the new messages
 appended, oldest first, with who and when) plus each attachment as <message id>-<file name>. A pasted link straight
 to a video / log / archive file (catbox, Dropbox, a Discord CDN link...) is downloaded as is; video site links
-(YouTube, Streamable, Medal, Twitch clips, Google Drive) go through yt-dlp when it is installed (720p at most).
+(YouTube, Streamable, Medal, Twitch clips, Google Drive) are only listed: those sites' terms don't allow downloading.
 A summary of what's new goes to stdout. Reporters' names stay in these local files only (never in commits/notes).
 Uses the LZ&A Helper bot (tools/discord_sync.py: token in ~/.config/lzarecomp/discord-token, never printed).
 """
@@ -22,7 +22,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import urllib.request
 
@@ -73,23 +72,12 @@ def download(url, path):
     return "saved"
 
 
-def grab_video(link, folder):
-    exe = shutil.which("yt-dlp")
-    if not exe:
-        return "not fetched (no yt-dlp)"
-    r = subprocess.run([exe, "-q", "--no-playlist", "-f", "bv*[height<=720]+ba/b[height<=720]/b", "--merge-output-format",
-                        "mp4", "-o", os.path.join(folder, "video-%(id)s.%(ext)s"), "--no-overwrites", link],
-                       capture_output=True, text=True, timeout=1800)
-    return "saved" if r.returncode == 0 else "failed: " + (r.stderr.strip().splitlines() or ["?"])[-1][:120]
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default="/mnt/ssd/PLA/testout/discord")
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--thread")
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--no-video", action="store_true", help="don't download video links")
     a = ap.parse_args()
 
     state = {}
@@ -160,7 +148,7 @@ def main():
                 lines.append(f"- linked file: {link} -> {name} ({st})\n")
                 print(f"    + linked file {link} {st}")
             for link in VIDEO_LINK.findall(text):
-                st = "listed" if a.dry_run or a.no_video else grab_video(link, folder)
+                st = "listed (watch it on the site: its terms don't allow downloading)"
                 lines.append(f"- video link: {link} ({st})\n")
                 print(f"    + video {link} {st}")
         if not a.dry_run:
