@@ -733,29 +733,55 @@ static int pla_char_step_hook(Cpu *c, uint64_t addr) {
     rt_call_original(c, addr);
     if (!(dt > 0 && dt < 1.0f / 30 - 1e-4f)) return 1;  // (30 fps and slower: the game's own step)
     float d = v[1] - v0[1];
-    // (the body's last step with a gravity bite: a step without one before it is the first in the air - the take-off)
-    static struct { uint64_t body; uint64_t frame; } air[16];
+    // (in the air: the body's steps since the first scaled one. The take-off is the first scaled step after one that
+    // wasn't - per body, not by frame number: a frame with two steps used to count as a take-off again and give the
+    // jump a second boost, ~8% higher at 60 fps now and then - measured 2026-11-14)
+    // (one entry per body, found by its address; one not stepped for 2 s is free again: other characters stepping in
+    // the same slot of a 16-entry table reset the rider's mid-jump and boosted it again)
+    static struct { uint64_t body, frame; bool in_air; } air[64];
     extern uint64_t renderer_game_frame(void);
     uint64_t now = renderer_game_frame();
-    int slot = (int)((b >> 9) & 15);
+    int slot = -1, free_slot = 0;
+    for (int i = 0; i < 64; i++) {
+        if (air[i].body == b) { slot = i; break; }
+        if (now - air[i].frame > 240 && now - air[free_slot].frame <= 240) free_slot = i;
+    }
+    if (slot < 0) slot = free_slot, air[slot].body = b, air[slot].in_air = false;
+    air[slot].frame = now;
     // (x and z: a jump while dashing steers in the air - ~0.05 m/s a step - and its bites were left whole: a dash jump at
     // 60 fps took twice the gravity, ~half the height - player report, measured 2026-11-13. A step on the ground starting
     // or stopping a dash changes them by ~8.5 m/s: still left alone.)
     float hmax = 1.0f;
     static float hlim = -1;  // (LARECOMP_PLA_GRAVITY_XZ=<m/s>: research - the horizontal change a scaled step may have)
     if (hlim < 0) hlim = getenv("LARECOMP_PLA_GRAVITY_XZ") ? (float)atof(getenv("LARECOMP_PLA_GRAVITY_XZ")) : hmax;
-    if (d < -0.2f && d > -2.0f && fabsf(v[0] - v0[0]) < hlim + 1e-4f && fabsf(v[2] - v0[2]) < hlim + 1e-4f) {
+    // (a step rising fast - just after the take-off - is in the air whatever it does across: the game cuts a dash jump's
+    // forward speed a few steps up, and that step's gravity was left whole - at 144 fps a dash jump 11% lower, 2026-11-14)
+    bool steer = fabsf(v[0] - v0[0]) < hlim + 1e-4f && fabsf(v[2] - v0[2]) < hlim + 1e-4f, rising = v0[1] > 3.0f;
+    if (d < -0.2f && d > -2.0f && (steer || rising)) {
         float k = 30 * dt;
         v[1] = v0[1] + d * k;
+        // The air's steering is a per-step bite too: a dash jump gains ~0.375 m/s forward each step - 11 m/s2 at 30 fps,
+        // 22 at 60, so the mount flew twice as far and seemed to hang before landing (player report 2026-11-14, measured:
+        // 8.9 -> 17.6 m/s in 0.4 s at 60, 8.9 -> 12.3 at 30). Scaled like the gravity.
+        static int xz = -1;  // (LARECOMP_PLA_GRAVITY_XZ_SCALE=0: research - the steering left whole)
+        if (xz < 0) xz = getenv("LARECOMP_PLA_GRAVITY_XZ_SCALE") ? atoi(getenv("LARECOMP_PLA_GRAVITY_XZ_SCALE")) : 1;
+        if (xz && steer) {  // (and the motor's copy, as for the vertical speed below: it gives the body its speed back next step)
+            float gx = v[0], gz = v[2];
+            v[0] = v0[0] + (gx - v0[0]) * k, v[2] = v0[2] + (gz - v0[2]) * k;
+            if (fabsf(m[0] - gx) < 1e-3f) m[0] = v[0];
+            if (fabsf(m[2] - gz) < 1e-3f) m[2] = v[2];
+        }
         // At 30 fps the position moved with the speed before each whole bite: the arc runs as if it had started half a
         // bite faster (8.75 -> 9.16 m/s for Wyrdeer: 2.0 m, not 1.6). Small steps lose that, so the first bite after the
         // take-off gives it back - the jump tops out as at 30 fps.
         static float boost = -1;  // (LARECOMP_PLA_GRAVITY_BOOST=<bites>: research - the take-off's share)
         if (boost < 0) boost = getenv("LARECOMP_PLA_GRAVITY_BOOST") ? (float)atof(getenv("LARECOMP_PLA_GRAVITY_BOOST")) : 1.25f;
-        if (!(air[slot].body == b && now - air[slot].frame <= 2)) v[1] -= d * (1 - k) * boost;
-        air[slot].body = b, air[slot].frame = now;
+        if (!air[slot].in_air) v[1] -= d * (1 - k) * boost;
+        air[slot].in_air = true;
         if (fabsf(m[1] - (v0[1] + d)) < 1e-3f) m[1] = v[1];
         (void)m0;
+    } else {
+        air[slot].in_air = false;  // (landed, pushed, or the take-off step itself)
     }
     return 1;
 }
