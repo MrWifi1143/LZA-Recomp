@@ -22,7 +22,7 @@ extern "C" {
 
 #define RT_BUNDLE_ID "com.plarecomp"            // (data folder on macOS)
 #define RT_APP_NAME "PL:A Recomp"             // window title, messages, the launcher
-#define RT_APP_VERSION "1.2.1"             // the release (the GitHub release: LegendsA-v<version>)
+#define RT_APP_VERSION "1.3.0"             // the release (the GitHub release: LegendsA-v<version>)
 #define RT_DISCORD_APP_ID "1570331890584395837"                // Discord Rich Presence: the Discord application (runtime/discord.c; "" off)
 #define RT_SHOT_PREFIX "PLA"                   // screenshots' file names (F12)
 #define RT_UPDATE_REPO "MrWifi1143/PLA-Recomp"     // updates: the releases of this GitHub repository (runtime/update.c)
