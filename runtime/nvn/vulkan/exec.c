@@ -230,6 +230,115 @@ static uint32_t gp_draws[GP_MAX];
 static VkQueryPool gps_qp;
 static int gps_n;
 static int gp_stat[GP_MAX];  // mark -> its index in gps_qp + 1 (0: none)
+// Indirect draws' arguments, checked on the GPU before the draw reads them. The game's compute writes a draw's instance
+// count into its argument words in the guest heap; in a Link Play room (Z-A, 2026-11-14, two copies on one PC) a draw
+// came with words that weren't draw arguments at all - an index list, then floats written into the instance count
+// (3089354752, 1052716720): billions of instances, the GPU never finished and the device was lost (device-lost trace:
+// fs d70b88f4d3c83397 / c9b576eaee74ddf3). Each indirect draw's 5 words are copied into a small ring of our own (outside
+// the render pass: it ends, the draw begins it again), a one-thread compute zeroes the count and the instances when
+// either is beyond any real draw (2^20 instances, 2^24 indices), and the draw reads the copy. A bad draw is then not
+// drawn that frame instead of hanging the GPU. LARECOMP_VK_INDIRECT_GUARD=0: off (the game's words read directly).
+VkBuffer g_ia_buf;
+VkDeviceSize g_ia_off;
+static VkBuffer ia_ring;
+static VmaAllocation ia_mem;
+static VkDescriptorSet ia_set;
+static uint64_t ia_addr_of[1024];
+static uint32_t ia_fresh[1024], ia_epoch = 1, ia_epoch_done;
+static int ia_n;
+static uint64_t ia_breaks;
+static VkPipeline ia_pipe;
+static VkPipelineLayout ia_layout;
+#define IA_SLOTS 1024  // (one 32-byte slot per argument address seen)
+static bool gmem_span(uint64_t a, uint64_t n, VkBuffer *buf, VkDeviceSize *off);
+static void ia_guard(uint64_t args) {
+    static int on = -1;
+    if (on < 0) on = !(ENV("LARECOMP_VK_INDIRECT_GUARD") && atoi(ENV("LARECOMP_VK_INDIRECT_GUARD")) == 0);
+    g_ia_buf = VK_NULL_HANDLE;
+    VkBuffer gbuf;
+    VkDeviceSize goff;
+    if (!on || !gmem_span(args, 20, &gbuf, &goff)) return;
+    if (!ia_pipe) {
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = IA_SLOTS * 32ull,
+                                 .usage = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &ia_ring, &ia_mem, NULL) != VK_SUCCESS) { on = 0; return; }
+        static const char *src =
+            "#version 460\n"
+            "layout(local_size_x = 1) in;\n"
+            "layout(std430, set = 0, binding = 0) buffer R { uint w[]; } r;\n"
+            "layout(push_constant) uniform P { uint base; uint max_inst; uint max_count; } p;\n"
+            "void main() { uint b = p.base + gl_GlobalInvocationID.x * 8u; if (r.w[b + 1u] > p.max_inst || r.w[b] > p.max_count) { r.w[b] = 0u; r.w[b + 1u] = 0u; } }\n";
+        VkShaderModule m = vk_compile_glsl(src, STAGE_COMPUTE, "indirect-guard");
+        VkDescriptorSetLayoutBinding lb = {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL};
+        VkDescriptorSetLayoutCreateInfo dli = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &lb};
+        VkDescriptorSetLayout dsl;
+        VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+        VkDescriptorPoolCreateInfo dpi = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &ps};
+        VkDescriptorPool dp;
+        if (!m || vkCreateDescriptorSetLayout(g_vk.dev, &dli, NULL, &dsl) != VK_SUCCESS || vkCreateDescriptorPool(g_vk.dev, &dpi, NULL, &dp) != VK_SUCCESS) { on = 0; return; }
+        VkDescriptorSetAllocateInfo dai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = dp, .descriptorSetCount = 1, .pSetLayouts = &dsl};
+        if (vkAllocateDescriptorSets(g_vk.dev, &dai, &ia_set) != VK_SUCCESS) { on = 0; return; }
+        VkDescriptorBufferInfo dbi = {ia_ring, 0, VK_WHOLE_SIZE};
+        VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ia_set, .dstBinding = 0, .descriptorCount = 1,
+                                  .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &dbi};
+        vkUpdateDescriptorSets(g_vk.dev, 1, &w, 0, NULL);
+        VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 12};
+        VkPipelineLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dsl,
+                                         .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+        if (vkCreatePipelineLayout(g_vk.dev, &li, NULL, &ia_layout) != VK_SUCCESS) { on = 0; return; }
+        VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = ia_layout,
+                                          .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                    .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main"}};
+        VkResult r = vkCreateComputePipelines(g_vk.dev, VK_NULL_HANDLE, 1, &ci, NULL, &ia_pipe);
+        vkDestroyShaderModule(g_vk.dev, m, NULL);
+        if (r != VK_SUCCESS) { on = 0; return; }
+        LOG("[vk] indirect draws: their arguments checked on the GPU first (LARECOMP_VK_INDIRECT_GUARD=0: off)\n");
+    }
+    // (the slot of this address; the copies are fresh until the next compute dispatch: ia_epoch)
+    int k = -1;
+    for (int i = 0; i < ia_n; i++) if (ia_addr_of[i] == args) { k = i; break; }
+    if (k < 0) {
+        if (ia_n == IA_SLOTS) ia_n = 0, ia_epoch_done = 0;  // (full: start over)
+        k = ia_n++;
+        ia_addr_of[k] = args, ia_fresh[k] = 0;
+    }
+    if (ia_fresh[k] != ia_epoch || !ia_epoch_done) {
+        // every known slot copied and checked at once: one pass break for the run of indirect draws that follows
+        vk_end_pass();
+        VkCommandBuffer cb = vk_cmd();
+        VkMemoryBarrier b0 = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT};
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &b0, 0, NULL, 0, NULL);
+        int ncopied = 0;
+        for (int i = 0; i < ia_n; i++) {
+            VkBuffer sb;
+            VkDeviceSize so;
+            if (!gmem_span(ia_addr_of[i], 20, &sb, &so)) continue;
+            VkBufferCopy bc = {.srcOffset = so, .dstOffset = (VkDeviceSize)i * 32, .size = 20};
+            vkCmdCopyBuffer(cb, sb, ia_ring, 1, &bc);
+            ia_fresh[i] = ia_epoch, ncopied++;
+        }
+        VkMemoryBarrier b1 = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                              .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT};
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &b1, 0, NULL, 0, NULL);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, ia_pipe);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, ia_layout, 0, 1, &ia_set, 0, NULL);
+        uint32_t pc[3] = {0, 1u << 20, 1u << 24};
+        vkCmdPushConstants(cb, ia_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, pc);
+        vkCmdDispatch(cb, (uint32_t)ia_n, 1, 1);
+        VkMemoryBarrier b2 = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                              .dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT};
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 1, &b2, 0, NULL, 0, NULL);
+        g_dyn_epoch++;
+        ia_epoch_done = 1;
+        ia_breaks++;
+        (void)ncopied;
+    }
+    g_ia_buf = ia_ring, g_ia_off = (VkDeviceSize)k * 32;
+}
+void vk_ia_dispatched(void) { ia_epoch++; }  // (dispatch_compute: the game's compute may have written arguments again)
+
+
 // LARECOMP_VK_DEVLOST_TRACE=1: the last 64 GPU operations, dumped on device loss (with LARECOMP_SYNC_SUBMIT=1 the
 // dump ends with the command list that faulted).
 #define DL_N 4096
@@ -4498,6 +4607,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
+    { void vk_ia_dispatched(void); vk_ia_dispatched(); }
     gp_mark(cb, "dispatch %ux%ux%u (local %ux%ux%u) cs %llx sbuf0 %llx+%llx", gx, gy, gz, cp->local[0], cp->local[1], cp->local[2],
             (unsigned long long)st.program->stages[5].code_addr, (unsigned long long)st.sbuf[5][0].addr, (unsigned long long)st.sbuf[5][0].size);
     if (ENV("LARECOMP_LOG_CS") && strtoull(ENV("LARECOMP_LOG_CS"), NULL, 16) == st.program->stages[5].code_addr && (cs_logn++ % (ENV("LARECOMP_LOG_CS_EVERY") ? atoi(ENV("LARECOMP_LOG_CS_EVERY")) : 600)) == 0) {
@@ -5375,7 +5485,11 @@ static void draw_(CmdRec *r, bool indexed) {
         gmem_info();
         VkBuffer gbuf;
         VkDeviceSize off;
-        if (gmem_span(g_draw_indirect, 20, &gbuf, &off)) {  // (gmem_size: the range may be capped)
+        extern VkBuffer g_ia_buf;
+        extern VkDeviceSize g_ia_off;
+        bool guarded = g_ia_buf != VK_NULL_HANDLE;
+        if (guarded) gbuf = g_ia_buf, off = g_ia_off;
+        if (guarded || gmem_span(g_draw_indirect, 20, &gbuf, &off)) {  // (gmem_size: the range may be capped)
             if (use_index) vkCmdDrawIndexedIndirect(cb, gbuf, off, 1, 20);
             else vkCmdDrawIndirect(cb, gbuf, off, 1, 16);
         } else {
@@ -6555,10 +6669,12 @@ static void exec_list(uint64_t handle, int depth) {
             if (idx) d.x[1] = r->x[1], d.x[3] = r->x[2], d.x[6] = 1;
             else d.x[4] = 1;
             g_draw_indirect = idx ? r->x[3] : r->x[1];
+            ia_guard(g_draw_indirect);
             if (g_debug_frame) LOG("[indirect] %s args %llx index %llx vs %llx\n", idx ? "elements" : "arrays", (unsigned long long)g_draw_indirect,
                                    (unsigned long long)(idx ? r->x[2] : 0), (unsigned long long)(st.program ? st.program->stages[0].code_addr : 0));
             draw(&d, idx);
             g_draw_indirect = 0;
+            g_ia_buf = VK_NULL_HANDLE;
             break;
         }
         case CMD_DISPATCH_INDIRECT: {  // (cmd, indirect buffer: three u32 group counts the GPU wrote)
