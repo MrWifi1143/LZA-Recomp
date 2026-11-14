@@ -199,20 +199,95 @@ __attribute__((constructor)) static void story_init(void) {
 }
 
 // ---- (research) LARECOMP_GHOST=<my port>,<peer port>[,<peer host>]: a second player in the field, as a stand-in.
-// Each copy sends its player's body (rotation rows +0x60..+0x8c, position +0x90) over UDP every frame; the other
-// copy takes a townsperson's body near its own player (3-40 m away) as the puppet and, right after that body's
-// physics step, puts it where the peer's player is (velocity zeroed). The puppet keeps its own model and animation:
-// a test that another player can be shown walking around Lumiose outside a battle, not the game's own remote player.
+// Each copy sends its player's position and facing over UDP every frame; the other shows them with a character of its
+// own level standing in. The stand-in is a story/station NPC near our player (a character body 3-40 m away that isn't
+// stepped - the crowd's models follow their own animation, not their bodies, 2026-11-13), moved through its transform
+// node: a node (vtable 0x7003be0d28) keeps its local scale at +0xc0, rotation at +0xd0 (quaternion xyzw) and
+// translation at +0xe0, and 0x7001ccf27c (x0 the node; called many times a frame) makes its world matrices (+0x40,
+// +0x80) from them - writing the translation moves the model (found 2026-11-14 by shifting every copy of a station
+// NPC's x and halving: the world matrices themselves are overwritten). The character's own node is the one whose
+// translation is its body's position. The stand-in keeps its own model, animation and collision (where it stood):
+// a test that another player can be shown in Lumiose outside a battle, not the game's own remote player.
+#ifndef _WIN32  // (sockets and process_vm_readv: Linux research only)
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
+#define _GNU_SOURCE_UNUSED
 #include <unistd.h>
 #include <fcntl.h>
+ssize_t process_vm_readv(pid_t, const struct iovec *, unsigned long, const struct iovec *, unsigned long, unsigned long);
+#define NODE_VTABLE 0x7003be0d28ull
+#define NODE_UPDATE 0x7001ccf27cull
 static int g_ghost_fd = -1;
 static struct sockaddr_in g_ghost_peer;
-static float g_peer[16];        // (the peer's body +0x60..+0x9c)
-static uint64_t g_peer_at;      // (frame of the last packet)
-static uint64_t g_puppet;       // (the body standing in for the peer)
+static float g_peer[4];              // (the peer's player: x y z, yaw)
+static volatile uint64_t g_peer_at;  // (frame of the last packet)
+static float g_off;                  // (LARECOMP_GHOST_OFFSET=<m>: research - beside the peer's spot, a loopback test on one copy)
+static volatile uint64_t g_stand_body, g_stand_node;  // (the stand-in's body, then its node)
+static volatile int g_scanning;
+static volatile uint64_t g_me_body, g_me_node;  // (our player's body and node: the node has the model's facing)
+
+static int node_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    uint64_t n = c->x[0];
+    uint64_t mb = g_me_body;
+    if (mb && !g_me_node && n >= HEAP_BASE && n < HEAP_BASE + HEAP_MAX && *(const uint64_t *)(uintptr_t)n == NODE_VTABLE &&
+        !memcmp((const void *)(uintptr_t)(n + 0xe0), (const void *)(uintptr_t)(mb + 0x90), 4) &&
+        !memcmp((const void *)(uintptr_t)(n + 0xe8), (const void *)(uintptr_t)(mb + 0x98), 4)) {
+        g_me_node = n;
+        LOG("[ghost] our player's node %llx\n", (unsigned long long)n);
+    }
+    if (!g_stand_body) return 0;
+    if (n == g_stand_node) {
+        if (g_frame - g_peer_at > 30 || *(const uint64_t *)(uintptr_t)n != NODE_VTABLE) return 0;
+        float *q = (float *)(uintptr_t)(n + 0xd0), *t = (float *)(uintptr_t)(n + 0xe0);
+        q[0] = 0, q[1] = sinf(g_peer[3] * 0.5f), q[2] = 0, q[3] = cosf(g_peer[3] * 0.5f);
+        t[0] = g_peer[0] + g_off, t[1] = g_peer[1], t[2] = g_peer[2];
+        return 0;
+    }
+    if (!g_stand_node && n >= HEAP_BASE && n < HEAP_BASE + HEAP_MAX && *(const uint64_t *)(uintptr_t)n == NODE_VTABLE &&
+        !memcmp((const void *)(uintptr_t)(n + 0xe0), (const void *)(uintptr_t)(g_stand_body + 0x90), 4) &&
+        !memcmp((const void *)(uintptr_t)(n + 0xe8), (const void *)(uintptr_t)(g_stand_body + 0x98), 4)) {
+        g_stand_node = n;
+        LOG("[ghost] the stand-in's node %llx\n", (unsigned long long)n);
+    }
+    return 0;
+}
+
+// every character body in the heap (a background thread, once): the nearest one 3-40 m from `me` not stepped lately
+static uint64_t g_scan_me;
+static void *scan_bodies(void *arg) {
+    (void)arg;
+    uint64_t me = g_scan_me, best_o = 0;
+    float px = ((const float *)(uintptr_t)(me + 0x90))[0], pz = ((const float *)(uintptr_t)(me + 0x90))[2], best = 1e9f;
+    const size_t chunk = 1u << 20;
+    uint64_t *buf = malloc(chunk);
+    int count = 0;
+    for (uint64_t a = HEAP_BASE; buf && a < HEAP_BASE + HEAP_MAX; a += chunk) {
+        struct iovec l = {buf, chunk}, r = {(void *)(uintptr_t)a, chunk};
+        if (process_vm_readv(getpid(), &l, 1, &r, 1, 0) != (ssize_t)chunk) continue;
+        for (size_t k = 0; k < chunk / 8; k++) {
+            if (buf[k] != BODY_VTABLE) continue;
+            uint64_t o = a + k * 8;
+            if (o == me || chunk - k * 8 < 0xa0) continue;
+            count++;
+            const float *q = (const float *)((const char *)buf + k * 8 + 0x90);
+            float d = sqrtf((q[0] - px) * (q[0] - px) + (q[2] - pz) * (q[2] - pz));
+            bool stepped = false;
+            pthread_mutex_lock(&g_body_lock);
+            for (int i = 0; i < NBODY; i++) if (g_bodies[i].o == o && g_frame - g_bodies[i].last <= 30) stepped = true;
+            pthread_mutex_unlock(&g_body_lock);
+            if (!stepped && d > 3 && d < 40 && d < best) best = d, best_o = o;
+        }
+    }
+    free(buf);
+    LOG("[ghost] %d character bodies; the stand-in: %llx, %.1f m from us\n", count, (unsigned long long)best_o, best);
+    g_stand_body = best_o;
+    g_scanning = 0;
+    return NULL;
+}
+
 void ghost_init(void) {
     const char *e = getenv("LARECOMP_GHOST");
     int mine = 0, peer = 0;
@@ -224,55 +299,43 @@ void ghost_init(void) {
     fcntl(g_ghost_fd, F_SETFL, O_NONBLOCK);
     g_ghost_peer.sin_family = AF_INET, g_ghost_peer.sin_port = htons((uint16_t)peer);
     inet_pton(AF_INET, host, &g_ghost_peer.sin_addr);
+    g_off = getenv("LARECOMP_GHOST_OFFSET") ? (float)atof(getenv("LARECOMP_GHOST_OFFSET")) : 0;
     g_ghost_on = 1;
+    rt_register_fnhook_at(NODE_UPDATE, node_hook);
     LOG("[ghost] on: port %d, peer %s:%d\n", mine, host, peer);
 }
 static void ghost_frame(uint64_t frame) {
     uint64_t me = player_body(frame);
-    if (me) {  // (send ours)
-        float out[17];
-        out[0] = 1.0f;  // (marker)
-        memcpy(out + 1, (const void *)(uintptr_t)(me + 0x60), 64);
+    if (me != g_me_body) g_me_body = me, g_me_node = 0;
+    uint64_t mn = g_me_node;
+    if (mn && *(const uint64_t *)(uintptr_t)mn != NODE_VTABLE) g_me_node = mn = 0;
+    if (me && mn) {  // (send ours: the body's position, the node's facing - a turn about y, quaternion xyzw at +0xd0)
+        const float *b = (const float *)(uintptr_t)(me + 0x90), *q = (const float *)(uintptr_t)(mn + 0xd0);
+        float out[5] = {2.0f, b[0], b[1], b[2], 2.0f * atan2f(q[1], q[3])};
         sendto(g_ghost_fd, out, sizeof out, 0, (struct sockaddr *)&g_ghost_peer, sizeof g_ghost_peer);
     }
-    float in[17];
+    float in[5];
     while (recv(g_ghost_fd, in, sizeof in, 0) == (ssize_t)sizeof in)
-        if (in[0] == 1.0f) memcpy(g_peer, in + 1, 64), g_peer_at = frame;
-    // the puppet: kept while it is still stepped; else the nearest other body 3-40 m from our player
-    if (g_puppet && !is_body(g_puppet)) g_puppet = 0;
-    if (g_puppet) {
-        bool seen = false;
-        pthread_mutex_lock(&g_body_lock);
-        for (int i = 0; i < NBODY; i++) if (g_bodies[i].o == g_puppet && frame - g_bodies[i].last <= 30) seen = true;
-        pthread_mutex_unlock(&g_body_lock);
-        if (!seen) { LOG("[ghost] puppet %llx gone\n", (unsigned long long)g_puppet); g_puppet = 0; }
+        if (in[0] == 2.0f) memcpy(g_peer, in + 1, 16), g_peer_at = frame;
+    if (g_stand_body && !is_body(g_stand_body)) {  // (gone with its level: another one)
+        LOG("[ghost] the stand-in %llx is gone\n", (unsigned long long)g_stand_body);
+        g_stand_body = g_stand_node = 0;
     }
-    if (!g_puppet && me && g_peer_at && frame - g_peer_at < 30) {
-        const float *p = (const float *)(uintptr_t)(me + 0x90);
-        float best = 1e9f;
-        pthread_mutex_lock(&g_body_lock);
-        for (int i = 0; i < NBODY; i++) {
-            uint64_t o = g_bodies[i].o;
-            if (!o || o == me || frame - g_bodies[i].last > 30 || !is_body(o)) continue;
-            const float *q = (const float *)(uintptr_t)(o + 0x90);
-            float d = sqrtf((q[0] - p[0]) * (q[0] - p[0]) + (q[2] - p[2]) * (q[2] - p[2]));
-            if (d > 3 && d < 40 && d < best) best = d, g_puppet = o;
-        }
-        pthread_mutex_unlock(&g_body_lock);
-        if (g_puppet) LOG("[ghost] puppet %llx (%.1f m from us) stands in for the peer\n", (unsigned long long)g_puppet, best);
+    static uint64_t scanned_at;
+    if (!g_stand_body && !g_scanning && me && frame - g_peer_at < 30 && (!scanned_at || frame - scanned_at > 600)) {
+        pthread_t t;
+        g_scanning = 1, g_scan_me = me, scanned_at = frame;
+        if (pthread_create(&t, NULL, scan_bodies, NULL)) g_scanning = 0; else pthread_detach(t);
     }
     static uint64_t logged;
-    if (g_puppet && frame - logged >= 120) {
+    if (g_stand_node && frame - logged >= 300) {
         logged = frame;
-        LOG("[ghost] peer at %.2f %.2f %.2f, puppet %llx\n", g_peer[12], g_peer[13], g_peer[14], (unsigned long long)g_puppet);
+        LOG("[ghost] peer at %.2f %.2f %.2f yaw %.2f\n", g_peer[0], g_peer[1], g_peer[2], g_peer[3]);
     }
 }
-void rt_call_original(Cpu *c, uint64_t addr);
-static int ghost_step(Cpu *c, uint64_t addr, uint64_t o) {
-    if (o != g_puppet || !g_peer_at || g_frame - g_peer_at > 30) return 0;
-    rt_call_original(c, addr);  // (its own step first, then where the peer is)
-    memcpy((void *)(uintptr_t)(o + 0x60), g_peer, 64);
-    memset((void *)(uintptr_t)(o + 0xc0), 0, 12);
-    memset((void *)(uintptr_t)(o + 0xe0), 0, 12);
-    return 1;
-}
+static int ghost_step(Cpu *c, uint64_t addr, uint64_t o) { (void)c, (void)addr, (void)o; return 0; }
+#else
+void ghost_init(void) {}
+static void ghost_frame(uint64_t frame) { (void)frame; }
+static int ghost_step(Cpu *c, uint64_t addr, uint64_t o) { (void)c, (void)addr, (void)o; return 0; }
+#endif
