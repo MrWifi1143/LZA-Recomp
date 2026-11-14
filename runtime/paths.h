@@ -23,7 +23,7 @@ extern "C" {
 #define RT_BUNDLE_ID "com.zarecomp"             // (data folder on macOS)
 #define RT_APP_NAME "PL:Z-A Recomp"           // window title, messages, the launcher
 #define RT_SHOT_PREFIX "ZA"                    // screenshots' file names (F12)
-#define RT_APP_VERSION "1.1.1"             // the release (the GitHub release: LegendsZA-v<version>)
+#define RT_APP_VERSION "1.2.0"             // the release (the GitHub release: LegendsZA-v<version>)
 #define RT_DISCORD_APP_ID "1570331403608920084"                // Discord Rich Presence: the Discord application (runtime/discord.c; "" off)
 #define RT_UPDATE_REPO "MrWifi1143/ZA-Recomp"      // updates: the releases of this GitHub repository (runtime/update.c)
 
