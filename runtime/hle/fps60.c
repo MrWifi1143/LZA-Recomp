@@ -794,7 +794,18 @@ void pla60_configure(const char *exefs) {
             g_pla60_build = k_legends60[i].entry;
             if (on) g_pla60_entry = g_pla60_build, LOG("[fps60] %s at %.0f fps\n", k_legends60[i].name, 1e9 / (double)g_pla60_ns);
         }
+    // Legends: Arceus without its 1.1.1 update (set up from the base game alone - RecompLauncher's update is optional):
+    // 60 fps and every fix keyed to 1.1.1's addresses stay off - the game runs at 30 and looks rougher. Said in the log
+    // and once in the game (ui/menu.mm), so the player knows to set it up again with the update.
+    extern uint64_t game_title_id(void);
+    extern bool g_game_needs_update;
+    if (!g_pla60_build && game_title_id() == 0x01001F5010DFA000ull && !g_game_needs_update) {
+        g_game_needs_update = true;
+        LOG("[boot] this Legends: Arceus isn't version 1.1.1 (main id %02x%02x%02x%02x%02x%02x%02x%02x): 60 fps and the fixes made "
+            "for 1.1.1 stay off - set the game up again with the 1.1.1 update\n", id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7]);
+    }
 }
+bool g_game_needs_update;  // (an older Legends: Arceus than 1.1.1: ui/menu.mm says so in the game)
 
 // The frame rate changed while playing (the game's Settings screen, hle/*_options.c): 30 the game's own; above it the
 // table entry and the present pacing (and the rest that follows pla60_period_ns) at once. False: not a known build.

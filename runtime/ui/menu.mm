@@ -443,7 +443,7 @@ static void quit_draw(ImGuiIO &io, float scale) {
 }
 
 // A short notice in the corner for a few seconds (the screenshot key: runtime/nvn/vulkan/device.c). Any thread.
-static char g_notice[192];
+static char g_notice[320];
 static std::atomic<uint64_t> g_notice_until{0};
 extern "C" void menu_notice_for(const char *text, unsigned ms) {
     snprintf(g_notice, sizeof g_notice, "%s", text);
@@ -456,7 +456,21 @@ extern "C" void menu_notice(const char *text) { menu_notice_for(text, 2500); }
 extern "C" bool g_launcher_skipped;  // (ui/launcher_lg.mm)
 static void update_notice_once(void) {
     static uint64_t first;
-    static bool told;
+    static bool told, told_old;
+    extern bool g_game_needs_update;  // (hle/fps60.c: an older Legends: Arceus than 1.1.1)
+    if (!told_old && g_game_needs_update) {
+        uint64_t t = SDL_GetTicks();
+        if (!first) first = t;
+        if (t - first >= 10000) {
+            told_old = true;
+            menu_notice_for(M("Your game isn't version 1.1.1: 60 fps and most fixes are off. Set it up again with the 1.1.1 update.",
+                              "Seu jogo não é a versão 1.1.1: 60 fps e a maioria das correções estão desligados. Configure de novo com a atualização 1.1.1.",
+                              "Ваша игра не версии 1.1.1: 60 fps и большинство исправлений отключены. Установите игру заново с обновлением 1.1.1."),
+                            15000);
+            fprintf(stderr, "[boot] told in the game: not version 1.1.1\n");
+        }
+        return;
+    }
     if (told || !g_launcher_skipped) return;
     uint64_t now = SDL_GetTicks();
     if (!first) first = now;
