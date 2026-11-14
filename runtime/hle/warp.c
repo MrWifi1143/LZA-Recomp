@@ -34,9 +34,11 @@ static volatile uint64_t g_frame;  // (the presents so far: warp_frame)
 
 static bool is_body(uint64_t o) { return o >= HEAP_BASE && o < HEAP_BASE + HEAP_MAX && *(const uint64_t *)(uintptr_t)o == BODY_VTABLE; }
 
+static int ghost_step(Cpu *c, uint64_t addr, uint64_t o);  // (below: LARECOMP_GHOST)
+static int g_ghost_on;
 static int body_hook(Cpu *c, uint64_t addr) {
     uint64_t o = c->x[0];
-    if ((g_state < 0 || g_state == 3) && !g_log_every) return 0;  // (off, or finished)
+    if ((g_state < 0 || g_state == 3) && !g_log_every && !g_ghost_on) return 0;  // (off, or finished)
     if (!is_body(o)) return 0;
     uint64_t f = g_frame;
     unsigned via = addr == STEP_B ? 2 : 1;
@@ -51,6 +53,7 @@ static int body_hook(Cpu *c, uint64_t addr) {
     unsigned was = i < NBODY ? g_bodies[i].via : 0;
     if (i < NBODY) g_bodies[i].last = f, g_bodies[i].via |= via;
     pthread_mutex_unlock(&g_body_lock);
+    if (g_ghost_on) { int r = ghost_step(c, addr, o); if (r) return r; }
     if (g_log_every && i < NBODY && (fresh || !(was & via))) {  // (research: each body as each hook first sees it)
         const float *p = (const float *)(uintptr_t)(o + 0x90);
         LOG("[player] body %llx via %llx lr %llx frame %llu at %.2f %.2f %.2f\n", (unsigned long long)o, (unsigned long long)addr,
@@ -75,15 +78,19 @@ __attribute__((constructor)) static void warp_init(void) {
     g_log_every = getenv("LARECOMP_LOG_PLAYER") ? atol(getenv("LARECOMP_LOG_PLAYER")) : 0;
     const char *w = getenv("LARECOMP_WARP");
     if (w && sscanf(w, "%f %f %f", &g_to[0], &g_to[1], &g_to[2]) == 3) g_state = 0;
-    if (g_log_every || g_state == 0) {
+    extern void ghost_init(void);
+    ghost_init();
+    if (g_log_every || g_state == 0 || g_ghost_on) {
         rt_register_fnhook_at(STEP_A, body_hook);
         rt_register_fnhook_at(STEP_B, body_hook);
         LOG("[warp] %s%s\n", g_state == 0 ? "the player goes to " : "", g_state == 0 ? w : "logging the player's position");
     }
 }
 
+static void ghost_frame(uint64_t frame);
 void warp_frame(uint64_t frame) {  // (each game frame: runtime/hle/input.c)
     g_frame = frame;
+    if (g_ghost_on) ghost_frame(frame);
     if (g_state < 0 && !g_log_every) return;
     uint64_t b = player_body(frame);
     if (g_log_every > 0 && frame % (uint64_t)g_log_every == 0 && b) {
@@ -189,4 +196,83 @@ __attribute__((constructor)) static void story_init(void) {
     rt_register_fnhook_at(PHASE_GET, phase_get_hook);
     if (g_story_all) rt_register_fnhook_at(WORK_GET, work_get_hook), rt_register_fnhook_at(WORK_SET, work_set_hook);
     LOG("[warp] story at phase %d%s\n", g_story, g_story_all ? " for everything" : " for the spawn conditions");
+}
+
+// ---- (research) LARECOMP_GHOST=<my port>,<peer port>[,<peer host>]: a second player in the field, as a stand-in.
+// Each copy sends its player's body (rotation rows +0x60..+0x8c, position +0x90) over UDP every frame; the other
+// copy takes a townsperson's body near its own player (3-40 m away) as the puppet and, right after that body's
+// physics step, puts it where the peer's player is (velocity zeroed). The puppet keeps its own model and animation:
+// a test that another player can be shown walking around Lumiose outside a battle, not the game's own remote player.
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <fcntl.h>
+static int g_ghost_fd = -1;
+static struct sockaddr_in g_ghost_peer;
+static float g_peer[16];        // (the peer's body +0x60..+0x9c)
+static uint64_t g_peer_at;      // (frame of the last packet)
+static uint64_t g_puppet;       // (the body standing in for the peer)
+void ghost_init(void) {
+    const char *e = getenv("LARECOMP_GHOST");
+    int mine = 0, peer = 0;
+    char host[64] = "127.0.0.1";
+    if (!e || sscanf(e, "%d,%d,%63s", &mine, &peer, host) < 2) return;
+    g_ghost_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)mine), .sin_addr.s_addr = htonl(INADDR_ANY)};
+    if (g_ghost_fd < 0 || bind(g_ghost_fd, (struct sockaddr *)&a, sizeof a)) { LOG("[ghost] can't bind %d\n", mine); return; }
+    fcntl(g_ghost_fd, F_SETFL, O_NONBLOCK);
+    g_ghost_peer.sin_family = AF_INET, g_ghost_peer.sin_port = htons((uint16_t)peer);
+    inet_pton(AF_INET, host, &g_ghost_peer.sin_addr);
+    g_ghost_on = 1;
+    LOG("[ghost] on: port %d, peer %s:%d\n", mine, host, peer);
+}
+static void ghost_frame(uint64_t frame) {
+    uint64_t me = player_body(frame);
+    if (me) {  // (send ours)
+        float out[17];
+        out[0] = 1.0f;  // (marker)
+        memcpy(out + 1, (const void *)(uintptr_t)(me + 0x60), 64);
+        sendto(g_ghost_fd, out, sizeof out, 0, (struct sockaddr *)&g_ghost_peer, sizeof g_ghost_peer);
+    }
+    float in[17];
+    while (recv(g_ghost_fd, in, sizeof in, 0) == (ssize_t)sizeof in)
+        if (in[0] == 1.0f) memcpy(g_peer, in + 1, 64), g_peer_at = frame;
+    // the puppet: kept while it is still stepped; else the nearest other body 3-40 m from our player
+    if (g_puppet && !is_body(g_puppet)) g_puppet = 0;
+    if (g_puppet) {
+        bool seen = false;
+        pthread_mutex_lock(&g_body_lock);
+        for (int i = 0; i < NBODY; i++) if (g_bodies[i].o == g_puppet && frame - g_bodies[i].last <= 30) seen = true;
+        pthread_mutex_unlock(&g_body_lock);
+        if (!seen) { LOG("[ghost] puppet %llx gone\n", (unsigned long long)g_puppet); g_puppet = 0; }
+    }
+    if (!g_puppet && me && g_peer_at && frame - g_peer_at < 30) {
+        const float *p = (const float *)(uintptr_t)(me + 0x90);
+        float best = 1e9f;
+        pthread_mutex_lock(&g_body_lock);
+        for (int i = 0; i < NBODY; i++) {
+            uint64_t o = g_bodies[i].o;
+            if (!o || o == me || frame - g_bodies[i].last > 30 || !is_body(o)) continue;
+            const float *q = (const float *)(uintptr_t)(o + 0x90);
+            float d = sqrtf((q[0] - p[0]) * (q[0] - p[0]) + (q[2] - p[2]) * (q[2] - p[2]));
+            if (d > 3 && d < 40 && d < best) best = d, g_puppet = o;
+        }
+        pthread_mutex_unlock(&g_body_lock);
+        if (g_puppet) LOG("[ghost] puppet %llx (%.1f m from us) stands in for the peer\n", (unsigned long long)g_puppet, best);
+    }
+    static uint64_t logged;
+    if (g_puppet && frame - logged >= 120) {
+        logged = frame;
+        LOG("[ghost] peer at %.2f %.2f %.2f, puppet %llx\n", g_peer[12], g_peer[13], g_peer[14], (unsigned long long)g_puppet);
+    }
+}
+void rt_call_original(Cpu *c, uint64_t addr);
+static int ghost_step(Cpu *c, uint64_t addr, uint64_t o) {
+    if (o != g_puppet || !g_peer_at || g_frame - g_peer_at > 30) return 0;
+    rt_call_original(c, addr);  // (its own step first, then where the peer is)
+    memcpy((void *)(uintptr_t)(o + 0x60), g_peer, 64);
+    memset((void *)(uintptr_t)(o + 0xc0), 0, 12);
+    memset((void *)(uintptr_t)(o + 0xe0), 0, 12);
+    return 1;
 }
