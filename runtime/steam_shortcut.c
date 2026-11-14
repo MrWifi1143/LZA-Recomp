@@ -254,6 +254,134 @@ static int copy_art(const char *config_dir, uint32_t appid) {
     return copied;
 }
 
+#ifdef _WIN32
+// ---- Windows: Steam for Windows ignores steam://addnonsteamgame (it logs the URL and adds nothing - 2026-11-13), so
+// the shortcut is written into shortcuts.vdf directly. Steam reads that file at start and writes its own copy back at
+// exit, so a running Steam is shut down first (steam.exe -shutdown) and started again afterwards.
+static uint32_t crc32_of(const char *s) {
+    uint32_t c = 0xFFFFFFFFu;
+    for (; *s; s++) {
+        c ^= (uint8_t)*s;
+        for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
+    }
+    return ~c;
+}
+
+static DWORD steam_pid(void) {  // (Steam's own record of its running process; 0: not running)
+    DWORD pid = 0, sz = sizeof pid;
+    if (RegGetValueA(HKEY_CURRENT_USER, "Software\\Valve\\Steam\\ActiveProcess", "pid", RRF_RT_REG_DWORD, NULL, &pid, &sz) != ERROR_SUCCESS)
+        return 0;
+    HANDLE h = pid ? OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) : NULL;
+    if (!h) return 0;
+    DWORD code = 0;
+    bool alive = GetExitCodeProcess(h, &code) && code == STILL_ACTIVE;
+    CloseHandle(h);
+    return alive ? pid : 0;
+}
+
+static bool start_steam(const char *root, const char *args) {
+    char cmd[1400];
+    snprintf(cmd, sizeof cmd, "\"%s\\steam.exe\" %s", root, args);
+    STARTUPINFOA si = {.cb = sizeof si};
+    PROCESS_INFORMATION pi;
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, DETACHED_PROCESS, NULL, root, &si, &pi)) return false;
+    CloseHandle(pi.hThread), CloseHandle(pi.hProcess);
+    return true;
+}
+
+typedef struct { uint8_t *b; size_t n, cap; } Buf;
+static void put(Buf *o, const void *p, size_t n) {
+    if (o->n + n > o->cap) {
+        o->cap = (o->n + n) * 2 + 256;
+        o->b = realloc(o->b, o->cap);
+    }
+    memcpy(o->b + o->n, p, n), o->n += n;
+}
+static void put_str(Buf *o, const char *k, const char *v) { put(o, "\x01", 1), put(o, k, strlen(k) + 1), put(o, v, strlen(v) + 1); }
+static void put_int(Buf *o, const char *k, uint32_t v) { put(o, "\x02", 1), put(o, k, strlen(k) + 1), put(o, &v, 4); }
+
+// Adds the shortcut to one account's shortcuts.vdf (made if missing; the old one kept as shortcuts.vdf.bak)
+static bool vdf_append(const char *config_dir, const char *exe, uint32_t appid) {
+    char path[1200], bak[1300];
+    snprintf(path, sizeof path, "%s\\shortcuts.vdf", config_dir);
+    size_t len = 0;
+    uint8_t *old = read_file(path, &len);
+    static const uint8_t empty[] = "\0shortcuts\0\x08\x08";  // (13 bytes: the root map, an empty "shortcuts" map)
+    if (!old || len < 2 || old[len - 1] != 8 || old[len - 2] != 8) {
+        free(old);
+        old = malloc(sizeof empty - 1), memcpy(old, empty, sizeof empty - 1), len = sizeof empty - 1;
+    } else {
+        snprintf(bak, sizeof bak, "%s.bak", path);
+        copy_file(path, bak);
+    }
+    static Shortcut sc[512];
+    int count = vdf_shortcuts(old, len, sc, 512);
+    char idx[16], quoted[1100], dir[1100];
+    snprintf(idx, sizeof idx, "%d", count);
+    snprintf(quoted, sizeof quoted, "\"%s\"", exe);
+    snprintf(dir, sizeof dir, "%s", exe);
+    char *slash = strrchr(dir, '\\');
+    if (slash) *slash = 0;
+    char qdir[1100];
+    snprintf(qdir, sizeof qdir, "\"%s\"", dir);
+    Buf o = {0};
+    put(&o, old, len - 2);  // (all but the two map ends)
+    put(&o, "\x00", 1), put(&o, idx, strlen(idx) + 1);
+    put_int(&o, "appid", appid);
+    put_str(&o, "AppName", RT_APP_NAME);
+    put_str(&o, "Exe", quoted);
+    put_str(&o, "StartDir", qdir);
+    put_str(&o, "icon", exe);
+    put_str(&o, "ShortcutPath", "");
+    put_str(&o, "LaunchOptions", "");
+    put_int(&o, "IsHidden", 0);
+    put_int(&o, "AllowDesktopConfig", 1);
+    put_int(&o, "AllowOverlay", 1);
+    put_int(&o, "OpenVR", 0);
+    put_int(&o, "Devkit", 0);
+    put_str(&o, "DevkitGameID", "");
+    put_int(&o, "DevkitOverrideAppID", 0);
+    put_int(&o, "LastPlayTime", 0);
+    put_str(&o, "FlatpakAppID", "");
+    put(&o, "\x00tags\x00\x08", 7);  // (an empty tags map)
+    put(&o, "\x08\x08\x08", 3);  // (this shortcut, "shortcuts", the root)
+    free(old);
+    FILE *f = fopen(path, "wb");
+    bool ok = f && fwrite(o.b, 1, o.n, f) == o.n;
+    if (f) ok = fclose(f) == 0 && ok;
+    free(o.b);
+    return ok;
+}
+
+static void add_direct(const char *root, const char *exe, char dirs[][1100], int na) {
+    DWORD pid = steam_pid();
+    if (pid) {
+        snprintf(g_status, sizeof g_status, "Closing Steam to add the game (it starts again after)...");
+        LOG("[steam] Steam running (pid %lu): asking it to shut down\n", (unsigned long)pid);
+        HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, pid);
+        start_steam(root, "-shutdown");
+        DWORD w = h ? WaitForSingleObject(h, 60000) : WAIT_FAILED;
+        if (h) CloseHandle(h);
+        if (w != WAIT_OBJECT_0) {
+            snprintf(g_status, sizeof g_status, "Steam didn't close - close Steam yourself, then try again.");
+            return;
+        }
+        SDL_Delay(1500);  // (its last file writes)
+    }
+    char quoted[1100], key[1300];
+    snprintf(quoted, sizeof quoted, "\"%s\"", exe);
+    snprintf(key, sizeof key, "%s%s", quoted, RT_APP_NAME);
+    uint32_t appid = crc32_of(key) | 0x80000000u;  // (the id Steam itself gives a shortcut: its grid art goes by it)
+    int added = 0, art = 0;
+    for (int i = 0; i < na; i++)
+        if (vdf_append(dirs[i], exe, appid)) added++, art += copy_art(dirs[i], appid);
+    LOG("[steam] written to %d account(s) as %u, %d image(s) copied\n", added, appid, art);
+    if (pid) start_steam(root, "");
+    if (!added) snprintf(g_status, sizeof g_status, "Couldn't write Steam's shortcut file.");
+    else snprintf(g_status, sizeof g_status, pid ? "Added to Steam (Steam was restarted)." : "Added to Steam - it shows the next time Steam starts.");
+}
+#endif
+
 static int run(void *unused) {
     (void)unused;
     char root[1100], exe[1100], dirs[16][1100];
@@ -283,6 +411,8 @@ static int run(void *unused) {
     }
     char add[1100];
 #ifdef _WIN32
+    add_direct(root, exe, dirs, na);
+    goto done;
     snprintf(add, sizeof add, "%s", exe);
 #else
     if (!write_desktop(exe, add, sizeof add)) {

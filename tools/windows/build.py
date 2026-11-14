@@ -19,7 +19,7 @@ GENFLAGS = ('-O2 -fno-strict-aliasing -fdenormal-fp-math=dynamic -Wno-return-typ
             '-Iruntime -D_FILE_OFFSET_BITS=64 -march=x86-64-v3  ')  # (as make expands it, spaces and all: part of the id)
 OSFLAGS = ['-D_FILE_OFFSET_BITS=64', '-D_POSIX_THREAD_SAFE_FUNCTIONS', '-D_CRT_RAND_S', '-DWIN32_LEAN_AND_MEAN', '-DNOMINMAX']
 LIBS = ['-lSDL3', '-lavformat', '-lavcodec', '-lavutil', '-lswscale', '-lvulkan-1', '-lwinmm', '-lole32', '-lshell32',
-        '-lcomdlg32', '-luuid', '-lws2_32', '-lshaderc_shared']
+        '-lcomdlg32', '-luuid', '-lws2_32', '-lwinhttp', '-lshaderc_shared']
 
 
 def die(msg):
