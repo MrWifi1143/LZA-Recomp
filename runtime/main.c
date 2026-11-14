@@ -373,8 +373,6 @@ int main(int argc, char **argv) {
             pla_cmdpool_configure();
             extern void pla_drawdist_configure(void);  // (hle/pla_drawdist.c: Settings.detail)
             pla_drawdist_configure();
-            extern void pla_wide_configure(void);  // (hle/pla_wide.c: Settings.ultrawide's camera)
-            pla_wide_configure();
         }
         { extern void wildbattle_configure(void); wildbattle_configure(); }  // (runtime/hle/wildbattle.c: the wild battles option)
         { extern void plugins_game_start(void); plugins_game_start(); }  // (runtime/plugin.h: the runtime's hooks are set)

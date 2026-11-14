@@ -83,8 +83,6 @@ static void set_fps(int i) {
 }
 static int get_res(void) { return find(k_lines, 6, g_settings.next_res_height ? g_settings.next_res_height - 1 : g_settings.res_height); }
 static void set_res(int i) { g_settings.next_res_height = k_lines[i] == g_settings.res_height ? 0 : k_lines[i] + 1; }
-static int get_wide(void) { return g_settings.ultrawide ? 1 : 0; }
-static void set_wide(int i) { g_settings.ultrawide = i == 1; }  // (at once: nvn/vulkan/device.c, hle/pla_wide.c)
 static int get_full(void) { return g_settings.fullscreen ? 1 : 0; }
 static void set_full(int i) { g_settings.fullscreen = i == 1, menu_apply_fullscreen(); }
 static int get_aa(void) { return g_settings.antialias == AA_SMAA ? 0 : 1; }
@@ -145,8 +143,6 @@ static const Row k_rows[] = {
      {"Auto", "540p", "720p", "1080p", "1440p", "4K"}, get_res, set_res},
     {"Screen Mode", "Choose whether the game fills the screen or plays in a window.", CHOICE, 2, {"Window", "Fullscreen"},
      get_full, set_full},
-    {"Aspect Ratio", "Choose 16:9 with bars at the sides, or fill a wider window or screen and see more to the sides.", CHOICE, 2,
-     {"16:9", "Fill Window"}, get_wide, set_wide},
     {"Anti-Aliasing", "Choose whether to smooth jagged edges (SMAA).", CHOICE, 2, {"Enabled", "Disabled"}, get_aa, set_aa},
     {"Sharpening", "Choose how much the image is sharpened at your screen's resolution (AMD's RCAS).", CHOICE, 4,
      {"Off", "Low", "Medium", "High"}, get_sharp, set_sharp},
