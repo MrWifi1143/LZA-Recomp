@@ -90,6 +90,9 @@ typedef struct {
     const uint8_t *label;     // (c->fwd: the block starts, label[pc / 8], and how many instructions: skip_bra)
     size_t nlabel;
     int skip_open;            // (c->fwd: ifs opened by skip_bra, closed where this block ends)
+    bool nobreak;             // g_maxwell_no_break: no break out of a block - a jump sets jmp, the rest runs in if (!jmp)
+    bool nb_pending;          // (nobreak: this instruction can jump - the rest of its block goes in if (!jmp))
+    int nb_guards;            // (nobreak: those ifs, closed where the block ends)
 } Ctx;
 
 static uint64_t bits(uint64_t w, int lo, int n) { return (w >> lo) & ((n == 64) ? ~0ull : ((1ull << n) - 1)); }
@@ -109,8 +112,9 @@ static void jump(Ctx *c, const char *cond, uint32_t to, uint32_t from) {
     if (c->fwd) {
         char set[64];
         jump_set(set, sizeof set, to, from);
-        if (cond) sp(&c->body, "    if (%s) { %s break; }\n", cond, set);
-        else sp(&c->body, "    %s break;\n", set);
+        if (cond) sp(&c->body, c->nobreak ? "    if (%s) { %s jmp = true; }\n" : "    if (%s) { %s break; }\n", cond, set);
+        else sp(&c->body, c->nobreak ? "    %s jmp = true;\n" : "    %s break;\n", set);
+        c->nb_pending = c->nobreak;
     } else sp(&c->body, cond ? "    if (%s) { pc = %uu; continue; }\n" : "%s    pc = %uu; continue;\n", cond ? cond : "", to);
 }
 
@@ -1208,7 +1212,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
 
 #define OPM(val, mask) ((w & (uint64_t)(mask)) == (uint64_t)(val))
     if (OPM(0xe300000000000000ull, 0xfff0000000000000ull)) {  // EXIT
-        sp(&c->body, c->branchy ? "    exit_now = true; break;\n" : "    break;\n");
+        if (c->nobreak) sp(&c->body, c->branchy ? "    exit_now = true; jmp = true;\n" : "    jmp = true;\n"), c->nb_pending = true;
+        else sp(&c->body, c->branchy ? "    exit_now = true; break;\n" : "    break;\n");
     } else if (OPM(0xe330000000000000ull, 0xfff0000000000000ull)) {  // KIL
         c->info->uses_discard = true;
         if (getenv("LARECOMP_NO_DISCARD")) {
@@ -2114,7 +2119,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                 jump_set(set, sizeof set, to, pc);
                 sp(&c->body, "%s case %uu: %s break;", j % 4 == 3 ? "\n       " : "", to, set);
             }
-            sp(&c->body, " default: exit_now = true; break; }\n      break; }\n");
+            sp(&c->body, c->nobreak ? " default: exit_now = true; break; }\n      jmp = true; }\n" : " default: exit_now = true; break; }\n      break; }\n");
+            c->nb_pending = c->nobreak;
         } else
             sp(&c->body, "    { uint t = %uu + %s + 0x%08xu; if (((t >> 3) & 3u) == 0u) t += 8u; pc = t; continue; }\n", pc + 8, R(a),
                (uint32_t)sbits(w, 20, 24));
@@ -2904,13 +2910,16 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (c->uses_local) sp(&s, "  uint lmem[%d]; for (int li_ = 0; li_ < %d; li_++) lmem[li_] = 0u;\n", LMEM_WORDS, LMEM_WORDS);
     if (dbg) sp(&s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");
     if (any_branch && c->fwd) {  // (the blocks, the last one closed here: translate_impl)
-        sp(&s, "%s  do {\n%s  } while (false);\n", c->fwd_decl.buf, body.buf ? body.buf : "");
+        if (c->nobreak) sp(&s, "%s  bool jmp = false;\n%s", c->fwd_decl.buf, body.buf ? body.buf : "");
+        else sp(&s, "%s  do {\n%s  } while (false);\n", c->fwd_decl.buf, body.buf ? body.buf : "");
     } else if (any_branch) {
         sp(&s, "  uint pc = 8u; uint crs[32]; uint crk[32]; uint crs_n = 0u;\n");
         sp(&s, "  bool exit_now = false;\n");
         sp(&s, "  for (uint guard = 0u; guard < 100000u; guard++) {\n  switch (pc) {\n");
         sp(&s, "%s", body.buf ? body.buf : "");
         sp(&s, "    exit_now = true; break;\n  default: exit_now = true; break;\n  }\n  if (exit_now) break;\n  }\n");
+    } else if (c->nobreak) {
+        sp(&s, "  bool jmp = false;\n  {\n%s  }\n", body.buf ? body.buf : "");
     } else {
         sp(&s, "  do {\n%s  } while (false);\n", body.buf ? body.buf : "");
     }
@@ -3079,10 +3088,11 @@ static bool flow_static(const uint64_t *code, size_t end, const size_t *brx, int
 static void fwd_loops_end(Ctx *c, const uint8_t *label, const size_t *lend, size_t i) {
     for (size_t h = i; h-- > 0;) {
         if (lend[h] != i) continue;
-        sp(&c->body, "  if (!l%u) break;\n  l%u = false;", (uint32_t)(h * 8), (uint32_t)(h * 8));
+        sp(&c->body, c->nobreak ? "  if (!l%u || exit_now) break;\n  l%u = false;" : "  if (!l%u) break;\n  l%u = false;",
+           (uint32_t)(h * 8), (uint32_t)(h * 8));
         for (size_t j = h + 1; j < i; j++)
             if (label[j] && j % 4) sp(&c->body, " b%u = false;", (uint32_t)(j * 8));
-        sp(&c->body, "\n  }\n  if (exit_now) break;\n");
+        sp(&c->body, c->nobreak ? "\n  }\n" : "\n  }\n  if (exit_now) break;\n");  // (nobreak: the blocks after test exit_now)
     }
 }
 
@@ -3255,6 +3265,12 @@ static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, const ui
     static int annotate = -1;
     if (annotate < 0) annotate = getenv("LARECOMP_SAVE_MSL") != NULL;
     c->branchy = any_branch;
+    // AMD's Windows driver (amdvlk / AMD proprietary) miscompiles the blocks' do { ... break; ... } while (false): its
+    // shader compiler crashed on one Arceus fragment program (the Jubilife cutscene: VK_ERROR on the pipeline, then the
+    // driver's own crash) and characters' eyes didn't draw; the same programs as ifs with a jmp flag, no break, built and
+    // ran (2026-11-13, an RX 6600 XT). The state machine (switch in a loop) keeps its breaks.
+    c->nobreak = g_maxwell_no_break && c->glsl && (c->fwd || !any_branch);
+    c->nb_pending = false, c->nb_guards = 0;
     c->flow_to = flow_to;
     c->label = c->fwd ? label : NULL, c->nlabel = end, c->skip_open = 0;
     for (size_t i = 0; i < end && !c->fail; i++) {
@@ -3262,13 +3278,17 @@ static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, const ui
         uint32_t pc = (uint32_t)(i * 8);
         if (any_branch && label[i] && c->fwd) {  // (the block before falls into this one: its flag)
             for (; c->skip_open; c->skip_open--) sp(&c->body, "  }\n");  // (skip_bra's ifs end with their block)
-            if (i > 1) sp(&c->body, "    b%u = true;\n  } while (false);\n  if (exit_now) break;\n", pc);
+            if (c->nobreak) {
+                for (; c->nb_guards; c->nb_guards--) sp(&c->body, "  }\n");
+                if (i > 1) sp(&c->body, "    if (!jmp) b%u = true;\n  }\n", pc);  // (fell through: no jump, no exit)
+            } else if (i > 1) sp(&c->body, "    b%u = true;\n  } while (false);\n  if (exit_now) break;\n", pc);
             fwd_loops_end(c, label, lend, i);
             if (lend[i]) sp(&c->body, "  for (uint g%u = 0u; g%u < 100000u; g%u++) {\n", pc, pc, pc);
-            sp(&c->body, "  do { if (!b%u) break;\n", pc);
+            sp(&c->body, c->nobreak ? "  if (b%u && !exit_now) { jmp = false;\n" : "  do { if (!b%u) break;\n", pc);
         } else if (any_branch && label[i]) sp(&c->body, "  case %uu:\n", pc);
         if (annotate) sp(&c->body, "    // pc %x: %016llx\n", pc, (unsigned long long)((const uint64_t *)code)[i]);
         emit_insn(c, ((const uint64_t *)code)[i], pc);
+        if (c->nb_pending) sp(&c->body, "  if (!jmp) {\n"), c->nb_guards++, c->nb_pending = false;
         if (dbg && pc == maxwell_dbg_pc) {
             int rr = maxwell_dbg_reg % 1000, half = maxwell_dbg_reg / 1000;  // +1000: low f16, +2000: high f16
             c->reg_used[rr] = 1;
@@ -3279,9 +3299,11 @@ static ShaderInfo *translate_impl(const uint8_t *blob, size_t max_size, const ui
     }
     if (c->fwd) {
         for (; c->skip_open; c->skip_open--) sp(&c->body, "  }\n");
-        sp(&c->body, "  } while (false);\n  if (exit_now) break;\n");
+        for (; c->nb_guards; c->nb_guards--) sp(&c->body, "  }\n");
+        sp(&c->body, c->nobreak ? "  }\n" : "  } while (false);\n  if (exit_now) break;\n");
         fwd_loops_end(c, label, lend, end);
-    }
+    } else
+        for (; c->nb_guards; c->nb_guards--) sp(&c->body, "  }\n");  // (nobreak, no branches: the ifs after an EXIT)
     for (int b = 0; b < nbrx; b++) free(brx_to[b]);
     c->nbrx = 0;
     c->label = NULL;
@@ -3478,15 +3500,17 @@ const char *maxwell_build_id(void) { return k_xlat_build; }
 _Thread_local bool maxwell_plain_glsl;  // (shader.h)  // (runtime/nvn/vulkan/warmup.c: its marker)
 bool g_maxwell_warp_slices;  // (shader.h)
 bool g_maxwell_gmem_table;   // (shader.h)
+bool g_maxwell_no_break;     // (shader.h)
 
 const char *maxwell_cache_tag(void) {
-    static char tags[2][2][17];  // (by g_maxwell_warp_slices / g_maxwell_gmem_table: device.c may set them after a first call)
-    char *tag = tags[g_maxwell_warp_slices][g_maxwell_gmem_table];
+    static char tags[2][2][2][17];  // (by g_maxwell_warp_slices / g_maxwell_gmem_table / g_maxwell_no_break: device.c may set them after a first call)
+    char *tag = tags[g_maxwell_warp_slices][g_maxwell_gmem_table][g_maxwell_no_break];
     if (!tag[0]) {
         uint64_t h = 0xcbf29ce484222325ull;
         for (const char *p = k_xlat_build; *p; p++) h = (h ^ (uint8_t)*p) * 0x100000001b3ull;
         if (g_maxwell_warp_slices) h = (h ^ 0x5a) * 0x100000001b3ull;  // (translations for sliced subgroups: their own)
         if (g_maxwell_gmem_table) h = (h ^ 0x7c) * 0x100000001b3ull;  // (global memory through the chunk table: its own)
+        if (g_maxwell_no_break) h = (h ^ 0x3d) * 0x100000001b3ull;  // (blocks without break: their own)
         snprintf(tag, 17, "%016llx", (unsigned long long)h);
     }
     return tag;

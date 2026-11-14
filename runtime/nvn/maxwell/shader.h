@@ -103,6 +103,10 @@ extern bool g_maxwell_warp_slices;
 // imported as separate 64 MB host-memory imports, each its own buffer and GPU address, where no sparse buffer can hold
 // them together (AMD's Windows driver). Word i lives in chunk i >> 24. Set before the first translation (gpuheap.c).
 extern bool g_maxwell_gmem_table;
+// Blocks without break (AMD's Windows driver: its compiler miscompiles do { ... break; } while (false) - a crash, characters
+// without eyes in Legends: Arceus): a jump sets a flag and the rest of its block runs in if (!jmp). Set before the first
+// translation (vulkan/device.c).
+extern bool g_maxwell_no_break;
 #define MAXWELL_GMEM_TABLE_N 128  // chunks the table holds (8 GB: Z-A's window is 6.75 GB)
 // This thread's next translations in the GLSL spelling from before glsl_retype (uint registers, as_u / as_f), not cached:
 // for a shader the renderer then patches by its text (runtime/nvn/vulkan/exec.c pla_soft_shadows)
