@@ -213,8 +213,31 @@ static int timeline_step(Cpu *c, uint64_t addr) {
 // the docked entry of the render pipeline's screen sizes and the size its targets are made at (two constants), all
 // before the renderer is made. Every pass then agrees on it, as on the Switch 2. The internal resolution option picks
 // it: render_height lines (1440: 2560x1440, scene 1664x936), 1080 x the multiplier, or the display's height (Match
-// display; the 75 / 50 / 25 % choices of it); 16:9 (a VR plugin's: its eye's shape), multiples of 8. LARECOMP_ZA_RES=<w>x<h>
-// sets it directly.
+// display; the 75 / 50 / 25 % choices of it); 16:9 (a VR plugin's: its eye's shape; Aspect ratio "Fill the window": the
+// window's, below), multiples of 8. LARECOMP_ZA_RES=<w>x<h> sets it directly.
+//
+// Ultrawide (Settings.ultrawide, "Fill the window"; at the next start): a window wider than 16:9 - or the display, when
+// the game goes fullscreen - makes the screen that shape, Hor+: the same height, the world seen wider. Every pass follows
+// the screen size, but the game keeps its cameras at 16:9 (the image came out stretched across) - wide_cam_hook below
+// widens them - and its interface's 1920 x 1080 layout space is stretched to the screen: drawn into a centred 16:9 box
+// instead (nvn/vulkan/exec.c draw_). The window then shows the image fitted at its shape (output_scale.c,
+// g_game_image_aspect).
+static double window_aspect(void) {  // (the window's shape as the game starts, 0: not known)
+    bool video = SDL_WasInit(SDL_INIT_VIDEO);
+    extern SDL_Window *ui_window(void);  // (nvn/vulkan/device.c)
+    SDL_Window *win = video ? ui_window() : NULL;
+    // fullscreen: the display's (the window may not have its fullscreen size yet - or not be made yet, without the start
+    // screen: nvn/vulkan/device.c makes it fullscreen at once); test windows stay windows
+    if (video && g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) {
+        const SDL_DisplayMode *dm = SDL_GetDesktopDisplayMode(win ? SDL_GetDisplayForWindow(win) : SDL_GetPrimaryDisplay());
+        if (dm && dm->w > 0 && dm->h > 0) return (double)dm->w / dm->h;
+    }
+    int ww = 0, wh = 0;
+    if (win) SDL_GetWindowSizeInPixels(win, &ww, &wh);
+    else if (getenv("LARECOMP_WINDOW")) sscanf(getenv("LARECOMP_WINDOW"), "%dx%d", &ww, &wh);  // (the size it will be made at)
+    return ww > 0 && wh > 0 ? (double)ww / wh : 0;  // (else the 1280 x 720 it will be made at)
+}
+static float g_wide_cam;  // (the scene camera's aspect: the screen's, 0 the game's own 16:9)
 static void za_screen_size(uint64_t *w, uint64_t *h) {
     const char *r = getenv("LARECOMP_ZA_RES");
     if (r && strchr(r, 'x') && atoi(r) >= 640 && atoi(strchr(r, 'x') + 1) >= 360) {
@@ -228,6 +251,10 @@ static void za_screen_size(uint64_t *w, uint64_t *h) {
     extern volatile uint32_t g_plugin_render_height;
     extern volatile float g_plugin_render_shape;
     double shape = g_plugin_render_shape > 0 ? g_plugin_render_shape : 16.0 / 9.0;
+    if (!(g_plugin_render_shape > 0) && g_settings.ultrawide) {
+        double a = window_aspect();
+        if (a > 16.0 / 9.0 * 1.005) shape = a;  // (wider only: a taller window keeps 16:9, with bars)
+    }
     if (g_plugin_render_height) lines = g_plugin_render_height;
     else if (g_settings.res_height > 0) lines = g_settings.res_height;
     else if (mode >= 1 && mode <= 8) lines = 1080.0 * mode;
@@ -268,6 +295,41 @@ static int res_scale_hook(Cpu *c, uint64_t addr) {
     return 1;
 }
 
+// Ultrawide: the scene camera made as wide as the screen. The render camera update 0x70018cff60 (x0 = the camera; the
+// same function LegendsVR drives) serves every camera of a frame - the scene's, the shadows', reflections' - and builds
+// each one's projection from its field of view (+0x19c, radians, vertical) and aspect (+0x1a0) inside, so the aspect is
+// set before it runs: on the cameras whose aspect is the game's 16:9 (or already ours) only - a shadow map's or a
+// reflection's of another shape keep theirs. Hor+: the vertical field of view stays, the sides see more. (A VR plugin's
+// shape: the plugin sets the cameras itself.)
+#define ZA_CAM_UPDATE 0x70018cff60ull
+static int wide_cam_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    extern volatile float g_plugin_render_shape;
+    if (g_plugin_render_shape > 0 || !g_wide_cam) return 0;
+    float *a = (float *)(uintptr_t)(c->x[0] + 0x1a0);
+    if (fabsf(*a - 16.0f / 9.0f) < 0.002f) {
+        static int said;
+        if (!said++) LOG("[wide] scene camera aspect %.4f -> %.4f (field of view %.1f degrees high)\n", *a, g_wide_cam, a[-1] * 57.29578f);
+        *a = g_wide_cam;
+    }
+    return 0;
+}
+static void za_wide_engage(uint64_t sw, uint64_t sh) {
+    extern volatile float g_plugin_render_shape;
+    extern volatile float g_game_image_aspect;  // (nvn/output_scale.c)
+    double a = (double)sw / (double)sh;
+    if (g_plugin_render_shape > 0 || !g_settings.ultrawide || a <= 16.0 / 9.0 * 1.005) {
+        if (g_settings.ultrawide && !(g_plugin_render_shape > 0))
+            LOG("[wide] fill the window: the window is 16:9 or narrower - 16:9 (%llux%llu)\n", (unsigned long long)sw, (unsigned long long)sh);
+        return;
+    }
+    g_wide_cam = (float)a, g_game_image_aspect = (float)a;
+    static bool hooked;
+    if (!hooked) hooked = true, rt_register_fnhook_at(ZA_CAM_UPDATE, wide_cam_hook);
+    LOG("[wide] fill the window: screen %llux%llu, shape %.3f x 16:9, scene camera aspect %.4f; interface in a centred 16:9 box\n",
+        (unsigned long long)sw, (unsigned long long)sh, a / (16.0 / 9.0), a);
+}
+
 // The engine's system config (read by 0x7001b2fc30 (config table, engine info, ...) into the info struct): +0x10 / +0x18
 // the output width / height (1920 x 1080 unless the data sets them), +0x58 the worker core count (hle/za_jobs.c).
 // (the output size: set by the screen size, below)
@@ -287,6 +349,7 @@ static int config_read(Cpu *c, uint64_t addr) {
     }
     uint64_t sw, sh;
     za_screen_size(&sw, &sh);
+    za_wide_engage(sw, sh);
     if (sw != 1920 || sh != 1080) {
         g_res_sw = sw, g_res_sh = sh;
         static bool hooked;

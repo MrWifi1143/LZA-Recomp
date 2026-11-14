@@ -61,6 +61,7 @@ static void parse_line(const char *line) {
     else if (!strcmp(key, "experimental")) g_settings.experimental = atoi(val) != 0, g_experimental_seen = true;
     else if (!strcmp(key, "frame_timing")) g_settings.fixed_steps = !strcmp(val, "fixed");
     else if (!strcmp(key, "render_height")) g_settings.res_height = atoi(val) >= 360 && atoi(val) <= 4320 ? atoi(val) : 0;
+    else if (!strcmp(key, "aspect_ratio")) g_settings.ultrawide = !strcmp(val, "fill");
     else if (!strcmp(key, "volume")) g_settings.volume = (float)atof(val);
     else if (!strcmp(key, "mouse_sens")) g_settings.mouse_sens = (float)atof(val);
     else if (!strcmp(key, "stick_deadzone")) g_settings.stick_deadzone = (float)atof(val);
@@ -148,6 +149,7 @@ void settings_save(void) {
     fprintf(f, "fps = %d\n", g_settings.next_fps ? g_settings.next_fps : g_settings.fps);
     fprintf(f, "frame_timing = %s\n", g_settings.fixed_steps ? "fixed" : "real_time");
     fprintf(f, "render_height = %d\n", g_settings.next_res_height ? g_settings.next_res_height - 1 : g_settings.res_height);
+    fprintf(f, "aspect_ratio = %s\n", g_settings.ultrawide ? "fill" : "16:9");
     fprintf(f, "smaa = %d\n", g_settings.antialias == AA_SMAA);
     fprintf(f, "mod = %s\n", g_settings.mod);
     fprintf(f, "plugins_off = %s\n", g_settings.plugins_off);

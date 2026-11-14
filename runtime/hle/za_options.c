@@ -92,6 +92,8 @@ static int get_steps(void) { return g_settings.fixed_steps ? 1 : 0; }
 static void set_steps(int i) { g_settings.fixed_steps = i == 1; }
 static int get_res(void) { return find(k_lines, 6, g_settings.next_res_height ? g_settings.next_res_height - 1 : g_settings.res_height); }
 static void set_res(int i) { g_settings.next_res_height = k_lines[i] == g_settings.res_height ? 0 : k_lines[i] + 1; }
+static int get_wide(void) { return g_settings.ultrawide ? 1 : 0; }
+static void set_wide(int i) { g_settings.ultrawide = i == 1; }
 static int get_full(void) { return g_settings.fullscreen ? 1 : 0; }
 static void set_full(int i) { g_settings.fullscreen = i == 1, menu_apply_fullscreen(); }
 static int get_aa(void) { return g_settings.antialias == AA_SMAA ? 0 : 1; }
@@ -167,6 +169,8 @@ static const Row k_rows[] = {  // (per tab in this order; Gameplay's first is th
      CHOICE, 6, {"Auto", "540p", "720p", "1080p", "1440p", "4K"}, get_res, set_res},
     {1, "Screen Mode", "Choose whether the game fills the screen or plays in a window.", CHOICE, 2, {"Window", "Fullscreen"},
      get_full, set_full},
+    {1, "Aspect Ratio (Next Start)", "Choose 16:9 with bars at the sides, or fill a wider window or screen and see more to the sides.",
+     CHOICE, 2, {"16:9", "Fill Window"}, get_wide, set_wide},
     {1, "Anti-Aliasing", "Choose whether to smooth jagged edges (SMAA).", CHOICE, 2, {"On", "Off"}, get_aa, set_aa},
     {1, "Draw Distance (People)", "Choose how many people and Pokémon are drawn at once and how far away they appear. More costs performance.", CHOICE, 4, {"Switch", "2x", "4x", "Max"}, get_crowd, set_crowd},
     {1, "Draw Distance (Detail)", "Choose how far away trees, buildings and Pokémon keep their detail and small props and rooftop details appear. Farther costs performance.", CHOICE, 4, {"Switch", "2x", "4x", "Max"}, get_detail, set_detail},
