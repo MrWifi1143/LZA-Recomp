@@ -696,8 +696,8 @@ static int pla_timed_tick_hook(Cpu *c, uint64_t addr) {
 // At 144 fps that is 4.8x the gravity: ridden jumps topped out at ~0.5 m instead of ~2 m (player report, measured
 // 2026-11-11: 8.75 m/s take-off, the same at every frame rate). The speed falls only through gravity in the air: a step
 // that lowers the vertical speed alone (x and z unchanged) by a gravity-sized bite is scaled to the step's time
-// (30 * dt), in the body's speed (+0x124) and the motor's copy of it (+0x4c4). Landings and pushes change more than y
-// or raise it: left alone. LARECOMP_PLA_GRAVITY_SCALE=0: off.
+// (30 * dt), in the body's speed (+0x124) and the motor's copy of it (+0x4c4) - a little horizontal change allowed (steering
+// in the air). Landings and pushes change more than that or raise it: left alone. LARECOMP_PLA_GRAVITY_SCALE=0: off.
 #define PLA_CHAR_STEP 0x7002ae3150ull
 static int pla_char_step_hook(Cpu *c, uint64_t addr) {
     uint64_t b = c->x[0], info = c->x[1];
@@ -713,7 +713,13 @@ static int pla_char_step_hook(Cpu *c, uint64_t addr) {
     extern uint64_t renderer_game_frame(void);
     uint64_t now = renderer_game_frame();
     int slot = (int)((b >> 9) & 15);
-    if (d < -0.2f && d > -2.0f && fabsf(v[0] - v0[0]) < 1e-4f && fabsf(v[2] - v0[2]) < 1e-4f) {
+    // (x and z: a jump while dashing steers in the air - ~0.05 m/s a step - and its bites were left whole: a dash jump at
+    // 60 fps took twice the gravity, ~half the height - player report, measured 2026-11-13. A step on the ground starting
+    // or stopping a dash changes them by ~8.5 m/s: still left alone.)
+    float hmax = 1.0f;
+    static float hlim = -1;  // (LARECOMP_PLA_GRAVITY_XZ=<m/s>: research - the horizontal change a scaled step may have)
+    if (hlim < 0) hlim = getenv("LARECOMP_PLA_GRAVITY_XZ") ? (float)atof(getenv("LARECOMP_PLA_GRAVITY_XZ")) : hmax;
+    if (d < -0.2f && d > -2.0f && fabsf(v[0] - v0[0]) < hlim + 1e-4f && fabsf(v[2] - v0[2]) < hlim + 1e-4f) {
         float k = 30 * dt;
         v[1] = v0[1] + d * k;
         // At 30 fps the position moved with the speed before each whole bite: the arc runs as if it had started half a
