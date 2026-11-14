@@ -11,8 +11,9 @@ New replies on OLD posts count too (people add to an old report instead of makin
 message id is remembered (~/.local/state/lzarecomp/grab.json), and a post with a newer one is fetched again.
 
 Saved under --out (default /mnt/ssd/PLA/testout/discord): <forum>/<post id>-<title>/thread.md (the new messages
-appended, oldest first, with who and when) plus each attachment as <message id>-<file name>. Video links (YouTube,
-Streamable, Medal, Twitch clips...) are downloaded with yt-dlp when it is installed (720p at most), else listed.
+appended, oldest first, with who and when) plus each attachment as <message id>-<file name>. A pasted link straight
+to a video / log / archive file (catbox, Dropbox, a Discord CDN link...) is downloaded as is; video site links
+(YouTube, Streamable, Medal, Twitch clips, Google Drive) go through yt-dlp when it is installed (720p at most).
 A summary of what's new goes to stdout. Reporters' names stay in these local files only (never in commits/notes).
 Uses the LZ&A Helper bot (tools/discord_sync.py: token in ~/.config/lzarecomp/discord-token, never printed).
 """
@@ -35,6 +36,7 @@ REPORTISH = re.compile(r"crash|bug|log|regress|broke|break|error|fps|stutter|fre
 STATE = os.path.expanduser("~/.local/state/lzarecomp/grab.json")
 VIDEO_LINK = re.compile(r"https?://(?:www\.)?(?:youtu\.be/|youtube\.com/(?:watch|shorts)|streamable\.com/|medal\.tv/"
                         r"|clips\.twitch\.tv/|www\.twitch\.tv/\S+/clip/|drive\.google\.com/)\S+", re.I)
+DIRECT_FILE = re.compile(r"https?://\S+?\.(?:mp4|webm|mov|mkv|avi|m4v|log|txt|zip|7z|rar)(?:\?[^\s>)]*)?(?=\s|$|>|\))", re.I)
 MAX_ATTACHMENT = 500 << 20
 
 
@@ -147,6 +149,16 @@ def main():
                     st = "too big, not fetched" if size > MAX_ATTACHMENT else download(at["url"], os.path.join(folder, fn))
                 lines.append(f"- attachment: {fn} ({size >> 10} KB, {st})\n")
                 print(f"    + {at['filename']} ({size >> 10} KB) {st}")
+            for link in DIRECT_FILE.findall(text):  # (a pasted link to the file itself: catbox, Dropbox ?dl=1, Discord CDN...)
+                name = f"{m['id']}-" + re.sub(r"[^A-Za-z0-9._-]", "_", link.split("?")[0].rsplit("/", 1)[-1])[-80:]
+                st = "listed"
+                if not a.dry_run:
+                    try:
+                        st = download(link.replace("dl=0", "dl=1"), os.path.join(folder, name))
+                    except Exception as e:  # (expired / private links)
+                        st = f"failed: {str(e)[:80]}"
+                lines.append(f"- linked file: {link} -> {name} ({st})\n")
+                print(f"    + linked file {link} {st}")
             for link in VIDEO_LINK.findall(text):
                 st = "listed" if a.dry_run or a.no_video else grab_video(link, folder)
                 lines.append(f"- video link: {link} ({st})\n")
