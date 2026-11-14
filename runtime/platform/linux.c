@@ -329,3 +329,21 @@ bool plat_remove_tree(const char *dir) { return nftw(dir, rm_entry, 16, FTW_DEPT
 // End the process at once, skipping the library teardown: as on Windows, the GPU driver's threads crashed in exit()
 // while the game's threads still submitted work.
 void plat_terminate(void) { _exit(0); }
+
+void plat_mem_info(uint64_t *rss_mb, uint64_t *commit_mb, uint64_t *avail_mb, uint64_t *total_mb) {
+    *rss_mb = *commit_mb = *avail_mb = *total_mb = 0;
+    char line[256];
+    unsigned long long v;
+    FILE *f = fopen("/proc/self/status", "r");
+    while (f && fgets(line, sizeof line, f)) {
+        if (sscanf(line, "VmRSS: %llu kB", &v) == 1) *rss_mb = v >> 10;
+        else if (sscanf(line, "RssAnon: %llu kB", &v) == 1 && !*commit_mb) *commit_mb = v >> 10;
+    }
+    if (f) fclose(f);
+    f = fopen("/proc/meminfo", "r");
+    while (f && fgets(line, sizeof line, f)) {
+        if (sscanf(line, "MemAvailable: %llu kB", &v) == 1) *avail_mb = v >> 10;
+        else if (sscanf(line, "MemTotal: %llu kB", &v) == 1) *total_mb = v >> 10;
+    }
+    if (f) fclose(f);
+}
