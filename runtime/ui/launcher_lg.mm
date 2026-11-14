@@ -890,6 +890,8 @@ static bool big_button(const char *label, float w, float h, bool primary, bool e
 }
 
 // ------------------------------------------------------------------ the start screen
+extern "C" bool g_launcher_skipped;
+bool g_launcher_skipped;
 extern "C" void launcher_lg_run(const char *root) {
     (void)root;
     pick_language();
@@ -1646,6 +1648,7 @@ extern "C" void launcher_lg_run(const char *root) {
         bool decide = focused_at ? SDL_GetTicks() - focused_at >= 250 : SDL_GetTicks() - opened >= 1500;
         if (skip_now && !shift_seen && decide && ready && inst != MOD_INSTALL_RUNNING) {
             fprintf(stderr, "[launcher] start screen skipped (skip_start_screen; Shift at start shows it)\n");
+            g_launcher_skipped = true;  // (ui/menu.mm: an update is mentioned in the game instead)
             play = true;
         }
         if (!vk_frame_begin(bg)) { SDL_Delay(16); continue; }
