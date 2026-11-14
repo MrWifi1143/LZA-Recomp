@@ -41,6 +41,7 @@ typedef struct {
     bool depth_clamp;  // depthClamp feature (NVN SetDepthClamp)
     bool gpl;          // VK_EXT_graphics_pipeline_library with fast linking (exec.c: pipelines from parts)
     bool gpuheap;  // the guest heap window is GPU memory (gpuheap.c: no host memory import), a sparse buffer in exec.c
+    bool lazyhost;  // the host memory import made in 64 MB chunks as the game uses them, a sparse buffer (gpuheap.c, exec.c)
     VkShaderStageFlags sg32;  // stages that get a required subgroup size of 32 (the Maxwell warp: vk_sg32)
     bool oq_host_reset, oq_precise;  // occlusion queries (exec.c): slots reset from the CPU; exact sample counts
     bool minmax;                     // samplerFilterMinmax: min / max reduction samplers

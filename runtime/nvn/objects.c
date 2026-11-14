@@ -935,8 +935,10 @@ static void present_pace(int interval) {
     }
     uint64_t period;
     extern bool fps60_enabled(void), fps60_world(void), pla60_enabled(void);
-    extern void pla60_present(void);
-    pla60_present();
+    extern void pla60_present(bool paced), pla60_paced(void), pla60_pace_restart(void);
+    extern uint64_t pla60_present_due(void);
+    if (!next) pla60_pace_restart();  // (first frame, after a pause: the step clock starts over too)
+    pla60_present(fps != 0);
     extern uint64_t pla60_period_ns(void);
     if (pla60_enabled() && fps != 0) period = pla60_period_ns();  // (runtime/hle/fps60.c: the Legends at 60 fps or more)
     else if (fps60_enabled()) period = fps60_world() ? 16666667ull : 33333333ull;  // (runtime/hle/fps60.c)
@@ -948,7 +950,10 @@ static void present_pace(int interval) {
     uint64_t now = plat_now_ns();
     static int old_pace = -1;  // (LARECOMP_PACE_OLD=1, research: the core taken back at the frame's time, as before)
     if (old_pace < 0) old_pace = ENV("LARECOMP_PACE_OLD") != NULL;
-    if (!next || now > next + 2 * period) next = now;  // first frame / fell behind: start over, no burst
+    // (real-time steps: the frame goes out at its time on the step clock, runtime/hle/fps60.c - late: at once)
+    uint64_t due = pla60_present_due();
+    if (due) next = due;
+    if (!due && (!next || now > next + 2 * period)) next = now;  // first frame / fell behind: start over, no burst
     else if (old_pace) {
         kernel_block_begin();
         plat_sleep_until_ns(next);
@@ -1001,6 +1006,7 @@ static void present_pace(int interval) {
         g_wait_pace_add += end - now;
     }
     next += period;
+    pla60_paced();
 }
 
 static int g_last_interval;

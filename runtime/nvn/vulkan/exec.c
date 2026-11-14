@@ -1062,7 +1062,7 @@ static uint32_t oq_next;
 static int oq_active = -1;  // the query running in this pass (its slot)
 static bool oq_wanted;      // a reset came outside a pass: the query begins with the next one
 static uint64_t oq_seq[OQ_SLOTS];  // submission each slot was last used in
-static struct { uint32_t slot; uint64_t off; } oq_copy[OQ_SLOTS];  // reports waiting for their query's result
+static struct { uint32_t slot; uint64_t off; VkBuffer buf; } oq_copy[OQ_SLOTS];  // reports waiting for their query's result
 static int oq_ncopy;
 static uint64_t oq_stats[3];  // queries copied, reports without a query, queries cut by a pass end
 
@@ -1109,6 +1109,7 @@ static void oq_pass_ending(void) {  // (before vkCmdEndRendering: a query can't 
     oq_stats[2]++;
 }
 static VkBuffer gmem_buf;
+static bool gmem_span(uint64_t a, uint64_t n, VkBuffer *buf, VkDeviceSize *off);
 static bool oq_copied;  // results were copied in the submission being recorded (it ends with a barrier for the CPU)
 // The results into the reports' counter words, right after the pass their queries ran in (outside it), in the same
 // submission as the draws they measured: written where the game's own fences cover them, as a Switch GPU writes a
@@ -1118,7 +1119,7 @@ static void oq_copy_out(void) {
     if (!oq_ncopy) return;
     VkCommandBuffer cb = vk_cmd();
     for (int i = 0; i < oq_ncopy; i++) {
-        vkCmdCopyQueryPoolResults(cb, oq_pool, oq_copy[i].slot, 1, gmem_buf, oq_copy[i].off, 8,
+        vkCmdCopyQueryPoolResults(cb, oq_pool, oq_copy[i].slot, 1, oq_copy[i].buf, oq_copy[i].off, 8,
                                   VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
         oq_seq[oq_copy[i].slot] = vk_pending_seq();  // (reusable once this submission is done)
     }
@@ -3452,53 +3453,222 @@ static VkDescriptorBufferInfo gmem_info(void);
 // Without the host import (gpuheap.c: the heap window is GPU memory, dma-buf chunks mapped at their guest addresses):
 // one sparse buffer over the whole window, each chunk imported and bound into it as gpuheap backs it. Bound before the
 // work that may read it is submitted (a fence: binds are few, at load).
+// The lazy host import (g_vk.lazyhost, gpuheap.c: integrated GPUs) is the same buffer, each chunk a host memory import
+// of its 64 MB of guest memory, made once the chunk is first used: the import pins what it covers, and on an integrated
+// GPU that comes out of the GPU's own budget.
 #define GMEM_MAX_CHUNKS 256
 static VkDeviceMemory gmem_chunk[GMEM_MAX_CHUNKS];
 // Each chunk also as a plain buffer over the same memory, for what a driver can't do with a sparse one (Turnip's
 // transform feedback binding reads the buffer's own allocation: null for a sparse buffer, a crash): gmem_plain
 static VkBuffer gmem_chunk_buf[GMEM_MAX_CHUNKS];
 static uint64_t gmem_chunk_size;
+static unsigned gmem_chunks_imported;  // (lazy host import: chunks imported, for the log and LARECOMP_MEM_LOG)
+unsigned vk_gmem_imported_mb(void);
+unsigned vk_gmem_imported_mb(void) {  // (device.c's [mem] line: the guest heap's host memory imported)
+    return g_vk.lazyhost ? (unsigned)((gmem_chunks_imported * gmem_chunk_size) >> 20) : gmem_mem ? (unsigned)(gmem_size >> 20) : 0;
+}
+static void gmem_lazy_fallback(void);
+// (lazy host import) chunk k's guest memory imported: the memory, false if the driver refused
+static bool gmem_host_chunk(unsigned k, uint64_t chunk, uint32_t type_bits, VkDeviceMemory *mem) {
+    static PFN_vkGetMemoryHostPointerPropertiesEXT props;
+    if (!props) props = (PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(g_vk.dev, "vkGetMemoryHostPointerPropertiesEXT");
+    void *p = (void *)(uintptr_t)(HEAP_BASE + (uint64_t)k * chunk);
+    VkMemoryHostPointerPropertiesEXT mp = {.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+    VkResult r = props ? props(g_vk.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, p, &mp) : VK_ERROR_EXTENSION_NOT_PRESENT;
+    uint32_t bits = mp.memoryTypeBits & type_bits;
+    if (r != VK_SUCCESS || !bits) {
+        LOG("[vk] guest heap chunk %u: host pointer properties %d, memory types %#x (the buffer takes %#x)\n", k, (int)r, mp.memoryTypeBits, type_bits);
+        return false;
+    }
+    VkImportMemoryHostPointerInfoEXT imp = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
+                                            .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, .pHostPointer = p};
+    VkMemoryAllocateFlagsInfo af = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .pNext = &imp,
+                                    .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
+    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &af, .allocationSize = chunk,
+                               .memoryTypeIndex = (uint32_t)__builtin_ctz(bits)};
+    r = vkAllocateMemory(g_vk.dev, &ai, NULL, mem);
+    if (r != VK_SUCCESS) {
+        LOG("[vk] guest heap chunk %u: import failed (%d, %llu MB imported so far)\n", k, (int)r,
+            (unsigned long long)((gmem_chunks_imported * chunk) >> 20));
+        *mem = VK_NULL_HANDLE;
+        return false;
+    }
+    return true;
+}
+// Chunk table (g_maxwell_gmem_table, gpuheap.c: where the lazy import can't use a sparse buffer - AMD's Windows driver
+// has no sparse buffers backed by host memory, and pinning the whole 3.8 GB at once failed with 8 GB of RAM: blank text):
+// each imported chunk is a buffer of its own with its own GPU address, and shaders find a word's chunk in a table
+// (gmem_ref_info). Chunks not imported yet point at one zero-filled 64 MB buffer (reads 0, as the sparse buffer's
+// unbound range). Vertex, index and uniform data, and transform feedback, read in place from one chunk's buffer; a
+// range across two chunks is copied instead (guest_direct; transform feedback: skipped).
+static VkBuffer gmem_cbuf[GMEM_MAX_CHUNKS];          // (chunk table) chunk k's buffer over its host import
+static VkDeviceAddress gmem_caddr[GMEM_MAX_CHUNKS];  // its GPU address
+static VkBuffer gmem_zbuf;                           // (chunk table) what chunks not imported read: zeros
+static VkDeviceMemory gmem_zmem;
+static VkDeviceAddress gmem_zaddr;
+static uint64_t gmem_tab_gen;                        // bumped when the table changes (gmem_ref_info's copy)
+static bool gmem_table_backed(void) { return g_maxwell_gmem_table && g_vk.lazyhost; }
+static VkBufferUsageFlags gmem_usage(void) {
+    return VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+           VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+           (g_vk.xfb ? VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT : 0);
+}
+// (chunk table) chunk k's guest memory imported as a buffer of its own: false if the driver refused
+static bool gmem_table_chunk(unsigned k, uint64_t chunk) {
+    VkExternalMemoryBufferCreateInfo eb = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+                                           .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = chunk, .usage = gmem_usage()};
+    VkBuffer b;
+    if (vkCreateBuffer(g_vk.dev, &bi, NULL, &b) != VK_SUCCESS) { LOG("[vk] guest heap chunk %u: no buffer\n", k); return false; }
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(g_vk.dev, b, &req);
+    if (!gmem_host_chunk(k, chunk, req.memoryTypeBits, &gmem_chunk[k])) { vkDestroyBuffer(g_vk.dev, b, NULL); return false; }
+    VkResult r = vkBindBufferMemory(g_vk.dev, b, gmem_chunk[k], 0);
+    if (r != VK_SUCCESS) {
+        LOG("[vk] guest heap chunk %u: binding its import failed (%d)\n", k, (int)r);
+        vkDestroyBuffer(g_vk.dev, b, NULL);
+        vkFreeMemory(g_vk.dev, gmem_chunk[k], NULL), gmem_chunk[k] = VK_NULL_HANDLE;
+        return false;
+    }
+    VkBufferDeviceAddressInfo dai = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = b};
+    gmem_cbuf[k] = b;
+    gmem_caddr[k] = vkGetBufferDeviceAddress(g_vk.dev, &dai);
+    return true;
+}
+// (chunk table) the zero buffer: device memory, cleared by the next submission's upload commands (before any draw)
+static void gmem_zero_buffer(uint64_t chunk) {
+    if (gmem_zbuf) return;
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = chunk,
+                             .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                      VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT};
+    if (vkCreateBuffer(g_vk.dev, &bi, NULL, &gmem_zbuf) != VK_SUCCESS) FATAL("guest heap: no zero buffer\n");
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(g_vk.dev, gmem_zbuf, &req);
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
+    uint32_t type = UINT32_MAX;
+    for (uint32_t i = 0; i < mp.memoryTypeCount && type == UINT32_MAX; i++)
+        if ((req.memoryTypeBits >> i & 1) && (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) type = i;
+    if (type == UINT32_MAX) type = (uint32_t)__builtin_ctz(req.memoryTypeBits);
+    VkMemoryAllocateFlagsInfo af = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
+    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &af, .allocationSize = req.size,
+                               .memoryTypeIndex = type};
+    VkResult r = vkAllocateMemory(g_vk.dev, &ai, NULL, &gmem_zmem);
+    if (r != VK_SUCCESS) FATAL("guest heap: no memory for its zero buffer (%d)\n", (int)r);
+    vkBindBufferMemory(g_vk.dev, gmem_zbuf, gmem_zmem, 0);
+    vkCmdFillBuffer(vk_upload_cmd(), gmem_zbuf, 0, VK_WHOLE_SIZE, 0);
+    VkBufferDeviceAddressInfo dai = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = gmem_zbuf};
+    gmem_zaddr = vkGetBufferDeviceAddress(g_vk.dev, &dai);
+}
+// (chunk table) backed chunks imported, each its own buffer (what gmem_sparse_bind does for the sparse buffer)
+static bool gmem_table_bind(void) {
+    extern int gpuheap_take_host(uint64_t *off, int max);
+    extern uint64_t gpuheap_end(void), gpuheap_chunk_size(void), g_gpuheap_end, g_gpuheap_gen;
+    static uint64_t gen_bound = UINT64_MAX;
+    uint64_t gen = __atomic_load_n(&g_gpuheap_gen, __ATOMIC_ACQUIRE);
+    if (gmem_zbuf && __atomic_load_n(&g_gpuheap_end, __ATOMIC_ACQUIRE) == gmem_size && gen == gen_bound) return true;  // (nothing new)
+    uint64_t chunk = gpuheap_chunk_size();
+    gmem_zero_buffer(chunk);
+    gen_bound = gen;
+    uint64_t off[GMEM_MAX_CHUNKS];
+    int n = gpuheap_take_host(off, GMEM_MAX_CHUNKS);
+    for (int i = 0; i < n; i++) {
+        unsigned k = (unsigned)(off[i] / chunk);
+        if (k >= MAXWELL_GMEM_TABLE_N || !gmem_table_chunk(k, chunk)) {
+            if (!gmem_chunks_imported && i == 0) {  // (the very first: this device can't, the whole import instead)
+                LOG("[vk] guest heap: the chunk table's first import failed: imported whole instead\n");
+                gen_bound = UINT64_MAX;
+                gmem_lazy_fallback();
+                gmem_tab_gen++;
+                return false;
+            }
+            FATAL("guest heap: importing %llu MB more of it for the GPU failed (%llu MB imported): out of graphics memory?\n",
+                  (unsigned long long)(chunk >> 20), (unsigned long long)((gmem_chunks_imported * chunk) >> 20));
+        }
+        gmem_chunks_imported++;
+        gmem_chunk_size = chunk;
+    }
+    uint64_t end = gpuheap_end();
+    if (end != gmem_size) LOG("[vk] guest heap for shader global memory: %llu MB of the window (chunk table)\n", (unsigned long long)(end >> 20));
+    if (n) {
+        static unsigned shown;
+        unsigned mb = vk_gmem_imported_mb();
+        if (mb >= shown + 256 || !shown || ENV("LARECOMP_LOG_GPUHEAP"))
+            LOG("[vk] guest heap: %u MB imported (%u chunks, frame %llu)\n", mb, gmem_chunks_imported, (unsigned long long)vk_frame_counter()), shown = mb;
+    }
+    if (n || end != gmem_size) gmem_tab_gen++;
+    gmem_size = end;
+    return true;
+}
+// (lazy host import) the device can't take the chunks after all: everything backed now, the whole import instead (gmem_info)
+static void gmem_lazy_fallback(void) {
+    extern void gpuheap_host_cancel(void);
+    gpuheap_host_cancel();
+    if (gmem_buf) vkDestroyBuffer(g_vk.dev, gmem_buf, NULL);
+    gmem_buf = VK_NULL_HANDLE;
+    g_vk.lazyhost = false;
+}
 static bool gmem_sparse_bind(void) {
-    extern int gpuheap_take(uint64_t *off, int *fds, int max);
+    extern int gpuheap_take(uint64_t *off, int *fds, int max), gpuheap_take_host(uint64_t *off, int max);
     extern uint64_t gpuheap_end(void), gpuheap_chunk_size(void), g_gpuheap_end, g_gpuheap_gen;
     static uint64_t gen_bound = UINT64_MAX;  // (gpuheap backs chunks below its end lazily on RADV: g_gpuheap_gen counts them)
     uint64_t gen = __atomic_load_n(&g_gpuheap_gen, __ATOMIC_ACQUIRE);
     if (gmem_buf && __atomic_load_n(&g_gpuheap_end, __ATOMIC_ACQUIRE) == gmem_size && gen == gen_bound) return true;  // (nothing new)
-    gen_bound = gen;
+    bool host = g_vk.lazyhost;
+    VkExternalMemoryBufferCreateInfo eb = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+                                           .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
     if (!gmem_buf) {
-        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = HEAP_MAX,
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = host ? &eb : NULL, .size = HEAP_MAX,
                                  .flags = VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT,
                                  .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
                                           VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
                                           (g_vk.xfb ? VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT : 0)};
-        if (vkCreateBuffer(g_vk.dev, &bi, NULL, &gmem_buf) != VK_SUCCESS) { gmem_buf = VK_NULL_HANDLE; return false; }
+        if (vkCreateBuffer(g_vk.dev, &bi, NULL, &gmem_buf) != VK_SUCCESS) {
+            gmem_buf = VK_NULL_HANDLE;
+            if (host) LOG("[vk] guest heap: no sparse buffer for the lazy import\n"), gmem_lazy_fallback();
+            return false;
+        }
         VkBufferDeviceAddressInfo dai = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = gmem_buf};
         gmem_addr = vkGetBufferDeviceAddress(g_vk.dev, &dai);
     }
+    gen_bound = gen;
     uint64_t off[GMEM_MAX_CHUNKS];
     int fds[GMEM_MAX_CHUNKS];
-    int n = gpuheap_take(off, fds, GMEM_MAX_CHUNKS);
+    int n = host ? gpuheap_take_host(off, GMEM_MAX_CHUNKS) : gpuheap_take(off, fds, GMEM_MAX_CHUNKS);
     if (n) {
         VkMemoryRequirements req;
         vkGetBufferMemoryRequirements(g_vk.dev, gmem_buf, &req);
-        PFN_vkGetMemoryFdPropertiesKHR fdprops = (PFN_vkGetMemoryFdPropertiesKHR)vkGetDeviceProcAddr(g_vk.dev, "vkGetMemoryFdPropertiesKHR");
+        PFN_vkGetMemoryFdPropertiesKHR fdprops = host ? NULL : (PFN_vkGetMemoryFdPropertiesKHR)vkGetDeviceProcAddr(g_vk.dev, "vkGetMemoryFdPropertiesKHR");
         VkSparseMemoryBind binds[GMEM_MAX_CHUNKS];
         uint64_t chunk = gpuheap_chunk_size();
         for (int i = 0; i < n; i++) {
-            VkMemoryFdPropertiesKHR fp = {.sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
-            if (fdprops) fdprops(g_vk.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, fds[i], &fp);
-            uint32_t bits = fp.memoryTypeBits & req.memoryTypeBits;
-            if (!bits) FATAL("guest heap: the GPU memory can't back the heap buffer (types %#x / %#x)\n", fp.memoryTypeBits, req.memoryTypeBits);
-            VkImportMemoryFdInfoKHR imp = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
-                                           .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, .fd = fds[i]};
-            VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &imp, .allocationSize = chunk,
-                                       .memoryTypeIndex = (uint32_t)__builtin_ctz(bits)};
             unsigned k = (unsigned)(off[i] / chunk);
-            VkResult r = k < GMEM_MAX_CHUNKS ? vkAllocateMemory(g_vk.dev, &ai, NULL, &gmem_chunk[k]) : VK_ERROR_OUT_OF_DEVICE_MEMORY;
-            if (r != VK_SUCCESS) FATAL("guest heap: importing its GPU memory failed (%d)\n", (int)r);
+            if (host) {
+                if (k >= GMEM_MAX_CHUNKS || !gmem_host_chunk(k, chunk, req.memoryTypeBits, &gmem_chunk[k])) {
+                    if (!gmem_chunks_imported && i == 0) {  // (the very first: this device can't, the whole import instead)
+                        gmem_lazy_fallback();
+                        return false;
+                    }
+                    FATAL("guest heap: importing %llu MB more of it for the GPU failed (%llu MB imported): out of graphics memory?\n",
+                          (unsigned long long)(chunk >> 20), (unsigned long long)((gmem_chunks_imported * chunk) >> 20));
+                }
+                gmem_chunks_imported++;
+            } else {
+                VkMemoryFdPropertiesKHR fp = {.sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
+                if (fdprops) fdprops(g_vk.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, fds[i], &fp);
+                uint32_t bits = fp.memoryTypeBits & req.memoryTypeBits;
+                if (!bits) FATAL("guest heap: the GPU memory can't back the heap buffer (types %#x / %#x)\n", fp.memoryTypeBits, req.memoryTypeBits);
+                VkImportMemoryFdInfoKHR imp = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+                                               .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, .fd = fds[i]};
+                VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &imp, .allocationSize = chunk,
+                                           .memoryTypeIndex = (uint32_t)__builtin_ctz(bits)};
+                VkResult r = k < GMEM_MAX_CHUNKS ? vkAllocateMemory(g_vk.dev, &ai, NULL, &gmem_chunk[k]) : VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                if (r != VK_SUCCESS) FATAL("guest heap: importing its GPU memory failed (%d)\n", (int)r);
+            }
             binds[i] = (VkSparseMemoryBind){.resourceOffset = off[i], .size = chunk, .memory = gmem_chunk[k]};
-            VkBufferCreateInfo pb = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = chunk,
+            VkBufferCreateInfo pb = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = host ? &eb : NULL, .size = chunk,
                                      .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                                               VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
                                               (g_vk.xfb ? VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT : 0)};
@@ -3521,7 +3691,12 @@ static bool gmem_sparse_bind(void) {
     }
     uint64_t end = gpuheap_end();
     if (end != gmem_size) LOG("[vk] guest heap bound for shader global memory: %llu MB (sparse)\n", (unsigned long long)(end >> 20));
-    if (n) {
+    if (n && host) {
+        static unsigned shown;
+        unsigned mb = vk_gmem_imported_mb();
+        if (mb >= shown + 256 || !shown || ENV("LARECOMP_LOG_GPUHEAP"))
+            LOG("[vk] guest heap: %u MB imported (%u chunks, frame %llu)\n", mb, gmem_chunks_imported, (unsigned long long)vk_frame_counter()), shown = mb;
+    } else if (n) {
         extern unsigned gpuheap_backed_mb(void);
         static unsigned shown;
         unsigned mb = gpuheap_backed_mb();
@@ -3530,12 +3705,18 @@ static bool gmem_sparse_bind(void) {
     gmem_size = end;
     return true;
 }
+// (vcache.c, before it write-protects guest pages it keeps a copy of) chunks backed so far imported now: an import
+// can't pin a read-only page (the driver asks for write access)
+void vk_gmem_sync(void);
+void vk_gmem_sync(void) {
+    if (g_vk.lazyhost) gmem_info();
+}
 // [a, a + n) of guest memory as a buffer and offset: the imported heap's; with the sparse heap, its chunk's plain
 // buffer (false when the range crosses chunks)
 static bool gmem_plain(uint64_t a, uint64_t n, VkBuffer *buf, VkDeviceSize *off) {
     if (!gmem_buf || a < HEAP_BASE || a + n > HEAP_BASE + gmem_size) return false;
     uint64_t o = a - HEAP_BASE;
-    if (!g_vk.gpuheap) { *buf = gmem_buf, *off = o; return true; }
+    if (!g_vk.gpuheap && !g_vk.lazyhost) { *buf = gmem_buf, *off = o; return true; }
     unsigned k = gmem_chunk_size ? (unsigned)(o / gmem_chunk_size) : 0;
     if (!gmem_chunk_size || k >= GMEM_MAX_CHUNKS || !gmem_chunk_buf[k] || (o + n - 1) / gmem_chunk_size != k) return false;
     *buf = gmem_chunk_buf[k], *off = o - (uint64_t)k * gmem_chunk_size;
@@ -3548,6 +3729,23 @@ static bool gmem_plain(uint64_t a, uint64_t n, VkBuffer *buf, VkDeviceSize *off)
 // (maxStorageBufferRange): past that every read returned 0 (Z-A's text was gone with a bigger game heap).
 static VkDescriptorBufferInfo gmem_ref_info(void) {
     gmem_info();  // (imported, or grown, first)
+    if (g_maxwell_gmem_table) {  // the chunk table: {unused, size, the GPU address of each 64 MB chunk}
+        // (one copy per submission while it's unchanged: 1 KB a draw otherwise)
+        static struct { uint64_t seq, gen, addr, size; bool backed; VkSpan span; } last = {.seq = UINT64_MAX};
+        static uint64_t v[2 + MAXWELL_GMEM_TABLE_N];
+        uint64_t seq = vk_pending_seq(), addr = gmem_buf ? (uint64_t)gmem_addr : 0;
+        bool backed = gmem_table_backed();
+        if (last.seq != seq || last.gen != gmem_tab_gen || last.addr != addr || last.size != gmem_size || last.backed != backed) {
+            const uint64_t chunk = 64ull << 20;
+            v[0] = 0;
+            v[1] = (backed ? gmem_zbuf != VK_NULL_HANDLE : gmem_buf != VK_NULL_HANDLE) ? gmem_size : 0;
+            for (unsigned k = 0; k < MAXWELL_GMEM_TABLE_N; k++)  // (after a fallback: the whole import's, or the sparse buffer's, parts)
+                v[2 + k] = backed ? (gmem_cbuf[k] ? gmem_caddr[k] : gmem_zaddr) : addr && k * chunk < gmem_size ? addr + k * chunk : 0;
+            last.span = vk_transient_copy(v, sizeof v, g_vk.props.limits.minUniformBufferOffsetAlignment);
+            last.seq = seq, last.gen = gmem_tab_gen, last.addr = addr, last.size = gmem_size, last.backed = backed;
+        }
+        return (VkDescriptorBufferInfo){last.span.buf, last.span.off, sizeof v};
+    }
     uint64_t v[2] = {gmem_buf ? (uint64_t)gmem_addr : 0, gmem_buf ? gmem_size : 0};
     VkSpan s = vk_transient_copy(v, sizeof v, g_vk.props.limits.minUniformBufferOffsetAlignment);
     return (VkDescriptorBufferInfo){s.buf, s.off, sizeof v};
@@ -3556,10 +3754,14 @@ static VkDescriptorBufferInfo gmem_ref_info(void) {
 static VkDescriptorBufferInfo gmem_info(void) {
     static int off = -1;
     if (off < 0) off = ENV("LARECOMP_VK_NO_GMEM") != NULL || (!g_vk.host_import && !g_vk.gpuheap);
-    if (!off && g_vk.gpuheap) {  // (the heap window is GPU memory: gpuheap.c)
-        if (!gmem_sparse_bind()) LOG("[vk] guest heap: no sparse buffer: shader global memory reads return zero\n"), off = 1;
+    if (!off && gmem_table_backed() && gmem_table_bind())  // (the chunk table: no one buffer over the heap - the zero buffer
+        return (VkDescriptorBufferInfo){gmem_zbuf, 0, 256};  // for a storage buffer binding; guest_direct finds ranges)
+    if (!off && (g_vk.gpuheap || g_vk.lazyhost)) {  // (the heap window is GPU memory, or imported in chunks: gpuheap.c)
+        bool ok = gmem_sparse_bind();
+        if (!ok && !g_vk.lazyhost && !g_vk.gpuheap) ok = true, LOG("[vk] guest heap: no lazy import here: imported whole\n");  // (below)
+        else if (!ok) LOG("[vk] guest heap: no sparse buffer: shader global memory reads return zero\n"), off = 1;
         uint64_t max = g_vk.props.limits.maxStorageBufferRange;  // (a storage buffer binding: shaders use gmem_ref_info)
-        if (gmem_buf) return (VkDescriptorBufferInfo){gmem_buf, 0, gmem_size < max ? (gmem_size ? gmem_size : 256) : max};
+        if (gmem_buf && (g_vk.gpuheap || g_vk.lazyhost)) return (VkDescriptorBufferInfo){gmem_buf, 0, gmem_size < max ? (gmem_size ? gmem_size : 256) : max};
     }
     extern uint64_t g_stdheap_used;  // (runtime/hle/heaps.c: the StandardAllocator block above the heap)
     uint64_t heap = kernel_heap_size(), std_end = g_stdheap_used ? STDHEAP_BASE + g_stdheap_used - HEAP_BASE : 0;
@@ -3652,6 +3854,32 @@ static bool gpuw_overlaps(uint64_t a, uint64_t n) {
     return lo < ngpuw && gpuw[lo].a < e;
 }
 
+// (chunk table) [addr, addr + size) of the guest heap in one imported chunk: its buffer and the offset there. A range
+// across two chunks (no one buffer holds it) or in one not imported: false (the caller copies it, or skips it)
+static bool gmem_table_range(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {
+    if (addr < HEAP_BASE || !gmem_chunk_size) return false;
+    uint64_t o = addr - HEAP_BASE, k = o / gmem_chunk_size;
+    if (k >= MAXWELL_GMEM_TABLE_N || !gmem_cbuf[k]) return false;
+    if ((o + (size ? size : 1) - 1) / gmem_chunk_size != k) {
+        static unsigned logged;
+        if (logged < 8 && ENV("LARECOMP_LOG_GPUHEAP"))
+            logged++, LOG("[vk] guest heap: %llx+%llx spans two chunks: copied\n", (unsigned long long)addr, (unsigned long long)size);
+        return false;
+    }
+    *buf = gmem_cbuf[k];
+    *off = o - k * gmem_chunk_size;
+    return true;
+}
+
+// [a, a + n) of the guest heap as a buffer and offset for the GPU to read or write (query results, indirect arguments):
+// the heap's one buffer (whole import, sparse buffer), or with the chunk table its chunk's
+static bool gmem_span(uint64_t a, uint64_t n, VkBuffer *buf, VkDeviceSize *off) {
+    if (gmem_table_backed()) return gmem_table_range(a, n, buf, off);
+    if (!gmem_buf || a < HEAP_BASE || a + n > HEAP_BASE + gmem_size) return false;
+    *buf = gmem_buf, *off = a - HEAP_BASE;
+    return true;
+}
+
 // Vertex / index data read in place from the imported guest heap (renderer.m bind_guest does the same with
 // g_guest_buffer): no per-draw copy, no index scan for the copy size. The game fences its CPU writes as on the
 // Switch. Falls back to copies outside the heap or without the import; LARECOMP_VK_COPY_VERTICES=1 forces copies.
@@ -3659,7 +3887,10 @@ static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSi
     static int copy = -1;
     if (copy < 0) copy = ENV("LARECOMP_VK_COPY_VERTICES") != NULL;
     if (copy || addr < HEAP_BASE) return false;
-    if (addr + size > HEAP_BASE + gmem_size && kernel_heap_size() != gmem_tried) { gmem_tried = kernel_heap_size(); gmem_info(); }
+    if (g_vk.lazyhost) {
+        gmem_info();  // (chunks the game started using since: imported and bound before this draw is submitted)
+        if (gmem_table_backed()) return gmem_table_range(addr, size, buf, off);
+    } else if (addr + size > HEAP_BASE + gmem_size && kernel_heap_size() != gmem_tried) { gmem_tried = kernel_heap_size(); gmem_info(); }
     if (!gmem_buf || addr + size > HEAP_BASE + gmem_size) return false;
     *buf = gmem_buf;
     *off = addr - HEAP_BASE;
@@ -3708,8 +3939,11 @@ void vk_exec_reset(void) {
     }
     for (int i = 0; i < GMEM_MAX_CHUNKS; i++) {  // (gpuheap's chunks: imported again after the guest reset)
         if (gmem_chunk_buf[i]) vkDestroyBuffer(g_vk.dev, gmem_chunk_buf[i], NULL), gmem_chunk_buf[i] = VK_NULL_HANDLE;
+        if (gmem_cbuf[i]) vkDestroyBuffer(g_vk.dev, gmem_cbuf[i], NULL), gmem_cbuf[i] = VK_NULL_HANDLE, gmem_caddr[i] = 0;
         if (gmem_chunk[i]) vkFreeMemory(g_vk.dev, gmem_chunk[i], NULL), gmem_chunk[i] = VK_NULL_HANDLE;
     }
+    gmem_tab_gen++;  // (the zero buffer stays)
+    gmem_chunks_imported = 0;
     gmem_size = gmem_tried = 0;
     st_defaults();
 }
@@ -4234,21 +4468,22 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     if (g_dispatch_indirect) {
         // The group counts are the GPU's (written by an earlier pass): from the argument words to the dispatch, and into
         // the driver constants the shader reads them from (c0[0x200..0x208], cbuf_info)
-        VkDescriptorBufferInfo gm = gmem_info();
-        uint64_t off = g_dispatch_indirect - HEAP_BASE;
-        if (!gm.buffer || gm.buffer != gmem_buf || g_dispatch_indirect < HEAP_BASE || off + 12 > gmem_size) {  // (gmem_size: the range may be capped)
+        gmem_info();
+        VkBuffer gbuf;
+        VkDeviceSize off;
+        if (!gmem_span(g_dispatch_indirect, 12, &gbuf, &off)) {  // (gmem_size: the range may be capped)
             static int warned;
             if (!warned++) LOG("[vk] indirect dispatch: arguments at %llx outside the heap import: skipped\n", (unsigned long long)g_dispatch_indirect);
             return;
         }
         if (g_dispatch_drv.buf) {
             VkBufferCopy bc = {.srcOffset = off, .dstOffset = g_dispatch_drv.off + 0x200, .size = 12};
-            vkCmdCopyBuffer(cb, gm.buffer, g_dispatch_drv.buf, 1, &bc);
+            vkCmdCopyBuffer(cb, gbuf, g_dispatch_drv.buf, 1, &bc);
             VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
                                   .dstAccessMask = VK_ACCESS_UNIFORM_READ_BIT};
             vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
         }
-        vkCmdDispatchIndirect(cb, gm.buffer, off);
+        vkCmdDispatchIndirect(cb, gbuf, off);
     } else {
         vkCmdDispatch(cb, gx, gy, gz);
     }
@@ -4367,43 +4602,6 @@ static bool wait_budget(_Atomic int *state) {
 }
 
 static uint64_t prof_tp_;
-// The Legends' interface panes (ultrawide: the 16:9 box in draw_). Their layout shaders draw a unit quad (a0) into the
-// pane: local x = a0.x * c3[0x210] + c3[0x218], y = -a0.y * c3[0x214] + c3[0x21c] (the pane's size and origin), times its
-// 3 x 4 matrix (c3[0x40..0x6f], rows) and the layout's projection (c3[0x00..0x3f], rows: 1920 x 1080 around the centre).
-// Known by their first instructions: c[3][0x210] / c[3][0x214] loaded at pc 0x8 / 0x18, the FFMAs with c[3][0x218] /
-// c[3][0x21c] soon after (registers and places vary; the same in Z-A and Arceus). A pane that covers the whole layout -
-// the screen fades, a menu's dimming of the world - is drawn over the whole image instead of the box (the sides went
-// undimmed). Wider-than-the-layout panels (Z-A's Settings sheet) are stretched to the sides with it; their contents stay.
-static bool za_layout_vs(uint64_t code) {
-    static struct { uint64_t code; bool yes; } cache[256];
-    uint32_t h = (uint32_t)((code >> 4) * 0x9E3779B1u) >> 24;
-    if (cache[h].code == code) return cache[h].yes;
-    const uint64_t *w = (const uint64_t *)(uintptr_t)(code + 0x80);  // (after the NVN header 0x30 and the SPH 0x50)
-    #define CR(x, op, off) (((x) >> 48) == (op) && (((x) >> 34) & 0x1f) == 3 && (((x) >> 20) & 0x3fff) * 4 == (off))
-    bool fx = false, fy = false;
-    for (int i = 5; i < 16; i++) fx |= CR(w[i], 0x51a0u, 0x218u), fy |= CR(w[i], 0x51a1u, 0x21cu);
-    bool yes = code && CR(w[1], 0x4c98u, 0x210u) && CR(w[3], 0x4c98u, 0x214u) && fx && fy;
-    #undef CR
-    cache[h].code = code, cache[h].yes = yes;
-    return yes;
-}
-static bool za_fullscreen_pane(void) {
-    if (!st.program || !za_layout_vs(st.program->stages[0].code_addr)) return false;
-    const float *c = (const float *)(uintptr_t)st.ubuf[0][0].addr;  // (the vertex stage's c3: ubuf[0][0])
-    if (!c || st.ubuf[0][0].size < 136 * 4) return false;
-    float lo[2] = {1e9f, 1e9f}, hi[2] = {-1e9f, -1e9f};
-    for (int k = 0; k < 4; k++) {
-        float lx = (float)(k & 1) * c[132] + c[134], ly = -(float)(k >> 1) * c[133] + c[135];
-        float wx = c[16] * lx + c[17] * ly + c[19], wy = c[20] * lx + c[21] * ly + c[23], wz = c[24] * lx + c[25] * ly + c[27];
-        float cw = c[12] * wx + c[13] * wy + c[14] * wz + c[15];
-        if (!(fabsf(cw) > 1e-6f)) return false;
-        float nx = (c[0] * wx + c[1] * wy + c[2] * wz + c[3]) / cw, ny = (c[4] * wx + c[5] * wy + c[6] * wz + c[7]) / cw;
-        lo[0] = fminf(lo[0], nx), hi[0] = fmaxf(hi[0], nx), lo[1] = fminf(lo[1], ny), hi[1] = fmaxf(hi[1], ny);
-    }
-    if (g_debug_frame) LOG("[draw]   layout pane: x %.3f .. %.3f, y %.3f .. %.3f\n", lo[0], hi[0], lo[1], hi[1]);
-    return lo[0] <= -0.99f && hi[0] >= 0.99f && lo[1] <= -0.99f && hi[1] >= 0.99f;
-}
-
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
     if (!st.program) { SKIP(0); return; }
@@ -4806,29 +5004,19 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     if (prof) prof_tex += SDL_GetTicksNS() - prof_tx_;
     // (the scene's final target, the presented image's size, takes the box too for the interface drawn into it: Legends:
-    // Arceus' sprites go there and a last pass copies it to the window - in a VR mod's eye shape they came out squeezed.
-    // Not Legends Z-A's: its screen-sized targets hold the scene too, drawn without the runtime's scale)
-    extern bool g_tex_no_scale;  // (textures.c: Legends Z-A renders unscaled - its screen is the image's own size)
-    NvnTexture *rt0 = st.rt.ncolor ? st.rt.color[0] : NULL;
-    bool presented = rt0 && renderer_texture_presented(rt0);
-    bool final_rt = rt0 && !presented && !g_tex_no_scale && rt0->width == st_pres_w && rt0->height == st_pres_h &&
-                    !(st.rt.depth && st.ds[0]) && (st.color_state[0] & 1);
-    // the image as drawn: not 16:9 (a reshaped image - "Fill the window" - a VR mod's eye shape, Z-A's ultrawide screen)
-    float img_w = rt0 ? rt0->width * pass_sx : 0, img_h = rt0 ? rt0->height * pass_sy : 0;
-    // (Z-A: its targets that are presented now and then also take scene passes - the interface is drawn without a depth test)
-    if (presented && g_tex_no_scale && st.rt.depth && st.ds[0]) presented = false;
-    if (!st.program->stages[1].code_addr) presented = false;  // (no fragment shader: nothing drawn - vertex work)
-    if (img_h > 0 && fabsf(img_w / img_h - 16.0f / 9.0f) > 0.01f * (16.0f / 9.0f) && (presented || final_rt)) {
+    // Arceus' sprites go there and a last pass copies it to the window - in a VR mod's eye shape they came out squeezed)
+    bool final_rt = st.rt.ncolor && st.rt.color[0] && !renderer_texture_presented(st.rt.color[0]) &&
+                    st.rt.color[0]->width == st_pres_w && st.rt.color[0]->height == st_pres_h && !(st.rt.depth && st.ds[0]) &&
+                    (st.color_state[0] & 1) && g_plugin_render_shape > 0;
+    if (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && (renderer_texture_presented(st.rt.color[0]) || final_rt)) {
         // Draws into the swapchain image (see renderer.m): composites fill the window, UI goes in a centred 16:9 box.
-        // A composite reads the scene: a texture the target's size - scaled by the runtime (its render targets), or, in
-        // a game that makes its own screen size (Z-A), any of that size.
         bool reads_scene = false;
         for (int i = 0; i < pr->fi->ntex && i < 64; i++)
-            if ((g_tex_no_scale || tex_sc[1][i][0] != 1 || tex_sc[1][i][1] != 1) && tex_wh[1][i][0] == rt0->width &&
-                tex_wh[1][i][1] == rt0->height)
+            if ((tex_sc[1][i][0] != 1 || tex_sc[1][i][1] != 1) && tex_wh[1][i][0] == st.rt.color[0]->width &&
+                tex_wh[1][i][1] == st.rt.color[0]->height)
                 reads_scene = true;
         bool fullscreen_quad = r->x[2] <= 6 && st.viewport[0][0] == 0 && st.viewport[0][1] == 0 &&
-                               st.viewport[0][2] >= rt0->width && st.viewport[0][3] >= rt0->height;
+                               st.viewport[0][2] >= st.rt.color[0]->width && st.viewport[0][3] >= st.rt.color[0]->height;
         bool fullscreen_fill = pr->fi->ntex == 0 && fullscreen_quad;
         if (fullscreen_quad && !reads_scene && pr->fi->ntex == 1 && (tex_sc[1][0][0] != 1 || tex_sc[1][0][1] != 1)) reads_scene = true;
         static uint64_t wide_frame = ~0ull;
@@ -4840,16 +5028,14 @@ static void draw_(CmdRec *r, bool indexed) {
             fade_fill = black || white;
         }
         bool composite = reads_scene || fade_fill || (fullscreen_fill && wide_frame == renderer_present_count());
-        // (Z-A: an interface pane as big as the whole layout - a fade, a menu's dimming - covers the whole image)
-        if (!composite && g_tex_no_scale && za_fullscreen_pane()) composite = true;
         if (!composite) wide_frame = ~0ull;
-        if (!composite) {  // (the box: the largest 16:9 in the image, centred; the whole target maps onto it)
+        if (!composite) {
             int pw, ph;
             pass_size(&pw, &ph);
-            float bw = fminf(img_w, img_h * (16.0f / 9.0f)), bh = fminf(img_h, img_w * (9.0f / 16.0f));
-            vp_sx = bw / rt0->width, vp_sy = bh / rt0->height;
-            vp_ox = (pw - bw) * 0.5f;
-            vp_oy = (ph - bh) * 0.5f;
+            float u = fminf(pass_sx, pass_sy);
+            vp_sx = vp_sy = u;
+            vp_ox = (pw - st.rt.color[0]->width * u) * 0.5f;
+            vp_oy = (ph - st.rt.color[0]->height * u) * 0.5f;
         }
     }
     {   // (research, LARECOMP_COUNT_FS=<fs hash>: draws with that fragment shader per frame, logged when the count changes)
@@ -5051,6 +5237,11 @@ static void draw_(CmdRec *r, bool indexed) {
         uint32_t nb = 0;
         for (int b = 0; b < 4 && pr->vkey.xfb_count[b]; b++) {
             uint64_t a = st.xfb_addr[b], n = st.xfb_size[b];
+            if (gmem_table_backed()) {  // (the chunk table: within one imported chunk)
+                if ((a & 3) || !gmem_table_range(a, n, &bufs[nb], &offs[nb])) { xfb_on = false; break; }
+                sizes[nb] = n; nb++;
+                continue;
+            }
             if (!gmem_buf || gi.buffer != gmem_buf || (a & 3) || !gmem_plain(a, n, &bufs[nb], &offs[nb])) { xfb_on = false; break; }
             sizes[nb] = n; nb++;
         }
@@ -5063,11 +5254,12 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     if (exp_hit && exp_mode == 1) { /* skipped */ }
     else if (g_draw_indirect) {
-        VkDescriptorBufferInfo gm = gmem_info();
-        uint64_t off = g_draw_indirect - HEAP_BASE;
-        if (gm.buffer && gm.buffer == gmem_buf && g_draw_indirect >= HEAP_BASE && off + 20 <= gmem_size) {  // (gmem_size: the range may be capped)
-            if (use_index) vkCmdDrawIndexedIndirect(cb, gm.buffer, off, 1, 20);
-            else vkCmdDrawIndirect(cb, gm.buffer, off, 1, 16);
+        gmem_info();
+        VkBuffer gbuf;
+        VkDeviceSize off;
+        if (gmem_span(g_draw_indirect, 20, &gbuf, &off)) {  // (gmem_size: the range may be capped)
+            if (use_index) vkCmdDrawIndexedIndirect(cb, gbuf, off, 1, 20);
+            else vkCmdDrawIndirect(cb, gbuf, off, 1, 16);
         } else {
             static int warned;
             if (!warned++) LOG("[vk] indirect draw: arguments at %llx outside the heap import: skipped\n", (unsigned long long)g_draw_indirect);
@@ -6300,8 +6492,10 @@ static void exec_list(uint64_t handle, int depth) {
                 uint64_t a = r->x[1];
                 if (oq_active >= 0) {
                     vkCmdEndQuery(vk_cmd(), oq_pool, (uint32_t)oq_active);
-                    if (in_pass && gmem_buf && a >= HEAP_BASE && a + 8 <= HEAP_BASE + gmem_size && oq_ncopy < OQ_SLOTS)
-                        oq_copy[oq_ncopy].slot = (uint32_t)oq_active, oq_copy[oq_ncopy++].off = a - HEAP_BASE;
+                    VkBuffer qb;
+                    VkDeviceSize qo;
+                    if (in_pass && oq_ncopy < OQ_SLOTS && gmem_span(a, 8, &qb, &qo))
+                        oq_copy[oq_ncopy].slot = (uint32_t)oq_active, oq_copy[oq_ncopy].buf = qb, oq_copy[oq_ncopy++].off = qo;
                     oq_active = -1;
                 } else if (oq_mode == 1) {
                     oq_stats[1]++;

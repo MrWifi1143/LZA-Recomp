@@ -435,6 +435,27 @@ static uint64_t g_pla60_entry;  // the interval-2 frame time of the running buil
 static uint64_t g_pla60_build;  // (that entry of the running build, also at 30)
 static bool g_pla60_patched;
 static uint64_t g_pla60_ns = 16666667;  // the frame time: 60 fps, 120, 144, FPS_UNLIMITED's, or LARECOMP_LEGENDS_FPS=<n>
+// Z-A's own 60 fps mode (the Switch 2's): the game reads a frame-rate mode byte ([[display+0x40]+0x20], 0x7001b296d8 in
+// 0x7001b29660) - 1 its 30 fps mode, which steps the world by table entry 1 (33.3 ms); 0 its 60 fps mode, entry 0
+// (16.7 ms). Before, the game stayed in its 30 fps mode with entry 1 at our frame time: the world's time was right, but
+// what the game tunes per mode stayed tuned for 30 - moves that home in on their target (Rollout, Flame Wheel) missed
+// right after starting. Now the mode byte is 0 and entry 0 holds our frame time (as the community static 60 fps patch
+// for 2.0.2 does: that byte read as 0). The compensations made for 30 fps steps (menu animations, cutscene timelines)
+// scale against 16.7 ms then. LARECOMP_ZA_NATIVE60=0: the old way.
+static bool g_za_native;
+static uint64_t g_pla60_nominal = 33333334;  // the game's own step in the mode it runs in (30: 33.3 ms, native 60: 16.7)
+uint64_t pla60_nominal_ns(void) { return g_pla60_nominal; }
+static int za_mode_hook(Cpu *c, uint64_t addr) {  // (0x7001b29660 entry: x0 = the display object)
+    (void)addr;
+    if (!g_za_native || !g_pla60_entry) return 0;
+    uint64_t o = c->x[0] ? *(const uint64_t *)(uintptr_t)(c->x[0] + 0x40) : 0;
+    if (!o) return 0;
+    volatile int8_t *m = (volatile int8_t *)(uintptr_t)(o + 0x20);
+    static int logged;
+    if (*m != 0 && logged++ < 4) LOG("[fps60] Z-A frame mode %d -> 0 (its own 60 fps mode)\n", (int)*m);
+    *m = 0;
+    return 0;
+}
 bool pla60_enabled(void) { return g_pla60_entry != 0; }
 uint64_t pla60_period_ns(void) { return g_pla60_ns; }
 
@@ -443,6 +464,7 @@ static float g_ui_scale = 1.0f;
 static int ui2d_update_frame(Cpu *c, uint64_t addr) {  // (s0 = progress; the original runs with it scaled)
     (void)addr;
     if (!g_pla60_entry) return 0;
+    if (g_za_native) return 0;  // (Z-A's own 60 fps mode steps its menus by the frame-time entry itself: 0.208 a frame at 144)
     float v;
     uint32_t w = (uint32_t)c->v[0];
     memcpy(&v, &w, 4);
@@ -572,8 +594,19 @@ void pla60_configure(const char *exefs) {
     for (size_t i = 0; i < sizeof k_legends60 / sizeof *k_legends60; i++)
         if (!memcmp(id, k_legends60[i].id, 8)) {
             g_pla60_build = k_legends60[i].entry;
+            {   // (Z-A 2.0.2: its own 60 fps mode, table entry 0 - see g_za_native)
+                const char *nv = getenv("LARECOMP_ZA_NATIVE60");
+                g_za_native = g_pla60_build == 0x7000000000ull + 0x3393E28 && !(nv && atoi(nv) == 0);
+                if (g_za_native) {
+                    g_pla60_build = 0x7000000000ull + 0x3393E20;
+                    static bool mh;
+                    if (!mh) mh = true, rt_register_fnhook_at(0x7001b29660ull, za_mode_hook);
+                }
+                g_pla60_nominal = g_za_native ? 16666667 : 33333334;
+                if (g_za_native) LOG("[fps60] Z-A in its own 60 fps mode (frame time table entry 0)\n");
+            }
             if (on) g_pla60_entry = g_pla60_build, LOG("[fps60] %s at %.0f fps\n", k_legends60[i].name, 1e9 / (double)g_pla60_ns);
-            g_ui_scale = on ? (float)((double)g_pla60_ns / 33333334.0) : 1.0f;  // (the hooks also at 30: the rate may change)
+            g_ui_scale = on ? (float)((double)g_pla60_ns / (double)g_pla60_nominal) : 1.0f;  // (the hooks also at 30: the rate may change)
             {
                 static bool dth;
                 const char *r = getenv("LARECOMP_DT_READERS");
@@ -610,13 +643,15 @@ bool legends_set_fps(int fps) {
     if (!g_pla60_build) return false;
     uint64_t ns = fps == 60 ? 16666667 : fps > 30 ? 1000000000ull / (uint64_t)fps : 33333334;
     volatile uint64_t *ft = (volatile uint64_t *)(uintptr_t)g_pla60_build;
-    bool loaded = g_pla60_patched || *ft == 33333334u;  // (the game's data there: else pla60_present patches it later)
+    uint64_t orig = g_za_native ? 16666667u : 33333334u;  // (the entry's own value)
+    bool loaded = g_pla60_patched || *ft == orig;  // (the game's data there: else pla60_present patches it later)
+    if (g_za_native && fps <= 30) ns = orig;  // (30: the game's own mode again - za_mode_hook stops - and entry 0 its own)
     if (loaded) {
         plat_protect(g_pla60_build & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);
         *ft = ns;
     }
     g_pla60_ns = fps > 30 ? ns : 16666667;
-    g_ui_scale = fps > 30 ? (float)((double)ns / 33333334.0) : 1.0f;
+    g_ui_scale = fps > 30 ? (float)((double)ns / (double)g_pla60_nominal) : 1.0f;
     g_pla60_entry = fps > 30 ? g_pla60_build : 0;
     g_pla60_patched = fps > 30 && loaded;
     LOG("[fps60] %d fps from now on\n", fps);
@@ -630,10 +665,14 @@ bool legends_set_fps(int fps) {
 // 33.3 ms: the sound runs on the audio device's clock, and a cutscene's picture stayed behind its sound by every hitch
 // it had (a first play's shader stall, a stream encoding beside the game: seconds by the end of the intro). Up to 1 s
 // is made up (LARECOMP_CATCHUP_MS; 0: none, as before) - a longer stall is a load, and its next scene isn't sped up.
-static uint64_t real_step(uint64_t real) {
-    static uint64_t ahead, behind;  // (the world's time ahead of / behind the real time)
+static int64_t catchup_ns(void) {
     static int64_t max_behind = -1;
     if (max_behind < 0) max_behind = (getenv("LARECOMP_CATCHUP_MS") ? atoll(getenv("LARECOMP_CATCHUP_MS")) : 1000) * 1000000ll;
+    return max_behind;
+}
+static uint64_t real_step(uint64_t real) {
+    static uint64_t ahead, behind;  // (the world's time ahead of / behind the real time)
+    int64_t max_behind = catchup_ns();
     uint64_t lo = g_pla60_ns / 2, hi = 33333334u, dt = real > ahead ? real - ahead : 0;
     ahead = dt < lo ? lo - dt : 0;
     if (dt < lo) dt = lo;
@@ -647,8 +686,149 @@ static uint64_t real_step(uint64_t real) {
     return dt > hi ? hi : dt;
 }
 
-// each present: the table entry, once the game is loaded (read-only data: the page made writable first)
-void pla60_present(void) {
+static uint64_t g_last_step = 16666667;  // (the step written last: the table entry)
+// Real-time steps on the present clock (pla60_present, nvn/objects.c present_pace). Each frame goes out at its time on
+// the world's clock - present_pace waits for it - so every frame shows just the time its update moved the world on.
+// Before, the steps were the time measured between presents in whole periods (taken before the pace's wait) and the
+// frames went out whenever they were done: at a frame rate that doesn't hold the period (144 at ~120 fps, Unlimited, an
+// uneven load) a frame shown 1.2 periods after the last one moved the world one period and the next one two - the
+// picture juddered (a run seen from the side) where Fixed (one period a frame) didn't.
+// The frames now go out a steady whole number of periods apart (the level: 144 fps -> 72 -> 48; Unlimited 360 / n:
+// 180, 120, 90 ...) and the steps stay whole periods (the cinematics' timers, real-time-steps). The level goes up when
+// frames keep coming late (12 of the last 128 by over a quarter period - not a short hitch): a period more, or the
+// periods they took. It comes down when none of the last 32 was late and each was ready a period or more before its
+// time - by those spare periods, at most half the level. The main thread's part can't be seen from here (it works
+// ahead while a present waits), so a lower level can still come late: then it's tried again later and later (1 s,
+// doubling, up to 8 s).
+// A late frame goes out at once and the clock moves on from there; the world makes that time up later, a period on top
+// of a step when the frames have room for it (or more than 100 ms is owed) - as a long frame's rest was made up before,
+// up to LARECOMP_CATCHUP_MS (1 s): more is a load.
+// A step shows in the picture of the next present (measured with LARECOMP_RT_PATTERN): the step written now is the
+// time between this frame's present and the next one's.
+// LARECOMP_RT_PACE=0: as before (A/B); LARECOMP_RT_LAG=<presents> (research): that lag; LARECOMP_RT_LOG=1: the level's
+// changes (2: also its state every 2 s).
+#define RT_LAG_MAX 4
+#define RT_LAG 1  // (the presents between a step written and the picture it moved: measured)
+static uint64_t g_due;               // (the frame being presented's time: 0 none, the pacer's own clock)
+static uint64_t g_dues[RT_LAG_MAX];  // (this frame's time and the next ones' already decided; [0] = 0: none)
+static uint64_t g_paced_at;          // (when the last present's wait ended)
+static uint64_t g_rt_debt;           // (world time still to make up)
+static unsigned g_rt_level = 1;      // (periods between frames)
+uint64_t pla60_present_due(void) { return g_due; }
+void pla60_pace_restart(void) { g_dues[0] = g_paced_at = 0; }  // (present_pace: after a pause)
+static uint64_t paced_step(uint64_t now, int64_t max_behind) {
+    static int lag = 0, log = -1;
+    if (!lag) {
+        lag = getenv("LARECOMP_RT_LAG") ? atoi(getenv("LARECOMP_RT_LAG")) : RT_LAG;
+        if (lag < 1) lag = 1;
+        if (lag > RT_LAG_MAX) lag = RT_LAG_MAX;
+        log = getenv("LARECOMP_RT_LOG") ? atoi(getenv("LARECOMP_RT_LOG")) : 0;
+    }
+    static uint64_t lates, lates_old, last_ready, changed_at, tried_at, backoff = 1000000000ull, late_sum, slack = ~0ull, slack_now = ~0ull;
+    static unsigned late_n, frames;
+    static uint64_t early[8];  // (how early the last 8 frames were ready: 0 late)
+    uint64_t p = g_pla60_ns, kmax = 33333334u / p ? 33333334u / p : 1;
+    static uint64_t level_p;
+    if (p != level_p) level_p = p, g_rt_level = 1;  // (another frame rate: from its own period again)
+    if (!g_dues[0] || now > g_dues[0] + (uint64_t)max_behind) {
+        static int logged;
+        if (g_dues[0] && logged++ < 20) LOG("[fps60] a %.0f ms stall: the step clock starts over\n", (double)(now - g_dues[0]) / 1e6);
+        g_dues[0] = now;  // (the frames after it: the steps already taken, the level's for those not known)
+        for (int i = 1; i < lag; i++) g_dues[i] = g_dues[i - 1] + (i == 1 ? g_last_step : g_rt_level * p);
+        g_rt_debt = 0, lates = lates_old = 0, changed_at = now, slack = slack_now = ~0ull;
+    } else if (now > g_dues[0]) {  // (late: out now, the clock moves on from here, the time made up later)
+        uint64_t d = now - g_dues[0];
+        for (int i = 0; i < lag; i++) g_dues[i] += d;
+        g_rt_debt += d;
+        if (g_rt_debt > (uint64_t)max_behind) g_rt_debt = (uint64_t)max_behind;
+        if (d > 500000 && d > p / 4) lates |= 1, late_sum += now - last_ready, late_n++;  // (a little late: the next step makes it up)
+        slack_now = 0, early[frames % 8] = 0;
+    } else {
+        early[frames % 8] = g_dues[0] - now;
+        if (g_dues[0] - now < slack_now) slack_now = g_dues[0] - now;
+    }
+    if (++frames % 32 == 0) slack = slack_now, slack_now = ~0ull;  // (how early the frames were: the last 32's least)
+    // (the level, above: up when 12 of the last 128 came late; down when none of the last 32 was late, all of them were
+    // ready more than a period early, and the last try's backoff is over)
+    if (__builtin_popcountll(lates) + __builtin_popcountll(lates_old) >= 12 && g_rt_level < kmax) {
+        unsigned old = g_rt_level, took = (unsigned)(late_sum / (late_n ? late_n : 1) / p);
+        g_rt_level = took > g_rt_level + 1 ? took : g_rt_level + 1;
+        if (g_rt_level > kmax) g_rt_level = (unsigned)kmax;
+        backoff = now - tried_at < 1500000000ull ? (backoff * 2 < 8000000000ull ? backoff * 2 : 8000000000ull) : 1000000000ull;
+        if (log) LOG("[fps60] frames late: %u periods a frame (%.0f fps), was %u; next try lower in %.0f s at the earliest\n", g_rt_level,
+                     1e9 / (double)(g_rt_level * p), old, backoff / 1e9);
+        lates = lates_old = 0, late_sum = late_n = 0, changed_at = now, slack = slack_now = ~0ull;
+    } else if (g_rt_level > 1 && !(lates & 0xffffffffull) && now - changed_at > backoff && slack != ~0ull && slack > p + 500000) {
+        unsigned fit = (unsigned)((slack - 500000) / p), half = (g_rt_level + 1) / 2;  // (periods to spare; at most half)
+        g_rt_level = g_rt_level > fit + half ? g_rt_level - fit : half;
+        changed_at = tried_at = now, slack = slack_now = ~0ull;
+        if (log) LOG("[fps60] trying %u periods a frame (%.0f fps)\n", g_rt_level, 1e9 / (double)(g_rt_level * p));
+    }
+    if (log > 1) {
+        static uint64_t t;
+        if (now - t > 2000000000ull) t = now, LOG("[fps60] rt: level %u lates %llx slack %.2f since %.2f backoff %.1f debt %.2f\n", g_rt_level,
+            (unsigned long long)lates, slack == ~0ull ? -1.0 : slack / 1e6, (now - changed_at) / 1e9, backoff / 1e9, g_rt_debt / 1e6);
+    }
+    lates_old = lates_old << 1 | lates >> 63, lates <<= 1;  // (the last 128 frames)
+    if (!lates && !lates_old) late_sum = late_n = 0;
+    last_ready = now;
+    // (the step: the level's periods, and one more while there is time to make up and the frames have room for it - a
+    // longer step is more work for the game: near the frame rate's limit making up made the next frames late, more to
+    // make up - or once it is over 100 ms)
+    uint64_t k = g_rt_level, extra = 0, room = ~0ull;
+    for (int i = 0; i < 8; i++) room = early[i] < room ? early[i] : room;
+    if (g_rt_debt >= p && k < kmax && (room >= p / 2 || g_rt_debt > 100000000ull)) extra = 1, g_rt_debt -= p;
+    g_due = g_dues[0];
+    for (int i = 0; i + 1 < lag; i++) g_dues[i] = g_dues[i + 1];
+    g_dues[lag - 1] = g_dues[lag - 1] + k * p;
+    return (k + extra) * p;
+}
+
+// (research) LARECOMP_STEP_CSV=<file>: each present - when the frame was ready, its time on the step clock, when its
+// wait ended (shown), the step its update took; LARECOMP_RT_WORK=<min>-<max> (ms): the
+// game thread made that much slower each frame (uniform), a slower PC's uneven frames
+static FILE *g_step_csv;
+static uint64_t g_csv_ready, g_csv_step;
+static void rt_work(void) {
+    static int lo = -2, hi;
+    if (lo == -2) {
+        const char *e = getenv("LARECOMP_RT_WORK");
+        if (!e || sscanf(e, "%d-%d", &lo, &hi) != 2) lo = -1;
+    }
+    if (lo >= 0 && hi >= lo) {
+        static uint64_t seed = 88172645463325252ull;
+        seed ^= seed << 13, seed ^= seed >> 7, seed ^= seed << 17;
+        uint64_t us = (uint64_t)lo * 1000 + seed % ((uint64_t)(hi - lo) * 1000 + 1);
+        plat_sleep_until_ns(plat_now_ns() + us * 1000);
+    }
+}
+static void step_csv_present(uint64_t now, uint64_t step_before) {
+    static int init;
+    if (!init) {
+        init = 1;
+        const char *e = getenv("LARECOMP_STEP_CSV");
+        if (e && *e && (g_step_csv = fopen(e, "w"))) fputs("present,ready_ms,due_ms,shown_ms,step_ms,period_ms,x,y,z,game_frame,shown_frame\n", g_step_csv);
+    }
+    g_csv_ready = now, g_csv_step = step_before;
+}
+void pla60_paced(void) {  // (present_pace, after its wait: the frame goes out)
+    g_paced_at = plat_now_ns();
+    if (g_step_csv && g_csv_ready) {
+        static uint64_t t0, n;
+        if (!t0) t0 = g_csv_ready;
+        float pos[3] = {0, 0, 0};  // (no player position here)
+        extern uint64_t renderer_game_frame(void), renderer_present_count(void);
+        fprintf(g_step_csv, "%llu,%.4f,%.4f,%.4f,%.4f,%.4f,%.5f,%.5f,%.5f,%llu,%llu\n", (unsigned long long)n++, (g_csv_ready - t0) / 1e6,
+                g_due ? ((double)g_due - (double)t0) / 1e6 : 0.0, (g_paced_at - t0) / 1e6, g_csv_step / 1e6, g_pla60_ns / 1e6,
+                pos[0], pos[1], pos[2], (unsigned long long)renderer_game_frame(), (unsigned long long)renderer_present_count());
+        if (n % 120 == 0) fflush(g_step_csv);
+    }
+}
+
+// each present: the table entry, once the game is loaded (read-only data: the page made writable first). paced: the
+// presents are paced (present_pace waits for pla60_present_due), not off by LARECOMP_FPS=0.
+void pla60_present(bool paced) {
+    rt_work();
     {   // (research: LARECOMP_LIVE=<dir> with <dir>/fps holding a number: that frame rate from now on, the file removed)
         static const char *live = (const char *)1;
         if (live == (const char *)1) live = getenv("LARECOMP_LIVE");
@@ -664,6 +844,7 @@ void pla60_present(void) {
     { extern void fscan_present(uint64_t frame); extern uint64_t renderer_present_count(void); fscan_present(renderer_present_count()); }
     { extern void za_options_present(void); za_options_present(); }
     { extern void menu_mouse_present(void); menu_mouse_present(); }
+    g_due = 0;
     if (g_pla60_entry && g_pla60_patched) {
         // Real-time steps (Settings Frame Timing, the default; Unlimited always): the world steps by the time that
         // really passed since the last present, not the frame rate's fixed period - a slow frame (a hitch, a dip below
@@ -677,26 +858,43 @@ void pla60_present(void) {
         static uint64_t last;
         uint64_t now = plat_now_ns();
         volatile uint64_t *ft = (volatile uint64_t *)(uintptr_t)g_pla60_entry;
+        step_csv_present(now, g_last_step);
         if (dyn && last) {
-            uint64_t dt = real_step(now - last);
+            uint64_t dt;
             // Whole periods only, the rest carried (the world still keeps to the real time: a long frame's step is two
             // periods). Some of the game's timers count whole ticks and round up: a step a little over the period
             // (16.9 ms at 60) counted as two - the Z-A intro's cinematics ran ~1.8x fast (Prism Tower lit before the talk
             // ended; the train outran the field's tree streaming: bare fields out the window). LARECOMP_DT_QUANT=0: raw.
-            static int quant = -1;
+            static int quant = -1, pace = -1;
             if (quant < 0) quant = !(getenv("LARECOMP_DT_QUANT") && atoi(getenv("LARECOMP_DT_QUANT")) == 0);
-            if (quant && g_pla60_ns) {
-                static int64_t bal;
-                bal += (int64_t)dt;
-                int64_t k = (bal + (int64_t)g_pla60_ns / 2) / (int64_t)g_pla60_ns;
-                if (k < 1) k = 1;
-                if ((uint64_t)k * g_pla60_ns > 33333334u) k = 33333334u / g_pla60_ns ? 33333334u / g_pla60_ns : 1;
-                dt = (uint64_t)k * g_pla60_ns;
-                bal -= (int64_t)dt;
-                if (bal < -(int64_t)g_pla60_ns) bal = -(int64_t)g_pla60_ns;
+            if (pace < 0) pace = !(getenv("LARECOMP_RT_PACE") && atoi(getenv("LARECOMP_RT_PACE")) == 0);
+            if (paced && quant && pace && g_pla60_ns) dt = paced_step(now, catchup_ns());  // (each frame shown at its time: above)
+            else {
+                g_dues[0] = 0;  // (as before: the pacer's own clock)
+                dt = real_step(now - last);
+                if (quant && g_pla60_ns) {
+                    static int64_t bal;
+                    bal += (int64_t)dt;
+                    int64_t k = (bal + (int64_t)g_pla60_ns / 2) / (int64_t)g_pla60_ns;
+                    if (k < 1) k = 1;
+                    if ((uint64_t)k * g_pla60_ns > 33333334u) k = 33333334u / g_pla60_ns ? 33333334u / g_pla60_ns : 1;
+                    dt = (uint64_t)k * g_pla60_ns;
+                    bal -= (int64_t)dt;
+                    if (bal < -(int64_t)g_pla60_ns) bal = -(int64_t)g_pla60_ns;
+                }
             }
+            {   // (research) LARECOMP_RT_PATTERN=<n>: every n-th present's step 4 periods - which frame shows which step
+                static int pat = -1;
+                static unsigned pn;
+                if (pat < 0) pat = getenv("LARECOMP_RT_PATTERN") ? atoi(getenv("LARECOMP_RT_PATTERN")) : 0;
+                if (pat > 0 && ++pn % (unsigned)pat == 0) dt = 4 * g_pla60_ns;
+            }
+            // (native mode: while the game's byte at main+0x610B980 is set, one exact period - the community dynamic
+            // 60 fps patch does the same there: "the rolling mechanic" softlocked on uneven steps)
+            if (g_za_native && *(const volatile uint8_t *)(uintptr_t)(0x7000000000ull + 0x610B980)) dt = g_pla60_ns;
             *ft = dt;
-            g_ui_scale = (float)((double)dt / 33333334.0);
+            g_last_step = dt;
+            g_ui_scale = (float)((double)dt / (double)g_pla60_nominal);
             static int dtlog = -1;  // (research: LARECOMP_DT_LOG=1 - each second: steps written, their sum against the real time)
             if (dtlog < 0) dtlog = getenv("LARECOMP_DT_LOG") && atoi(getenv("LARECOMP_DT_LOG")) > 0;
             if (dtlog) {
@@ -711,9 +909,13 @@ void pla60_present(void) {
                     t0 = now, p0 = renderer_present_count(), sum = n = mx = 0, mn = ~0ull;
                 }
             }
-        } else if (was_dyn) {  // (switched to Fixed in game: the period again)
+        } else {
+            g_dues[0] = 0;  // (Fixed: the pacer's own clock)
+            g_last_step = g_pla60_ns;
+        }
+        if (!dyn && was_dyn) {  // (switched to Fixed in game: the period again)
             *ft = g_pla60_ns;
-            g_ui_scale = (float)((double)g_pla60_ns / 33333334.0);
+            g_ui_scale = (float)((double)g_pla60_ns / (double)g_pla60_nominal);
         }
         was_dyn = dyn;
         last = now;
@@ -721,7 +923,7 @@ void pla60_present(void) {
     }
     if (!g_pla60_entry) return;
     volatile uint64_t *ft = (volatile uint64_t *)(uintptr_t)g_pla60_entry;
-    if (*ft != 33333334u) return;
+    if (*ft != (g_za_native ? 16666667u : 33333334u)) return;
     plat_protect(g_pla60_entry & ~(PLAT_PAGE - 1), PLAT_PAGE, PLAT_PROT_RW);
     *ft = g_pla60_ns;
     if (getenv("LARECOMP_LEGENDS_DT_FPS")) *ft = 1000000000ull / (uint64_t)atoi(getenv("LARECOMP_LEGENDS_DT_FPS"));  // (research: the world's frame time apart from the pacing)

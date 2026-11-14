@@ -69,6 +69,15 @@ static bool enabled(void) {
     return on;
 }
 
+// pagewatch_protect, with the range's heap chunks imported first (the lazy host import, exec.c: a driver can't import
+// a chunk with read-only pages in it - it asks for write access)
+static void protect(uint64_t a, uint64_t n) {
+    extern void gpuheap_touch(uint64_t addr, uint64_t n), vk_gmem_sync(void);
+    gpuheap_touch(a, n);
+    vk_gmem_sync();
+    pagewatch_protect(a, n);
+}
+
 // The range's pages fully inside it [*ilo, *ihi) are write-protected; the partial pages at its ends are shared with
 // whatever lies next to it (Legends: Arceus writes there every frame), so the range's bytes in them are compared with a
 // shadow copy instead (at most 2 x 4 KB, at each draw).
@@ -194,7 +203,7 @@ bool vcache_get(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off) {
             if (!pagewatch_written_since(pa, 1, was)) { pa += 4096; continue; }
             uint64_t pe = pa + 4096;
             while (pe < ihi && pagewatch_written_since(pe, 1, was)) pe += 4096;
-            pagewatch_protect(pa, pe - pa);
+            protect(pa, pe - pa);
             copy_part(cb, e, pa, pe - pa, hn, tn);
             g_vcache_why[3] += pe - pa;
             pa = pe;
@@ -219,7 +228,7 @@ bool vcache_get(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off) {
         g_bytes += bi.size;
         uint64_t t1 = SDL_GetTicksNS();
         e->stamp = pagewatch_now();
-        if (ihi > ilo) pagewatch_protect(ilo, ihi - ilo);
+        if (ihi > ilo) protect(ilo, ihi - ilo);
         uint64_t t2 = SDL_GetTicksNS();
         if (!e->shadow && hn + tn) e->shadow = malloc(hn + tn);
         copy_part(cb, e, addr, len, hn, tn);

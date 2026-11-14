@@ -5,11 +5,42 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsZA`)
 
+## 2026-11-13: LegendsZA-v1.2.0
+
+Previous release: LegendsZA-v1.1.1. Game version: Pokemon Legends: Z-A 2.0.2. Same game code as 1.1.1: no rebuild on start, and copies
+already set up can take the hotfix zip (the program only).
+
 - Add to Steam (start screen, Options): puts the game in your Steam library as a non-Steam game, with its own
-  artwork (cover, banner, hero, logo). Steam can stay open; restart it to see the artwork. Suggested on Discord.
+  artwork (cover, banner, hero, logo). On Linux Steam can stay open (restart it to see the artwork); on Windows the
+  game closes Steam, adds itself and starts Steam again. Suggested on Discord.
 - Discord Rich Presence: "Playing PL:Z-A Recomp", where you are (Lumiose City), resolution and frame rate, time
   played. Needs Discord running and Activity Privacy sharing on; a launcher checkbox ("Show what you're playing on
   Discord") turns it off.
+- Frame Timing "Real Time": no more judder when the game doesn't hold the chosen frame rate (144 or Unlimited at
+  ~120 fps, an uneven load) - most visible on a run seen from the side. Each frame now goes out exactly when the time
+  it shows has come, a steady whole number of the frame rate's periods apart: when the PC can't hold the rate it
+  settles on the next steady one (144 -> 72 -> 48, 120 -> 60, Unlimited 180 / 120 / 90 / 72 ...) and goes back up when
+  it can, instead of mixing one- and two-period steps on uneven frames. Fixed timing is unchanged. Reported for
+  Arceus (RTX 4060 laptop, 144 Hz); Z-A stepped the same way.
+- Updates: the launcher looks for a newer release at start and shows one line when there is one; a click downloads it,
+  puts it in place (Windows zip: changed files swapped, your mods kept; Linux AppImage: replaced) and offers a
+  restart. Nothing happens without the click; Options -> "Check for updates at start" turns the look off. From this
+  version on - this one still has to be installed by hand.
+- In-game "Leave the game?" box: back to the title screen or the launcher, besides quitting.
+- AMD Radeon on Windows (AMD's driver): shaders are now written without the block structure AMD's shader compiler
+  mishandled - in Arceus it crashed a cutscene and drew characters without eyes (fixed there, confirmed on an RX 6600
+  XT); Z-A uses the same shader translator.
+- A rare crash right at start on NVIDIA (two threads starting the graphics driver at once) is fixed.
+- Blank text on PCs with little graphics memory (Intel integrated graphics, AMD on Windows) is fixed: the game's
+  memory is handed to the GPU in 64 MB pieces as it is used.
+- Linux: a crash no longer writes a huge core file (one filled a root partition).
+- 60 fps and up now run the game in its own 60 fps mode (the one the Switch 2 version uses) instead of its 30 fps mode
+  sped up: moves that home in on their target (Rollout, Flame Wheel) no longer miss right after starting.
+  LARECOMP_ZA_NATIVE60=0 brings back the old way.
+- RTX 50 (Blackwell): a shader that crashed the GPU is fixed.
+- RX 9000 (RDNA4) on Linux: the GPU hang at loading screens is fixed (occlusion queries off on that card).
+- Sharper picture at resolutions that aren't a whole multiple of 1080 lines (native 1440p).
+- Mods whose folder name has a comma in it now load.
 
 ## 2026-11-12: LegendsZA-v1.1.1
 

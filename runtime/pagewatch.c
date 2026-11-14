@@ -88,9 +88,7 @@ bool pagewatch_fault(uint64_t addr) {
 void gpuheap_touch(uint64_t addr, uint64_t n);
 void pagewatch_prewrite(uint64_t addr, uint64_t n) {
     if (!n) return;
-#ifdef __linux__
-    gpuheap_touch(addr, n);  // (an unbacked GPU-memory chunk: a syscall would fail with EFAULT there, not fault)
-#endif
+    gpuheap_touch(addr, n);  // (an unbacked heap chunk - gpuheap.c: a syscall would fail with EFAULT there, not fault)
     for (uint64_t a = addr & ~(PAGE - 1); a < addr + n; a += PAGE) {
         if (!in_heap(a)) continue;
         uint64_t p = pidx(a);
@@ -109,10 +107,8 @@ bool pagewatch_written_since(uint64_t a, uint64_t n, uint32_t since) {
 // Read-only (before the caller copies the range: a store after this faults, so the copy can't miss it)
 void pagewatch_protect(uint64_t a, uint64_t n) {
     uint64_t lo = a & ~(PAGE - 1), hi = (a + n + PAGE - 1) & ~(PAGE - 1);
-#ifdef __linux__
-    gpuheap_touch(lo, hi - lo);  // (an unbacked GPU-memory chunk backed first: backing it maps it read-write, which would
-    // drop the protection unseen, and gpuheap_fault leaves faults in backed chunks to pagewatch_fault)
-#endif
+    gpuheap_touch(lo, hi - lo);  // (an unbacked heap chunk backed first - gpuheap.c: backing it maps it read-write, which
+    // would drop the protection unseen, and gpuheap_fault leaves faults in backed chunks to pagewatch_fault)
     lock();
     for (uint64_t pa = lo; pa < hi; pa += PAGE) {
         uint64_t p = pidx(pa), bit = 1ull << (p & 63);
