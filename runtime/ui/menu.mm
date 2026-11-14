@@ -371,6 +371,10 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
     ImGui::End();
     if (g_kbd.load() != 1) was_open = false;
 }
+// The next name / code entry answered at once with this (runtime/hle/warp.c: the walk-up trade's Link Code)
+extern "C" char g_kbd_auto_once[32];
+char g_kbd_auto_once[32];
+
 
 // Game thread (runtime/hle/swkbd.c): show the dialog, re-present the last frame until it's answered.
 // Returns 1 confirmed (out = text, UTF-8), 0 cancelled.
@@ -382,7 +386,8 @@ extern "C" int menu_keyboard_run(const char *initial, int max_len, const char *t
     input_reset();
     g_kbd = 1;
     // (test) LARECOMP_KBD_AUTO=<text>: answer at once
-    if (getenv("LARECOMP_KBD_AUTO")) { snprintf(g_kbd_text, sizeof g_kbd_text, "%s", getenv("LARECOMP_KBD_AUTO")); g_kbd = 2; }
+    if (g_kbd_auto_once[0]) { snprintf(g_kbd_text, sizeof g_kbd_text, "%s", g_kbd_auto_once); g_kbd_auto_once[0] = 0; g_kbd = 2; }
+    else if (getenv("LARECOMP_KBD_AUTO")) { snprintf(g_kbd_text, sizeof g_kbd_text, "%s", getenv("LARECOMP_KBD_AUTO")); g_kbd = 2; }
     else if (input_replay_text(g_kbd_text, (int)sizeof g_kbd_text)) g_kbd = 2;  // (LARECOMP_REPLAY: the recorded name)
     while (g_kbd.load() == 1 && !g_rt_unwind) {  // ~60 Hz (a reboot cancels)
         uint64_t t0 = SDL_GetTicks();

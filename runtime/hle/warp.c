@@ -216,6 +216,8 @@ __attribute__((constructor)) static void story_init(void) {
 #define _GNU_SOURCE_UNUSED
 #include <unistd.h>
 #include <fcntl.h>
+#include <time.h>
+static uint64_t ghost_now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
 ssize_t process_vm_readv(pid_t, const struct iovec *, unsigned long, const struct iovec *, unsigned long, unsigned long);
 #define NODE_VTABLE 0x7003be0d28ull
 #define NODE_UPDATE 0x7001ccf27cull
@@ -288,6 +290,77 @@ static void *scan_bodies(void *arg) {
     return NULL;
 }
 
+// The walk-up trade: A pressed by the stand-in (the game's own Talk is kept from it) asks the other player; them
+// doing the same answers. Both games then go to Link Play -> Link Trade -> Nearby Players with the same Link Code
+// (pressed through runtime/hle/input.c's queue; the code typed by menu.mm's name entry): the game's own trade from there.
+#define TRADE_NEAR 2.5f
+#define BTN_A_BIT 1ull
+void input_macro(const char *lines);
+bool input_macro_busy(void);
+uint64_t input_buttons_now(void);
+extern volatile uint64_t g_input_swallow;
+void menu_notice_for(const char *text, unsigned ms);
+extern char g_kbd_auto_once[32];
+static int g_trade;            // 0 nothing, 1 we asked, 2 they asked
+static uint32_t g_trade_code;  // (8 digits, below 2^24: exact in the packet's float)
+static uint64_t g_trade_at;
+static void trade_send(int accept, uint32_t code) {
+    float out[5] = {accept ? 4.0f : 3.0f, (float)code, 0, 0, 0};
+    for (int i = 0; i < 3; i++) sendto(g_ghost_fd, out, sizeof out, 0, (struct sockaddr *)&g_ghost_peer, sizeof g_ghost_peer);
+}
+static void trade_start(uint32_t code) {
+    snprintf(g_kbd_auto_once, sizeof g_kbd_auto_once, "%08u", code);
+    // X (menu), up to Link Play, A; right twice to Link Trade, A; Nearby Players, A; the Link Code entry answers itself
+    input_macro("200ms -\n170ms X\n2500ms -\n170ms UP\n500ms -\n170ms A\n4000ms -\n170ms RIGHT\n500ms -\n170ms RIGHT\n"
+                "500ms -\n170ms A\n3000ms -\n170ms A\n1000ms -\n");
+    char t[96];
+    snprintf(t, sizeof t, "Trading with the other player (Link Code %04u %04u)", code / 10000, code % 10000);
+    menu_notice_for(t, 8000);
+    LOG("[ghost] trade: Link Code %08u\n", code);
+    g_trade = 0;
+}
+static void trade_message(bool accept, uint32_t code, uint64_t frame) {
+    if (accept) {
+        if (g_trade == 1 && code == g_trade_code) trade_start(code);
+        return;
+    }
+    if (g_trade == 2 && code == g_trade_code) return;  // (a repeat)
+    if (g_trade == 1 && code > g_trade_code) return;   // (both asked at once: the lower code stands)
+    g_trade = 2, g_trade_code = code, g_trade_at = frame;
+    menu_notice_for("The other player wants to trade! Walk up to them and press A.", 8000);
+    LOG("[ghost] trade asked by the other player (code %08u)\n", code);
+}
+static void trade_frame(uint64_t me, uint64_t frame) {
+    uint64_t n = g_stand_node;
+    bool near = false;
+    if (me && n && frame - g_peer_at < 30) {
+        const float *p = (const float *)(uintptr_t)(me + 0x90), *t = (const float *)(uintptr_t)(n + 0xe0);
+        near = (p[0] - t[0]) * (p[0] - t[0]) + (p[2] - t[2]) * (p[2] - t[2]) < TRADE_NEAR * TRADE_NEAR && fabsf(p[1] - t[1]) < 2;
+    }
+    bool busy = input_macro_busy();
+    g_input_swallow = near && !busy ? BTN_A_BIT : 0;  // (the stand-in's own Talk never starts)
+    static bool was;
+    bool a = (input_buttons_now() & BTN_A_BIT) != 0, press = a && !was;
+    was = a;
+    if (g_trade && frame - g_trade_at > 60 * 120) {  // (two minutes: forgotten)
+        if (g_trade == 1) menu_notice_for("No answer to the trade request.", 4000);
+        g_trade = 0;
+    }
+    if (!near || busy || !press) return;
+    if (g_trade == 2) {
+        trade_send(1, g_trade_code);
+        trade_start(g_trade_code);
+    } else if (g_trade == 0) {
+        g_trade_code = 10000000u + (uint32_t)(ghost_now_ns() / 1000 % 6777216u);
+        g_trade = 1, g_trade_at = frame;
+        trade_send(0, g_trade_code);
+        menu_notice_for("Trade request sent. Waiting for the other player to walk up to you and press A.", 6000);
+        LOG("[ghost] trade asked (code %08u)\n", g_trade_code);
+    } else {
+        trade_send(0, g_trade_code);  // (again, in case it was lost)
+    }
+}
+
 void ghost_init(void) {
     const char *e = getenv("LARECOMP_GHOST");
     int mine = 0, peer = 0;
@@ -315,8 +388,11 @@ static void ghost_frame(uint64_t frame) {
         sendto(g_ghost_fd, out, sizeof out, 0, (struct sockaddr *)&g_ghost_peer, sizeof g_ghost_peer);
     }
     float in[5];
-    while (recv(g_ghost_fd, in, sizeof in, 0) == (ssize_t)sizeof in)
+    while (recv(g_ghost_fd, in, sizeof in, 0) == (ssize_t)sizeof in) {
         if (in[0] == 2.0f) memcpy(g_peer, in + 1, 16), g_peer_at = frame;
+        else if (in[0] == 3.0f || in[0] == 4.0f) trade_message(in[0] == 4.0f, (uint32_t)in[1], frame);
+    }
+    trade_frame(me, frame);
     if (g_stand_body && !is_body(g_stand_body)) {  // (gone with its level: another one)
         LOG("[ghost] the stand-in %llx is gone\n", (unsigned long long)g_stand_body);
         g_stand_body = g_stand_node = 0;
@@ -328,6 +404,11 @@ static void ghost_frame(uint64_t frame) {
         if (pthread_create(&t, NULL, scan_bodies, NULL)) g_scanning = 0; else pthread_detach(t);
     }
     static uint64_t logged;
+    if (!g_me_node && me && frame - logged >= 300) {
+        logged = frame;
+        const float *b = (const float *)(uintptr_t)(me + 0x90);
+        LOG("[ghost] our body %llx at %.2f %.2f %.2f: its node not found yet\n", (unsigned long long)me, b[0], b[1], b[2]);
+    }
     if (g_stand_node && frame - logged >= 300) {
         logged = frame;
         LOG("[ghost] peer at %.2f %.2f %.2f yaw %.2f\n", g_peer[0], g_peer[1], g_peer[2], g_peer[3]);

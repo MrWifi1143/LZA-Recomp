@@ -699,6 +699,36 @@ static void host_test_frame(uint64_t frame) {
 static uint64_t g_pad_obj;
 volatile int g_inject_plus;  // frames to hold Plus for the game (movie.c: A / B skip the opening movie too)
 RT_ON_RESET(input_reboot_reset) { g_pad_obj = 0; g_inject_plus = 0; }  // (reboot: the controller object was guest memory)
+// The scripted-input queue: LARECOMP_LIVE's commands and input_macro()'s (lines "<frames> <keys>" or "<n>ms <keys>")
+static struct { long len; bool ms; char keys[120]; } g_mq[256];
+static int g_mqh, g_mqt;
+static bool g_mq_active;
+static bool g_mq_macro;  // (input_macro's lines queued: busy until the queue is empty)
+static void mq_push_line(const char *line) {
+    long len;
+    char keys[120], unit[8] = "";
+    bool ms = sscanf(line, "%ld%7[ms] %119s", &len, unit, keys) == 3 && !strcmp(unit, "ms");
+    if ((ms || sscanf(line, "%ld %119s", &len, keys) == 2) && (g_mqt + 1) % 256 != g_mqh)
+        g_mq[g_mqt].len = len, g_mq[g_mqt].ms = ms, snprintf(g_mq[g_mqt].keys, 120, "%s", keys), g_mqt = (g_mqt + 1) % 256;
+}
+// Buttons pressed for the player, on top of their own input (the input thread: from input_frame's callees only)
+void input_macro(const char *lines) {
+    for (const char *l = lines; l && *l;) {
+        const char *e = strchr(l, '\n');
+        char line[160];
+        size_t n = e ? (size_t)(e - l) : strlen(l);
+        snprintf(line, sizeof line, "%.*s", (int)(n < sizeof line - 1 ? n : sizeof line - 1), l);
+        mq_push_line(line);
+        l = e ? e + 1 : NULL;
+    }
+    g_mq_macro = true;
+}
+bool input_macro_busy(void) {
+    if (g_mq_macro && !g_mq_active && g_mqh == g_mqt) g_mq_macro = false;
+    return g_mq_macro;
+}
+volatile uint64_t g_input_swallow;  // buttons kept from the game (the player's own; not the queue's)
+
 void input_frame(uint64_t frame) {
     if (g_pad_obj && getenv("LARECOMP_DUMP_PAD") && frame % 600 == 0) {
         const uint8_t *m = (const uint8_t *)(uintptr_t)(g_pad_obj - 0x98);
@@ -725,27 +755,24 @@ void input_frame(uint64_t frame) {
         // run one after another; <dir>/state says the frame and what's left (screenshots: <dir>/shot, nvn/vulkan/device.c)
         static const char *dir = (const char *)1;
         if (dir == (const char *)1) dir = getenv("LARECOMP_LIVE");
-        if (dir) {
+        if (dir || g_mq_active || g_mqh != g_mqt) {
             static long off;
-            static struct { long len; bool ms; char keys[120]; } q[256];  // (len in frames, or "<n>ms": real milliseconds)
             static uint64_t until_ns;
-            static int qh, qt;
             static uint64_t until;
-            static bool active;
+#define q g_mq
+#define qh g_mqh
+#define qt g_mqt
+#define active g_mq_active
             char path[1100], line[160];
-            snprintf(path, sizeof path, "%s/cmd", dir);
-            FILE *f = fopen(path, "r");
+            snprintf(path, sizeof path, "%s/cmd", dir ? dir : "");
+            FILE *f = dir ? fopen(path, "r") : NULL;
             if (f) {
                 fseek(f, 0, SEEK_END);
                 if (ftell(f) < off) off = 0;  // (the file written anew, shorter: read it from the start)
                 fseek(f, off, SEEK_SET);
                 while ((qt + 1) % 256 != qh && fgets(line, sizeof line, f) && strchr(line, '\n')) {  // (a full queue: the
                     off = ftell(f);                                                                   // rest read later)
-                    long len;
-                    char keys[120], unit[8] = "";
-                    bool ms = sscanf(line, "%ld%7[ms] %119s", &len, unit, keys) == 3 && !strcmp(unit, "ms");
-                    if ((ms || sscanf(line, "%ld %119s", &len, keys) == 2) && (qt + 1) % 256 != qh)
-                        q[qt].len = len, q[qt].ms = ms, snprintf(q[qt].keys, 120, "%s", keys), qt = (qt + 1) % 256;
+                    mq_push_line(line);
                 }
                 fclose(f);
             }
@@ -788,14 +815,18 @@ void input_frame(uint64_t frame) {
                 }
             }
             static uint64_t last_state;
-            if (frame - last_state >= 30) {
+            if (dir && frame - last_state >= 30) {
                 last_state = frame;
                 snprintf(path, sizeof path, "%s/state", dir);
                 FILE *o = fopen(path, "w");
                 if (o) { fprintf(o, "frame %llu queued %d%s%s\n", (unsigned long long)frame, (qt - qh + 256) % 256, active ? " now " : "", active ? q[qh].keys : ""); fclose(o); }
             }
+#undef q
+#undef qh
+#undef qt
+#undef active
             script_buttons = b, script_lx = lx, script_ly = ly, script_rx = rx, script_ry = ry;
-            return;
+            if (dir || g_mq_active || g_mqh != g_mqt) return;
         }
     }
     {   // LARECOMP_REPLAY=<file>: a LARECOMP_REC recording, by game frame
@@ -986,7 +1017,7 @@ static void fill_state(Cpu *c) {
     bool input_pad_finger_on(void);
     const uint64_t zr = input_pad_finger_on() ? 1ull << BTN_ZR : 0;  // (with the finger on, the controller's ZR touches)
     if (wheel_until[0] || wheel_until[1]) recompute_keyboard();  // (a wheel notch's binding lets go by time)
-    uint64_t b = menu ? script_buttons & ~zr : key_buttons | plugin_buttons | ((pad_buttons | script_buttons) & ~zr);
+    uint64_t b = menu ? script_buttons & ~zr : ((key_buttons | plugin_buttons | (pad_buttons & ~zr)) & ~g_input_swallow) | (script_buttons & ~zr);
     {
         uint64_t menu_mouse_buttons(Cpu *c);  // (runtime/hle/menu_mouse.c: the mouse in the game's menus)
         uint64_t m = menu_mouse_buttons(c);
