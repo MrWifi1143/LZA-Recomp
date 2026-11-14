@@ -1388,6 +1388,30 @@ void backend_present(NvnTexture *t) {
         if (last_fps_time > 0)
             LOG("[vk] t=%.1f frame %llu %.1f fps max %.0fms (%s)\n", now, (unsigned long long)total_frames,
                 frames / (now - last_fps_time), max_gap * 1000.0, renderer_stats());
+            {   // memory every 30 s: a PC short of RAM swaps and the game crawls with the GPU idle (8 GB + integrated GPU,
+                // 2026-11-14 - the logs couldn't show it). The game's RAM, the PC's free RAM, the GPU heaps' use / budget.
+                static double mem_at;
+                if (now - mem_at >= 30) {
+                    mem_at = now;
+                    uint64_t rss, commit, avail, total;
+                    plat_mem_info(&rss, &commit, &avail, &total);
+                    char gpu[200] = "";
+                    if (g_vk.vma) {
+                        VmaBudget bud[VK_MAX_MEMORY_HEAPS];
+                        vmaGetHeapBudgets(g_vk.vma, bud);
+                        const VkPhysicalDeviceMemoryProperties *mp;
+                        vmaGetMemoryProperties(g_vk.vma, &mp);
+                        int n = 0;
+                        for (uint32_t h = 0; h < mp->memoryHeapCount && h < 3; h++)
+                            n += snprintf(gpu + n, sizeof gpu - n, "%s%llu/%llu", h ? ", " : "; GPU heaps (MB used/budget) ",
+                                          (unsigned long long)(bud[h].usage >> 20), (unsigned long long)(bud[h].budget >> 20));
+                    }
+                    extern unsigned vk_gmem_imported_mb(void);
+                    LOG("[mem] game %llu MB in RAM (%llu MB committed), PC %llu MB free of %llu; guest heap imported %u MB%s\n",
+                        (unsigned long long)rss, (unsigned long long)commit, (unsigned long long)avail, (unsigned long long)total,
+                        vk_gmem_imported_mb(), gpu);
+                }
+            }
         max_gap = 0;
         frames = 0;
         last_fps_time = now;
