@@ -346,6 +346,12 @@ static void trade_frame(uint64_t me, uint64_t frame) {
         if (g_trade == 1) menu_notice_for("No answer to the trade request.", 4000);
         g_trade = 0;
     }
+    static uint64_t hint_at;  // (by the stand-in: what A does there, in the corner while near)
+    if (near && !busy && frame - hint_at >= 30) {
+        hint_at = frame;
+        menu_notice_for(g_trade == 2 ? "A: accept the other player's trade" : g_trade == 1 ? "Trade asked: waiting for the other player" :
+                        "A: ask the other player to trade", 700);
+    }
     if (!near || busy || !press) return;
     if (g_trade == 2) {
         trade_send(1, g_trade_code);
