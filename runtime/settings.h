@@ -19,6 +19,8 @@ typedef struct {
                          // game down), not the time that really passed (the default; FPS_UNLIMITED always: hle/fps60.c)
     int res_mode;        // RES_MATCH, 1..4 (N x the Switch's 1080p), RES_DYNAMIC, RES_Q75/50/25 (share of the display)
     int res_height;      // the launcher's render height in lines (720 / 1080 / 1440 / 2160); 0: res_mode decides
+    bool ultrawide;      // Aspect ratio "Fill the window": a window wider than 16:9 is filled - the world seen wider (the same
+                         // height), the interface in a centred 16:9 box; off: 16:9 with bars (nvn/output_scale.c, hle/pla_wide.c)
     int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
     float volume;        // master volume, 1 = 100%
