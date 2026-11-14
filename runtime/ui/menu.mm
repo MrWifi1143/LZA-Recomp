@@ -23,6 +23,7 @@ extern "C" {
 #include "../settings.h"
 #include "menu.h"
 #include "../paths.h"
+#include "../update.h"
 void input_reset(void);
 bool input_finger_cursor(float *x, float *y, bool *down);  // runtime/hle/input.c
 void input_rec_text(const char *text);                   // (LARECOMP_REC / LARECOMP_REPLAY: the names typed)
@@ -442,17 +443,39 @@ static void quit_draw(ImGuiIO &io, float scale) {
 }
 
 // A short notice in the corner for a few seconds (the screenshot key: runtime/nvn/vulkan/device.c). Any thread.
-static char g_notice[128];
+static char g_notice[192];
 static std::atomic<uint64_t> g_notice_until{0};
-extern "C" void menu_notice(const char *text) {
+extern "C" void menu_notice_for(const char *text, unsigned ms) {
     snprintf(g_notice, sizeof g_notice, "%s", text);
-    g_notice_until.store(SDL_GetTicks() + 2500);
+    g_notice_until.store(SDL_GetTicks() + ms);
+}
+extern "C" void menu_notice(const char *text) { menu_notice_for(text, 2500); }
+
+// A newer release, when the launcher was skipped (its update line never showed): once, 15 s into the game, for 12 s -
+// the update itself is a click in the launcher ("Leave the game?" -> Launcher)
+extern "C" bool g_launcher_skipped;  // (ui/launcher_lg.mm)
+static void update_notice_once(void) {
+    static uint64_t first;
+    static bool told;
+    if (told || !g_launcher_skipped) return;
+    uint64_t now = SDL_GetTicks();
+    if (!first) first = now;
+    if (now - first < 15000 || update_state() != UPD_AVAILABLE) return;
+    told = true;
+    char t[192];
+    snprintf(t, sizeof t, M("%s %s is out - update from the launcher (Esc -> Launcher)",
+                            "%s %s saiu - atualize pelo launcher (Esc -> Launcher)",
+                            "Вышла версия %s %s - обновите в лаунчере (Esc -> Лаунчер)"),
+             RT_APP_NAME, update_version());
+    menu_notice_for(t, 12000);
+    fprintf(stderr, "[update] told in the game: %s\n", t);
 }
 
 void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool open = g_open.load(), kbd = g_kbd.load() == 1;
     float fx, fy;
     bool fdown, finger = !open && input_finger_cursor(&fx, &fy, &fdown);
+    update_notice_once();
     bool notice = SDL_GetTicks() < g_notice_until.load();
     if (!open && !kbd && !g_settings.show_fps && !finger && !notice) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
