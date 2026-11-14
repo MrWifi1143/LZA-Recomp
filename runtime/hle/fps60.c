@@ -464,6 +464,7 @@ static float g_ui_scale = 1.0f;
 static int ui2d_update_frame(Cpu *c, uint64_t addr) {  // (s0 = progress; the original runs with it scaled)
     (void)addr;
     if (!g_pla60_entry) return 0;
+    if (g_za_native) return 0;  // (Z-A's own 60 fps mode steps its menus by the frame-time entry itself: 0.208 a frame at 144)
     float v;
     uint32_t w = (uint32_t)c->v[0];
     memcpy(&v, &w, 4);
