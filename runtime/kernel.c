@@ -664,7 +664,7 @@ static void lock_prof_note(uint64_t addr, uint64_t ns) {  // (caller holds g_klo
 // variable for that costs a wake-up (~12 us on Windows, measured with LARECOMP_PROF_LOCKS) and the world's frame has
 // ~1000 of them per thread (a hot nn::os::Mutex of the game, three threads), so a waiter first spins on its own wait
 // state for a few microseconds. LARECOMP_LOCK_SPIN_US=<n> (default 40; 0: always sleep, as before); off on a machine
-// with fewer than 4 logical processors, where the spinning thread would take the owner's core.
+// with 4 logical processors or fewer, where the spinning thread would take the owner's core.
 #if defined(__x86_64__)
 #define CPU_RELAX() __builtin_ia32_pause()
 #else
@@ -675,7 +675,7 @@ static uint64_t lock_spin_ns(void) {
     if (ns < 0) {
         const char *e = getenv("LARECOMP_LOCK_SPIN_US");
         long us = e ? atol(e) : 40;
-        if (!e && SDL_GetNumLogicalCPUCores() < 4) us = 0;  // (the owner would have to run on the spinner's CPU: sleep at once;
+        if (!e && SDL_GetNumLogicalCPUCores() <= 4) us = 0;  // (4 or fewer: measured slower when starved - Arceus kernel.c)  // (the owner would have to run on the spinner's CPU: sleep at once;
         // the machine's count - plat_cpu_count is the caller's, a pinned game thread's 2, which turned spinning off)
         ns = us > 0 ? us * 1000 : 0;
     }
