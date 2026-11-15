@@ -5,6 +5,15 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsZA`)
 
+## 2026-11-15: LegendsZA-v1.2.1
+
+Previous release: LegendsZA-v1.2.0. Game version: Pokemon Legends: Z-A 2.0.2. A Linux hotfix: same game code as 1.2.0, and the program
+itself is unchanged apart from the version number.
+
+- Linux / Steam Deck: the first start's game code build no longer stops at 16% ("the game code didn't build") on
+  systems without their own C headers (SteamOS and other immutable distros). The AppImage's compiler was missing the
+  x86-64 glibc headers its newer version keeps in a separate folder. Reported on Discord (Steam Deck).
+
 ## 2026-11-13: LegendsZA-v1.2.0
 
 Previous release: LegendsZA-v1.1.1. Game version: Pokemon Legends: Z-A 2.0.2. Same game code as 1.1.1: no rebuild on start, and copies
