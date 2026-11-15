@@ -942,8 +942,8 @@ extern "C" void launcher_lg_run(const char *root) {
     for (int i = 0; i < 6; i++) if (res_lines[i] == g_settings.res_height) res = i;
     bool full = g_settings.fullscreen, smaa = g_settings.antialias == AA_SMAA, wildb = g_settings.wild_battle, showfps = g_settings.show_fps, realtime = !g_settings.fixed_steps;
     // (72: half a 144 Hz screen's refresh - every frame shown for exactly 2 refreshes, where 60 alternates 2 and 3)
-    static const int fps_vals[] = {30, 60, 72, 120, 144, FPS_UNLIMITED};
-    auto fps_index = [](int f) { for (int i = 0; i < 6; i++) if (fps_vals[i] == f) return i; return 0; };
+    static const int fps_vals[] = {30, 45, 60, 72, 120, 144, FPS_UNLIMITED};  // (45: PCs that dip under 60)
+    auto fps_index = [](int f) { for (int i = 0; i < 7; i++) if (fps_vals[i] == f) return i; return 0; };
     int fps_i = fps_index(g_settings.fps);
     bool experimental = g_settings.experimental;
     // Recommended settings for this PC (from Z-A's start screen; by the GPU, the CPU threads and the RAM): shown with an
@@ -976,7 +976,7 @@ extern "C" void launcher_lg_run(const char *root) {
     int detail_i = g_settings.detail >= 0 && g_settings.detail <= 3 ? g_settings.detail : 0;
     int shadows_i = g_settings.shadows >= 0 && g_settings.shadows <= 2 ? g_settings.shadows : 0;
     int sharp_i = g_settings.sharpen >= 0 && g_settings.sharpen <= 3 ? g_settings.sharpen : 0;
-    auto apply_rec = [&]() { res = rec.res, fps_i = rec.fps, shl_i = rec.nowait; };
+    auto apply_rec = [&]() { res = rec.res, fps_i = fps_index(rec.fps ? 60 : 30), shl_i = rec.nowait; };
     if (g_settings_fresh) apply_rec();
     int bg_i = g_settings.background >= 0 && g_settings.background <= 2 ? g_settings.background : 0;
     int pk_i = g_settings.pkhex_link >= 0 && g_settings.pkhex_link <= 2 ? g_settings.pkhex_link : 0;
@@ -1087,13 +1087,13 @@ extern "C" void launcher_lg_run(const char *root) {
         ImGui::Combo(T("Resolution", "Resolução"), &res, g_pt ? res_pt : res_en, 6);
         if (ImGui::Checkbox(T("Fullscreen", "Tela cheia"), &full) && classic) SDL_SetWindowFullscreen(win, full);  // (launcher: at Play)
         ImGui::Checkbox(T("Anti-aliasing (SMAA)", "Suavizar serrilhado (SMAA)"), &smaa);
-        static const char *const fps_names_en[] = {"30 fps", "60 fps", "72 fps", "120 fps", "144 fps", "Unlimited"};  // (above 60: Experimental settings)
-        static const char *const fps_names_pt[] = {"30 fps", "60 fps", "72 fps", "120 fps", "144 fps", "Ilimitada"};
-        if (!experimental && fps_i > 1) fps_i = 1;
-        ImGui::Combo(T("Frame rate", "Taxa de quadros"), &fps_i, g_pt ? fps_names_pt : fps_names_en, experimental ? 6 : 2);
-        if (fps_i >= 1 && fps_i <= 4)  // (Unlimited: always real time, hle/fps60.c)
+        static const char *const fps_names_en[] = {"30 fps", "45 fps", "60 fps", "72 fps", "120 fps", "144 fps", "Unlimited"};  // (above 60: Experimental settings)
+        static const char *const fps_names_pt[] = {"30 fps", "45 fps", "60 fps", "72 fps", "120 fps", "144 fps", "Ilimitada"};
+        if (!experimental && fps_i > 2) fps_i = 2;
+        ImGui::Combo(T("Frame rate", "Taxa de quadros"), &fps_i, g_pt ? fps_names_pt : fps_names_en, experimental ? 7 : 3);
+        if (fps_i >= 1 && fps_i <= 5)  // (Unlimited: always real time, hle/fps60.c)
             ImGui::Checkbox(T("Keep full speed when the frame rate dips", "Manter a velocidade total quando a taxa de quadros cai"), &realtime);
-        if (fps_i >= 2)  // (72 / 120 / 144 / Unlimited: the game's own logic was made for 30; some of it counts frames)
+        if (fps_i >= 3)  // (72 / 120 / 144 / Unlimited: the game's own logic was made for 30; some of it counts frames)
             ImGui::TextColored(k_yellow, "%s",
                                T("Above 60 fps is experimental. Some scripted scenes can stall at these rates\n"
                                               "(a cutscene that walks you somewhere may never let go of you). If that happens,\n"
@@ -1639,9 +1639,9 @@ extern "C" void launcher_lg_run(const char *root) {
     g_settings.res_height = res_lines[res];
     g_settings.fullscreen = full;
     g_settings.antialias = smaa ? AA_SMAA : AA_OFF;
-    if (!experimental && fps_i > 1) fps_i = 1;
+    if (!experimental && fps_i > 2) fps_i = 2;
     g_settings.experimental = experimental;
-    g_settings.fps = fps_vals[fps_i >= 0 && fps_i < 6 ? fps_i : 0];
+    g_settings.fps = fps_vals[fps_i >= 0 && fps_i < 7 ? fps_i : 0];
     g_settings.wild_battle = wildb;
     g_settings.show_fps = showfps;
     g_settings.fixed_steps = !realtime;

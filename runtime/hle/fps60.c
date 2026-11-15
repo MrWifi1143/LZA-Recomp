@@ -804,8 +804,10 @@ void pla60_configure(const char *exefs) {
         fclose(f);
     }
     const char *e = getenv("LARECOMP_PLA_60FPS"), *n = getenv("LARECOMP_LEGENDS_FPS");
-    bool on = e ? atoi(e) != 0 : g_settings.fps >= 60;
-    g_pla60_ns = !e && g_settings.fps > 60 ? 1000000000ull / (uint64_t)g_settings.fps : 16666667;
+    // (45: between 30 and 60 for PCs that can't hold 60 - with Real Time's whole steps a 60 that dips settles at 30,
+    // a 45 setting steps the world by 1/45 s and holds 45)
+    bool on = e ? atoi(e) != 0 : g_settings.fps > 30;
+    g_pla60_ns = !e && g_settings.fps > 30 && g_settings.fps != 60 ? 1000000000ull / (uint64_t)g_settings.fps : 16666667;
     if (n && atoi(n) > 30) on = true, g_pla60_ns = 1000000000ull / (uint64_t)atoi(n);
     g_pla60_entry = g_pla60_build = 0;
     g_pla60_patched = false;
