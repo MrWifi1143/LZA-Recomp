@@ -110,6 +110,12 @@ def main():
         'runtime/nvn/maxwell/translate.c': ['-DXLAT_SRC_HASH="%s"' % xlat_hash],
         'runtime/nvn/smaa_data.c': ['-I' + B + '/inc', '-Ithird_party/smaa/Textures'],
     }
+    # the community Discord invite: from a file outside the repository (the Makefile's DISCORD_INVITE_FILE); none: no
+    # Discord buttons
+    invf = os.environ.get('DISCORD_INVITE_FILE') or os.path.expanduser('~/.config/lzarecomp/discord-invite')
+    invite = open(invf).read().strip() if os.path.isfile(invf) else ''
+    extra['runtime/discord.c'] = ['-DRT_DISCORD_INVITE="%s"' % invite]
+    extra['runtime/ui/launcher_lg.mm'] = ['-DRT_DISCORD_INVITE="%s"' % invite]
 
     # SMAA's shader as a C string (the Makefile's tr / sed): CR dropped, non-ASCII as '?', each line quoted
     inc = os.path.join(B, 'inc', 'smaa_hlsl.inc')
@@ -139,7 +145,7 @@ def main():
         jobs.append((s, B + '/rt/' + s[len('runtime/'):-4] + '.o', cxx + cxxflags + OSFLAGS, True))
     for s in sorted(glob.glob('runtime/ui/*.mm')):
         s = s.replace('\\', '/')
-        jobs.append((s, B + '/rt/' + s[len('runtime/'):-3] + '.o', cxx + cxxflags + ['-x', 'c++'] + OSFLAGS, True))
+        jobs.append((s, B + '/rt/' + s[len('runtime/'):-3] + '.o', cxx + cxxflags + ['-x', 'c++'] + OSFLAGS + extra.get(s, []), True))
     for n in ('imgui', 'imgui_draw', 'imgui_tables', 'imgui_widgets'):
         jobs.append(('third_party/imgui/%s.cpp' % n, B + '/imgui/%s.o' % n, cxx + cxxflags, False))
     for n in ('sdl3', 'vulkan'):
@@ -154,7 +160,7 @@ def main():
     todo = [j for j in jobs if stale(*j[0:2], j[3])]
     # (the ids are in the sources' flags, not their text: a changed id rebuilds those three)
     stamp = os.path.join(B, 'ids.txt')
-    ids = '%s %s %s' % (gamelib_id, xlat_hash, gamelib_cflags)
+    ids = '%s %s %s %s' % (gamelib_id, xlat_hash, gamelib_cflags, invite)
     if not os.path.isfile(stamp) or open(stamp).read() != ids:
         todo += [j for j in jobs if j[0] in extra and j not in todo]
     print('%d of %d objects to compile, %d at a time' % (len(todo), len(jobs), args.jobs))
