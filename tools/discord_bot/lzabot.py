@@ -445,7 +445,10 @@ def main():
             client._polling = True
             client.loop.create_task(poll())
 
-    client.run(ds.token(), log_handler=None)
+    import logging
+    # discord.py's own warnings and errors (a dropped gateway connection, an exception in a button) go to the journal;
+    # without them a press that never arrives leaves no trace
+    client.run(ds.token(), log_handler=logging.StreamHandler(), log_level=logging.WARNING)
 
 
 if __name__ == "__main__":

@@ -34,7 +34,7 @@ import urllib.request
 
 API = "https://discord.com/api/v10"
 GUILD = os.environ.get("LZARECOMP_DISCORD_GUILD", "1569929395542425721")  # LZ&A Recomp (--guild: a test server)
-FORUMS = ("known-issues", "bug-reports", "suggestions")
+FORUMS = ("known-issues", "bug-reports", "suggestions", "help")  # (help: no Fixed tag there - only the "Fixed in" reply)
 OPEN_TAGS = ("open",)
 CLOSED_TAGS = ("closed", "fixed", "added", "resolved", "solved")
 PENDING_TAGS = ("fixed (unreleased)", "fixed in next release", "pending release")
