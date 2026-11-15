@@ -6,6 +6,18 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsA`)
 
+## 2026-11-15: LegendsA-v1.3.2
+
+Previous release: LegendsA-v1.3.1. Game version: Pokemon Legends: Arceus 1.1.1. Same game code as 1.3.0, so nothing
+is rebuilt on start (the hotfix zip is enough on Windows).
+
+- New: a 45 fps setting (launcher, the game's Settings, larecomp.ini `fps = 45`). A PC that can't hold 60 dropped to
+  30 and bounced back; 45 holds steady instead (CPU-limited test: 1975 of 1980 frames at 45).
+- Low-end CPUs (4 threads or fewer): the game's threads no longer spin while they wait, they sleep at once, leaving
+  the cores to the game.
+- Models drawn with transform feedback no longer go missing or stretch when their buffer sits in a part of the GPU
+  heap that wasn't backed yet (port of the Z-A Radeon fix).
+
 ## 2026-11-15: LegendsA-v1.3.1
 
 Previous release: LegendsA-v1.3.0. Game version: Pokemon Legends: Arceus 1.1.1. A hotfix: same game code as 1.3.0,
