@@ -170,6 +170,12 @@ static int timeline_step(Cpu *c, uint64_t addr) {
     // at 144 fps (the trainer's ball behind her arm; "You are challenged by ...!" not taking A for seconds)
     float by_time = s1 * 60.0f * s2;
     if (by_time > 0 && fabsf((t - old) - by_time) <= 0.1f * by_time) return 0;
+    // (and the ones it steps by our frame time at 30 frames a second: s1 the table step itself, the advance s1 x 30 x
+    // rate - at 45 fps the opening's cinematics (rate 1, 0.667 an update), scaled again they ran 1.33x fast. In the
+    // game's own 30 fps mode s1 is its 1/30 s, not our step: those still get scaled)
+    extern uint64_t pla60_last_step_ns(void);
+    float step_s = (float)((double)pla60_last_step_ns() / 1e9), by_step = s1 * 30.0f * s2;
+    if (step_s > 0 && fabsf(s1 - step_s) <= 0.05f * step_s && by_step > 0 && fabsf((t - old) - by_step) <= 0.1f * by_step) return 0;
     // the real time since this player's last update (the audio plays in real time: a frame late - a stutter, a shader
     // compiled - is made up on the next one), our frame time on its first, 100 ms at most
     static struct { uint64_t player, at; } last[32];
@@ -182,7 +188,8 @@ static int timeline_step(Cpu *c, uint64_t addr) {
     extern uint64_t pla60_nominal_ns(void);  // (the game's own step: 33.3 ms in its 30 fps mode, 16.7 in its own 60)
     float scale = (float)((double)dt / (double)pla60_nominal_ns()), nt = old + (t - old) * scale;
     static int seen;
-    if (seen < 6 && getenv("LARECOMP_ZA_CUTSCENE_LOG")) seen++, LOG("[za] timeline %g -> %g (was %g)\n", old, nt, t);
+    if (seen < 6 && getenv("LARECOMP_ZA_CUTSCENE_LOG"))
+        seen++, LOG("[za] timeline %g -> %g (was %g; s1 %g s2 %g, by time %g, by step %g)\n", old, nt, t, s1, s2, by_time, by_step);
     {   // (LARECOMP_ZA_CUTSCENE_LOG=2: each player's calls, real time and advance, once a second)
         static int lv = -1;
         if (lv < 0) lv = getenv("LARECOMP_ZA_CUTSCENE_LOG") ? atoi(getenv("LARECOMP_ZA_CUTSCENE_LOG")) : 0;

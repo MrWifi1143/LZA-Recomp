@@ -458,6 +458,8 @@ static int za_mode_hook(Cpu *c, uint64_t addr) {  // (0x7001b29660 entry: x0 = t
 }
 bool pla60_enabled(void) { return g_pla60_entry != 0; }
 uint64_t pla60_period_ns(void) { return g_pla60_ns; }
+static uint64_t g_last_step;
+uint64_t pla60_last_step_ns(void) { return g_last_step; }  // (the step in the table entry now)
 
 void rt_register_fnhook_at(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
 static float g_ui_scale = 1.0f;
@@ -688,7 +690,7 @@ static uint64_t real_step(uint64_t real) {
     return dt > hi ? hi : dt;
 }
 
-static uint64_t g_last_step = 16666667;  // (the step written last: the table entry)
+static uint64_t g_last_step = 16666667;  // (the step written last: the table entry; declared above)
 // Real-time steps on the present clock (pla60_present, nvn/objects.c present_pace). Each frame goes out at its time on
 // the world's clock - present_pace waits for it - so every frame shows just the time its update moved the world on.
 // Before, the steps were the time measured between presents in whole periods (taken before the pace's wait) and the
