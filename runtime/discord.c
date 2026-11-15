@@ -204,6 +204,9 @@ static void jesc(char *out, size_t size, const char *s) {
     out[o] = 0;
 }
 
+#ifndef RT_DISCORD_INVITE  // (the community invite: from the build, Makefile DISCORD_INVITE_FILE; none: no button)
+#define RT_DISCORD_INVITE ""
+#endif
 static bool is_pla(void) { return RT_SHOT_PREFIX[0] == 'P'; }
 
 // The activity as JSON (the SET_ACTIVITY args), from the settings and where the player is
@@ -226,19 +229,20 @@ static void build_activity(char *out, size_t size, uint64_t nonce) {
     else snprintf(state, sizeof state, "%s", rate);
     snprintf(large, sizeof large, "%s v%s", RT_APP_NAME, RT_APP_VERSION);
     jesc(de, sizeof de, details), jesc(se, sizeof se, state), jesc(le, sizeof le, large);
+    char dbtn[160] = "";  // (the Discord button: only with the build's invite, as the launcher's)
+    if (RT_DISCORD_INVITE[0]) snprintf(dbtn, sizeof dbtn, ",{\"label\":\"Discord\",\"url\":\"%s\"}", RT_DISCORD_INVITE);
     snprintf(out, size,
              "{\"cmd\":\"SET_ACTIVITY\",\"nonce\":\"%llu\",\"args\":{\"pid\":%d,\"activity\":{"
              "\"details\":\"%s\",\"state\":\"%s\",\"timestamps\":{\"start\":%lld},"
              "\"assets\":{\"large_image\":\"https://raw.githubusercontent.com/MrWifi1143/%s/main/icon.png\",\"large_text\":\"%s\"},"
-             "\"buttons\":[{\"label\":\"Get the recomp\",\"url\":\"https://github.com/MrWifi1143/LZA-Recomp\"},"
-             "{\"label\":\"Discord\",\"url\":\"https://discord.gg/wxqppgye97\"}]}}}",
+             "\"buttons\":[{\"label\":\"Get the recomp\",\"url\":\"https://github.com/MrWifi1143/LZA-Recomp\"}%s]}}}",
              (unsigned long long)nonce,
 #ifdef _WIN32
              (int)GetCurrentProcessId(),
 #else
              (int)getpid(),
 #endif
-             de, se, (long long)start, is_pla() ? "PLA-Recomp" : "ZA-Recomp", le);
+             de, se, (long long)start, is_pla() ? "PLA-Recomp" : "ZA-Recomp", le, dbtn);
 }
 
 static int dc_thread(void *arg) {

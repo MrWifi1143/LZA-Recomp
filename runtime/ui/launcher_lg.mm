@@ -395,7 +395,12 @@ static void remove_tree(const char *dir) {
 }
 // The community's Discord: a small button beside the version, opened in the browser. Right-click: hide it (remembered in
 // larecomp.ini, discord_button = 0: the data folder, so it stays hidden across updates). Never opens by itself.
-static const char *const k_discord_url = "https://discord.gg/wxqppgye97";
+// The invite comes from the build (Makefile: DISCORD_INVITE_FILE, outside the repository); without one there is no
+// Discord button anywhere.
+#ifndef RT_DISCORD_INVITE
+#define RT_DISCORD_INVITE ""
+#endif
+static const char *const k_discord_url = RT_DISCORD_INVITE;
 // Next to the version: the newer release, if any (runtime/update.c) - "Update" downloads it and puts it in place, then
 // "Restart" starts the new version (the launcher again). Folder installs get "Download" (the release page).
 extern "C" void rt_restart_process(int to_launcher);  // (main.c)
@@ -443,7 +448,7 @@ static void update_line(bool same_line = true) {  // (false: a row of its own)
     }
 }
 static void discord_button(void) {
-    if (g_settings.hide_discord) return;
+    if (g_settings.hide_discord || !k_discord_url[0]) return;
     ImGui::SameLine();
     if (ImGui::SmallButton("Discord")) SDL_OpenURL(k_discord_url);
     if (ImGui::IsItemHovered())
@@ -566,7 +571,7 @@ static void game_files_section(SDL_Window *win) {
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 900);
         ImGui::TextColored(k_red, "%s", T(en[k], pt[k]));
         ImGui::TextDisabled("%s", T(en_h[k], pt_h[k]));
-        if (ImGui::SmallButton(T("Get help on Discord", "Pedir ajuda no Discord"))) SDL_OpenURL(k_discord_url);  // (always: a failed setup is when it's needed)
+        if (k_discord_url[0] && ImGui::SmallButton(T("Get help on Discord", "Pedir ajuda no Discord"))) SDL_OpenURL(k_discord_url);  // (always: a failed setup is when it's needed)
         ImGui::PopTextWrapPos();
     } else {
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 900);

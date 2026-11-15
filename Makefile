@@ -196,6 +196,14 @@ $(GAMELIB): $(GEN_OBJ) | $(EXE)
 	mv -f $@.tmp $@
 	echo $(GAMELIB_ID) > $@.id
 
+# The community Discord invite (launcher buttons, Rich Presence): read from a file outside the repository, one line
+# (https://discord.gg/...). No file, no invite: builds without it have no Discord buttons.
+DISCORD_INVITE_FILE ?= $(HOME)/.config/lzarecomp/discord-invite
+DISCORD_INVITE := $(strip $(shell cat "$(DISCORD_INVITE_FILE)" 2>/dev/null))
+$(B)/rt/discord.o: RTFLAGS += -DRT_DISCORD_INVITE='"$(DISCORD_INVITE)"'
+$(B)/rt/ui/launcher_lg.o: UIFLAGS += -DRT_DISCORD_INVITE='"$(DISCORD_INVITE)"'
+$(B)/rt/discord.o $(B)/rt/ui/launcher_lg.o: $(wildcard $(DISCORD_INVITE_FILE))
+
 $(B)/rt/ui/%.o: runtime/ui/%.mm $(RT_HDRS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(UIFLAGS) -c $< -o $@
