@@ -126,6 +126,7 @@ static int g_nitems;
 static float g_cur_x, g_cur_y;  // the cursor
 static bool g_settings_up;      // the Settings screen is the one with the cursor (its description line drawn)
 static _Atomic bool g_menu_up;
+static _Atomic bool g_buttons_up;  // a menu with buttons (N_cursor panes) is on screen: one the pointer clicks
 static uint64_t g_menu_seen;
 
 static bool is_cursor(const Pane *p) {  // (Z-A: the part "L_cursor_00" / "L_cursor_box_00"...; Arceus: its own small
@@ -281,6 +282,9 @@ static int item_at(float x, float y) {  // the button under the pointer, or -1
 }
 
 bool menu_mouse_active(void) { return atomic_load(&g_menu_up); }
+// A menu with buttons is up (not only the player's camera stopped: aiming, a lock-on, a dialogue, a cutscene) - a held
+// mouse is let go for it (runtime/hle/input.c)
+bool menu_mouse_buttons_up(void) { return atomic_load(&g_buttons_up); }
 int menu_cursor_items(void) { return g_nitems; }  // (the buttons of the cursor menu on screen, last frame; 0: none - hle/fps60.c)
 bool menu_settings_up(void) { return g_settings_up && g_nitems; }  // (runtime/hle/za_options.c, the game's thread)
 bool menu_item_part(const char *prefix) {  // a button on screen is a part of that name (the game's options file)
@@ -472,6 +476,9 @@ uint64_t menu_mouse_buttons(Cpu *c) {
     if (g_nitems || f - g_field_camera_frame > 8) g_menu_seen = f;  // (or the player's camera stopped: a menu without
     bool up = f - g_menu_seen < 10;                                    // buttons, a dialogue, a cutscene)
     atomic_store(&g_menu_up, up);
+    static uint64_t buttons_seen;
+    if (g_nitems) buttons_seen = f;
+    atomic_store(&g_buttons_up, g_nitems || f - buttons_seen < 10);
     int32_t px, py;
     uint32_t moves;
     int clicks, rclicks, wheel;

@@ -209,7 +209,7 @@ static _Atomic int32_t touch_x = 960, touch_y = 540;
 // The free pointer in a menu (runtime/hle/menu_mouse.c): how often it moved, the clicks and wheel notches not yet taken
 static _Atomic uint32_t ptr_moves;
 static _Atomic int ptr_clicks, ptr_rclicks, ptr_wheel;
-bool menu_mouse_active(void);
+bool menu_mouse_active(void), menu_mouse_buttons_up(void);
 static void touch_at(SDL_Window *w, float mx, float my) {
     float d = w ? SDL_GetWindowPixelDensity(w) : 1;
     if (d <= 0) d = 1;
@@ -433,19 +433,24 @@ void input_handle_event(const SDL_Event *e) {
         bool motion = e->type == SDL_EVENT_MOUSE_MOTION, wheel = e->type == SDL_EVENT_MOUSE_WHEEL;
         SDL_Window *w = SDL_GetWindowFromID(motion ? e->motion.windowID : wheel ? e->wheel.windowID : e->button.windowID);
         bool cam = g_settings.mouse_camera, down = e->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
-        bool menu = menu_mouse_active();  // (a menu is up: the pointer is for it - a held mouse is let go)
+        bool menu = menu_mouse_active();  // (a menu is up, or the player's camera stopped: a free pointer is for it)
+        // A held mouse is let go only for a menu with buttons to point at. "The camera stopped" is also aiming (its own
+        // camera: the aim needs the held mouse, the virtual gyro), a lock-on (ZL, the right button), a dialogue and a
+        // cutscene: letting go there showed the pointer the moment a throw was aimed and in every cutscene, and the next
+        // aim had no mouse - the Poke Ball couldn't be aimed with it.
+        bool buttons = menu_mouse_buttons_up();
         // aiming takes the mouse (the gyro); with the mouse camera a click does too (and is only that: no press)
         // (a scripted test run - LARECOMP_INPUT / LARECOMP_REPLAY - never takes the mouse: the pointer stays the user's
         // while a test window aims beside what they're doing)
         static int scripted = -1;
         if (scripted < 0) scripted = getenv("LARECOMP_INPUT") || getenv("LARECOMP_REPLAY") || getenv("LARECOMP_NO_MOUSE_GRAB");
-        if (!mouse_win && w && !menu && !scripted && (gyro_aiming || (cam && down))) {
+        if (!mouse_win && w && !buttons && !scripted && (gyro_aiming || (cam && down))) {
             mouse_win = w;
             SDL_SetWindowRelativeMouseMode(w, true);
             touch_down = 0;
             last_kbm = 1;
             if (down && !gyro_aiming) break;
-        } else if (mouse_win && (menu || (!gyro_aiming && !cam))) {
+        } else if (mouse_win && (buttons || (!gyro_aiming && !cam))) {
             mouse_release();
         }
         if (motion) {
