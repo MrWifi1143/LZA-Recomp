@@ -1149,6 +1149,7 @@ void vk_end_pass(void) { vk_end_pass_at(0); }
 #define vk_end_pass() vk_end_pass_at(__LINE__)
 static bool g_storage_written;  // a draw of this pass wrote storage images (SUST / SURED)
 static NvnTexture *pass_rt[9];  // the running pass's color targets and depth (frame dumps save these at its end)
+static void linear_writeback(NvnTexture *t);
 static void vk_end_pass_at(int line) {
     if (!in_pass) return;
     if (prof && line < 4096) prof_end_line[line]++;
@@ -1165,6 +1166,8 @@ static void vk_end_pass_at(int line) {
                              VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
     }
+    for (int i = 0; i < 8; i++)  // (linear targets: back into the game's memory, which the CPU reads)
+        if (pass_rt[i] && (pass_rt[i]->flags & 0x10)) linear_writeback(pass_rt[i]);
     static long pass_fmt = -2;  // LARECOMP_DEBUG_PASS_FMT=<nvn format>: every pass rendering to that format, all frames
     if (pass_fmt == -2) pass_fmt = ENV("LARECOMP_DEBUG_PASS_FMT") ? strtol(ENV("LARECOMP_DEBUG_PASS_FMT"), NULL, 0) : -1;
     if (pass_fmt >= 0 && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend && (long)st.rt.color[0]->format == pass_fmt && st.rt.color[0]->width < 1000) {
@@ -3899,6 +3902,53 @@ static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSi
     *off = addr - HEAP_BASE;
     return true;
 }
+// A linear texture (NVN's LINEAR flag: rows at its stride, the layout the CPU reads) the GPU wrote: the game reads its
+// texels from memory once it has waited for the GPU. Legends Z-A's photo for the Z-A Royale card copies the frame into
+// two 1920x1080 linear textures, then crops and BC1-compresses it on the CPU; our textures live in VRAM only, so the CPU
+// found zeros there and the card stayed black (or showed a strip of an older buffer's leftovers). After each copy into
+// one, and each pass drawing to one, the GPU copies it back into the game's memory (in order, no wait; a scaled
+// allocation is filtered to its guest size first). Only the photo does this so far: ~10 a photo, none in play.
+static void linear_writeback(NvnTexture *t) {
+    const FormatInfo *fi = nvn_format_info(t->format);
+    if (!t->backend || !t->addr || t->addr < HEAP_BASE || !fi || !fi->bpb || fi->bw != 1 || fi->bh != 1 || fi->bpb == 3) return;
+    TexBackend *b = t->backend;
+    if (b->aspect != VK_IMAGE_ASPECT_COLOR_BIT || b->samples > 1 || b->layers > 1 || b->depth > 1) return;
+    uint64_t stride = t->stride ? t->stride : (uint64_t)t->width * fi->bpb;
+    if (stride % fi->bpb || stride < (uint64_t)t->width * fi->bpb) return;
+    uint64_t size = stride * (t->height - 1) + (uint64_t)t->width * fi->bpb;
+    extern void gpuheap_touch(uint64_t addr, uint64_t n);
+    gpuheap_touch(t->addr, size);
+    VkBuffer gb;
+    VkDeviceSize go;
+    if (!guest_direct(t->addr, size, &gb, &go) || go % 4) {
+        static int told;
+        if (!told++) LOG("[vk] linear target %ux%u at %llx: not in one guest memory buffer, not written back\n", t->width, t->height, (unsigned long long)t->addr);
+        return;
+    }
+    VkCommandBuffer cb = vk_cmd();
+    vk_full_barrier(cb);
+    VkImage img = b->image;
+    VmaAllocation small_mem = NULL;
+    if (b->width != t->width || b->height != t->height) {  // (a scaled allocation: guest-sized texels first)
+        VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = b->format,
+                                .extent = {t->width, t->height, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+                                .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        if (vmaCreateImage(g_vk.vma, &ci, &ai, &img, &small_mem, NULL) != VK_SUCCESS) return;
+        vk_image_init_layout(cb, img, VK_IMAGE_ASPECT_COLOR_BIT);
+        VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)b->width, (int32_t)b->height, 1}},
+                          .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {(int32_t)t->width, (int32_t)t->height, 1}}};
+        vkCmdBlitImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, img, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+        vk_full_barrier(cb);
+    }
+    VkBufferImageCopy c = {.bufferOffset = go, .bufferRowLength = (uint32_t)(stride / fi->bpb),
+                           .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {t->width, t->height, 1}};
+    vkCmdCopyImageToBuffer(cb, img, VK_IMAGE_LAYOUT_GENERAL, gb, 1, &c);
+    vk_full_barrier(cb);
+    gpuw_note(t->addr, size);
+    if (small_mem) { extern void vk_defer_image(VkImage, VmaAllocation); vk_defer_image(img, small_mem); }
+}
+
 // Vertex / index range of a draw: in place from the game's memory (true) or to be copied (false). With the VRAM ring on, copied
 // unless a compute dispatch may write it, or it is large: Legends Z-A's draws name whole buffers (MBs each, ~6 GB a second
 // copied in its opening scene, 8 fps; read in place: 30 fps).
@@ -5826,7 +5876,7 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     if (small_mem) vmaDestroyImage(g_vk.vma, srcimg, small_mem);
 }
 
-static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t flags) {
+static void copy_texture_(const TexRefRec *src, const TexRefRec *dst, uint64_t flags) {
     snap_reason = "tex2tex"; snapshots_invalidate(NULL);
     NvnTexture *st_ = (NvnTexture *)(uintptr_t)src->tex, *dt = (NvnTexture *)(uintptr_t)dst->tex;
     if (!st_ || !dt) return;
@@ -5900,6 +5950,11 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     dl_note("  blit %p lv%u/%u %ux%u (%d,%d %dx%d) -> %p lv%u/%u %ux%u (%d,%d %dx%d) %s", (void *)s->image, slv, s->levels, s->width,
             s->height, sx0, sy0, sw, sh, (void *)d->image, dlv, d->levels, d->width, d->height, dx0, dy0, dw, dh, linear ? "linear" : "nearest");
     vkCmdBlitImage(cb, s->image, VK_IMAGE_LAYOUT_GENERAL, d->image, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+}
+static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t flags) {
+    copy_texture_(src, dst, flags);
+    NvnTexture *dt = (NvnTexture *)(uintptr_t)dst->tex;
+    if (dt && (dt->flags & 0x10) && dt->backend) linear_writeback(dt);  // (a linear texture: the CPU reads it from memory)
 }
 
 // ================================================================== present helpers (device.c)
