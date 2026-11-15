@@ -3670,7 +3670,10 @@ static bool gpuw_unknown;
 static void gpuw_stores(const ShaderInfo *si, const Range *sbufs, int n, const char *what, uint64_t code) {
     if (!si || !si->gmem_stores) return;
     bool any = false;
-    for (int i = 0; i < n; i++) if (sbufs[i].addr) { gpuw_note(sbufs[i].addr, sbufs[i].size); any = true; }
+    // (a lazily backed heap - gpuheap.c: an output in a chunk nothing has touched yet is backed first; unbacked, the
+    // sparse heap buffer drops the GPU's writes there and whatever reads them later gets zeros)
+    extern void gpuheap_touch(uint64_t addr, uint64_t n);
+    for (int i = 0; i < n; i++) if (sbufs[i].addr) { gpuheap_touch(sbufs[i].addr, sbufs[i].size); gpuw_note(sbufs[i].addr, sbufs[i].size); any = true; }
     if (!any && !gpuw_unknown) {
         gpuw_unknown = true;
         LOG("[vk] %s %llx stores to global memory without a storage buffer: vertex and index data is read in place from now on\n", what, (unsigned long long)code);
@@ -4817,6 +4820,17 @@ static void draw_(CmdRec *r, bool indexed) {
     // lie in the imported heap (gmem_buf); the draws that read them as vertex data later read them in place (gpuw).
     bool xfb_on = st.xfb_active && g_vk.xfb && pr->vkey.xfb_count[0];
     if (xfb_on) {
+        // (a lazily backed heap - gpuheap.c: the capture's buffers in chunks nothing has touched yet are backed first, so
+        // gmem_info below binds them; skipped, the draws that read the captured vertices got stale memory - a Radeon
+        // on Linux: models stretched into huge slabs, a wall of a hat and a bystander, after ~20 min of play)
+        extern void gpuheap_touch(uint64_t addr, uint64_t n);
+        extern unsigned gpuheap_backed_mb(void);
+        unsigned before = g_vk.gpuheap || g_vk.lazyhost ? gpuheap_backed_mb() : 0;
+        for (int b = 0; b < 4 && pr->vkey.xfb_count[b]; b++) gpuheap_touch(st.xfb_addr[b], st.xfb_size[b]);
+        if (before && gpuheap_backed_mb() != before) {
+            static int told;
+            if (told++ < 10) LOG("[xfb] buffer %llx in a heap chunk not backed yet: backed now (%u MB)\n", (unsigned long long)st.xfb_addr[0], gpuheap_backed_mb());
+        }
         VkDescriptorBufferInfo gi = gmem_info();
         VkBuffer bufs[4];
         VkDeviceSize offs[4], sizes[4];
@@ -4832,7 +4846,7 @@ static void draw_(CmdRec *r, bool indexed) {
             bufs[nb] = gmem_buf; offs[nb] = a - HEAP_BASE; sizes[nb] = n; nb++;
         }
         static int logged;
-        if (!xfb_on && logged++ < 10) LOG("[xfb] capture skipped: buffer %llx outside the imported heap\n", (unsigned long long)st.xfb_addr[0]);
+        if (!xfb_on && logged++ < 10) LOG("[xfb] capture skipped: buffer %llx (%llu bytes) outside the imported heap\n", (unsigned long long)st.xfb_addr[0], (unsigned long long)st.xfb_size[0]);
         if (xfb_on) {
             g_vk.bind_xfb(cb, 0, nb, bufs, offs, sizes);
             g_vk.begin_xfb(cb, 0, 0, NULL, NULL);
