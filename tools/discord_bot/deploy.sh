@@ -10,7 +10,7 @@ python3 -m pip install -q --target "$deps" --python-version "$pyver" --implement
     --platform manylinux_2_17_x86_64 --platform manylinux2014_x86_64 --platform manylinux_2_28_x86_64 \
     --only-binary=:all: discord.py
 ssh "$H" 'rm -rf ~/lzabot-src && mkdir -p ~/lzabot-src ~/.config/lzarecomp && chmod 700 ~/.config/lzarecomp'
-scp -q "$here/lzabot.py" "$here/../discord_sync.py" "$here/lzabot.service" "$here/install.sh" "$H":lzabot-src/
+scp -q "$here/lzabot.py" "$here/testbuilds.py" "$here/../discord_sync.py" "$here/lzabot.service" "$here/install.sh" "$H":lzabot-src/
 scp -q -r "$deps" "$H":lzabot-src/deps
 rm -rf "$deps"
 ssh "$H" 'test -s ~/.config/lzarecomp/discord-token' || {

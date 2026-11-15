@@ -11,6 +11,9 @@ tools/discord_fixes.json at that tag) get their posts closed and a "Fixed in <ga
     python3 lzabot.py --promote <post id> [--title ..] [--game ..] [--note ..] [-n]   what /known-issue does
     python3 lzabot.py --announce <tag> [-n]   post that release in #releases now
     python3 lzabot.py --updates-button [-n]   post the "Get update pings" button message in #releases (once)
+    python3 lzabot.py --test-build <post id> --file x.zip [--what ..] [--try ..] [-n]   stage a test build (testbuilds.py)
+    python3 lzabot.py --reply <post id> --text "..." [--file ..] [-n]   stage a reply in the bot's voice (testbuilds.py)
+    python3 lzabot.py --local      run here for testing: buttons only (no release polling, no command sync)
 
 Each new full release (not a release candidate) also gets one short post in #releases: the version as a link to the
 release page, the first few highlights of its notes (New / Fixed / Improved) and whether it is a hotfix. The post
@@ -38,6 +41,7 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import discord_sync as ds  # noqa: E402
+import testbuilds  # noqa: E402
 
 GITLAB = "https://gitlab.com/api/v4/projects/88608822"
 RELEASES = "https://gitlab.com/mr.wifi1143/LZA-Recomp/-/releases/"
@@ -314,7 +318,29 @@ def main():
     ap.add_argument("--note", default="")
     ap.add_argument("--announce", metavar="TAG", help=f"post that release in #{ANNOUNCE} now (e.g. one from before this existed)")
     ap.add_argument("--updates-button", action="store_true", help=f"post the update-pings button in #{ANNOUNCE}")
+    ap.add_argument("--test-build", metavar="POST_ID", help="stage a test build for that report in #dev-approvals")
+    ap.add_argument("--file", action="append", default=[], help="(--test-build) a file to send, repeatable")
+    ap.add_argument("--what", default="", help="(--test-build) what it fixes, one line")
+    ap.add_argument("--why", default="", help="(--test-build) what was wrong, plain words")
+    ap.add_argument("--fix", default="", help="(--test-build) what changed, plain words")
+    ap.add_argument("--try", dest="try_", default="", help="(--test-build) what to do to check it")
+    ap.add_argument("--reply", metavar="POST_ID", help="stage a reply in the bot's voice for that report")
+    ap.add_argument("--text", default="", help="(--reply) the message; @file reads it from a file")
+    ap.add_argument("--recheck", action="store_true", help="what /recheck does (digest of new report messages)")
+    ap.add_argument("--local", action="store_true", help="test run: buttons only, no polling / command sync")
     a = ap.parse_args()
+    if a.recheck:
+        print(testbuilds.recheck("cli", a.dry_run))
+        return
+    if a.reply:
+        text = open(a.text[1:]).read().strip() if a.text.startswith("@") else a.text
+        if not text:
+            sys.exit("--reply needs --text")
+        testbuilds.stage_reply(a.reply, text, a.file, a.dry_run)
+        return
+    if a.test_build:
+        testbuilds.stage(a.test_build, a.file, a.what, a.try_, a.game, a.dry_run, why=a.why, fix=a.fix)
+        return
     if a.updates_button:
         post_updates_button(a.dry_run)
         return
@@ -351,6 +377,25 @@ def main():
             kid, text = None, f"Discord refused it: {e}"
         await interaction.followup.send(text if not kid else f"Opened {text}", ephemeral=True)
 
+    last_recheck = [0.0]
+
+    @tree.command(name="recheck", description="Send what's new in the report forums to the dev queue", guild=guild)
+    @app_commands.default_permissions(manage_threads=True)
+    @app_commands.guild_only()
+    async def recheck_cmd(interaction: discord.Interaction):
+        import time as _t
+        if _t.time() - last_recheck[0] < 60:
+            return await interaction.response.send_message("Just checked a moment ago - try again in a minute.",
+                                                           ephemeral=True)
+        last_recheck[0] = _t.time()
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            text = await asyncio.to_thread(testbuilds.recheck, str(interaction.user))
+        except SystemExit as e:
+            text = f"Discord refused it: {e}"
+        log(f"/recheck by {interaction.user.id}: {text}")
+        await interaction.followup.send(text, ephemeral=True)
+
     async def updates(interaction: discord.Interaction):
         roles = {r.id for r in getattr(interaction.user, "roles", [])}
         text = await asyncio.to_thread(toggle_updates, interaction.user.id, lambda rid: int(rid) in roles)
@@ -384,11 +429,15 @@ def main():
         if not getattr(client, "_view", False):
             client._view = True
             client.add_view(UpdatesButton())  # (the #releases button keeps working across restarts)
+            client.add_dynamic_items(*testbuilds.items(discord, log))  # (test build buttons: owner-gated)
+        if a.local:
+            log("local test run: no command sync, no polling")
+            return
         if not getattr(client, "_synced", False):
             client._synced = True
             try:
                 await tree.sync(guild=guild)
-                log("/known-issue + /updates registered")
+                log("/known-issue + /updates + /recheck registered")
             except Exception as e:
                 log(f"command sync failed: {e!r}")
         await client.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="for fixes"))

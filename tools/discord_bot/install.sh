@@ -4,7 +4,7 @@
 set -eu
 D=$HOME/lzabot
 mkdir -p "$D" ~/.config/systemd/user
-cp lzabot.py discord_sync.py "$D"/
+cp lzabot.py testbuilds.py discord_sync.py "$D"/
 rm -rf "$D/deps"; cp -r deps "$D/deps"
 PYTHONPATH="$D/deps" python3 -c "import discord; print('discord.py', discord.__version__)"
 cp lzabot.service ~/.config/systemd/user/
