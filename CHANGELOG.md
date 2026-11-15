@@ -6,6 +6,20 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsA`)
 
+## 2026-11-15: LegendsA-v1.3.1
+
+Previous release: LegendsA-v1.3.0. Game version: Pokemon Legends: Arceus 1.1.1. A hotfix: same game code as 1.3.0,
+so nothing is rebuilt on start (the hotfix zip is enough on Windows).
+
+- Linux / Steam Deck: the first start's game code build no longer stops at 16% ("the game code didn't build") on
+  systems without their own C headers (SteamOS and other immutable distros). The AppImage's compiler was missing the
+  x86-64 glibc headers its newer version keeps in a separate folder. Reported on Discord (Steam Deck).
+- Above 30 fps, riding: a jump while dashing goes as high as at 30 fps; a dash jump no longer carries you further
+  forward and hangs in the air before landing; pressing Dash and Jump together no longer sends the mount flying now
+  and then. Measured on Wyrdeer: 2.0 m high and 0.8 s in the air at 30, 60 and 144 fps.
+- Above 30 fps, the balloon races' timer counts real seconds (45 s is 45 s, not 22.5 at 60).
+  Both reported on Discord and confirmed fixed by the reporter on a test build.
+
 ## 2026-11-13: LegendsA-v1.3.0
 
 Previous release: LegendsA-v1.2.1. Game version: Pokemon Legends: Arceus 1.1.1. Same game code as 1.2.1: no rebuild on start, and copies
