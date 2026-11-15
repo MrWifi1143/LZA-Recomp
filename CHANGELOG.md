@@ -5,6 +5,19 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsZA`)
 
+## 2026-11-15: LegendsZA-v1.2.2
+
+Previous release: LegendsZA-v1.2.1. Game version: Pokemon Legends: Z-A 2.0.2. Same game
+code as 1.2.0, so nothing is rebuilt on start (the hotfix zip is enough on Windows).
+
+- New: a 45 fps setting (launcher, the game's Settings, larecomp.ini `fps = 45`). A PC that can't hold 60 dropped to
+  30 and bounced back; 45 holds steady instead. The opening's cinematics run at the right speed at 45.
+- The Z-A Royale card's photo is no longer black. The game builds the card picture on the CPU from a copy of the
+  frame, which stayed on the GPU. Photos taken before stay black until they're retaken.
+- Radeon and others: stretched models, a "wall" of a hat and a bystander's spikes are gone (transform feedback
+  captures were lost when their buffer sat in a part of the GPU heap that wasn't backed yet). Reported on Discord.
+- Low-end CPUs (4 threads or fewer): the game's threads no longer spin while they wait, they sleep at once.
+
 ## 2026-11-15: LegendsZA-v1.2.1
 
 Previous release: LegendsZA-v1.2.0. Game version: Pokemon Legends: Z-A 2.0.2. A Linux hotfix: same game code as 1.2.0, and the program
