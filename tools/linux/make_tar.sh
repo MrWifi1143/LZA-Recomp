@@ -79,7 +79,8 @@ cp tools/{gen,lifter,analyze,nso,passes,patches,simd_c}.py "$D/gen/"
 # the compiler: zig for Linux, only what compiling C for x86-64 glibc Linux needs
 cp -a "$ZIG" "$D/zig"
 Z=$D/zig/lib
-for d in "$Z"/libc/include/*; do case "$(basename "$d")" in any-linux-any|generic-glibc|x86-linux-any|x86_64-linux-any|x86_64-linux-gnu) ;; *) rm -rf "$d" ;; esac; done
+# (zig 0.17 keeps x86-64 glibc's own headers in x86-linux-gnu: without it bits/types.h stops with #error)
+for d in "$Z"/libc/include/*; do case "$(basename "$d")" in any-linux-any|generic-glibc|x86-linux-any|x86-linux-gnu|x86_64-linux-any|x86_64-linux-gnu) ;; *) rm -rf "$d" ;; esac; done
 for d in "$Z"/libc/*; do case "$(basename "$d")" in include|glibc) ;; *) rm -rf "$d" ;; esac; done
 rm -rf "$Z/libcxx" "$Z/libcxxabi" "$Z/libtsan" "$Z/init" "$Z/build-web" "$Z/docs" "$D/zig/doc" "$D/zig/README.md"
 
