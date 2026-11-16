@@ -877,10 +877,13 @@ static int dress_hook(Cpu *c, uint64_t addr) {
         }
         g_pbody = f14 ? f14[0] : -1;
         pthread_mutex_unlock(&g_dress_lock);
-        LOG("[dress] our player's %d parts kept (body type %d)\n", g_npparts, g_pbody);
         extern void world_self_outfit(void);
         world_self_outfit();
-        return 0;
+        uint64_t out = c->x[8];
+        rt_call_original(c, addr);
+        LOG("[dress] our player's %d parts kept (body type %d; its instance %llx)\n", g_npparts, g_pbody,
+            (unsigned long long)(out ? *(const uint64_t *)(uintptr_t)(out + 8) : 0));
+        return 1;
     }
     if (n != 1) return 0;
     DressPart own;
@@ -926,7 +929,9 @@ static int dress_hook(Cpu *c, uint64_t addr) {
     }
     LOG("[dress] townsperson %s (body type %d) dressed in %s's %d parts (character %llx, description %p)\n", own.path, body,
         for_peer ? "another player" : "our player", np, (unsigned long long)owner, (void *)d);
+    uint64_t out = c->x[8];
     rt_call_original(c, addr);
+    LOG("[dress]   its instance %llx\n", (unsigned long long)(out ? *(const uint64_t *)(uintptr_t)(out + 8) : 0));
     return 1;
 }
 // a dressed character's body, once it has one (0: not yet / gone): its object +0x1a0 -> +0x8 -> +0x138
