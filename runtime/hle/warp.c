@@ -488,7 +488,10 @@ static void move_reset_expire(uint64_t frame) {  // (a node that went with its l
     for (int i = 0; i < 8; i++) if (g_move_reset[i].node && frame - g_move_reset[i].at > 600) g_move_reset[i].node = 0;
     pthread_mutex_unlock(&g_move_lock);
 }
-static void stand_in_gone(Peer *p) { p->body = p->node = 0, p->move_node = 0, p->move_ok = 0, p->move_scratch = 0; }  // (with its level)
+static volatile int g_scan_soon;  // (a stand-in went with its level: the next one looked for at once, not within 10 s)
+static void stand_in_gone(Peer *p) {  // (with its level)
+    p->body = p->node = 0, p->move_node = 0, p->move_ok = 0, p->move_scratch = 0, g_scan_soon = 1;
+}
 // what a stand-in is given: their own value; from an older copy (no value) their speed: walking below ~4 m/s (research
 // LARECOMP_WORLD_MOVE=<v>: always v - a test)
 static float stand_in_move(const Peer *p) {
@@ -1222,9 +1225,9 @@ static void ghost_frame(uint64_t frame) {
     }
     trade_frame(me, frame);
     static uint64_t scanned_at;
-    if (want_scan && !g_scanning && me && mn && (!scanned_at || frame - scanned_at > 600)) {
+    if (want_scan && !g_scanning && me && mn && (!scanned_at || frame - scanned_at > 600 || (g_scan_soon && frame - scanned_at > 60))) {
         pthread_t t;
-        g_scanning = 1, g_scan_me = me, scanned_at = frame;
+        g_scanning = 1, g_scan_me = me, scanned_at = frame, g_scan_soon = 0;
         if (pthread_create(&t, NULL, scan_bodies, NULL)) g_scanning = 0; else pthread_detach(t);
     }
 }
