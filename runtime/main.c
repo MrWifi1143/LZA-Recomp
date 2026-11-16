@@ -324,6 +324,14 @@ int main(int argc, char **argv) {
         plugins_load();  // (runtime/plugin.h: before the Vulkan backend, whose instance / device they may extend)
     }
     { extern void discord_start(void); discord_start(); }  // (runtime/discord.c: Discord Rich Presence, if Discord runs)
+    // (Legends: Arceus files of another version - set up by an older release, say - don't boot: the runtime's hooks would
+    // land in other code. The start screen comes up instead and says which version is needed.)
+    char boot_exefs[1100];
+    snprintf(boot_exefs, sizeof boot_exefs, "%s/exefs", root);
+    if (skip_launcher && game_pla_unsupported(boot_exefs)) {
+        LOG("[boot] %s: Legends: Arceus, but not 1.1.1 - the start screen instead of the game\n", boot_exefs);
+        skip_launcher = false;
+    }
     for (bool title = !skip_launcher || force_launcher;;) {
         if (title) {  // start screen: resolution, fullscreen, anti-aliasing, translation, keys (runtime/ui/launcher_lg.mm)
             extern void discord_set_screen(int screen);
@@ -361,7 +369,12 @@ int main(int argc, char **argv) {
             rt_fnhook_set_build(build);
             extern const char *g_game_version;  // (runtime/services/am.c)
             g_game_version = game_version(exefs);
-            if (build == GAME_BUILD_OTHER) LOG("[boot] %s: a build without address tables, 60 fps and wild battles stay off\n", exefs);
+            char mid[17];
+            game_module_id(exefs, mid);
+            if (build == GAME_BUILD_PLA_111) LOG("[boot] %s: Legends: Arceus 1.1.1 (main %s), the supported version\n", exefs, mid);
+            else if (game_pla_unsupported(exefs))
+                LOG("[boot] %s: Legends: Arceus, but an unsupported version (main %s) - this build needs Arceus 1.1.1 (main AEE8F150DDA1B5A8)\n", exefs, mid);
+            else if (build == GAME_BUILD_OTHER) LOG("[boot] %s: not a known build (main %s)\n", exefs, mid);
         }
         { extern void fps60_configure(void); fps60_configure(); }  // (runtime/hle/fps60.c: the launcher's 60 fps option)
         {   // (runtime/hle/fps60.c: the same option, Legends: Arceus)

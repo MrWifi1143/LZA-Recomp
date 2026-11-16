@@ -3,7 +3,7 @@
 // exefs/ is copied into <data root>/extracted (hard links where the file system allows), the RomFS image is copied
 // or built (runtime/romfs_build.c), then the game code is recompiled from exefs/ (runtime/gamebuild.c).
 // No extracted files but .nsp / .xci: read out of those instead (runtime/nxpkg.c), the newest update that makes a
-// supported game, the exefs checked before the old game files are replaced.
+// supported build (1.1.1 for Arceus), the exefs checked before the old game files are replaced.
 #include "gamesetup.h"
 
 #include <SDL3/SDL.h>
@@ -32,6 +32,11 @@
 #define TITLE_PLA 0x01001F5010DFA000ull  // Pokemon Legends: Arceus
 static const uint8_t EEVEE_100[8] = {0x0a, 0x3f, 0x0d, 0x21, 0xe6, 0x7d, 0xad, 0x80};    // Let's Go, Eevee! v1.0.0 main
 static const uint8_t PIKACHU_100[8] = {0x1c, 0x37, 0x56, 0x92, 0xde, 0x4f, 0x4b, 0x87};  // Let's Go, Pikachu! v1.0.0
+// Legends: Arceus 1.1.1 (base game 1.0.0 + the 1.1.1 update, v262144 - its control.nacp's display version 1.1.1):
+// the build the runtime's Arceus fixes are written for (their hooks are at its addresses). Any other (the base game
+// alone, 1.0.0: main 7FCAD279539DE183, size 0x430c000; an older update...) isn't played - the hooks would land in
+// other code: the start screen asks for 1.1.1 (game_pla_unsupported).
+static const uint8_t PLA_111[8] = {0xae, 0xe8, 0xf1, 0x50, 0xdd, 0xa1, 0xb5, 0xa8};
 
 static _Atomic int g_state;
 static _Atomic float g_progress;
@@ -83,7 +88,24 @@ int game_build(const char *exefs) {
     uint64_t pid = program_id(exefs);
     if (n == 8 && !memcmp(id, EEVEE_100, 8) && pid == TITLE_EEVEE) return GAME_BUILD_EEVEE_100;
     if (n == 8 && !memcmp(id, PIKACHU_100, 8) && pid == TITLE_PIKACHU) return GAME_BUILD_PIKACHU_100;
+    if (n == 8 && !memcmp(id, PLA_111, 8) && pid == TITLE_PLA) return GAME_BUILD_PLA_111;
     return GAME_BUILD_OTHER;
+}
+
+bool game_pla_unsupported(const char *exefs) {
+    return program_id(exefs) == TITLE_PLA && game_build(exefs) != GAME_BUILD_PLA_111;
+}
+
+bool game_module_id(const char *exefs, char out[17]) {
+    char p[1100];
+    snprintf(p, sizeof p, "%s/main", exefs);
+    uint8_t id[8];
+    FILE *f = fopen(p, "rb");
+    bool ok = f && !fseek(f, 0x40, SEEK_SET) && fread(id, 1, 8, f) == 8;
+    if (f) fclose(f);
+    if (!ok) { snprintf(out, 17, "?"); return false; }
+    for (int i = 0; i < 8; i++) snprintf(out + 2 * i, 3, "%02X", id[i]);
+    return true;
 }
 
 const char *game_version(const char *exefs) {
@@ -114,7 +136,7 @@ const char *game_name(const char *exefs) {
 }
 
 bool setup_ready(void) {
-    return game_ok(ROOT "/exefs") && is_file(ROOT "/romfs.bin") && gamelib_present(ROOT);
+    return game_ok(ROOT "/exefs") && !game_pla_unsupported(ROOT "/exefs") && is_file(ROOT "/romfs.bin") && gamelib_present(ROOT);
 }
 
 typedef struct { char exefs[1024], romfs[1024], romfs_bin[1024]; bool package; } Found;
@@ -177,7 +199,7 @@ static void build_progress(double f, const char *step) {
 }
 
 // From the player's packages: the exefs of each update found (newest first, then the base game alone) is unpacked
-// into a scratch folder until one is a supported game; then the old game files go and that exefs, the RomFS image
+// into a scratch folder until one is a supported build; then the old game files go and that exefs, the RomFS image
 // (base + that update) and any add-on content are written into extracted/.
 #define UNPACK_TMP "extracted.unpack"
 static bool from_packages(void) {
@@ -186,6 +208,7 @@ static bool from_packages(void) {
     char why[512] = "";
     g_state = SETUP_UNPACKING;
     NxPkg *p = nxpkg_open(g_folder, titles, &err, why, sizeof why);
+    bool pla = p && nxpkg_title(p) == TITLE_PLA;
     if (!p) {
         LOG("[setup] packages in %s: %s\n", g_folder, why);
         g_state = err == NXPKG_NO_KEYS ? SETUP_FAIL_KEYS : err == NXPKG_KEY_MISSING ? SETUP_FAIL_KEYS_OLD
@@ -205,12 +228,15 @@ static bool from_packages(void) {
             g_state = SETUP_FAIL_UNPACK;
             break;
         }
-        bool good = game_ok(UNPACK_TMP "/exefs");
-        LOG("[setup] %s v%u: %s\n", u ? "update" : "base game", nxpkg_update_version(p, u), good ? "supported" : "not this game");
+        bool good = game_ok(UNPACK_TMP "/exefs") && !game_pla_unsupported(UNPACK_TMP "/exefs");
+        char mid[17];
+        game_module_id(UNPACK_TMP "/exefs", mid);
+        LOG("[setup] %s v%u (main %s): %s\n", u ? "update" : "base game", nxpkg_update_version(p, u), mid,
+            good ? "supported" : game_ok(UNPACK_TMP "/exefs") ? "not this build (Legends: Arceus needs 1.1.1)" : "not this game");
         if (good) pick = u;
     }
     if (pick < 0) {
-        if (g_state == SETUP_UNPACKING) g_state = SETUP_FAIL_VERSION;
+        if (g_state == SETUP_UNPACKING) g_state = pla ? SETUP_FAIL_PLA_VERSION : SETUP_FAIL_VERSION;
         plat_remove_tree(UNPACK_TMP);
         nxpkg_close(p);
         return false;
@@ -256,7 +282,8 @@ static void *setup_thread(void *arg) {
     (void)arg;
     g_progress = 0;
     if (!g_folder[0]) {  // only the game code (files set up already, e.g. a new version of the app)
-        if (build_code()) g_state = setup_ready() ? SETUP_DONE : SETUP_FAIL_BUILD;
+        if (game_pla_unsupported(ROOT "/exefs")) g_state = SETUP_FAIL_PLA_VERSION;  // (not built for nothing)
+        else if (build_code()) g_state = setup_ready() ? SETUP_DONE : SETUP_FAIL_BUILD;
         g_running = false;
         return NULL;
     }
@@ -274,7 +301,12 @@ static void *setup_thread(void *arg) {
         }
         g_state = SETUP_FAIL_NOT_FOUND;
     } else if (!game_ok(f.exefs)) g_state = SETUP_FAIL_VERSION;
-    else {
+    else if (game_pla_unsupported(f.exefs)) {  // (the old game files stay: a setup before still plays)
+        char mid[17];
+        game_module_id(f.exefs, mid);
+        LOG("[setup] %s: Legends: Arceus, but not 1.1.1 (main %s) - this build needs Arceus 1.1.1\n", f.exefs, mid);
+        g_state = SETUP_FAIL_PLA_VERSION;
+    } else {
         // (the picked folder can't be our own copy: setting up again deletes that first)
         char a[4096], b[4096];
         mkdir(ROOT, 0755);
@@ -335,7 +367,8 @@ int setup_prepare(const char *game, FILE *out) {
                                        "Not Pokemon Legends: Arceus", "The files couldn't be copied (disk space?)",
                                        "The game code didn't build (lasrecomp.log)", "The game code builder is missing from this copy",
                                        "No keys found for the game files (prod.keys)", "Your keys can't open the game files",
-                                       "Only the update was found, not the base game", "The game files couldn't be read"};
+                                       "Only the update was found, not the base game", "The game files couldn't be read",
+                                       "This needs Pokemon Legends: Arceus version 1.1.1 (the base game and the 1.1.1 update); those files are another version"};
     if (!game || !*game) { fprintf(out, "progress 0 No game given (--game <folder or .nsp / .xci>)\n"); return 2; }
     LOG("[setup] --prepare %s\n", game);
     setup_start(game);

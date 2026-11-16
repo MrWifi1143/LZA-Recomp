@@ -1,5 +1,5 @@
 // Game file setup on the start screen (runtime/gamesetup.c): the player picks the folder with their own
-// Pokémon Legends: Arceus - the dumped .nsp / .xci of the base game and the update (read with their prod.keys,
+// Pokémon Legends: Arceus 1.1.1 - the dumped .nsp / .xci of the base game and the update (read with their prod.keys,
 // runtime/nxpkg.c), or extracted files (exefs/ and romfs/, or a romfs.bin image) -, it is checked, set up in
 // <data root>/extracted (exefs copied, the RomFS image built) and the game code is recompiled there from it
 // (runtime/gamebuild.c). Runs on a background thread; the launcher polls its state.
@@ -32,6 +32,7 @@ enum {
     SETUP_FAIL_KEYS_OLD,    // the keys can't open them (older than the game, or no ticket / title key)
     SETUP_FAIL_NO_BASE,     // the update's package without the base game's
     SETUP_FAIL_UNPACK,      // a package couldn't be read (damaged, or a layout runtime/nxpkg.c doesn't read)
+    SETUP_FAIL_PLA_VERSION, // Legends: Arceus, but not 1.1.1 (game_pla_unsupported; last: --prepare's exit codes stay)
 };
 
 // While the game code is compiled: the estimated minutes left (from the pace so far), -1 before there is one.
@@ -41,9 +42,15 @@ bool setup_ready(void);
 // The game in that exefs/ folder: "Eevee", "Pikachu" or NULL.
 const char *game_name(const char *exefs);
 // The build of that exefs/main: one with address tables (runtime/fnhook.c, tools/patches.py) - the 60 fps and wild
-// battles options and the generator's patches - or GAME_BUILD_OTHER (an update, say: those stay off).
-enum { GAME_BUILD_OTHER, GAME_BUILD_EEVEE_100, GAME_BUILD_PIKACHU_100 };
+// battles options and the generator's patches - or GAME_BUILD_OTHER (an update, say: those stay off). Legends: Arceus:
+// 1.1.1 (main AEE8F150DDA1B5A8), the build the runtime's Arceus fixes are written for.
+enum { GAME_BUILD_OTHER, GAME_BUILD_EEVEE_100, GAME_BUILD_PIKACHU_100, GAME_BUILD_PLA_111 };
 int game_build(const char *exefs);
+// Legends: Arceus, but not 1.1.1 (the base game alone, an older update): not played - the runtime's hooks are at
+// 1.1.1's addresses, other code in any other build (SETUP_FAIL_PLA_VERSION).
+bool game_pla_unsupported(const char *exefs);
+// That exefs/main's module id (the NSO header's build id, its first 8 bytes) in hex, "?" (false) when unreadable.
+bool game_module_id(const char *exefs, char out[17]);
 // Its version ("1.0.0", "1.0.2"...: the builds known by their build id; "1.0.0" otherwise), told to the game (am).
 const char *game_version(const char *exefs);
 // Starts a setup from the picked folder (NULL: only rebuild the game code from files set up already).
