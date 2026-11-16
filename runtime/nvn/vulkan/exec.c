@@ -94,6 +94,11 @@ uint64_t vk_completed_seq(void) {
     return v;
 }
 
+// (the hang watch, runtime/hangwatch.c: who waits for which GPU submission, since when - [0] the render thread, [1] the
+// last other thread; and a submission or sparse bind in progress)
+static struct { volatile uint64_t seq, since; } g_hw_wait[2], g_hw_submit_wait[1];
+static volatile uint64_t g_hw_in_submit, g_hw_in_bind;
+static volatile int g_hw_last_wait_result;
 void vk_wait_seq(uint64_t seq) {
     if (!seq) return;
     VkSemaphoreWaitInfo wi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &g_vk.timeline,
@@ -101,7 +106,11 @@ void vk_wait_seq(uint64_t seq) {
     uint64_t t0 = SDL_GetTicksNS();
     extern void rt_trace(char ev, uint64_t arg);
     rt_trace('G', seq);
+    int hw = rt_on_render_thread() ? 0 : 1;
+    g_hw_wait[hw].seq = seq, g_hw_wait[hw].since = plat_now_ns();
     VkResult r = vkWaitSemaphores(g_vk.dev, &wi, 10ull * 1000000000ull);
+    g_hw_wait[hw].since = 0;
+    g_hw_last_wait_result = (int)r;
     rt_trace('g', 0);
     stat_wait_ns += SDL_GetTicksNS() - t0;
     cum_wait += SDL_GetTicksNS() - t0;
@@ -455,7 +464,9 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
 #else
         __atomic_thread_fence(__ATOMIC_SEQ_CST);
 #endif
+        g_hw_in_submit = plat_now_ns();
         VkResult sr = vkQueueSubmit2(g_vk.queue, 1, &si, VK_NULL_HANDLE);
+        g_hw_in_submit = 0;
         vk_queue_unlock();
         if (sr == VK_ERROR_DEVICE_LOST) vk_devlost_dump();
         VK_CHECK(sr);
@@ -474,6 +485,30 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
 }
 
 void renderer_submit(void) { vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE); }
+
+// The hang watch's report (runtime/hangwatch.c): the GPU timeline and who waits on it, read without locks.
+// vkGetSemaphoreCounterValue is the timeline's fence status (no VkFence is used per submission).
+void vk_hang_report(const char *tag) {
+    uint64_t now = plat_now_ns(), done = 0;
+    VkResult r = g_vk.dev && g_vk.timeline ? vkGetSemaphoreCounterValue(g_vk.dev, g_vk.timeline, &done) : VK_NOT_READY;
+    uint64_t sub = submit_seq;
+    LOG("%sgpu: submissions %llu sent, %llu finished (timeline status %d)%s; a list waits to be sent: %s; last wait result %d\n", tag,
+        (unsigned long long)sub, (unsigned long long)done, (int)r, done < sub ? " - the GPU is behind" : " - the GPU is idle",
+        __atomic_load_n(&g_submit_req, __ATOMIC_RELAXED) ? "yes" : "no", g_hw_last_wait_result);
+    static const char *const who[2] = {"the render thread", "a game thread"};
+    for (int i = 0; i < 2; i++) {
+        uint64_t since = g_hw_wait[i].since;
+        if (since && now > since)
+            LOG("%s%s waits for GPU submission %llu: %.1f s\n", tag, who[i], (unsigned long long)g_hw_wait[i].seq, (now - since) / 1e9);
+    }
+    uint64_t sw = g_hw_submit_wait[0].since;
+    if (sw && now > sw)
+        LOG("%sa game thread waits for the render thread to send submission %llu: %.1f s\n", tag,
+            (unsigned long long)g_hw_submit_wait[0].seq, (now - sw) / 1e9);
+    uint64_t is = g_hw_in_submit, ib = g_hw_in_bind;
+    if (is && now > is) LOG("%sin vkQueueSubmit2 for %.1f s\n", tag, (now - is) / 1e9);
+    if (ib && now > ib) LOG("%sin vkWaitForFences (sparse bind of the guest heap) for %.1f s\n", tag, (now - ib) / 1e9);
+}
 void renderer_wait_seq(uint64_t seq);
 uint64_t renderer_fence_seq(void);
 
@@ -506,6 +541,7 @@ void renderer_wait_seq(uint64_t seq) {
         pthread_mutex_unlock(&seq_lock);
         rt_wake();
         pthread_mutex_lock(&seq_lock);
+        g_hw_submit_wait[0].seq = seq, g_hw_submit_wait[0].since = plat_now_ns();
         while (seq > submit_seq && !g_rt_unwind) {
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
@@ -513,6 +549,7 @@ void renderer_wait_seq(uint64_t seq) {
             if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
             pthread_cond_timedwait(&seq_cond, &seq_lock, &ts);
         }
+        g_hw_submit_wait[0].since = 0;
     }
     uint64_t s = submit_seq;
     pthread_mutex_unlock(&seq_lock);
@@ -3797,7 +3834,9 @@ static bool gmem_sparse_bind(void) {
         vk_queue_lock();
         VkResult r = vkQueueBindSparse(g_vk.queue, 1, &si, fence);
         vk_queue_unlock();
+        g_hw_in_bind = plat_now_ns();
         if (r == VK_SUCCESS) r = vkWaitForFences(g_vk.dev, 1, &fence, VK_TRUE, UINT64_MAX);
+        g_hw_in_bind = 0;
         vkDestroyFence(g_vk.dev, fence, NULL);
         if (r != VK_SUCCESS) FATAL("guest heap: binding its GPU memory failed (%d)\n", (int)r);
     }

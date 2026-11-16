@@ -72,25 +72,47 @@ void hle_override(uint64_t addr, HostFn fn, const char *name) {
     override_count++;
 }
 
-// ---- recent-HLE ring (crash debugging: what the game asked the host just before dying)
-#define HHIST 128
-static __thread struct { const char *name; uint64_t x0, x1, x30; } hhist[HHIST];
-static __thread int hhist_n;
+// ---- recent-HLE ring (crash debugging: what the game asked the host just before dying; the hang watch reads a stuck
+// thread's from another thread - runtime/hangwatch.c). One ring per host thread, kept after it ends (a few KB each:
+// a guest thread's KThread points at it until a reboot).
+void kernel_set_host_ring(HostCallRing *r);  // (kernel.c: the current guest thread's KThread->hcr)
+static __thread HostCallRing *t_hh;
+static __thread HostCallRing t_hh_own;  // (no memory for one: the thread's own, not shown by the hang watch)
+static HostCallRing *hh_self(void) {
+    if (__builtin_expect(!t_hh, 0)) {
+        HostCallRing *r = calloc(1, sizeof *r);
+        if (r) kernel_set_host_ring(r);
+        t_hh = r ? r : &t_hh_own;
+    }
+    return t_hh;
+}
 static void hhist_push(const char *name, Cpu *c) {
-    int i = hhist_n++ & (HHIST - 1);
-    hhist[i].name = name;
-    hhist[i].x0 = c->x[0];
-    hhist[i].x1 = c->x[1];
-    hhist[i].x30 = c->x[30];
+    HostCallRing *h = hh_self();
+    unsigned n = h->n;
+    HostCall *e = &h->r[n & (HOSTCALL_RING - 1)];
+    e->name = name;
+    e->x0 = c->x[0];
+    e->x1 = c->x[1];
+    e->x30 = c->x[30];
+    __atomic_store_n(&h->n, n + 1, __ATOMIC_RELEASE);
+}
+void hostcalls_log(const HostCallRing *h, int max, const char *prefix) {
+    if (!h) return;
+    unsigned total = __atomic_load_n(&h->n, __ATOMIC_ACQUIRE);
+    int n = total < HOSTCALL_RING ? (int)total : HOSTCALL_RING;
+    if (n > max) n = max;
+    unsigned start = total - (unsigned)n;
+    for (int k = 0; k < n; k++) {
+        const HostCall *e = &h->r[(start + (unsigned)k) & (HOSTCALL_RING - 1)];
+        LOG("%s%s x0=%llx x1=%llx lr=%llx\n", prefix, e->name ? e->name : "?", (unsigned long long)e->x0,
+            (unsigned long long)e->x1, (unsigned long long)e->x30);
+    }
 }
 static void hhist_dump(void) {
-    int n = hhist_n < HHIST ? hhist_n : HHIST, start = hhist_n - n;
-    fprintf(stderr, "last %d host calls:\n", n);
-    for (int k = 0; k < n; k++) {
-        int i = (start + k) & (HHIST - 1);
-        fprintf(stderr, "  %s x0=%llx x1=%llx lr=%llx\n", hhist[i].name ? hhist[i].name : "?",
-                (unsigned long long)hhist[i].x0, (unsigned long long)hhist[i].x1, (unsigned long long)hhist[i].x30);
-    }
+    const HostCallRing *h = t_hh;
+    unsigned total = h ? h->n : 0;
+    fprintf(stderr, "last %d host calls:\n", total < HOSTCALL_RING ? (int)total : HOSTCALL_RING);
+    hostcalls_log(h, HOSTCALL_RING, "  ");
 }
 
 static __thread uint64_t unimpl_pc;

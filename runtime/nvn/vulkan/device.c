@@ -533,6 +533,10 @@ static void image_barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, V
 
 typedef struct { uint32_t image; VkSemaphore acquired; bool ok; } Frame;
 static Frame cur_frame;
+// (the hang watch, runtime/hangwatch.c: in the acquire / present since when, the last results)
+static volatile uint64_t g_hw_acquire, g_hw_slot_wait, g_hw_present, g_hw_acquires, g_hw_presents;
+static volatile int g_hw_acquire_result, g_hw_present_result;
+static volatile uint32_t g_hw_acquire_image;
 
 // Acquire the next window image and begin rendering into it (cleared to `clear`). Returns false when there is
 // nothing to draw into (minimised window).
@@ -552,14 +556,21 @@ bool vk_frame_begin(const float clear[4]) {
     if (trace) LOG("[vk] frame begin %dx%d (swapchain %ux%u)\n", w, h, g_vk.sc_extent.width, g_vk.sc_extent.height);
     slot = (slot + 1) % FRAMES;
     if (!acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
+    g_hw_slot_wait = plat_now_ns();
     vk_wait_seq(slot_seq[slot]);
+    g_hw_slot_wait = 0;
     rt_trace('A', 0);
+    g_hw_acquire = plat_now_ns();
     VkResult r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
+    g_hw_acquire = 0;
     rt_trace('a', 0);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
         recreate_swapchain();
+        g_hw_acquire = plat_now_ns();
         r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
+        g_hw_acquire = 0;
     }
+    g_hw_acquire_result = (int)r, g_hw_acquire_image = cur_frame.image, g_hw_acquires++;
     static unsigned acquire_fails;  // (a window the driver keeps reporting out of date: logged once per 600, not every frame)
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
         if (acquire_fails++ % 600 == 0) LOG("[vk] acquire failed: %d (%u times)\n", r, acquire_fails);
@@ -676,7 +687,10 @@ void vk_frame_end(const char *shot_path) {
     if (g_display_csv) pid = display_log_id(), pi.pNext = &pidi;
     vk_queue_lock();
     rt_trace('Q', 0);
+    g_hw_present = plat_now_ns();
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
+    g_hw_present = 0;
+    g_hw_present_result = (int)r, g_hw_presents++;
     rt_trace('q', 0);
     vk_queue_unlock();
     if (g_display_csv) display_log_presented(pid);
@@ -774,6 +788,17 @@ void renderer_save_texture_tex(TexBackend *b, const char *path);
 
 static uint64_t frames, total_frames, g_frame_counter;
 uint64_t renderer_present_count(void) { return total_frames; }
+static uint64_t g_hw_present_done_ns;  // (the hang watch: when the last frame was shown - plat_now_ns)
+uint64_t vk_last_present_ns(void) { return __atomic_load_n(&g_hw_present_done_ns, __ATOMIC_ACQUIRE); }
+void vk_swapchain_hang_report(const char *tag) {
+    uint64_t now = plat_now_ns(), a = g_hw_acquire, w = g_hw_slot_wait, p = g_hw_present;
+    LOG("%sswapchain %ux%u (%u images): %llu acquires (last image %u, result %d), %llu presents (last result %d), frames shown %llu\n",
+        tag, g_vk.sc_extent.width, g_vk.sc_extent.height, g_vk.sc_count, (unsigned long long)g_hw_acquires, g_hw_acquire_image,
+        g_hw_acquire_result, (unsigned long long)g_hw_presents, g_hw_present_result, (unsigned long long)total_frames);
+    if (w && now > w) LOG("%swaits for the GPU to free a frame slot: %.1f s\n", tag, (now - w) / 1e9);
+    if (a && now > a) LOG("%sin vkAcquireNextImageKHR for %.1f s\n", tag, (now - a) / 1e9);
+    if (p && now > p) LOG("%sin vkQueuePresentKHR for %.1f s\n", tag, (now - p) / 1e9);
+}
 uint64_t vk_frame_counter(void) { return g_frame_counter; }
 static float g_shot_crop[4] = {0, 0, 1, 1};
 static double last_fps_time;
@@ -933,6 +958,7 @@ void backend_present(NvnTexture *t) {
     frames++;
     total_frames++;
     g_frame_counter++;
+    __atomic_store_n(&g_hw_present_done_ns, plat_now_ns(), __ATOMIC_RELEASE);
     {   // Opt-in game-present intervals (not the extra menu image shown by the 60 fps mode).
         static FILE *csv;
         static uint64_t previous;
