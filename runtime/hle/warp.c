@@ -223,13 +223,37 @@ __attribute__((constructor)) static void story_init(void) {
 #include <windows.h>
 #endif
 static uint64_t world_now_ns(void) { return plat_now_ns(); }
+// a character's part (its look, below: the townspeople dressed in a player's outfit): {name, .ccdatam, variant}
+typedef struct { char name[32], path[96], var[96]; } DressPart;
+#define MAXPARTS 16
 typedef struct {
     uint64_t id;                     // (the player's own random id; 0 a free slot)
     float pos[3], vel[3], yaw;       // (as last heard)
     float shown[3];                  // (where the stand-in is drawn: smoothed toward pos + vel * age)
     uint64_t heard_ns;
     volatile uint64_t body, node;    // (the stand-in's body, then its node)
+    // their outfit (type 5 packets, part k of n): once every part is heard, the next townsperson made is dressed in
+    // it and stands in for them from then on (dressed_*: that character, the outfit it wears)
+    DressPart parts[MAXPARTS];
+    int nparts, body_type;
+    uint32_t have, hash, dressed_hash, armed_hash;
+    uint64_t dressed_owner, dressed_body, dressed_at;
 } Peer;
+// the shared world's dressing: the next townsperson made wears `want` (its player then waits for it); each one made
+// is kept as {player, owner (the request's +0x30: the character's object), outfit} until its body is found
+static pthread_mutex_t g_dress_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct { uint64_t peer; DressPart parts[MAXPARTS]; int n, body; uint32_t hash; } g_dress_want;
+static struct { uint64_t peer, owner; uint32_t hash; } g_dressed[8];
+static int g_ndressed;
+static DressPart g_pparts[24];   // (our player's parts, as its character was made; g_npparts of them)
+static int g_npparts, g_pbody = -1;
+static uint32_t outfit_hash(const DressPart *p, int n) {
+    uint32_t h = 2166136261u;
+    for (int k = 0; k < n; k++)
+        for (const char *s[3] = {p[k].name, p[k].path, p[k].var}, **q = s; q < s + 3; q++)
+            for (const char *c = *q; ; c++) { h = (h ^ (uint8_t)*c) * 16777619u; if (!*c) break; }
+    return h;
+}
 static Peer g_peers[MAXPEER];
 static uint64_t g_self;               // (this copy's id in the world)
 static volatile int g_scanning;
@@ -239,7 +263,10 @@ static bool g_hooked;
 // ---- packets (both ways the same, little-endian): {u8 type, u8 version 1, u8[6], u64 from, ...}
 //   type 2 where:  f32 x y z, f32 yaw, f32 vx vy vz
 //   type 3 trade asked, 4 trade answered: u64 to, u32 code
-typedef struct { uint8_t type, ver, pad[6]; uint64_t from; union { struct { float p[3], yaw, v[3]; } w; struct { uint64_t to; uint32_t code; } t; }; } WorldPkt;
+//   type 5 outfit: u8 part k, u8 parts n, u8 body type, then three strings (NUL-ended): the part's name, its .ccdatam
+//          ("ik_chara/<dir>/<last>.ccdatam" sent as "<dir>"), its variant (the item and colour); 96 bytes at most
+typedef struct { uint8_t type, ver, pad[6]; uint64_t from; union { struct { float p[3], yaw, v[3]; } w; struct { uint64_t to; uint32_t code; } t;
+    struct { uint8_t k, n, body; char s[77]; } o; }; } WorldPkt;
 
 // transport: the online server through the relay plugin, else (tests) UDP
 static void (*w_send)(const void *, size_t);
@@ -256,6 +283,8 @@ static int (*w_avail)(void);
 static int g_udp = -1;
 static struct sockaddr_in g_udp_peer;
 static float g_off;  // (LARECOMP_GHOST_OFFSET=<m>: one copy shown beside itself, a loopback test)
+static int g_self_test;  // (LARECOMP_GHOST_SELF=1: our own packets count as another player's - one copy, a loopback test)
+static int g_crowd_ok;   // (LARECOMP_GHOST_CROWD=1: a stepped body - the crowd's - may stand in too, research)
 static void udp_send(const void *p, size_t n) { sendto(g_udp, p, n, 0, (struct sockaddr *)&g_udp_peer, sizeof g_udp_peer); }
 static int udp_recv(uint64_t *from, void *p, size_t cap) {
     ssize_t n = recv(g_udp, p, cap, 0);
@@ -265,6 +294,7 @@ static int udp_recv(uint64_t *from, void *p, size_t cap) {
 ssize_t process_vm_readv(pid_t, const struct iovec *, unsigned long, const struct iovec *, unsigned long, unsigned long);
 #else
 static const float g_off = 0;
+static const int g_self_test = 0, g_crowd_ok = 0;
 #endif
 static void world_send(const WorldPkt *k, size_t n) { if (w_send) w_send(k, n); }
 #ifndef _WIN32
@@ -348,7 +378,7 @@ static void *scan_bodies(void *arg) {
             if (!(d > 3 && d < 40)) continue;
             bool skip = false;
             pthread_mutex_lock(&g_body_lock);
-            for (int i = 0; i < NBODY; i++) if (g_bodies[i].o == o && g_frame - g_bodies[i].last <= 30) skip = true;
+            for (int i = 0; i < NBODY; i++) if (g_bodies[i].o == o && g_frame - g_bodies[i].last <= 30 && !g_crowd_ok) skip = true;
             pthread_mutex_unlock(&g_body_lock);
             for (int i = 0; i < MAXPEER; i++) if (g_peers[i].body == o) skip = true;
             if (skip) continue;
@@ -456,6 +486,126 @@ static void trade_frame(uint64_t me, uint64_t frame) {
     }
 }
 
+// ---- outfits: ours sent part by part (type 5), theirs kept per player; a player whose whole outfit is heard gets the
+// next townsperson made dressed in it (below, dress_hook), which then stands in for them
+static uint64_t dressed_body_of(uint64_t owner);
+static void dress_hook_on(void);
+// our outfit as sent: our player's parts; research LARECOMP_WORLD_OUTFIT="<part>=<variant>[;...]" changes some
+// (a test: two copies of one save then look different to each other)
+static int outfit_ours(DressPart *out, int *body) {
+    pthread_mutex_lock(&g_dress_lock);
+    int n = g_npparts < MAXPARTS ? g_npparts : MAXPARTS;
+    memcpy(out, g_pparts, sizeof *out * (size_t)n);
+    *body = g_pbody;
+    pthread_mutex_unlock(&g_dress_lock);
+    const char *e = getenv("LARECOMP_WORLD_OUTFIT");
+    for (const char *q = e; q && *q;) {
+        char name[32] = "", var[96] = "";
+        if (sscanf(q, "%31[^=;]=%95[^;]", name, var) == 2)
+            for (int k = 0; k < n; k++) if (!strcmp(out[k].name, name)) snprintf(out[k].var, sizeof out[k].var, "%s", var);
+        q = strchr(q, ';');
+        if (q) q++;
+    }
+    return n;
+}
+// a part as a type 5 packet's strings: "ik_chara/<dir>/<last>.ccdatam" goes as "<dir>" (0: too long)
+static size_t outfit_put(WorldPkt *k, const DressPart *p) {
+    char dir[96];
+    const char *path = p->path, *slash = strrchr(path, '/');
+    size_t pl = strlen(path);
+    snprintf(dir, sizeof dir, "%s", path);
+    if (!strncmp(path, "ik_chara/", 9) && slash && pl > 8 && !strcmp(path + pl - 8, ".ccdatam")) {
+        size_t dl = (size_t)(slash - path) - 9, ll = (size_t)(path + pl - 8 - (slash + 1));
+        const char *dirlast = path + 9;
+        for (const char *c = path + 9; c < path + 9 + dl; c++) if (*c == '/') dirlast = c + 1;
+        if ((size_t)(slash - dirlast) == ll && !memcmp(dirlast, slash + 1, ll)) snprintf(dir, sizeof dir, "%.*s", (int)dl, path + 9);
+    }
+    size_t a = strlen(p->name) + 1, b = strlen(dir) + 1, c = strlen(p->var) + 1;
+    if (a + b + c > sizeof k->o.s) return 0;
+    memcpy(k->o.s, p->name, a), memcpy(k->o.s + a, dir, b), memcpy(k->o.s + a + b, p->var, c);
+    return 16 + 3 + a + b + c;
+}
+static bool outfit_get(const WorldPkt *k, size_t n, DressPart *p) {
+    if (n <= 16 + 3) return false;
+    const char *s = k->o.s, *end = (const char *)k + n, *f[3];
+    for (int i = 0; i < 3; i++) {
+        f[i] = s;
+        while (s < end && *s) s++;
+        if (s >= end) return false;
+        s++;
+    }
+    snprintf(p->name, sizeof p->name, "%s", f[0]), snprintf(p->var, sizeof p->var, "%s", f[2]);
+    if (strstr(f[1], ".ccdatam")) snprintf(p->path, sizeof p->path, "%s", f[1]);
+    else {
+        const char *last = strrchr(f[1], '/');
+        snprintf(p->path, sizeof p->path, "ik_chara/%s/%s.ccdatam", f[1], last ? last + 1 : f[1]);
+    }
+    return true;
+}
+static void outfit_message(const WorldPkt *k, size_t n) {
+    Peer *p = NULL;
+    for (int i = 0; i < MAXPEER; i++) if (g_peers[i].id == k->from) p = &g_peers[i];
+    if (!p || k->o.n == 0 || k->o.n > MAXPARTS || k->o.k >= k->o.n) return;  // (not heard where they are yet: resent)
+    if (p->nparts != k->o.n) p->nparts = k->o.n, p->have = 0;
+    if (!outfit_get(k, n, &p->parts[k->o.k])) return;
+    p->body_type = k->o.body == 0xff ? -1 : k->o.body;
+    p->have |= 1u << k->o.k;
+    if (p->have != (1u << p->nparts) - 1) return;
+    uint32_t h = outfit_hash(p->parts, p->nparts);
+    if (h == p->hash) return;
+    p->hash = h;
+    LOG("[world] player %016llx's outfit: %d parts (%08x), hat %s, top %s\n", (unsigned long long)p->id, p->nparts, h,
+        p->nparts > 6 ? p->parts[6].var : "?", p->parts[p->nparts - 1].var);
+}
+// (LARECOMP_GHOST_SELF, one copy: we are the other player too - our first townsperson is dressed for "them" at once)
+void world_self_outfit(void) {
+    if (!g_self_test) return;
+    DressPart o[MAXPARTS];
+    int body, n = outfit_ours(o, &body);
+    pthread_mutex_lock(&g_dress_lock);
+    g_dress_want.peer = g_self ^ 2, g_dress_want.n = n, g_dress_want.body = body, g_dress_want.hash = outfit_hash(o, n);
+    memcpy(g_dress_want.parts, o, sizeof o);
+    pthread_mutex_unlock(&g_dress_lock);
+}
+// a player's dressed character: asked for once their outfit is whole, then found (its body) - it stands in from then on;
+// gone (its level, the crowd took it back) - asked for again
+static void outfit_frame(Peer *p, uint64_t frame) {
+    if (p->dressed_body && (!is_body(p->dressed_body) || dressed_body_of(p->dressed_owner) != p->dressed_body)) {
+        LOG("[world] player %016llx's dressed character is gone\n", (unsigned long long)p->id);
+        if (p->body == p->dressed_body) p->body = p->node = 0;
+        p->dressed_body = p->dressed_owner = 0, p->dressed_hash = p->armed_hash = 0;
+    }
+    if (!p->hash || p->dressed_hash == p->hash) return;
+    uint64_t owner = 0;
+    pthread_mutex_lock(&g_dress_lock);
+    for (int i = 0; i < g_ndressed; i++) if (g_dressed[i].peer == p->id && g_dressed[i].hash == p->hash) owner = g_dressed[i].owner;
+    if (!owner && p->armed_hash != p->hash && !g_dress_want.peer) {  // (the next townsperson made: theirs)
+        g_dress_want.peer = p->id, g_dress_want.n = p->nparts, g_dress_want.body = p->body_type, g_dress_want.hash = p->hash;
+        memcpy(g_dress_want.parts, p->parts, sizeof p->parts);
+        p->armed_hash = p->hash, p->dressed_at = 0;  // (the wait for its body starts once it is made)
+        LOG("[world] player %016llx: the next townsperson made wears their outfit\n", (unsigned long long)p->id);
+    }
+    pthread_mutex_unlock(&g_dress_lock);
+    if (!owner) return;
+    uint64_t b = dressed_body_of(owner);
+    if (!b) {
+        if (!p->dressed_at) p->dressed_at = frame;
+        if (frame - p->dressed_at > 1200) {  // (made but never placed in 20 s: another one)
+            pthread_mutex_lock(&g_dress_lock);
+            for (int i = 0; i < g_ndressed; i++) if (g_dressed[i].owner == owner) g_dressed[i] = g_dressed[--g_ndressed], i--;
+            pthread_mutex_unlock(&g_dress_lock);
+            p->armed_hash = 0, p->dressed_at = 0;
+        }
+        return;
+    }
+    p->dressed_hash = p->hash, p->dressed_owner = owner, p->dressed_body = b, p->dressed_at = 0;
+    p->body = b, p->node = 0;  // (its node: found by node_hook at the body's spot)
+    pthread_mutex_lock(&g_dress_lock);
+    for (int i = 0; i < g_ndressed; i++) if (g_dressed[i].peer == p->id && g_dressed[i].owner != owner) g_dressed[i] = g_dressed[--g_ndressed], i--;
+    pthread_mutex_unlock(&g_dress_lock);
+    LOG("[world] player %016llx is shown by a townsperson in their outfit (body %llx)\n", (unsigned long long)p->id, (unsigned long long)b);
+}
+
 static void hooks_on(void) {
     if (g_hooked) return;
     g_hooked = true;
@@ -485,8 +635,10 @@ void ghost_init(void) {  // (the test transport: LARECOMP_GHOST=<my port>,<peer 
     g_udp_peer.sin_family = AF_INET, g_udp_peer.sin_port = htons((uint16_t)peer);
     inet_pton(AF_INET, host, &g_udp_peer.sin_addr);
     g_off = getenv("LARECOMP_GHOST_OFFSET") ? (float)atof(getenv("LARECOMP_GHOST_OFFSET")) : 0;
+    g_self_test = getenv("LARECOMP_GHOST_SELF") != NULL, g_crowd_ok = getenv("LARECOMP_GHOST_CROWD") != NULL;
     w_send = udp_send, w_recv = udp_recv;
     g_world = 1;
+    dress_hook_on();  // (our player's outfit is kept as its character is made: before the world is up)
     LOG("[world] test transport: UDP %d -> %s:%d\n", mine, host, peer);
 #endif
 }
@@ -496,6 +648,7 @@ static void world_transport(uint64_t frame) {
     static uint64_t checked;
     if (g_udp_test() || frame - checked < 60) return;
     checked = frame;
+    if (g_settings.world_players) dress_hook_on();  // (our player's outfit: kept as its character is made)
     void *plugins_symbol(const char *name);
     if (!w_avail) {
         w_avail = (int (*)(void))plugins_symbol("larecomp_world_available");
@@ -532,12 +685,26 @@ static void ghost_frame(uint64_t frame) {
         world_send(&k, 16 + 28);
         sent_ns = now;
     }
+    if (me && frame % 8 == 0) {  // (our outfit, a part every 8 frames: the whole of it every ~2 s)
+        static int part;
+        DressPart o[MAXPARTS];
+        int body, n = outfit_ours(o, &body);
+        if (n) {
+            part = (part + 1) % n;
+            WorldPkt k = {.type = 5, .ver = 1, .from = g_self};
+            k.o.k = (uint8_t)part, k.o.n = (uint8_t)n, k.o.body = (uint8_t)(body < 0 ? 0xff : body);
+            size_t len = outfit_put(&k, &o[part]);
+            if (len) world_send(&k, len);
+        }
+    }
     WorldPkt in;
     uint64_t via;
     int n;
     while (w_recv && (n = w_recv(&via, &in, sizeof in)) >= 16) {
+        if (g_self_test && in.from == g_self) in.from = g_self ^ 2;  // (ourselves, as someone else)
         if (in.ver != 1 || in.from == g_self) continue;
         if (in.type == 3 || in.type == 4) { if (n >= 28) trade_message(&in, frame); continue; }
+        if (in.type == 5) { outfit_message(&in, (size_t)n); continue; }
         if (in.type != 2 || n < 44) continue;
         Peer *p = NULL, *free_p = NULL;
         for (int i = 0; i < MAXPEER; i++) {
@@ -564,6 +731,7 @@ static void ghost_frame(uint64_t frame) {
             memset(p, 0, sizeof *p);
             continue;
         }
+        outfit_frame(p, frame);
         if (p->body && !is_body(p->body)) p->body = p->node = 0;  // (the stand-in went with its level)
         if (!p->body) want_scan = true;
         float age = (float)(now - p->heard_ns) / 1e9f;  // (shown: toward where they should be now, smoothly)
@@ -584,21 +752,24 @@ static void ghost_frame(uint64_t frame) {
 static int ghost_step(Cpu *c, uint64_t addr, uint64_t o) { (void)c, (void)addr, (void)o; return 0; }
 
 
-// ---- (research) LARECOMP_DRESS_NPC=<n>[,<mode>[,<body>]]: the next n townspeople created are built with the player's
-// outfit. A character's creation (CharacterCreationMaster make, 0x70011164d0, x2 a request {u64 description, ...}) is
-// given its template's CharacterCreationMasterComponent (FlatBuffers): 0 its name, 2-12 distances (20, 40, 60...), 14 a
-// body type (the player 1 - so are the teenage boys, schoolkids_m / hope_m / child_a_m; the women 6, ...), 15 its parts
-// - tables {0 name, 1 .ccdatam path, 2 variant} - and 16 (4). A townsperson has one part ("default",
-// savm_cc_vr/trNNNN.ccdatam: one .ccdata of a whole body), the player 13 (base = savm_pc_base, then acc, bag, eyw, ftw,
-// glv, hdw, hrs, lgw, drs, face, lwb, upb from savm_pc, the variant the item worn); everything else is the same. The
-// townsperson's description is copied into guest memory with field 15 pointed at a new parts list: mode 0 the
-// player's 13; 1 the townsperson's own part first, then the player's; 2 the player's with "base" named "default" (the
-// part a townsperson's other components look for). <body>: only townspeople of that body type (1 = the player's).
+// ---- Dressed townspeople: the other players' look. A character's look is its template's
+// CharacterCreationMasterComponent (FlatBuffers), given to the CharacterCreationMaster make (0x70011164d0, x2 a request
+// {u64 description, ..., +0x18 its name's length (6: "Player"), +0x30 the character's object}): 0 its name, 2-12
+// distances (20, 40, 60...), 14 a body type (the player 1 - so are the teenage boys, schoolkids_m / hope_m / child_a_m;
+// the women 6, ...), 15 its parts - tables {0 name, 1 .ccdatam path, 2 variant} - and 16 (4). A townsperson has one part
+// ("default", savm_cc_vr/trNNNN.ccdatam: one .ccdata of a whole body), the player 13 (base = savm_pc_base, then acc, bag,
+// eyw, ftw, glv, hdw, hrs, lgw, drs, face, lwb, upb from savm_pc; the variant is the item and its colour, e.g.
+// "p0_hdw0000_00_default_normal_08"); everything else is the same. A townsperson's description copied into guest memory
+// with field 15 pointed at a player's parts - the player's "base" part named "default", the part a townsperson's other
+// components wait for (named "base", the level never finished loading) - is made, drawn and animated like any
+// townsperson (2026-11-16: 38 in Lumiose, standing and walking): a player-looking character. Its object (the request's
+// +0x30, vtable 0x7003be7358) leads to its body: +0x1a0 -> +0x8 -> +0x138.
+//   The shared world (above) asks for one per player (g_dress_want: their outfit, heard as type 5 packets); research:
+// LARECOMP_DRESS_NPC=<n>[,<mode>[,<body>]] - the next n townspeople wear our own player's outfit: mode 0 the parts as
+// the player's (never loads), 1 the townsperson's own part first, 2 "base" named "default"; <body>: only that body type.
 #define CC_MAKE 0x70011164d0ull
-typedef struct { char name[32], path[96], var[96]; } DressPart;
+#define CHAR_OBJ_VTABLE 0x7003be7358ull
 static int g_dress_left = -1, g_dress_mode, g_dress_body = -1;
-static DressPart g_pparts[24];
-static int g_npparts;
 static uint32_t fb_u32(const uint8_t *b, uint64_t o) { uint32_t v; memcpy(&v, b + o, 4); return v; }
 static const uint8_t *fb_field(const uint8_t *b, uint64_t tab, int f) {  // (the field's address in the table, NULL absent)
     int32_t so; memcpy(&so, b + tab, 4);
@@ -643,7 +814,6 @@ static uint32_t fb_put_parts(uint8_t *d, uint32_t w, const DressPart *parts, int
 }
 void *hle_alloc(uint64_t size);
 static int dress_hook(Cpu *c, uint64_t addr) {
-    if (g_dress_left == 0) return 0;
     uint64_t req = c->x[2], fbp = *(const uint64_t *)(uintptr_t)req;
     if (fbp < HEAP_BASE || fbp >= HEAP_BASE + HEAP_MAX) return 0;
     const uint8_t *b = (const uint8_t *)(uintptr_t)fbp;
@@ -652,28 +822,44 @@ static int dress_hook(Cpu *c, uint64_t addr) {
     if (!f15) return 0;
     const uint8_t *vec = f15 + fb_u32(f15, 0);
     uint32_t n = fb_u32(vec, 0);
-    if (n >= 8 && !g_npparts) {  // (the player: its parts kept)
+    uint64_t name_len = ((const uint64_t *)(uintptr_t)req)[3];
+    if (n >= 8 && (!g_npparts || name_len == 6)) {  // (the player - "Player" - or the first of its kind: its parts kept)
+        pthread_mutex_lock(&g_dress_lock);
+        g_npparts = 0;
         for (uint32_t k = 0; k < n && k < 24; k++) {
             const uint8_t *e = vec + 4 + 4 * k;
             part_of(b, e + fb_u32(e, 0), &g_pparts[g_npparts++]);
         }
-        LOG("[dress] the player's %d parts kept\n", g_npparts);
+        g_pbody = f14 ? f14[0] : -1;
+        pthread_mutex_unlock(&g_dress_lock);
+        LOG("[dress] our player's %d parts kept (body type %d)\n", g_npparts, g_pbody);
+        extern void world_self_outfit(void);
+        world_self_outfit();
         return 0;
     }
-    if (n != 1 || !g_npparts || g_dress_left < 0) return 0;
+    if (n != 1) return 0;
     DressPart own;
     part_of(b, vec + 4 + fb_u32(vec + 4, 0), &own);
     if (!strstr(own.path, "savm_cc_vr")) return 0;  // (townspeople only)
     int body = f14 ? f14[0] : -1;
-    if (g_dress_body >= 0 && body != g_dress_body) return 0;
     DressPart parts[25];
-    int np = 0;
-    if (g_dress_mode == 1) parts[np++] = own;
-    for (int k = 0; k < g_npparts && np < 25; k++) {
-        parts[np] = g_pparts[k];
-        if (g_dress_mode == 2 && !strcmp(parts[np].name, "base")) snprintf(parts[np].name, sizeof parts[np].name, "default");
-        np++;
+    int np = 0, to_body = -1;
+    uint64_t for_peer = 0;
+    uint32_t hash = 0;
+    pthread_mutex_lock(&g_dress_lock);
+    if (g_dress_want.peer) {  // (a player of the shared world waiting for a look)
+        for_peer = g_dress_want.peer, hash = g_dress_want.hash, to_body = g_dress_want.body;
+        for (int k = 0; k < g_dress_want.n; k++) parts[np++] = g_dress_want.parts[k];
+        g_dress_want.peer = 0;
+    } else if (g_dress_left > 0 && g_npparts && (g_dress_body < 0 || body == g_dress_body)) {  // (research)
+        if (g_dress_mode == 1) parts[np++] = own;
+        for (int k = 0; k < g_npparts && np < 25; k++) parts[np++] = g_pparts[k];
+        g_dress_left--;
     }
+    pthread_mutex_unlock(&g_dress_lock);
+    if (!np) return 0;
+    if (for_peer || g_dress_mode == 2)
+        for (int k = 0; k < np; k++) if (!strcmp(parts[k].name, "base")) snprintf(parts[k].name, sizeof parts[k].name, "default");
     // copy the description (8 KB: it and what follows it in its file) into guest memory and add the new parts list
     const uint32_t base = 8192;
     uint8_t *d = hle_alloc(16384);
@@ -681,20 +867,37 @@ static int dress_hook(Cpu *c, uint64_t addr) {
     uint32_t vpos = fb_put_parts(d, base, parts, np);
     uint64_t f15o = (uint64_t)(f15 - b);
     memcpy(d + f15o, &(uint32_t){vpos - (uint32_t)f15o}, 4);
+    if (f14 && to_body >= 0) d[f14 - b] = (uint8_t)to_body;  // (the player's body type: theirs)
     *(uint64_t *)(uintptr_t)req = (uint64_t)(uintptr_t)d;
-    if (g_dress_left > 0) g_dress_left--;
-    LOG("[dress] townsperson %s (body %d) built with the player's %d parts, mode %d (description at %p)\n", own.path, body,
-        g_npparts, g_dress_mode, (void *)d);
-    uint64_t out = c->x[8];
+    uint64_t owner = ((const uint64_t *)(uintptr_t)req)[6];
+    if (for_peer) {
+        pthread_mutex_lock(&g_dress_lock);
+        int i = g_ndressed < 8 ? g_ndressed++ : 7;
+        g_dressed[i].peer = for_peer, g_dressed[i].owner = owner, g_dressed[i].hash = hash;
+        pthread_mutex_unlock(&g_dress_lock);
+    }
+    LOG("[dress] townsperson %s (body type %d) dressed in %s's %d parts (character %llx, description %p)\n", own.path, body,
+        for_peer ? "another player" : "our player", np, (unsigned long long)owner, (void *)d);
     rt_call_original(c, addr);
-    uint64_t r0 = out ? *(const uint64_t *)(uintptr_t)out : 0, r1 = out ? *(const uint64_t *)(uintptr_t)(out + 8) : 0;
-    LOG("[dress]   made: [x8] %llx %llx, x0 %llx\n", (unsigned long long)r0, (unsigned long long)r1, (unsigned long long)c->x[0]);
     return 1;
+}
+// a dressed character's body, once it has one (0: not yet / gone): its object +0x1a0 -> +0x8 -> +0x138
+static uint64_t dressed_body_of(uint64_t owner) {
+    uint64_t v = 0, a = 0, b = 0, body = 0;
+    if (!heap_read(owner, &v, 8) || v != CHAR_OBJ_VTABLE || !heap_read(owner + 0x1a0, &a, 8) || !heap_read(a + 8, &b, 8) ||
+        !heap_read(b + 0x138, &body, 8)) return 0;
+    return heap_read(body, &v, 8) && v == BODY_VTABLE ? body : 0;
+}
+static bool g_dress_hooked;
+static void dress_hook_on(void) {
+    if (g_dress_hooked) return;
+    g_dress_hooked = true;
+    rt_register_fnhook_at(CC_MAKE, dress_hook);
 }
 __attribute__((constructor)) static void dress_init(void) {
     const char *e = getenv("LARECOMP_DRESS_NPC");
     if (!e) return;
     sscanf(e, "%d,%d,%d", &g_dress_left, &g_dress_mode, &g_dress_body);
-    rt_register_fnhook_at(CC_MAKE, dress_hook);
+    dress_hook_on();
     LOG("[dress] the next %d townspeople (body type %d) get the player's outfit, mode %d\n", g_dress_left, g_dress_body, g_dress_mode);
 }
