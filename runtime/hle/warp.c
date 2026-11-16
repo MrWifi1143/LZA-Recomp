@@ -238,6 +238,8 @@ typedef struct {
     int nparts, body_type;
     uint32_t have, hash, dressed_hash, armed_hash;
     uint64_t dressed_owner, dressed_body, dressed_at;
+    uint64_t saved_node;             // (the stand-in's node as it was - put back when another one takes over / they leave)
+    float saved_q[4], saved_t[3];
 } Peer;
 // the shared world's dressing: the next townsperson made wears `want` (its player then waits for it); each one made
 // is kept as {player, owner (the request's +0x30: the character's object), outfit} until its body is found
@@ -329,8 +331,16 @@ static int node_hook(Cpu *c, uint64_t addr) {
     if (p) {
         if (*(const uint64_t *)(uintptr_t)n != NODE_VTABLE) return 0;
         float *q = (float *)(uintptr_t)(n + 0xd0), *t = (float *)(uintptr_t)(n + 0xe0);
+        if (p->saved_node != n) memcpy(p->saved_q, q, 16), memcpy(p->saved_t, t, 12), p->saved_node = n;
         q[0] = 0, q[1] = sinf(p->yaw * 0.5f), q[2] = 0, q[3] = cosf(p->yaw * 0.5f);
         t[0] = p->shown[0] + g_off, t[1] = p->shown[1], t[2] = p->shown[2];
+        static int animvel = -1;  // (research LARECOMP_WORLD_ANIMVEL=1: their speed written into the stand-in's body)
+        if (animvel < 0) animvel = getenv("LARECOMP_WORLD_ANIMVEL") ? atoi(getenv("LARECOMP_WORLD_ANIMVEL")) : 0;
+        uint64_t b = p->body;
+        if (animvel && b && is_body(b)) {
+            float *v = (float *)(uintptr_t)(b + 0xc0), *d = (float *)(uintptr_t)(b + 0xd0), *v2 = (float *)(uintptr_t)(b + 0xe0);
+            for (int k = 0; k < 3; k++) v[k] = v2[k] = k == 1 ? 0 : p->vel[k], d[k] = v[k] / 60.0f;
+        }
         return 0;
     }
     if (*(const uint64_t *)(uintptr_t)n != NODE_VTABLE) return 0;
@@ -486,6 +496,15 @@ static void trade_frame(uint64_t me, uint64_t frame) {
     }
 }
 
+// a stand-in let go: its node back where it stood (a station NPC's isn't written again by the game: it stayed where
+// the player was last seen, 2026-11-16) - unless it went with its level
+static void standin_release(Peer *p) {
+    uint64_t n = p->saved_node, b = p->body;
+    p->node = 0, p->saved_node = 0;
+    if (!n || !b || !is_body(b) || *(const uint64_t *)(uintptr_t)n != NODE_VTABLE) return;
+    memcpy((void *)(uintptr_t)(n + 0xd0), p->saved_q, 16), memcpy((void *)(uintptr_t)(n + 0xe0), p->saved_t, 12);
+}
+
 // ---- outfits: ours sent part by part (type 5), theirs kept per player; a player whose whole outfit is heard gets the
 // next townsperson made dressed in it (below, dress_hook), which then stands in for them
 static uint64_t dressed_body_of(uint64_t owner);
@@ -599,6 +618,7 @@ static void outfit_frame(Peer *p, uint64_t frame) {
         return;
     }
     p->dressed_hash = p->hash, p->dressed_owner = owner, p->dressed_body = b, p->dressed_at = 0;
+    if (p->body != b) standin_release(p);  // (the plain stand-in goes back)
     p->body = b, p->node = 0;  // (its node: found by node_hook at the body's spot)
     pthread_mutex_lock(&g_dress_lock);
     for (int i = 0; i < g_ndressed; i++) if (g_dressed[i].peer == p->id && g_dressed[i].owner != owner) g_dressed[i] = g_dressed[--g_ndressed], i--;
@@ -662,7 +682,10 @@ static void world_transport(uint64_t frame) {
     w_enable(want);
     g_world = want;
     LOG("[world] %s\n", want ? "on: other players on the online server are shown" : "off");
-    if (!want) memset(g_peers, 0, sizeof g_peers);  // (their stand-ins go back where they stood)
+    if (!want) {  // (their stand-ins go back where they stood)
+        for (int i = 0; i < MAXPEER; i++) if (g_peers[i].id) standin_release(&g_peers[i]);
+        memset(g_peers, 0, sizeof g_peers);
+    }
 }
 
 static void ghost_frame(uint64_t frame) {
@@ -728,6 +751,7 @@ static void ghost_frame(uint64_t frame) {
         if (!p->id) continue;
         if (now - p->heard_ns > PEER_TIMEOUT_NS) {  // (gone quiet: their stand-in goes back)
             LOG("[world] player %016llx left\n", (unsigned long long)p->id);
+            standin_release(p);
             memset(p, 0, sizeof *p);
             continue;
         }
