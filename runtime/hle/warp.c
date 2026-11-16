@@ -249,7 +249,9 @@ typedef struct {
     uint32_t look_have, look_hash;
     int look_state;                  // (0 not checked yet, 1 the game has everything in it, 2 refused: their outfit alone)
     uint64_t via;                    // (who the transport says sent their packets: the server's id - their id can't be borrowed)
-    uint64_t armed_at;               // (when their last dressing was asked for: at most one every 10 s)
+    uint64_t armed_at, arm_wait;     // (when their last dressing was asked for; the wait before the next: 10 s, doubled - up to
+                                     //  1 min - each time it went to one of the crowd, back to 10 s once one stands in)
+    uint64_t cand_body, cand_at;     // (their dressed character's body, first seen: watched a second before it stands in)
     int refused;                     // (outfit parts refused, logged once)
     uint64_t look_refused_at;        // (a refused look logged at most every 30 s: a changing bad look mustn't flood the log)
     // their walk (below, stand_in_walk): the locomotion value their own player's animation has (0 standing, 0.5 walking,
@@ -974,6 +976,7 @@ static void outfit_frame(Peer *p, uint64_t frame) {
         LOG("[world] player %016llx's dressed character walks with the crowd: another one asked for\n", (unsigned long long)p->id);
         stray_add(p->dressed_body, frame);                          // its node - it can't stand in, 2026-11-16)
         dressed_drop(p->dressed_owner);
+        p->arm_wait = p->arm_wait ? (p->arm_wait * 2 > 3600 ? 3600 : p->arm_wait * 2) : 1200;
         if (p->body == p->dressed_body) standin_release(p), p->body = 0;
         p->dressed_body = p->dressed_owner = 0, p->dressed_hash = p->armed_hash = 0;
     }
@@ -1004,7 +1007,7 @@ static void outfit_frame(Peer *p, uint64_t frame) {
     uint64_t owner = 0;
     pthread_mutex_lock(&g_dress_lock);
     for (int i = 0; i < g_ndressed; i++) if (g_dressed[i].peer == p->id && g_dressed[i].hash == key) owner = g_dressed[i].owner;
-    if (!owner && p->armed_hash != key && !g_dress_want.peer && (!p->armed_at || frame - p->armed_at > 600) && g_dressings < 400) {
+    if (!owner && p->armed_hash != key && !g_dress_want.peer && (!p->armed_at || frame - p->armed_at > (p->arm_wait ? p->arm_wait : 600)) && g_dressings < 400) {
         g_dress_want.peer = p->id, g_dress_want.n = p->nparts, g_dress_want.body = p->body_type, g_dress_want.hash = key;  // (the next
         g_dress_want.look = p->look, g_dress_want.look_ok = p->look_state == 1;                                         // made: theirs)
         p->armed_at = frame;
@@ -1024,9 +1027,12 @@ static void outfit_frame(Peer *p, uint64_t frame) {
         LOG("[world] player %016llx's dressed character walks with the crowd: another one asked for\n", (unsigned long long)p->id);
         stray_add(b, frame);
         dressed_drop(owner), p->armed_hash = 0, p->dressed_at = 0;
+        p->arm_wait = p->arm_wait ? (p->arm_wait * 2 > 3600 ? 3600 : p->arm_wait * 2) : 1200;
         return;
     }
-    p->dressed_hash = key, p->dressed_owner = owner, p->dressed_body = b, p->dressed_at = 0;
+    if (p->cand_body != b) p->cand_body = b, p->cand_at = frame;  // (a walker of the crowd is made standing too: only its
+    if (frame - p->cand_at < 60) return;                          //  steps tell - the plain stand-in stays meanwhile)
+    p->dressed_hash = key, p->dressed_owner = owner, p->dressed_body = b, p->dressed_at = 0, p->arm_wait = 0;
     if (p->body != b) standin_release(p);  // (the plain stand-in goes back)
     p->body = b, p->node = 0;  // (its node: found by node_hook at the body's spot)
     pthread_mutex_lock(&g_dress_lock);
