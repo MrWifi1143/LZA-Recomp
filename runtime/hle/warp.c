@@ -286,7 +286,7 @@ static int g_udp = -1;
 static struct sockaddr_in g_udp_peer;
 static float g_off;  // (LARECOMP_GHOST_OFFSET=<m>: one copy shown beside itself, a loopback test)
 static int g_self_test;  // (LARECOMP_GHOST_SELF=1: our own packets count as another player's - one copy, a loopback test)
-static int g_crowd_ok;   // (LARECOMP_GHOST_CROWD=1: a stepped body - the crowd's - may stand in too, research)
+static int g_crowd_ok;   // (LARECOMP_GHOST_CROWD=1: a stepped body - the crowd's - may stand in too; 2: only those, research)
 static void udp_send(const void *p, size_t n) { sendto(g_udp, p, n, 0, (struct sockaddr *)&g_udp_peer, sizeof g_udp_peer); }
 static int udp_recv(uint64_t *from, void *p, size_t cap) {
     ssize_t n = recv(g_udp, p, cap, 0);
@@ -388,7 +388,9 @@ static void *scan_bodies(void *arg) {
             if (!(d > 3 && d < 40)) continue;
             bool skip = false;
             pthread_mutex_lock(&g_body_lock);
-            for (int i = 0; i < NBODY; i++) if (g_bodies[i].o == o && g_frame - g_bodies[i].last <= 30 && !g_crowd_ok) skip = true;
+            bool stepped = false;
+            for (int i = 0; i < NBODY; i++) if (g_bodies[i].o == o && g_frame - g_bodies[i].last <= 30) stepped = true;
+            if (g_crowd_ok == 2 ? !stepped : stepped && !g_crowd_ok) skip = true;
             pthread_mutex_unlock(&g_body_lock);
             for (int i = 0; i < MAXPEER; i++) if (g_peers[i].body == o) skip = true;
             if (skip) continue;
@@ -588,7 +590,26 @@ void world_self_outfit(void) {
 }
 // a player's dressed character: asked for once their outfit is whole, then found (its body) - it stands in from then on;
 // gone (its level, the crowd took it back) - asked for again
+static bool body_stepped(uint64_t b, uint64_t frame) {  // (the crowd's and the player's bodies are stepped)
+    bool st = false;
+    pthread_mutex_lock(&g_body_lock);
+    for (int i = 0; i < NBODY; i++) if (g_bodies[i].o == b && frame - g_bodies[i].last <= 30) st = true;
+    pthread_mutex_unlock(&g_body_lock);
+    return st;
+}
+static void dressed_drop(uint64_t owner) {
+    pthread_mutex_lock(&g_dress_lock);
+    for (int i = 0; i < g_ndressed; i++) if (g_dressed[i].owner == owner) g_dressed[i] = g_dressed[--g_ndressed], i--;
+    pthread_mutex_unlock(&g_dress_lock);
+}
 static void outfit_frame(Peer *p, uint64_t frame) {
+    if (g_crowd_ok == 2) return;  // (research: the crowd's stand-ins only)
+    if (p->dressed_body && body_stepped(p->dressed_body, frame)) {  // (one of the crowd: its model follows the crowd, not
+        LOG("[world] player %016llx's dressed character walks with the crowd: another one asked for\n", (unsigned long long)p->id);
+        dressed_drop(p->dressed_owner);                             // its node - it can't stand in, 2026-11-16)
+        if (p->body == p->dressed_body) standin_release(p), p->body = 0;
+        p->dressed_body = p->dressed_owner = 0, p->dressed_hash = p->armed_hash = 0;
+    }
     if (p->dressed_body && (!is_body(p->dressed_body) || dressed_body_of(p->dressed_owner) != p->dressed_body)) {
         LOG("[world] player %016llx's dressed character is gone\n", (unsigned long long)p->id);
         if (p->body == p->dressed_body) p->body = p->node = 0;
@@ -609,12 +630,12 @@ static void outfit_frame(Peer *p, uint64_t frame) {
     uint64_t b = dressed_body_of(owner);
     if (!b) {
         if (!p->dressed_at) p->dressed_at = frame;
-        if (frame - p->dressed_at > 1200) {  // (made but never placed in 20 s: another one)
-            pthread_mutex_lock(&g_dress_lock);
-            for (int i = 0; i < g_ndressed; i++) if (g_dressed[i].owner == owner) g_dressed[i] = g_dressed[--g_ndressed], i--;
-            pthread_mutex_unlock(&g_dress_lock);
-            p->armed_hash = 0, p->dressed_at = 0;
-        }
+        if (frame - p->dressed_at > 1200) dressed_drop(owner), p->armed_hash = 0, p->dressed_at = 0;  // (never placed in 20 s)
+        return;
+    }
+    if (body_stepped(b, frame)) {  // (one of the crowd: see above)
+        LOG("[world] player %016llx's dressed character walks with the crowd: another one asked for\n", (unsigned long long)p->id);
+        dressed_drop(owner), p->armed_hash = 0, p->dressed_at = 0;
         return;
     }
     p->dressed_hash = p->hash, p->dressed_owner = owner, p->dressed_body = b, p->dressed_at = 0;
@@ -655,7 +676,7 @@ void ghost_init(void) {  // (the test transport: LARECOMP_GHOST=<my port>,<peer 
     g_udp_peer.sin_family = AF_INET, g_udp_peer.sin_port = htons((uint16_t)peer);
     inet_pton(AF_INET, host, &g_udp_peer.sin_addr);
     g_off = getenv("LARECOMP_GHOST_OFFSET") ? (float)atof(getenv("LARECOMP_GHOST_OFFSET")) : 0;
-    g_self_test = getenv("LARECOMP_GHOST_SELF") != NULL, g_crowd_ok = getenv("LARECOMP_GHOST_CROWD") != NULL;
+    g_self_test = getenv("LARECOMP_GHOST_SELF") != NULL, g_crowd_ok = getenv("LARECOMP_GHOST_CROWD") ? atoi(getenv("LARECOMP_GHOST_CROWD")) : 0;
     w_send = udp_send, w_recv = udp_recv;
     g_world = 1;
     dress_hook_on();  // (our player's outfit is kept as its character is made: before the world is up)
@@ -870,6 +891,9 @@ static int dress_hook(Cpu *c, uint64_t addr) {
     int np = 0, to_body = -1;
     uint64_t for_peer = 0;
     uint32_t hash = 0;
+    // (any townsperson: station NPCs - made with their level or streamed in as the player walks - can stand in; one
+    // of the crowd (made alone while the player stands, its body stepped) can't - its model follows the crowd, not its
+    // node - and is let go once its body is seen stepped, 2026-11-16: the dressed walker then keeps their look)
     pthread_mutex_lock(&g_dress_lock);
     if (g_dress_want.peer) {  // (a player of the shared world waiting for a look)
         for_peer = g_dress_want.peer, hash = g_dress_want.hash, to_body = g_dress_want.body;
