@@ -7104,7 +7104,7 @@ static TexBackend *ip_hold_copy(TexBackend *src) {
         d->samples = 1; d->aspect = VK_IMAGE_ASPECT_COLOR_BIT; d->base_type = VK_IMAGE_VIEW_TYPE_2D;
         vk_image_init_layout(vk_cmd(), d->image, d->aspect);
     }
-    d->sx = src->sx; d->sy = src->sy; d->scalable = src->scalable;
+    d->sx = src->sx; d->sy = src->sy; d->scalable = src->scalable; d->fit = src->fit;
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
     VkImageCopy rg = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},

@@ -98,6 +98,7 @@ typedef struct TexBackend {
     uint32_t glyph_gen;
     uint64_t data_hash, sample_hash, checked_frame, full_frame;
     bool scalable, presented;
+    bool fit, nofit;     // (nofit: filled from memory, kept at its own size) fit: drawn smaller than the game made it, to fit the screen (textures.c tex_fit): sx / sy its scale
     uint64_t touched_frame, frame_cleared;
     uint32_t level_gen;
     float sx, sy;

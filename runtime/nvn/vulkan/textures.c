@@ -162,6 +162,26 @@ static bool tex_scalable(const NvnTexture *t) {
     return a > 1.74f && a < 1.81f;
 }
 
+// Legends Z-A below 1536 x 864 (hle/za_fixes.c sets g_tex_fit_w / h to its screen when that's smaller than 1920 x 1080):
+// the Quasartico broadcast draws its hologram scene into a target the game sizes from the Switch's own screen - 0.8 of
+// 1920 x 1080, 1536 x 864, whatever ours is - against the screen's depth buffer. On the Switch that depth (1920 x 1080)
+// covers it; a 1416 x 800 one (a Steam Deck) doesn't, a pass only reaches as far as its smallest attachment, and the
+// target's right and bottom strip was never drawn: the upscale to the screen showed whatever that memory held there
+// (garbage on AMD). Such a target - 16:9, a render target, larger than the screen, no larger than 1920 x 1080 - is
+// made at the screen's size instead and drawn scaled into it (as Legends: Arceus's scaled targets are: viewports and
+// fetches follow sx / sy, sampling is by normalized coordinates already).
+uint32_t g_tex_fit_w, g_tex_fit_h;
+static bool tex_fit(const NvnTexture *t, float *sx, float *sy) {
+    if (!g_tex_fit_w || !g_tex_fit_h || ENV("LARECOMP_NO_FIT")) return false;
+    if (t->target != 1 || t->samples > 1 || !(t->flags & 8) || renderer_format_is_depth(t->format)) return false;
+    if (t->width > 1920 || t->height > 1080 || (t->width <= g_tex_fit_w && t->height <= g_tex_fit_h)) return false;
+    float a = (float)t->width / (float)t->height;
+    if (a < 1.74f || a > 1.81f) return false;
+    *sx = t->width > g_tex_fit_w ? (float)g_tex_fit_w / (float)t->width : 1.0f;
+    *sy = t->height > g_tex_fit_h ? (float)g_tex_fit_h / (float)t->height : 1.0f;
+    return true;
+}
+
 bool renderer_texture_first_write(NvnTexture *t) {
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;
     uint64_t total_frames = renderer_present_count();
@@ -205,7 +225,7 @@ bool renderer_texture_presented(NvnTexture *t) {
 
 void renderer_texture_scale(NvnTexture *t, float *sx, float *sy) {
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;
-    if (b && b->scalable) { *sx = b->sx; *sy = b->sy; }
+    if (b && (b->scalable || b->fit)) { *sx = b->sx; *sy = b->sy; }
     else { *sx = 1; *sy = 1; }
 }
 
@@ -241,10 +261,17 @@ void vk_collect_dead(void) {
 
 static void create_image(NvnTexture *t, TexBackend *b) {
     VkFmt mf = fmt_of(t->format);
-    b->sx = b->scalable ? g_rs_x : 1;
-    b->sy = b->scalable ? g_rs_y : 1;
+    float fx = 1, fy = 1;
+    b->fit = !b->scalable && !b->nofit && tex_fit(t, &fx, &fy);
+    b->sx = b->scalable ? g_rs_x : fx;
+    b->sy = b->scalable ? g_rs_y : fy;
     uint32_t tw = t->width ? t->width : 1, th = t->height ? t->height : 1;
-    if (b->scalable) {
+    if (b->fit) {
+        static int nlog;
+        if (nlog++ < 8) LOG("[vk] target %ux%u fmt %#x larger than the screen: made at %ux%u and drawn scaled into it\n", tw, th,
+                            t->format, (unsigned)lroundf(tw * b->sx), (unsigned)lroundf(th * b->sy));
+    }
+    if (b->scalable || b->fit) {
         tw = (uint32_t)lroundf(tw * b->sx); th = (uint32_t)lroundf(th * b->sy);
         if (tw < 1) tw = 1;
         if (th < 1) th = 1;
@@ -338,6 +365,20 @@ static void create_image(NvnTexture *t, TexBackend *b) {
         VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
         vkCmdPipelineBarrier2(cb, &di);
     }
+    static int poison = -1;  // (research: LARECOMP_POISON_RT=1: new color targets magenta - shows reads of never-drawn pixels)
+    if (poison < 0) poison = getenv("LARECOMP_POISON_RT") && *getenv("LARECOMP_POISON_RT") == '1';
+    if (poison && !depthfmt && (b->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
+        VkCommandBuffer cb = vk_upload_cmd();
+        VkClearColorValue m = {{1.0f, 0.0f, 1.0f, 1.0f}};
+        if (vf == VK_FORMAT_R8G8B8A8_UINT || vf == VK_FORMAT_R16G16B16A16_UINT || vf == VK_FORMAT_R32G32B32A32_UINT ||
+            vf == VK_FORMAT_R32_UINT || vf == VK_FORMAT_R32G32_UINT || vf == VK_FORMAT_R16_UINT || vf == VK_FORMAT_R8_UINT)
+            m = (VkClearColorValue){.uint32 = {0, 0, 0, 0}};
+        VkImageSubresourceRange rg = {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
+        vkCmdClearColorImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, &m, 1, &rg);
+        vk_full_barrier(cb);
+        LOG("[poison] frame %llu: new target %ux%u fmt %#x vk %d at %llx flags %#x scalable %d\n",
+            (unsigned long long)renderer_present_count(), tw, th, t->format, (int)vf, (unsigned long long)t->addr, t->flags, b->scalable);
+    }
 }
 
 static void defer(Dead d) {
@@ -405,6 +446,13 @@ static TexBackend *tex_backend(NvnTexture *t) {
 // the window and the full-size copies overran them (device lost). Such a texture stays at its own size from then on.
 void vk_tex_unscale(NvnTexture *t) {
     TexBackend *b = tex_backend(t);
+    if (b->fit) {  // (filled from memory: its own size after all)
+        LOG("[vk] texture %ux%u at %llx filled from memory: not fitted to the screen\n", t->width, t->height, (unsigned long long)t->addr);
+        b->nofit = true;
+        destroy_image(b);
+        create_image(t, b);
+        return;
+    }
     if (!b->scalable) return;
     b->scalable = false;
     if (b->sx != 1 || b->sy != 1) {

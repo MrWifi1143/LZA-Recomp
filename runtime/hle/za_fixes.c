@@ -296,6 +296,10 @@ static int config_read(Cpu *c, uint64_t addr) {
     za_screen_size(&sw, &sh);
     if (sw != 1920 || sh != 1080) {
         g_res_sw = sw, g_res_sh = sh;
+        // a smaller screen: targets the game sizes from the Switch's 1920 x 1080 that come out larger are fitted to it
+        // (nvn/vulkan/textures.c tex_fit: the broadcast's 1536 x 864 against the screen's depth)
+        extern uint32_t g_tex_fit_w, g_tex_fit_h;
+        if (sw < 1536 || sh < 864) g_tex_fit_w = (uint32_t)sw, g_tex_fit_h = (uint32_t)sh;
         static bool hooked;
         if (!hooked) hooked = true, rt_register_fnhook_at(ZA_RES_SCALE, res_scale_hook);
         uint64_t *w = (uint64_t *)(uintptr_t)(info + 0x10), *h = (uint64_t *)(uintptr_t)(info + 0x18);
