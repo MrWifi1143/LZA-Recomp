@@ -37,6 +37,8 @@ static volatile uint64_t g_frame;  // (the presents so far: warp_frame)
 static bool is_body(uint64_t o) { return o >= HEAP_BASE && o < HEAP_BASE + HEAP_MAX && *(const uint64_t *)(uintptr_t)o == BODY_VTABLE; }
 
 static int ghost_step(Cpu *c, uint64_t addr, uint64_t o);  // (below: the shared world)
+static void stray_frame(uint64_t frame);
+static void stray_add(uint64_t body, uint64_t frame);
 static volatile int g_world;   // (the shared world on: sending and showing - below)
 static bool g_body_hooks;      // (body_hook registered)
 static int body_hook(Cpu *c, uint64_t addr) {
@@ -245,10 +247,14 @@ typedef struct {
     float saved_q[4], saved_t[3];
     Look look;                       // (their real look: type 6 packets, 2 pieces; worn by their dressed character once whole)
     uint32_t look_have, look_hash;
+    int look_state;                  // (0 not checked yet, 1 the game has everything in it, 2 refused: their outfit alone)
+    uint64_t via;                    // (who the transport says sent their packets: the server's id - their id can't be borrowed)
+    uint64_t armed_at;               // (when their last dressing was asked for: at most one every 10 s)
+    int refused;                     // (outfit parts refused, logged once)
     // their walk (below, stand_in_walk): the locomotion value their own player's animation has (0 standing, 0.5 walking,
     // 1 running, 1.5 dashing; -1 not sent - an older copy: from their speed) and what their stand-in was last given
     float move, move_given;
-    uint64_t move_node, move_bb, move_at, move_given_at, move_scratch;
+    uint64_t move_node, move_bb, move_at, move_given_at, move_scratch, move_tried;
     uint32_t move_idx;
     int move_ok;
 } Peer;
@@ -256,7 +262,8 @@ static bool look_ours(Look *l);
 // the shared world's dressing: the next townsperson made wears `want` (its player then waits for it); each one made
 // is kept as {player, owner (the request's +0x30: the character's object), outfit} until its body is found
 static pthread_mutex_t g_dress_lock = PTHREAD_MUTEX_INITIALIZER;
-static struct { uint64_t peer; DressPart parts[MAXPARTS]; int n, body; uint32_t hash; Look look; } g_dress_want;
+static struct { uint64_t peer; DressPart parts[MAXPARTS]; int n, body; uint32_t hash; Look look; bool look_ok; } g_dress_want;
+static int g_dressings;  // (townspeople dressed for other players so far: each takes 16 KB of HLE memory - capped)
 static struct { uint64_t peer, owner; uint32_t hash; } g_dressed[8];
 static int g_ndressed;
 static DressPart g_pparts[24];   // (our player's parts, as its character was made; g_npparts of them)
@@ -305,7 +312,7 @@ static int g_crowd_ok;   // (LARECOMP_GHOST_CROWD=1: a stepped body - the crowd'
 static void udp_send(const void *p, size_t n) { sendto(g_udp, p, n, 0, (struct sockaddr *)&g_udp_peer, sizeof g_udp_peer); }
 static int udp_recv(uint64_t *from, void *p, size_t cap) {
     ssize_t n = recv(g_udp, p, cap, 0);
-    (void)from;
+    *from = 0;  // (a test: no one vouches for the sender)
     return n > 0 ? (int)n : 0;
 }
 ssize_t process_vm_readv(pid_t, const struct iovec *, unsigned long, const struct iovec *, unsigned long, unsigned long);
@@ -407,6 +414,50 @@ static int bb_set_hook(Cpu *c, uint64_t addr) {
     if (isfinite(v)) g_me_move = v;
     return 0;
 }
+// ---- No Talk prompt by a stand-in (its Talk is kept from the game anyway - A there asks for a trade). A townsperson's
+// InteractNPC component (vtable 0x7003ce9540) offers "Talk" from its per-frame 0x7000d44050 (x0 the component); its +0x40
+// is a handle to the character's animation component (+0x28 of an object with vtable 0x7003d2a8e8), whose blackboard
+// ([[E +0x20] + 0x128] for h = [[comp+0x2038]+0x80], E = [0x7003ec21c8] + (h & 0xfffff) * 32, [E+0x10] == h) is the
+// one its node's component holds - the stand-in's (found 2026-11-16). That update is skipped for a stand-in's.
+#define INTERACT_NPC_UPDATE 0x7000d44050ull
+#define HANDLE_TABLE_PTR 0x7003ec21c8ull
+static uint64_t handle_obj(uint64_t h) {  // (a handle's object, 0: none / stale)
+    uint64_t tab = 0, id = 0, o = 0;
+    if (!h || !heap_read(HANDLE_TABLE_PTR, &tab, 8) || !tab) return 0;
+    uint64_t e = tab + (h & 0xfffff) * 32;
+    if (!heap_read(e + 0x10, &id, 8) || id != h || !heap_read(e + 0x20, &o, 8)) return 0;
+    return o;
+}
+static uint64_t interact_bb(uint64_t comp) {  // (an InteractNPC component's character's blackboard, 0: not known)
+    uint64_t h = 0, ac = 0, x = 0, h2 = 0, o = 0, bb = 0, v = 0;
+    if (!heap_read(comp + 0x40, &h, 8) || !(ac = handle_obj(h)) || !heap_read(ac - 0x28 + 0x2038, &x, 8) || !heap_read(x + 0x80, &h2, 8) ||
+        !(o = handle_obj(h2)) || !heap_read(o + 0x128, &bb, 8) || !heap_read(bb, &v, 8) || v != BB_VTABLE) return 0;
+    return bb;
+}
+static int interact_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    if (!g_world) return 0;
+    bool any = false;
+    for (int i = 0; i < MAXPEER; i++) any |= g_peers[i].id && g_peers[i].move_ok;
+    if (!any) return 0;
+    static struct { uint64_t comp, bb, at; } cache[64];
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    uint64_t comp = c->x[0], f = g_frame, bb = 0;
+    unsigned slot = (unsigned)(comp >> 5) & 63;
+    pthread_mutex_lock(&lock);
+    bool have = cache[slot].comp == comp && f - cache[slot].at < 120;
+    if (have) bb = cache[slot].bb;
+    pthread_mutex_unlock(&lock);
+    if (!have) {
+        bb = interact_bb(comp);
+        pthread_mutex_lock(&lock);
+        cache[slot].comp = comp, cache[slot].bb = bb, cache[slot].at = f;
+        pthread_mutex_unlock(&lock);
+    }
+    if (!bb) return 0;
+    for (int i = 0; i < MAXPEER; i++) if (g_peers[i].id && g_peers[i].move_ok && g_peers[i].move_bb == bb) return 1;  // (no Talk)
+    return 0;
+}
 // a let-go stand-in back to standing ("move" 0) - from the next update of its node (a guest thread)
 static struct { uint64_t node, bb, scratch, at; uint32_t idx; } g_move_reset[8];
 static pthread_mutex_t g_move_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -453,13 +504,15 @@ static float stand_in_move(const Peer *p) {
 static void stand_in_walk(Cpu *c, Peer *p, uint64_t node) {
     uint64_t f = g_frame;
     if (__atomic_exchange_n(&p->move_at, f, __ATOMIC_ACQ_REL) == f) return;
-    if (p->move_node != node) {
-        if (p->move_node) stand_in_stop(p);
-        p->move_node = node, p->move_bb = anim_bb_of_node(node), p->move_given = -1;
+    bool fresh = p->move_node != node;
+    if (fresh || (!p->move_ok && f - p->move_tried >= 30 && p->move_tried)) {  // (a character just made gets its animation
+        if (fresh && p->move_node) stand_in_stop(p);                            //  a little later: looked for again)
+        p->move_node = node, p->move_bb = anim_bb_of_node(node), p->move_given = -1, p->move_tried = f;
         p->move_ok = p->move_bb && anim_float_index(p->move_bb, HASH_MOVE, &p->move_idx);
         if (p->move_ok && !p->move_scratch) p->move_scratch = (uint64_t)(uintptr_t)hle_alloc(16);
-        LOG("[world] player %016llx's stand-in (node %llx): blackboard %llx, %s\n", (unsigned long long)p->id, (unsigned long long)node,
-            (unsigned long long)p->move_bb, p->move_ok ? "walks with them" : "no \"move\" - it slides");
+        if (fresh || p->move_ok)
+            LOG("[world] player %016llx's stand-in (node %llx): blackboard %llx, %s\n", (unsigned long long)p->id, (unsigned long long)node,
+                (unsigned long long)p->move_bb, p->move_ok ? "walks with them" : "no \"move\" yet");
     }
     if (!p->move_ok || !p->move_scratch) return;
     float want = stand_in_move(p);
@@ -589,12 +642,13 @@ static void trade_start(uint32_t code) {
     g_trade = 0;
 }
 static void trade_message(const WorldPkt *k, uint64_t frame) {
-    if (k->t.to != g_self) return;
+    if (k->t.to != g_self || k->t.code >= 100000000u) return;  // (a Link Code has 8 digits)
     if (k->type == 4) {
         if (g_trade == 1 && k->from == g_trade_with && k->t.code == g_trade_code) trade_start(k->t.code);
         return;
     }
     if (g_trade == 2 && k->from == g_trade_with && k->t.code == g_trade_code) return;  // (a repeat)
+    if (g_trade == 2 && frame - g_trade_at < 600) return;  // (a newer ask within 10 s: the first one stands - no notice spam)
     if (g_trade == 1 && k->from == g_trade_with && k->t.code > g_trade_code) return;  // (both asked at once: the lower code)
     g_trade = 2, g_trade_with = k->from, g_trade_code = k->t.code, g_trade_at = frame;
     menu_notice_for("Another player wants to trade! Walk up to them and press A.", 8000);
@@ -649,6 +703,155 @@ static void standin_release(Peer *p) {
     p->node = 0, p->saved_node = 0;
     if (!n || !b || !is_body(b) || *(const uint64_t *)(uintptr_t)n != NODE_VTABLE) return;
     memcpy((void *)(uintptr_t)(n + 0xd0), p->saved_q, 16), memcpy((void *)(uintptr_t)(n + 0xe0), p->saved_t, 12);
+}
+
+// ---- What another player may wear: only what the game's own data has. A look naming a variant the game has no file
+// for in that part (2026-11-16: the other body's p2_ hoodie in the upper-body slot of a p1 body - the slot's p1_ name
+// is the one the game has) kept the level from ever finishing loading, so a peer's look and outfit are checked first.
+// The names: every variant the game knows is a FlatBuffers string {u32 length, the name, NUL} in its loaded data - the
+// parts' character-creation files (ik_chara/savm_pc/<part>/<part>.ccdatam: each variant's full name, e.g.
+// p1_upb0000_00_blousonshirt_normal_r00_c00, p0_hrs0002_00_medium, p1_drs9999_00_none, p0_base; an item's own folder
+// name is only inside its .ccdata path, never a string of its own) and the dress-up table (world/exl/dress_up_data:
+// every wearable item, p2_ names). One scan of the heap (a thread, once we are in the world; again, rarely, when a look
+// names something unknown) keeps each such name's hash (the game's FNV-1a 64), its part and its body (p0 any, p1 / p2:
+// the body-shaped parts drs / lwb / upb - also kept under the other body's prefix, both bodies' files having the same
+// items). Our own memory (HLE: descriptions made from peers' strings) is outside the heap: it can't vouch for itself.
+// The look's 13 slots are base, acc, bag, eyw, ftw, glv, hdw, hrs, lgw, drs, face, lwb, upb (checked: a save's 13 hashes
+// were those parts' names, in that order); the body-shaped three must share one body. Options aren't checked (all 18 at
+// 250 made odd hair, nothing worse) beyond keeping them under 64; the blob's two flags are always 1 (as a save's).
+#define VSET_N 65536u
+static struct VsetEnt { uint64_t h; uint8_t slot, body; } *g_vset;
+static volatile int g_vset_state;  // 0 never scanned, 1 scanning, 2 ready
+static uint64_t g_vset_at;         // (the frame of the last scan)
+static int g_vset_scans, g_vset_count;
+static volatile int g_vset_want;   // (a look named something unknown: scan again, rarely)
+static const char *const k_slot_type[13] = {"base", "acc", "bag", "eyw", "ftw", "glv", "hdw", "hrs", "lgw", "drs", "face", "lwb", "upb"};
+static void vset_add(struct VsetEnt *t, uint64_t h, int slot, int body) {
+    for (uint32_t i = (uint32_t)(h ^ h >> 32) & (VSET_N - 1), n = 0; n < VSET_N; i = (i + 1) & (VSET_N - 1), n++) {
+        if (t[i].h == h) return;
+        if (!t[i].h) { t[i].h = h, t[i].slot = (uint8_t)slot, t[i].body = (uint8_t)body; g_vset_count++; return; }
+    }
+}
+static int vset_slot(uint64_t h, int *body) {  // (-1: not a variant the game has)
+    if (g_vset_state != 2 || !h) return -1;
+    for (uint32_t i = (uint32_t)(h ^ h >> 32) & (VSET_N - 1), n = 0; n < VSET_N; i = (i + 1) & (VSET_N - 1), n++) {
+        if (!g_vset[i].h) return -1;
+        if (g_vset[i].h == h) { if (body) *body = g_vset[i].body; return g_vset[i].slot; }
+    }
+    return -1;
+}
+// a name's part (slot) and body; -1 not a variant name: "p<0-2>_<part><4 digits>_<2 digits>_..." or "p0_base"
+static int variant_slot(const char *s, size_t n, int *body) {
+    if (n < 7 || s[0] != 'p' || s[1] < '0' || s[1] > '2' || s[2] != '_') return -1;
+    *body = s[1] - '0';
+    if (n == 7 && !memcmp(s, "p0_base", 7)) return 0;
+    size_t t = 3;
+    while (t < n && s[t] >= 'a' && s[t] <= 'z') t++;
+    if (t + 8 > n || t == 3) return -1;
+    for (int k = 0; k < 4; k++) if (s[t + k] < '0' || s[t + k] > '9') return -1;
+    if (s[t + 4] != '_' || s[t + 5] < '0' || s[t + 5] > '9' || s[t + 6] < '0' || s[t + 6] > '9') return -1;
+    for (int k = 1; k < 13; k++)
+        if (strlen(k_slot_type[k]) == t - 3 && !memcmp(s + 3, k_slot_type[k], t - 3)) {
+            bool shaped = k == 9 || k == 11 || k == 12;
+            return shaped == (*body != 0) ? k : -1;
+        }
+    return -1;
+}
+static uint64_t gf_hash(const char *s);
+static void vset_chunk(struct VsetEnt *t, const uint8_t *b, size_t len) {
+    for (const uint8_t *p = b + 4; p + 8 < b + len && (p = memchr(p, 'p', (size_t)(b + len - 8 - p)));) {
+        uint32_t sl;
+        memcpy(&sl, p - 4, 4);
+        if (sl < 7 || sl > 90 || p + sl >= b + len || p[sl] || p[1] < '0' || p[1] > '2' || p[2] != '_') { p++; continue; }
+        bool ok = true;
+        for (uint32_t k = 0; k < sl && ok; k++)
+            ok = (p[k] >= 'a' && p[k] <= 'z') || (p[k] >= '0' && p[k] <= '9') || p[k] == '_' || (p[k] >= 'A' && p[k] <= 'Z');
+        int body, slot = ok ? variant_slot((const char *)p, sl, &body) : -1;
+        if (slot >= 0) {
+            char name[96];
+            memcpy(name, p, sl), name[sl] = 0;
+            vset_add(t, gf_hash(name), slot, body);
+            if (body) name[1] = body == 1 ? '2' : '1', vset_add(t, gf_hash(name), slot, 3 - body);
+        }
+        p += ok && slot >= 0 ? sl : 1;
+    }
+}
+static void *vset_scan(void *arg) {
+    (void)arg;
+    struct VsetEnt *t = calloc(VSET_N, sizeof *t);
+    const size_t chunk = 1u << 20, over = 128;
+    uint8_t *buf = malloc(chunk + over);
+    int count0 = g_vset_count;
+    g_vset_count = 0;
+    for (uint64_t a = HEAP_BASE; t && buf && a < HEAP_BASE + HEAP_MAX; a += chunk) {
+        size_t len = chunk + over;
+        if (!heap_read(a, buf, len)) { len = chunk; if (!heap_read(a, buf, len)) continue; }
+        vset_chunk(t, buf, len);
+    }
+    free(buf);
+    pthread_mutex_lock(&g_dress_lock);  // (and our own template's - our own game's - whatever the scan saw)
+    for (int k = 0; t && k < g_npparts && k < 24; k++) {
+        int body, slot = variant_slot(g_pparts[k].var, strlen(g_pparts[k].var), &body);
+        if (slot >= 0) vset_add(t, gf_hash(g_pparts[k].var), slot, body);
+    }
+    pthread_mutex_unlock(&g_dress_lock);
+    if (t && g_vset_count >= 1000) {  // (the game's data in: kept; the old table stays readable a while - not freed)
+        g_vset = t;
+        __atomic_store_n(&g_vset_state, 2, __ATOMIC_RELEASE);
+        LOG("[world] %d variants the game has (parts' files, the dress-up table): other players' looks are checked against them\n", g_vset_count);
+    } else {
+        LOG("[world] only %d variant names in memory: checked again later\n", g_vset_count);
+        free(t);
+        g_vset_count = count0;
+        __atomic_store_n(&g_vset_state, g_vset ? 2 : 0, __ATOMIC_RELEASE);
+    }
+    return NULL;
+}
+static void vset_frame(uint64_t frame, bool in_world) {  // (ghost_frame: the scan started once we are in the world)
+    if (!in_world || g_vset_state == 1) return;
+    bool again = g_vset_state == 2 && g_vset_want && g_vset_scans < 4 && frame - g_vset_at > 3600;
+    bool first = g_vset_state == 0 && (!g_vset_at || frame - g_vset_at > 600);
+    if (!first && !again) return;
+    g_vset_want = 0, g_vset_at = frame, g_vset_scans++, g_vset_state = 1;
+    pthread_t th;
+    if (pthread_create(&th, NULL, vset_scan, NULL)) g_vset_state = g_vset ? 2 : 0; else pthread_detach(th);
+}
+// a peer's look as it may be worn (options kept under 64, the flags 1); false: refused (`why` says which part), or
+// not known yet (*pending: the names not scanned yet)
+static bool look_check(Look *l, char *why, size_t wn, bool *pending) {
+    *pending = g_vset_state != 2;
+    if (*pending) { snprintf(why, wn, "not checked yet"); return false; }
+    int shaped = -1;
+    for (int k = 0; k < 13; k++) {
+        int body = 0, slot = vset_slot(l->part[k], &body);
+        if (slot != k) {
+            snprintf(why, wn, "its %s (%016llx) isn't a %s the game has", k_slot_type[k], (unsigned long long)l->part[k], k_slot_type[k]);
+            g_vset_want = 1;
+            return false;
+        }
+        if (k == 9 || k == 11 || k == 12) {
+            if (shaped >= 0 && body != shaped) { snprintf(why, wn, "its clothes are for two different bodies"); return false; }
+            shaped = body;
+        }
+    }
+    for (int k = 0; k < 18; k++) if (l->opt[k] > 63) l->opt[k] = 63;
+    l->f1 = l->f2 = 1;
+    return true;
+}
+// a peer's outfit part (type 5) as it may go into a description: one of the 13 parts (by name), the part's own file
+// (ours: every player's character is made from the same template) and a variant of that part the game has, for the
+// template's body; false: refused
+static bool outfit_part_check(DressPart *p) {
+    int slot = -1;
+    for (int k = 0; k < 13; k++) if (!strcmp(p->name, k_slot_type[k])) slot = k;
+    if (slot < 0) return false;
+    bool ok = false;
+    pthread_mutex_lock(&g_dress_lock);
+    for (int k = 0; k < g_npparts; k++)
+        if (!strcmp(g_pparts[k].name, p->name) && !strcmp(g_pparts[k].path, p->path) && g_pparts[k].var[1] == p->var[1]) ok = true;
+    pthread_mutex_unlock(&g_dress_lock);
+    int body = 0;
+    return ok && vset_slot(gf_hash(p->var), &body) == slot;
 }
 
 // ---- outfits: ours sent part by part (type 5), theirs kept per player; a player whose whole outfit is heard gets the
@@ -707,13 +910,22 @@ static bool outfit_get(const WorldPkt *k, size_t n, DressPart *p) {
     }
     return true;
 }
-static void outfit_message(const WorldPkt *k, size_t n) {
-    Peer *p = NULL;
-    for (int i = 0; i < MAXPEER; i++) if (g_peers[i].id == k->from) p = &g_peers[i];
-    if (!p || k->o.n == 0 || k->o.n > MAXPARTS || k->o.k >= k->o.n) return;  // (not heard where they are yet: resent)
+static bool outfit_part_check(DressPart *p);
+static void outfit_message(Peer *p, const WorldPkt *k, size_t n) {
+    // (13 parts, as every player's template has; each one a part of the template with a variant the game has for it -
+    // anything else refused, see outfit_part_check; their body type: the template's)
+    if (!p || g_npparts != 13 || k->o.n != 13 || k->o.k >= k->o.n) return;  // (not heard where they are yet: resent)
+    DressPart part;
+    if (!outfit_get(k, n, &part)) return;
+    if (g_vset_state != 2) return;  // (the game's names not known yet: it comes again)
+    if (!outfit_part_check(&part)) {
+        if (!p->refused++) LOG("[world] player %016llx's outfit refused: its %.31s \"%.95s\" isn't one the game has\n", (unsigned long long)p->id,
+                               part.name, part.var);
+        return;
+    }
     if (p->nparts != k->o.n) p->nparts = k->o.n, p->have = 0;
-    if (!outfit_get(k, n, &p->parts[k->o.k])) return;
-    p->body_type = k->o.body == 0xff ? -1 : k->o.body;
+    p->parts[k->o.k] = part;
+    p->body_type = g_pbody;
     p->have |= 1u << k->o.k;
     if (p->have != (1u << p->nparts) - 1) return;
     uint32_t h = outfit_hash(p->parts, p->nparts);
@@ -724,13 +936,14 @@ static void outfit_message(const WorldPkt *k, size_t n) {
 }
 // (LARECOMP_GHOST_SELF, one copy: we are the other player too - our first townsperson is dressed for "them" at once)
 void world_self_outfit(void) {
-    if (!g_self_test) return;
+    if (!g_self_test || getenv("LARECOMP_WORLD_OUTFIT") || getenv("LARECOMP_WORLD_LOOK")) return;  // (a changed look: checked, as
+                                                                                                   //  another player's would be)
     DressPart o[MAXPARTS];
     int body, n = outfit_ours(o, &body);
     pthread_mutex_lock(&g_dress_lock);
     Look l;
     if (!look_ours(&l)) { pthread_mutex_unlock(&g_dress_lock); return; }  // (the save's look isn't there yet: as packets)
-    g_dress_want.peer = g_self ^ 2, g_dress_want.n = n, g_dress_want.body = body, g_dress_want.look = l;
+    g_dress_want.peer = g_self ^ 2, g_dress_want.n = n, g_dress_want.body = body, g_dress_want.look = l, g_dress_want.look_ok = true;
     uint32_t lh = 2166136261u;
     for (size_t b = 0; b < sizeof l; b++) lh = (lh ^ ((const uint8_t *)&l)[b]) * 16777619u;
     g_dress_want.hash = outfit_hash(o, n) ^ lh;
@@ -755,7 +968,8 @@ static void outfit_frame(Peer *p, uint64_t frame) {
     if (g_crowd_ok == 2) return;  // (research: the crowd's stand-ins only)
     if (p->dressed_body && body_stepped(p->dressed_body, frame)) {  // (one of the crowd: its model follows the crowd, not
         LOG("[world] player %016llx's dressed character walks with the crowd: another one asked for\n", (unsigned long long)p->id);
-        dressed_drop(p->dressed_owner);                             // its node - it can't stand in, 2026-11-16)
+        stray_add(p->dressed_body, frame);                          // its node - it can't stand in, 2026-11-16)
+        dressed_drop(p->dressed_owner);
         if (p->body == p->dressed_body) standin_release(p), p->body = 0;
         p->dressed_body = p->dressed_owner = 0, p->dressed_hash = p->armed_hash = 0;
     }
@@ -766,14 +980,29 @@ static void outfit_frame(Peer *p, uint64_t frame) {
     }
     // (their outfit and their look - the save's dress-up, worn as the character is made - both heard: the key of what
     // their character must wear)
-    uint32_t key = p->hash && p->look_hash ? p->hash ^ p->look_hash : 0;
+    if (p->look_have == 3 && !p->look_state) {  // (their look checked once the game's names are known)
+        char why[160];
+        bool pending;
+        if (look_check(&p->look, why, sizeof why, &pending)) {
+            uint32_t h = 2166136261u;
+            for (size_t b = 0; b < sizeof p->look; b++) h = (h ^ ((const uint8_t *)&p->look)[b]) * 16777619u;
+            p->look_hash = h, p->look_state = 1;
+            LOG("[world] player %016llx's look heard (skin %u, eyes %u, hair colour %u)\n", (unsigned long long)p->id, p->look.opt[0],
+                p->look.opt[3], p->look.opt[11]);
+        } else if (!pending) {
+            p->look_state = 2;
+            LOG("[world] player %016llx's look refused: %s - shown in their outfit alone\n", (unsigned long long)p->id, why);
+        }
+    }
+    uint32_t key = p->hash && p->look_state ? p->hash ^ (p->look_state == 1 ? p->look_hash : 0x5eed) : 0;
     if (!key || p->dressed_hash == key) return;
     uint64_t owner = 0;
     pthread_mutex_lock(&g_dress_lock);
     for (int i = 0; i < g_ndressed; i++) if (g_dressed[i].peer == p->id && g_dressed[i].hash == key) owner = g_dressed[i].owner;
-    if (!owner && p->armed_hash != key && !g_dress_want.peer) {  // (the next townsperson made: theirs)
-        g_dress_want.peer = p->id, g_dress_want.n = p->nparts, g_dress_want.body = p->body_type, g_dress_want.hash = key;
-        g_dress_want.look = p->look;
+    if (!owner && p->armed_hash != key && !g_dress_want.peer && (!p->armed_at || frame - p->armed_at > 600) && g_dressings < 400) {
+        g_dress_want.peer = p->id, g_dress_want.n = p->nparts, g_dress_want.body = p->body_type, g_dress_want.hash = key;  // (the next
+        g_dress_want.look = p->look, g_dress_want.look_ok = p->look_state == 1;                                         // made: theirs)
+        p->armed_at = frame;
         memcpy(g_dress_want.parts, p->parts, sizeof p->parts);
         p->armed_hash = key, p->dressed_at = 0;  // (the wait for its body starts once it is made)
         LOG("[world] player %016llx: the next townsperson made wears their outfit\n", (unsigned long long)p->id);
@@ -788,6 +1017,7 @@ static void outfit_frame(Peer *p, uint64_t frame) {
     }
     if (body_stepped(b, frame)) {  // (one of the crowd: see above)
         LOG("[world] player %016llx's dressed character walks with the crowd: another one asked for\n", (unsigned long long)p->id);
+        stray_add(b, frame);
         dressed_drop(owner), p->armed_hash = 0, p->dressed_at = 0;
         return;
     }
@@ -800,11 +1030,18 @@ static void outfit_frame(Peer *p, uint64_t frame) {
     LOG("[world] player %016llx is shown by a townsperson in their outfit (body %llx)\n", (unsigned long long)p->id, (unsigned long long)b);
 }
 
+// (the player a packet is from - known by their id and, through the server, by the sender the server names; NULL else)
+static Peer *peer_from(const WorldPkt *k, uint64_t via) {
+    for (int i = 0; i < MAXPEER; i++)
+        if (g_peers[i].id && g_peers[i].id == k->from) return !via || g_peers[i].via == via ? &g_peers[i] : NULL;
+    return NULL;
+}
 static void hooks_on(void) {
     if (g_hooked) return;
     g_hooked = true;
     rt_register_fnhook_at(NODE_UPDATE, node_hook);
     rt_register_fnhook_at(BB_SET_FLOAT, bb_set_hook);
+    rt_register_fnhook_at(INTERACT_NPC_UPDATE, interact_hook);
     if (!g_body_hooks) g_body_hooks = true, rt_register_fnhook_at(STEP_A, body_hook), rt_register_fnhook_at(STEP_B, body_hook);
 }
 void ghost_init(void) {  // (the test transport: LARECOMP_GHOST=<my port>,<peer port>[,<peer host>], Linux)
@@ -883,6 +1120,8 @@ static void ghost_frame(uint64_t frame) {
         }
     }
     move_reset_expire(frame);
+    vset_frame(frame, me && mn);  // (the names of everything the game has to wear: once in the world)
+    stray_frame(frame);
     static uint64_t sent_ns;
     static float last[3];
     if (me && mn && now - sent_ns >= 50000000ull) {  // (ours, 20 a second: the body's position, the node's facing)
@@ -919,44 +1158,46 @@ static void ghost_frame(uint64_t frame) {
     WorldPkt in;
     uint64_t via;
     int n;
-    while (w_recv && (n = w_recv(&via, &in, sizeof in)) >= 16) {
+    // (everything in a packet is checked before use: its size per type, numbers finite and in range, strings bounded and
+    // known to the game - outfit_part_check / look_check; a player is known by their id AND, through the server, by who
+    // the server says sent it - peer_from: an id can't be borrowed)
+    while (w_recv && (via = 0, n = w_recv(&via, &in, sizeof in)) >= 16) {
         if (g_self_test && in.from == g_self) in.from = g_self ^ 2;  // (ourselves, as someone else)
-        if (in.ver != 1 || in.from == g_self) continue;
-        if (in.type == 3 || in.type == 4) { if (n >= 28) trade_message(&in, frame); continue; }
-        if (in.type == 5) { outfit_message(&in, (size_t)n); continue; }
+        if (in.ver != 1 || in.from == g_self || !in.from) continue;
+        Peer *p = peer_from(&in, via);
+        if (in.type == 3 || in.type == 4) { if (n >= 28 && p) trade_message(&in, frame); continue; }
+        if (in.type == 5) { outfit_message(p, &in, (size_t)n); continue; }
         if (in.type == 6) {
-            if (n < 16 + 8 + 64 || in.l.n != 2 || in.l.k >= 2) continue;
-            for (int i = 0; i < MAXPEER; i++) {
-                Peer *p = &g_peers[i];
-                if (p->id != in.from) continue;
-                size_t off = (size_t)in.l.k * 64, len = sizeof p->look - off < 64 ? sizeof p->look - off : 64;
-                memcpy((uint8_t *)&p->look + off, in.l.d, len);
-                p->look_have |= 1u << in.l.k;
-                if (p->look_have == 3) {
-                    uint32_t h = 2166136261u;
-                    for (size_t b = 0; b < sizeof p->look; b++) h = (h ^ ((const uint8_t *)&p->look)[b]) * 16777619u;
-                    if (h != p->look_hash) p->look_hash = h, LOG("[world] player %016llx's look heard (skin %u, eyes %u, hair colour %u)\n",
-                        (unsigned long long)p->id, p->look.opt[0], p->look.opt[3], p->look.opt[11]);
-                }
-            }
+            if (!p || n < 16 + 8 + 64 || in.l.n != 2 || in.l.k >= 2) continue;
+            size_t off = (size_t)in.l.k * 64, len = sizeof p->look - off < 64 ? sizeof p->look - off : 64;
+            if (!memcmp((uint8_t *)&p->look + off, in.l.d, len) && (p->look_have & 1u << in.l.k)) continue;  // (the same again)
+            memcpy((uint8_t *)&p->look + off, in.l.d, len);
+            p->look_have |= 1u << in.l.k;
+            p->look_state = 0;  // (changed: checked again - outfit_frame)
             continue;
         }
         if (in.type != 2 || n < 16 + 28) continue;
-        Peer *p = NULL, *free_p = NULL;
-        for (int i = 0; i < MAXPEER; i++) {
-            if (g_peers[i].id == in.from) p = &g_peers[i];
-            else if (!g_peers[i].id && !free_p) free_p = &g_peers[i];
-        }
-        if (!p && free_p) {
+        bool sane = isfinite(in.w.yaw);
+        for (int k = 0; k < 3; k++) sane = sane && isfinite(in.w.p[k]) && fabsf(in.w.p[k]) < 100000.0f && isfinite(in.w.v[k]);
+        if (!sane) continue;
+        if (!p) {
+            bool taken = false;  // (a free slot; someone the server already knows under another id: not a second player)
+            Peer *free_p = NULL;
+            for (int i = 0; i < MAXPEER; i++) {
+                if (g_peers[i].id == in.from || (via && g_peers[i].id && g_peers[i].via == via)) taken = true;
+                else if (!g_peers[i].id && !free_p) free_p = &g_peers[i];
+            }
+            if (taken || !free_p) continue;  // (more players than stand-ins)
             p = free_p;
             memset(p, 0, sizeof *p);
-            p->id = in.from;
+            p->id = in.from, p->via = via;
             memcpy(p->shown, in.w.p, 12);
             LOG("[world] player %016llx is here\n", (unsigned long long)in.from);
             menu_notice_for("Another player is nearby.", 3000);
         }
-        if (!p) continue;  // (more players than stand-ins)
-        memcpy(p->pos, in.w.p, 12), memcpy(p->vel, in.w.v, 12), p->yaw = in.w.yaw, p->heard_ns = now;
+        memcpy(p->pos, in.w.p, 12), p->heard_ns = now;
+        for (int k = 0; k < 3; k++) p->vel[k] = fminf(fmaxf(in.w.v[k], -60.0f), 60.0f);
+        p->yaw = remainderf(in.w.yaw, 6.2831853f);
         p->move = n >= 16 + 32 && isfinite(in.w.move) ? fminf(fmaxf(in.w.move, 0.0f), 2.0f) : -1;
     }
     bool want_scan = false;
@@ -987,7 +1228,34 @@ static void ghost_frame(uint64_t frame) {
         if (pthread_create(&t, NULL, scan_bodies, NULL)) g_scanning = 0; else pthread_detach(t);
     }
 }
-static int ghost_step(Cpu *c, uint64_t addr, uint64_t o) { (void)c, (void)addr, (void)o; return 0; }
+// A dressed townsperson that turned out to walk with the crowd (it can't stand in) would go on walking around in their
+// outfit: its body is put far under the street before each step for a while - the crowd lets a walker that leaves its
+// route go (2026-11-13: moved bodies of walkers were removed), and below the street it isn't seen meanwhile.
+static struct { volatile uint64_t body, until; } g_stray[8];
+static void stray_add(uint64_t body, uint64_t frame) {
+    for (int i = 0; i < 8; i++) if (!g_stray[i].body || g_stray[i].body == body || frame > g_stray[i].until) {
+        g_stray[i].until = frame + 900, g_stray[i].body = body;
+        return;
+    }
+}
+static int ghost_step(Cpu *c, uint64_t addr, uint64_t o) {
+    (void)c, (void)addr;
+    for (int i = 0; i < 8; i++) {
+        if (g_stray[i].body != o) continue;
+        if (g_frame > g_stray[i].until) { g_stray[i].body = 0; continue; }
+        float *pos = (float *)(uintptr_t)(o + 0x90);
+        if (pos[1] > -400.0f) pos[1] = -500.0f;
+    }
+    return 0;
+}
+static void stray_frame(uint64_t frame) {  // (gone - let go by the crowd - or its time up: forgotten)
+    for (int i = 0; i < 8; i++) {
+        uint64_t b = g_stray[i].body;
+        if (!b) continue;
+        if (!is_body(b)) { LOG("[world] the crowd let the dressed walker go (body %llx)\n", (unsigned long long)b); g_stray[i].body = 0; }
+        else if (frame > g_stray[i].until) g_stray[i].body = 0;
+    }
+}
 
 
 // ---- Dressed townspeople: the other players' look. A character's look is its template's
@@ -1092,8 +1360,10 @@ static int dress_hook(Cpu *c, uint64_t addr) {
     // node - and is let go once its body is seen stepped, 2026-11-16: the dressed walker then keeps their look)
     pthread_mutex_lock(&g_dress_lock);
     Look want_look;
+    bool want_look_ok = false;
     if (g_dress_want.peer) {  // (a player of the shared world waiting for a look)
         for_peer = g_dress_want.peer, hash = g_dress_want.hash, to_body = g_dress_want.body, want_look = g_dress_want.look;
+        want_look_ok = g_dress_want.look_ok, g_dressings++;
         for (int k = 0; k < g_dress_want.n; k++) parts[np++] = g_dress_want.parts[k];
         g_dress_want.peer = 0;
     } else if (g_dress_left > 0 && g_npparts && (g_dress_body < 0 || body == g_dress_body)) {  // (research)
@@ -1123,7 +1393,7 @@ static int dress_hook(Cpu *c, uint64_t addr) {
     }
     LOG("[dress] townsperson %s (body type %d) dressed in %s's %d parts (character %llx, description %p)\n", own.path, body,
         for_peer ? "another player" : "our player", np, (unsigned long long)owner, (void *)d);
-    if (for_peer) { extern bool look_wear_at_make(Cpu *c, uint64_t owner, const Look *l); look_wear_at_make(c, owner, &want_look); }
+    if (for_peer && want_look_ok) { extern bool look_wear_at_make(Cpu *c, uint64_t owner, const Look *l); look_wear_at_make(c, owner, &want_look); }
     uint64_t out = c->x[8];
     rt_call_original(c, addr);
     LOG("[dress]   its instance %llx\n", (unsigned long long)(out ? *(const uint64_t *)(uintptr_t)(out + 8) : 0));
@@ -1207,8 +1477,15 @@ static bool look_ours(Look *l) {
     for (int k = 0; k < 18; k++) l->opt[k] = (uint8_t)(v[k] > 255 ? 255 : v[k]);
     l->f1 = l->f2 = 1;
     static uint64_t logged;
-    if (logged != o && (logged = o)) LOG("[world] our look: object %llx, hair %016llx, skin %u eyes %u lashes %u hair colour %u\n", (unsigned long long)o,
-        (unsigned long long)l->part[7], l->opt[0], l->opt[3], l->opt[6], l->opt[11]);
+    if (logged != o && (logged = o)) {
+        LOG("[world] our look: object %llx, hair %016llx, skin %u eyes %u lashes %u hair colour %u\n", (unsigned long long)o,
+            (unsigned long long)l->part[7], l->opt[0], l->opt[3], l->opt[6], l->opt[11]);
+        LOG("[world]   its parts %016llx %016llx %016llx %016llx %016llx %016llx %016llx %016llx %016llx %016llx %016llx %016llx %016llx\n",
+            (unsigned long long)l->part[0], (unsigned long long)l->part[1], (unsigned long long)l->part[2], (unsigned long long)l->part[3],
+            (unsigned long long)l->part[4], (unsigned long long)l->part[5], (unsigned long long)l->part[6], (unsigned long long)l->part[7],
+            (unsigned long long)l->part[8], (unsigned long long)l->part[9], (unsigned long long)l->part[10], (unsigned long long)l->part[11],
+            (unsigned long long)l->part[12]);
+    }
     static const char *lk = (const char *)1;  // (research LARECOMP_WORLD_LOOK="<option>=<n>;...": options changed - a test)
     if (lk == (const char *)1) lk = getenv("LARECOMP_WORLD_LOOK");
     for (const char *q = lk; q && *q;) {
