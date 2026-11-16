@@ -582,3 +582,119 @@ static void ghost_frame(uint64_t frame) {
     }
 }
 static int ghost_step(Cpu *c, uint64_t addr, uint64_t o) { (void)c, (void)addr, (void)o; return 0; }
+
+
+// ---- (research) LARECOMP_DRESS_NPC=<n>[,<mode>[,<body>]]: the next n townspeople created are built with the player's
+// outfit. A character's creation (CharacterCreationMaster make, 0x70011164d0, x2 a request {u64 description, ...}) is
+// given its template's CharacterCreationMasterComponent (FlatBuffers): 0 its name, 2-12 distances (20, 40, 60...), 14 a
+// body type (the player 1 - so are the teenage boys, schoolkids_m / hope_m / child_a_m; the women 6, ...), 15 its parts
+// - tables {0 name, 1 .ccdatam path, 2 variant} - and 16 (4). A townsperson has one part ("default",
+// savm_cc_vr/trNNNN.ccdatam: one .ccdata of a whole body), the player 13 (base = savm_pc_base, then acc, bag, eyw, ftw,
+// glv, hdw, hrs, lgw, drs, face, lwb, upb from savm_pc, the variant the item worn); everything else is the same. The
+// townsperson's description is copied into guest memory with field 15 pointed at a new parts list: mode 0 the
+// player's 13; 1 the townsperson's own part first, then the player's; 2 the player's with "base" named "default" (the
+// part a townsperson's other components look for). <body>: only townspeople of that body type (1 = the player's).
+#define CC_MAKE 0x70011164d0ull
+typedef struct { char name[32], path[96], var[96]; } DressPart;
+static int g_dress_left = -1, g_dress_mode, g_dress_body = -1;
+static DressPart g_pparts[24];
+static int g_npparts;
+static uint32_t fb_u32(const uint8_t *b, uint64_t o) { uint32_t v; memcpy(&v, b + o, 4); return v; }
+static const uint8_t *fb_field(const uint8_t *b, uint64_t tab, int f) {  // (the field's address in the table, NULL absent)
+    int32_t so; memcpy(&so, b + tab, 4);
+    const uint8_t *vt = b + tab - so;
+    uint16_t vl; memcpy(&vl, vt, 2);
+    if (4 + 2 * f >= vl) return NULL;
+    uint16_t fo; memcpy(&fo, vt + 4 + 2 * f, 2);
+    return fo ? b + tab + fo : NULL;
+}
+static const char *fb_str(const uint8_t *fieldp) { uint32_t o; memcpy(&o, fieldp, 4); return (const char *)(fieldp + o + 4); }
+static void part_of(const uint8_t *b, const uint8_t *t, DressPart *p) {
+    const uint8_t *p0 = fb_field(b, (uint64_t)(t - b), 0), *p1 = fb_field(b, (uint64_t)(t - b), 1), *p2 = fb_field(b, (uint64_t)(t - b), 2);
+    snprintf(p->name, sizeof p->name, "%s", p0 ? fb_str(p0) : ""), snprintf(p->path, sizeof p->path, "%s", p1 ? fb_str(p1) : "");
+    snprintf(p->var, sizeof p->var, "%s", p2 ? fb_str(p2) : "");
+}
+// a parts list written at d + w: [vector][vtable + table per part][strings] (FlatBuffers offsets point forward); the
+// vector's position
+static uint32_t fb_put_parts(uint8_t *d, uint32_t w, const DressPart *parts, int np) {
+    uint32_t vbase = w = (w + 3) & ~3u, tabs[32];
+    memcpy(d + w, &(uint32_t){(uint32_t)np}, 4);
+    w += 4 + 4 * np;
+    for (int k = 0; k < np; k++) {
+        w = (w + 3) & ~3u;
+        uint16_t vt[5] = {10, 16, 4, 8, 12};  // (vtable: its size, the table's, fields 0..2 at +4 +8 +12)
+        uint32_t vto = w;
+        memcpy(d + w, vt, 10), w += 12;
+        tabs[k] = w;
+        memcpy(d + w, &(int32_t){(int32_t)(tabs[k] - vto)}, 4), w += 16;
+        memcpy(d + vbase + 4 + 4 * k, &(uint32_t){tabs[k] - (vbase + 4 + 4 * k)}, 4);
+    }
+    for (int k = 0; k < np; k++) {
+        const char *s[3] = {parts[k].name, parts[k].path, parts[k].var};
+        for (int j = 0; j < 3; j++) {
+            w = (w + 3) & ~3u;
+            uint32_t len = (uint32_t)strlen(s[j]);
+            memcpy(d + w, &len, 4), memcpy(d + w + 4, s[j], len + 1);
+            memcpy(d + tabs[k] + 4 + 4 * j, &(uint32_t){w - (tabs[k] + 4 + 4 * j)}, 4);
+            w += 4 + len + 1;
+        }
+    }
+    return vbase;
+}
+void *hle_alloc(uint64_t size);
+static int dress_hook(Cpu *c, uint64_t addr) {
+    if (g_dress_left == 0) return 0;
+    uint64_t req = c->x[2], fbp = *(const uint64_t *)(uintptr_t)req;
+    if (fbp < HEAP_BASE || fbp >= HEAP_BASE + HEAP_MAX) return 0;
+    const uint8_t *b = (const uint8_t *)(uintptr_t)fbp;
+    uint64_t root = fb_u32(b, 0);
+    const uint8_t *f15 = fb_field(b, root, 15), *f14 = fb_field(b, root, 14);
+    if (!f15) return 0;
+    const uint8_t *vec = f15 + fb_u32(f15, 0);
+    uint32_t n = fb_u32(vec, 0);
+    if (n >= 8 && !g_npparts) {  // (the player: its parts kept)
+        for (uint32_t k = 0; k < n && k < 24; k++) {
+            const uint8_t *e = vec + 4 + 4 * k;
+            part_of(b, e + fb_u32(e, 0), &g_pparts[g_npparts++]);
+        }
+        LOG("[dress] the player's %d parts kept\n", g_npparts);
+        return 0;
+    }
+    if (n != 1 || !g_npparts || g_dress_left < 0) return 0;
+    DressPart own;
+    part_of(b, vec + 4 + fb_u32(vec + 4, 0), &own);
+    if (!strstr(own.path, "savm_cc_vr")) return 0;  // (townspeople only)
+    int body = f14 ? f14[0] : -1;
+    if (g_dress_body >= 0 && body != g_dress_body) return 0;
+    DressPart parts[25];
+    int np = 0;
+    if (g_dress_mode == 1) parts[np++] = own;
+    for (int k = 0; k < g_npparts && np < 25; k++) {
+        parts[np] = g_pparts[k];
+        if (g_dress_mode == 2 && !strcmp(parts[np].name, "base")) snprintf(parts[np].name, sizeof parts[np].name, "default");
+        np++;
+    }
+    // copy the description (8 KB: it and what follows it in its file) into guest memory and add the new parts list
+    const uint32_t base = 8192;
+    uint8_t *d = hle_alloc(16384);
+    memcpy(d, b, base);
+    uint32_t vpos = fb_put_parts(d, base, parts, np);
+    uint64_t f15o = (uint64_t)(f15 - b);
+    memcpy(d + f15o, &(uint32_t){vpos - (uint32_t)f15o}, 4);
+    *(uint64_t *)(uintptr_t)req = (uint64_t)(uintptr_t)d;
+    if (g_dress_left > 0) g_dress_left--;
+    LOG("[dress] townsperson %s (body %d) built with the player's %d parts, mode %d (description at %p)\n", own.path, body,
+        g_npparts, g_dress_mode, (void *)d);
+    uint64_t out = c->x[8];
+    rt_call_original(c, addr);
+    uint64_t r0 = out ? *(const uint64_t *)(uintptr_t)out : 0, r1 = out ? *(const uint64_t *)(uintptr_t)(out + 8) : 0;
+    LOG("[dress]   made: [x8] %llx %llx, x0 %llx\n", (unsigned long long)r0, (unsigned long long)r1, (unsigned long long)c->x[0]);
+    return 1;
+}
+__attribute__((constructor)) static void dress_init(void) {
+    const char *e = getenv("LARECOMP_DRESS_NPC");
+    if (!e) return;
+    sscanf(e, "%d,%d,%d", &g_dress_left, &g_dress_mode, &g_dress_body);
+    rt_register_fnhook_at(CC_MAKE, dress_hook);
+    LOG("[dress] the next %d townspeople (body type %d) get the player's outfit, mode %d\n", g_dress_left, g_dress_body, g_dress_mode);
+}
