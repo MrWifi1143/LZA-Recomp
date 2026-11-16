@@ -922,9 +922,12 @@ static void present_pace(int interval) {
         extern bool input_background_paused(void);
         if (input_background_paused()) {
             LOG("[nvn] paused (the window isn't focused)\n");
+            extern volatile int g_hang_paused;  // (runtime/hangwatch.c: no frames on purpose)
+            g_hang_paused = 1;
             kernel_block_begin();
             while (input_background_paused()) plat_sleep_until_ns(plat_now_ns() + 50000000ull);
             kernel_block_end();
+            g_hang_paused = 0;
             LOG("[nvn] resumed\n");
             next = 0;  // (pacing starts over)
         }

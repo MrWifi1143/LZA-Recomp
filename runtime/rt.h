@@ -82,6 +82,12 @@ uint64_t hle_register(const char *name, HostFn fn);  // returns fake guest addre
 HostFn hle_lookup_impl(const char *name);
 void hle_override(uint64_t guest_addr, HostFn fn, const char *name);
 void rt_fatal_trace(void) __attribute__((noreturn));
+// The last host (HLE) calls of a thread (dispatch.c, for crash reports and the hang watch): a ring per thread, read
+// from another thread without locks (names are never freed). hostcalls_log: the last `max` of one, each line prefixed.
+#define HOSTCALL_RING 128
+typedef struct { const char *name; uint64_t x0, x1, x30; } HostCall;
+typedef struct HostCallRing { HostCall r[HOSTCALL_RING]; volatile unsigned n; } HostCallRing;
+void hostcalls_log(const HostCallRing *h, int max, const char *prefix);
 void crash_handler_install(void);  // per thread (alternate signal stack)
 
 // ---- kernel.c

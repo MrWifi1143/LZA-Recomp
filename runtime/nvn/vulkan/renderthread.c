@@ -65,6 +65,33 @@ static uint64_t game_frames;
 static bool started, busy, dropping;
 static __thread bool on_render_thread;
 static pthread_t thread;
+// (the hang watch, runtime/hangwatch.c - read without lk: the job running since when, the game's last present)
+static volatile int rs_kind = -1;
+static volatile uint64_t rs_since, rs_handle, rs_ticket;
+static volatile uint64_t g_game_present_ns;
+static void *volatile g_present_thread;  // the KThread that presents (the game's frame loop)
+static long g_test_hang = -1;            // LARECOMP_TEST_HANG=<frame>[,render][,<seconds>]: research, below
+static bool g_test_hang_render;
+static long g_test_hang_s;               // (a stall of that many seconds instead of for good)
+static void test_hang_configure(void) {
+    static bool done;
+    if (done) return;
+    done = true;
+    const char *e = ENV("LARECOMP_TEST_HANG");
+    if (!e || !*e) return;
+    g_test_hang = atol(e);
+    g_test_hang_render = strstr(e, "render") != NULL;
+    for (const char *q = strchr(e, ','); q; q = strchr(q + 1, ','))
+        if (q[1] >= '0' && q[1] <= '9') g_test_hang_s = atol(q + 1);
+    if (g_test_hang_s) LOG("[hang-test] the %s thread stalls for %ld s at frame %ld (LARECOMP_TEST_HANG)\n", g_test_hang_render ? "render" : "game", g_test_hang_s, g_test_hang);
+    else LOG("[hang-test] the %s thread stops for good at frame %ld (LARECOMP_TEST_HANG)\n", g_test_hang_render ? "render" : "game", g_test_hang);
+}
+static void test_hang_forever(const char *who, uint64_t frame) {
+    LOG("[hang-test] %s thread: stopping at frame %llu\n", who, (unsigned long long)frame);
+    uint64_t end = g_test_hang_s ? plat_now_ns() + (uint64_t)g_test_hang_s * 1000000000ull : ~0ull;
+    while (plat_now_ns() < end) plat_sleep_until_ns(plat_now_ns() + 100000000ull);
+    LOG("[hang-test] %s thread: going on\n", who);
+}
 
 bool rt_active(void) {
     static int on = -1;
@@ -156,13 +183,19 @@ static void *render_main(void *arg) {
         }
         Job j = queue[qhead % QN];
         busy = true;
+        rs_kind = j.kind, rs_handle = j.kind == RJ_PRESENT ? pres_fin + 1 : j.handle, rs_ticket = fin + 1, rs_since = plat_now_ns();
         pthread_mutex_unlock(&lk);
+        if (j.kind == RJ_PRESENT && g_test_hang_render && g_test_hang >= 0 && rs_handle >= (uint64_t)g_test_hang) {
+            g_test_hang = -1;
+            test_hang_forever("render", rs_handle);
+        }
         rt_trace(j.kind == RJ_EXEC ? 'X' : j.kind == RJ_PRESENT ? 'R' : 'C', j.handle);
         if (!dropping || j.kind == RJ_CALL) run(&j);  // (a reboot drops queued lists and presents, never a caller's call)
         rt_trace('e', 0);
         renderer_submit_if_needed(false);
         rt_trace('s', 0);
         uint64_t seq = renderer_fence_seq();
+        rs_kind = -1;
         pthread_mutex_lock(&lk);
         qhead++;
         fin++;
@@ -243,6 +276,15 @@ void rt_submit(uint64_t handle) {
 // present used to run at its end (scripted input, function profile, reboot tests) happens here, in the game's order.
 void rt_present(NvnTexture *t) {
     if (!t) return;
+    g_game_present_ns = plat_now_ns();
+    { extern KThread *kernel_current_thread(void); g_present_thread = kernel_current_thread(); }
+    test_hang_configure();
+    if (g_test_hang >= 0 && !g_test_hang_render && renderer_game_frame() + 1 >= (uint64_t)g_test_hang) {
+        g_test_hang = -1;
+        kernel_block_begin();  // (as a wait would: its emulated core goes to the other threads)
+        test_hang_forever("game", renderer_game_frame() + 1);
+        kernel_block_end();
+    }
     if (!rt_active()) { rt_off_lock(); backend_present(t); rt_off_unlock(); return; }
     rt_trace('P', 0);
     pthread_mutex_lock(&lk);
@@ -378,4 +420,26 @@ void rt_reset(void) {
     pres_enq = pres_fin = 0;
     lk_unlock();
     __atomic_store_n(&game_frames, renderer_present_count(), __ATOMIC_RELAXED);
+}
+
+// The hang watch's report (runtime/hangwatch.c): the render thread's state, read without lk (never blocks).
+void *rt_present_thread(void) { return g_present_thread; }
+uint64_t rt_game_present_ns(void) { return g_game_present_ns; }
+void rt_hang_report(const char *tag) {
+    uint64_t now = plat_now_ns(), gp = g_game_present_ns;
+    if (!rt_active()) {
+        LOG("%srender thread off (the game thread presents itself); its last present call %.1f s ago\n", tag, gp ? (now - gp) / 1e9 : -1.0);
+        return;
+    }
+    LOG("%srender thread: %s; jobs queued %llu, done %llu (queue %u), presents queued %llu, shown %llu, game frames %llu; "
+        "the game's last present call %.1f s ago\n", tag, started ? "running" : "not started", (unsigned long long)enq,
+        (unsigned long long)fin, qtail - qhead, (unsigned long long)pres_enq, (unsigned long long)pres_fin,
+        (unsigned long long)game_frames, gp ? (now - gp) / 1e9 : -1.0);
+    int k = rs_kind;
+    uint64_t since = rs_since;
+    static const char *const kinds[] = {"command list", "present", "call"};
+    if (k >= 0 && k < 3)
+        LOG(k == RJ_PRESENT ? "%srender thread busy for %.1f s: job %llu, a %s (present %llu)\n" : "%srender thread busy for %.1f s: job %llu, a %s (%llx)\n",
+            tag, since && now > since ? (now - since) / 1e9 : 0.0, (unsigned long long)rs_ticket, kinds[k], (unsigned long long)rs_handle);
+    else LOG("%srender thread idle (waits for work)%s\n", tag, qtail != qhead ? " - but the queue is not empty" : "");
 }

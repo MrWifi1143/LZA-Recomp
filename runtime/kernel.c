@@ -323,10 +323,20 @@ static void core_release(KThread *t) {
     pthread_mutex_unlock(&g_core_lock);
 }
 
-void kernel_block_begin(void) { core_release(t_cur); }
-void kernel_block_end(void) { core_acquire(t_cur); }
+// (the hang watch, runtime/hangwatch.c: where host code blocked a guest thread, and since when)
+__attribute__((noinline)) void kernel_block_begin(void) {
+    KThread *t = t_cur;
+    if (t && !t->block_ns) t->block_ra = (uintptr_t)__builtin_return_address(0), t->block_ns = plat_now_ns();  // (the first of a loop of waits)
+    core_release(t);
+}
+void kernel_block_end(void) {
+    KThread *t = t_cur;
+    core_acquire(t);
+    if (t) t->block_ns = 0;
+}
+void kernel_set_host_ring(struct HostCallRing *r) { if (t_cur) t_cur->hcr = r; }  // (dispatch.c)
 void kernel_core_reacquire(void) {
-    if (__builtin_expect(t_cur && t_cur->run_core < 0, 0)) core_acquire(t_cur);
+    if (__builtin_expect(t_cur && t_cur->run_core < 0, 0)) core_acquire(t_cur), t_cur->block_ns = 0;
 }
 
 // Sleep on the current thread's condition. Returns false on timeout. Caller holds g_klock.
@@ -922,58 +932,134 @@ void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
     if (self) {
         self->cur_svc = -1;
         core_acquire(self);  // (no-op unless the svc gave its core up)
+        self->block_ns = 0;
     }
     rt_unwind_point();
 }
 
-// LARECOMP_THREAD_DUMP=<seconds>[,<repeat seconds>]: list every guest thread, the svc it is blocked in and where
-// from (guest pc / lr), to find what a hung boot waits on. (Read without g_klock: a debug snapshot.)
+// Every guest thread: the svc it is blocked in and where from (guest pc / lr), what it waits on, its guest call stack,
+// where host code blocked it and its last host call. Read without g_klock (a debug snapshot, safe while they run: the
+// threads' records live until a reboot, which the caller doesn't run into - hangwatch.c skips one). `tag` starts each line.
+static const char *svc_name(int svc) {
+    switch (svc) {
+    case 0x0B: return "SleepThread";
+    case 0x18: return "WaitSynchronization";
+    case 0x1A: return "ArbitrateLock";
+    case 0x1C: return "WaitProcessWideKeyAtomic";
+    case 0x34: return "WaitForAddress";
+    case 0x21: return "SendSyncRequest";
+    default: return NULL;
+    }
+}
+void kernel_thread_dump(const char *tag, bool detail) {
+    uint64_t now = plat_now_ns();
+    {   // the emulated cores' owners (kernel.c "cores")
+        char line[256];
+        int n = snprintf(line, sizeof line, "%scores:", tag);
+        for (int i = 0; i < g_ncores && n < (int)sizeof line - 24; i++) {
+            KThread *o = g_core_owner[i];
+            n += snprintf(line + n, sizeof line - n, o ? " %d=%llx" : " %d=free", i, o ? (unsigned long long)o->id : 0ull);
+        }
+        LOG("%s\n", line);
+    }
+    for (KThread *t = g_threads; t; t = t->anext) {
+        if (t->finished || !t->started) continue;
+        int svc = t->cur_svc;
+        const char *sn = svc >= 0 ? svc_name(svc) : NULL;
+        char where[96];
+        uint64_t bns = t->block_ns;
+        if (svc < 0) snprintf(where, sizeof where, bns ? "in host code (no svc)" : "running (no svc)");
+        else if (sn) snprintf(where, sizeof where, "in svc %02x %s", svc, sn);
+        else snprintf(where, sizeof where, "in svc %02x", svc);
+        char args[96] = "";
+        if (svc >= 0)
+            snprintf(args, sizeof args, "(%llx, %llx, %llx, %llx)", (unsigned long long)t->cur_svc_args[0], (unsigned long long)t->cur_svc_args[1],
+                     (unsigned long long)t->cur_svc_args[2], (unsigned long long)t->cur_svc_args[3]);
+        LOG("%sthread %llx tid %d prio %d core %d%s mask %x h %x entry %llx: %s%s @%llx lr %llx\n", tag,
+            (unsigned long long)t->id, t->host_tid, t->prio, t->run_core, t->core_shared ? " (shared)" : "", t->core_mask, t->handle,
+            (unsigned long long)t->entry, where, args, (unsigned long long)(svc < 0 ? t->cpu.pc : t->cur_svc_pc), (unsigned long long)t->cpu.x[30]);
+        int wk = (int)t->wait_kind;
+        if (wk > 0 && wk < 4)
+        {
+            uint32_t v = t->wait_addr >= GUEST_LO && t->wait_addr < GUEST_HI ? *(uint32_t *)(uintptr_t)t->wait_addr : 0;
+            if (wk == WAIT_CONDVAR)
+                LOG("%s    waits on condvar %llx (=%x), then its mutex %llx (=%x)\n", tag, (unsigned long long)t->wait_addr, v,
+                    (unsigned long long)t->wait_mutex, t->wait_mutex >= GUEST_LO && t->wait_mutex < GUEST_HI ? *(uint32_t *)(uintptr_t)t->wait_mutex : 0);
+            else if (wk == WAIT_MUTEX)  // (the word: owner handle | 0x40000000 waiters)
+                LOG("%s    waits on mutex %llx (=%x: owner handle %x)\n", tag, (unsigned long long)t->wait_addr, v, v & ~WAITERS_BIT);
+            else LOG("%s    waits on address %llx (=%x)\n", tag, (unsigned long long)t->wait_addr, v);
+        }
+        if (svc == 0x18 && t->cur_svc_args[1] >= GUEST_LO && t->cur_svc_args[1] < GUEST_HI) {  // (the handles waited on)
+            char line[256];
+            int n = snprintf(line, sizeof line, "%s    waits on handles (timeout %lld):", tag, (long long)t->cur_svc_args[3]);
+            for (uint64_t k = 0; k < t->cur_svc_args[2] && k < 8 && n < (int)sizeof line - 24; k++) {
+                uint32_t hh = ((uint32_t *)(uintptr_t)t->cur_svc_args[1])[k];
+                KObject *o = hh >= 0x101 && hh < 0x100 + MAX_HANDLES ? handles[hh - 0x100] : NULL;
+                n += snprintf(line + n, sizeof line - n, " %x%s", hh, o ? (o->signaled ? "(set)" : "(unset)") : "(?)");
+            }
+            LOG("%s\n", line);
+        }
+        if (bns && now > bns) {
+            uint64_t ra = t->block_ra, off = 0;
+            const char *s = plat_symbol(ra, &off);
+            if (s) LOG("%s    host code blocked it %.1f s ago, from %llx (%s+%llx)\n", tag, (now - bns) / 1e9, (unsigned long long)ra, s, (unsigned long long)off);
+            else LOG("%s    host code blocked it %.1f s ago, from %llx\n", tag, (now - bns) / 1e9, (unsigned long long)ra);
+        }
+        if (t->hcr) {
+            const HostCallRing *h = t->hcr;
+            unsigned n = __atomic_load_n(&h->n, __ATOMIC_ACQUIRE);
+            const HostCall *e = n ? &h->r[(n - 1) & (HOSTCALL_RING - 1)] : NULL;
+            if (e)
+                LOG("%s    last host call (of %u): %s x0=%llx x1=%llx lr=%llx\n", tag, n, e->name ? e->name : "?",
+                    (unsigned long long)e->x0, (unsigned long long)e->x1, (unsigned long long)e->x30);
+        }
+        {   // its name: the first string in (or pointed to from) the SDK's ThreadType it was started with
+            char nm[40] = "";
+            for (uint64_t o = 0; o < 0x1c0 && !nm[0] && t->arg >= GUEST_LO && t->arg + o + 8 < GUEST_HI; o += 8) {
+                const char *cand[2] = {(const char *)(uintptr_t)(t->arg + o), NULL};
+                uint64_t pv = *(uint64_t *)(uintptr_t)(t->arg + o);
+                if (pv >= GUEST_LO && pv + 32 < GUEST_HI) cand[1] = (const char *)(uintptr_t)pv;
+                for (int k = 0; k < 2 && !nm[0]; k++) {
+                    const char *q = cand[k];
+                    int n = 0;
+                    while (q && n < 39 && q[n] >= 0x20 && q[n] < 0x7f) n++;
+                    if (q && n >= 4 && !q[n]) memcpy(nm, q, (size_t)n), nm[n] = 0;
+                }
+            }
+            if (detail || nm[0])
+                LOG("%s    name \"%s\" core %d arg %llx tpidr %llx\n", tag, nm, t->core, (unsigned long long)t->arg,
+                    (unsigned long long)t->cpu.tpidr);
+        }
+        if (!detail && svc < 0 && !bns && t->hcr) {  // (hang watch: a thread running guest code - a spin? its recent host calls)
+            LOG("%s    its last host calls:\n", tag);
+            char pre[64];
+            snprintf(pre, sizeof pre, "%s      ", tag);
+            hostcalls_log(t->hcr, 8, pre);
+        }
+        {   // guest call stack: the AArch64 frame record chain {fp, lr} from x29
+            char line[512];
+            int n = snprintf(line, sizeof line, "%s    stack:", tag);
+            uint64_t fp = t->cpu.x[29];
+            for (int i = 0; i < 16 && fp >= GUEST_LO && fp < GUEST_HI && !(fp & 7) && n < (int)sizeof line - 24; i++) {
+                uint64_t lr = ((uint64_t *)(uintptr_t)fp)[1], up = ((uint64_t *)(uintptr_t)fp)[0];
+                n += snprintf(line + n, sizeof line - n, " %llx", (unsigned long long)lr);
+                if (up <= fp) break;
+                fp = up;
+            }
+            LOG("%s\n", line);
+        }
+    }
+}
+
+// LARECOMP_THREAD_DUMP=<seconds>[,<repeat seconds>]: list every guest thread (kernel_thread_dump), to find what a hung
+// boot waits on.
 static void *thread_dump_main(void *arg) {
     const char *e = (const char *)arg;
     double first = atof(e), every = strchr(e, ',') ? atof(strchr(e, ',') + 1) : 0;
     plat_sleep_until_ns(plat_now_ns() + (uint64_t)(first * 1e9));
     for (;;) {
         LOG("[threads] ---- dump\n");
-        for (KThread *t = g_threads; t; t = t->anext) {
-            if (t->finished) continue;
-            LOG("[threads] id %llu tid %d mask %x h %x prio %d entry %llx wait %d tag %x addr %llx (=%x) | svc %02x(%llx, %llx, %llx, %llx) "
-                "@%llx lr %llx\n", (unsigned long long)t->id, t->host_tid, t->core_mask, t->handle, t->prio, (unsigned long long)t->entry,
-                (int)t->wait_kind, t->wait_tag, (unsigned long long)t->wait_addr,
-                t->wait_addr >= GUEST_LO && t->wait_addr < GUEST_HI ? *(uint32_t *)(uintptr_t)t->wait_addr : 0, t->cur_svc < 0 ? 0xff : t->cur_svc,
-                (unsigned long long)t->cur_svc_args[0], (unsigned long long)t->cur_svc_args[1],
-                (unsigned long long)t->cur_svc_args[2], (unsigned long long)t->cur_svc_args[3],
-                (unsigned long long)(t->cur_svc < 0 ? t->cpu.pc : t->cur_svc_pc), (unsigned long long)t->cpu.x[30]);
-            {   // its name: the first string in (or pointed to from) the SDK's ThreadType it was started with
-                char nm[40] = "";
-                for (uint64_t o = 0; o < 0x1c0 && !nm[0] && t->arg >= GUEST_LO && t->arg + o + 8 < GUEST_HI; o += 8) {
-                    const char *cand[2] = {(const char *)(uintptr_t)(t->arg + o), NULL};
-                    uint64_t pv = *(uint64_t *)(uintptr_t)(t->arg + o);
-                    if (pv >= GUEST_LO && pv + 32 < GUEST_HI) cand[1] = (const char *)(uintptr_t)pv;
-                    for (int k = 0; k < 2 && !nm[0]; k++) {
-                        const char *q = cand[k];
-                        int n = 0;
-                        while (q && n < 39 && q[n] >= 0x20 && q[n] < 0x7f) n++;
-                        if (q && n >= 4 && !q[n]) memcpy(nm, q, (size_t)n), nm[n] = 0;
-                    }
-                }
-                LOG("[threads]     name \"%s\" mask %x core %d arg %llx tpidr %llx (id %llx)\n", nm, t->core_mask, t->core, (unsigned long long)t->arg, (unsigned long long)t->cpu.tpidr, (unsigned long long)((t->cpu.tpidr >> 13) & 0x7f));
-            }
-            if (t->cur_svc == 0x18 && t->cur_svc_args[1] >= GUEST_LO && t->cur_svc_args[1] < GUEST_HI) {  // (the handles waited on)
-                LOG("[threads]     waits on:");
-                for (uint64_t k = 0; k < t->cur_svc_args[2] && k < 8; k++) LOG(" %x", ((uint32_t *)(uintptr_t)t->cur_svc_args[1])[k]);
-                LOG("\n");
-            }
-            // guest call stack: the AArch64 frame record chain {fp, lr} from x29
-            uint64_t fp = t->cpu.x[29];
-            LOG("[threads]     stack:");
-            for (int i = 0; i < 16 && fp >= GUEST_LO && fp < GUEST_HI && !(fp & 7); i++) {
-                uint64_t lr = ((uint64_t *)(uintptr_t)fp)[1], up = ((uint64_t *)(uintptr_t)fp)[0];
-                LOG(" %llx", (unsigned long long)lr);
-                if (up <= fp) break;
-                fp = up;
-            }
-            LOG("\n");
-        }
+        kernel_thread_dump("[threads] ", true);
         // LARECOMP_THREAD_DUMP_MEM=<addr>:<len>: guest memory with each dump (the state a hang waits on)
         const char *mem = getenv("LARECOMP_THREAD_DUMP_MEM");
         if (mem) {
@@ -1460,6 +1546,7 @@ void kernel_init(void) {
         pthread_create(&th, NULL, thread_dump_main, (void *)dump);
         pthread_detach(th);
     }
+    { extern void hangwatch_start(void); hangwatch_start(); }  // (runtime/hangwatch.c: armed at the boot's first present)
     // Reserve the heap, alias, stack, and TLS regions.
     region_add(TLS_BASE, TLS_SIZE, 0xC, 3);
     for (int i = 0; i < g_nmodules; i++) {

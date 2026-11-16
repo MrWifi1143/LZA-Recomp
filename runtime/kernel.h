@@ -51,6 +51,11 @@ struct KThread {
     // debug (LARECOMP_THREAD_DUMP): the svc this thread is in, -1 when running guest / host code
     volatile int cur_svc;
     uint64_t cur_svc_pc, cur_svc_args[4];
+    // hang watch (runtime/hangwatch.c, read from another thread without locks): the ring of its last host calls
+    // (dispatch.c), and where host code blocked it (kernel_block_begin: since when, the host return address; 0 = not)
+    struct HostCallRing *volatile hcr;
+    volatile uint64_t block_ns;
+    volatile uintptr_t block_ra;
 };
 
 typedef struct KSharedMem {
