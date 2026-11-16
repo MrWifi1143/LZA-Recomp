@@ -251,6 +251,7 @@ typedef struct {
     uint64_t via;                    // (who the transport says sent their packets: the server's id - their id can't be borrowed)
     uint64_t armed_at;               // (when their last dressing was asked for: at most one every 10 s)
     int refused;                     // (outfit parts refused, logged once)
+    uint64_t look_refused_at;        // (a refused look logged at most every 30 s: a changing bad look mustn't flood the log)
     // their walk (below, stand_in_walk): the locomotion value their own player's animation has (0 standing, 0.5 walking,
     // 1 running, 1.5 dashing; -1 not sent - an older copy: from their speed) and what their stand-in was last given
     float move, move_given;
@@ -994,7 +995,8 @@ static void outfit_frame(Peer *p, uint64_t frame) {
                 p->look.opt[3], p->look.opt[11]);
         } else if (!pending) {
             p->look_state = 2;
-            LOG("[world] player %016llx's look refused: %s - shown in their outfit alone\n", (unsigned long long)p->id, why);
+            if (!p->look_refused_at || frame - p->look_refused_at > 1800)
+                p->look_refused_at = frame, LOG("[world] player %016llx's look refused: %s - shown in their outfit alone\n", (unsigned long long)p->id, why);
         }
     }
     uint32_t key = p->hash && p->look_state ? p->hash ^ (p->look_state == 1 ? p->look_hash : 0x5eed) : 0;
