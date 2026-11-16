@@ -211,8 +211,9 @@ __attribute__((constructor)) static void story_init(void) {
 // +0xc0, rotation at +0xd0 (quaternion xyzw) and translation at +0xe0, and 0x7001ccf27c (x0 the node; called many times
 // a frame) makes its world matrices (+0x40, +0x80) from them - writing the translation moves the model (found 2026-11-14
 // by shifting every copy of a station NPC's x and halving: the world matrices themselves are overwritten). A
-// character's own node is the one whose translation is its body's position. The stand-in keeps its own model, animation
-// and collision (where it stood); its Talk prompt follows it - and A there asks that player to trade (below).
+// character's own node is the one whose translation is its body's position. The stand-in keeps its own model and
+// collision (where it stood) and walks, runs and stands as they do (stand_in_walk, their animation's locomotion value);
+// its Talk prompt follows it - and A there asks that player to trade (below).
 //   (The game's own remote player - Private Battles' - is an ordinary character whose movement comes from the network,
 // 2026-11-14: a stand-in until that can be made in the field.)
 #define NODE_VTABLE 0x7003be0d28ull
@@ -244,6 +245,12 @@ typedef struct {
     float saved_q[4], saved_t[3];
     Look look;                       // (their real look: type 6 packets, 2 pieces; worn by their dressed character once whole)
     uint32_t look_have, look_hash;
+    // their walk (below, stand_in_walk): the locomotion value their own player's animation has (0 standing, 0.5 walking,
+    // 1 running, 1.5 dashing; -1 not sent - an older copy: from their speed) and what their stand-in was last given
+    float move, move_given;
+    uint64_t move_node, move_bb, move_at, move_given_at, move_scratch;
+    uint32_t move_idx;
+    int move_ok;
 } Peer;
 static bool look_ours(Look *l);
 // the shared world's dressing: the next townsperson made wears `want` (its player then waits for it); each one made
@@ -268,12 +275,13 @@ static volatile uint64_t g_me_body, g_me_node;  // (our player's body and node: 
 static bool g_hooked;
 
 // ---- packets (both ways the same, little-endian): {u8 type, u8 version 1, u8[6], u64 from, ...}
-//   type 2 where:  f32 x y z, f32 yaw, f32 vx vy vz
+//   type 2 where:  f32 x y z, f32 yaw, f32 vx vy vz, f32 move (their animation's locomotion value; 48 bytes - copies
+//          before it sent 44)
 //   type 3 trade asked, 4 trade answered: u64 to, u32 code
 //   type 5 outfit: u8 part k, u8 parts n, u8 body type, then three strings (NUL-ended): the part's name, its .ccdatam
 //          ("ik_chara/<dir>/<last>.ccdatam" sent as "<dir>"), its variant (the item and colour); 96 bytes at most
 //   type 6 look: u8 piece k of n (2), u8[6], 64 bytes of a Look (the save's dress-up: part hashes, options)
-typedef struct { uint8_t type, ver, pad[6]; uint64_t from; union { struct { float p[3], yaw, v[3]; } w; struct { uint64_t to; uint32_t code; } t;
+typedef struct { uint8_t type, ver, pad[6]; uint64_t from; union { struct { float p[3], yaw, v[3], move; } w; struct { uint64_t to; uint32_t code; } t;
     struct { uint8_t k, n, body; char s[77]; } o; struct { uint8_t k, n, pad[6]; uint8_t d[64]; } l; }; } WorldPkt;
 
 // transport: the online server through the relay plugin, else (tests) UDP
@@ -291,6 +299,7 @@ static int (*w_avail)(void);
 static int g_udp = -1;
 static struct sockaddr_in g_udp_peer;
 static float g_off;  // (LARECOMP_GHOST_OFFSET=<m>: one copy shown beside itself, a loopback test)
+static float g_off_ahead;  // (LARECOMP_GHOST_AHEAD=<degrees>: the offset that far from their facing - in the camera's view)
 static int g_self_test;  // (LARECOMP_GHOST_SELF=1: our own packets count as another player's - one copy, a loopback test)
 static int g_crowd_ok;   // (LARECOMP_GHOST_CROWD=1: a stepped body - the crowd's - may stand in too; 2: only those, research)
 static void udp_send(const void *p, size_t n) { sendto(g_udp, p, n, 0, (struct sockaddr *)&g_udp_peer, sizeof g_udp_peer); }
@@ -302,6 +311,7 @@ static int udp_recv(uint64_t *from, void *p, size_t cap) {
 ssize_t process_vm_readv(pid_t, const struct iovec *, unsigned long, const struct iovec *, unsigned long, unsigned long);
 #else
 static const float g_off = 0;
+static const float g_off_ahead = 0;
 static const int g_self_test = 0, g_crowd_ok = 0;
 #endif
 static void world_send(const WorldPkt *k, size_t n) { if (w_send) w_send(k, n); }
@@ -329,6 +339,136 @@ static Peer *peer_of_node(uint64_t n) {
     for (int i = 0; i < MAXPEER; i++) if (g_peers[i].id && g_peers[i].node == n) return &g_peers[i];
     return NULL;
 }
+
+// ---- Their walk. A character's animation reads named parameters from its blackboard (vtable 0x7003c2b7a8: tables of
+// 0x40-byte entries {FNV-1a 64 of the name, the name, its length, ..., +0x20/+0x28 the listeners} - +0x68 ints, +0x88
+// floats, +0xa8 bools, +0xc8 triggers); 0x700010a6e0 (x0 the blackboard, x1 -> {u8 1, u32 the index at +4}, s0) sets a
+// float and tells the listeners (the animation graphs). The float "move" is the locomotion: the player's controller
+// (0x7000107e80: a parameter set from data per movement state) gives 0.5 walking, 1 running, 1.5 dashing, 0 standing;
+// townspeople get theirs from their AI the same way (found 2026-11-16 by Lua-hooking the setters; the sound update
+// 0x70029a1644 reads "move_front" / "move" too). A character node's blackboard: the node's component vector (+0x148 ..
+// +0x150) holds one with vtable 0x7003c2b008, its +0x130 the blackboard. Giving "move" = 1 to the player's own made it
+// run on the spot of its own accord (root motion); a stand-in gets its player's value - its node is put where they are
+// anyway (node_hook), so the root motion goes nowhere. The game sets it only on a change of state, so ours stays.
+#define PARAMS_COMP_VTABLE 0x7003c2b008ull
+#define BB_VTABLE 0x7003c2b7a8ull
+#define BB_SET_FLOAT 0x700010a6e0ull
+#define HASH_MOVE 0xd5eb2f99669eefd4ull  // (the game's FNV-1a 64 of "move")
+void *hle_alloc(uint64_t size);
+static uint64_t anim_bb_of_node(uint64_t node) {
+    uint64_t v = 0, b = 0, e = 0, comps[256];
+    if (!heap_read(node, &v, 8) || v != NODE_VTABLE || !heap_read(node + 0x148, &b, 8) || !heap_read(node + 0x150, &e, 8) ||
+        e <= b || e - b > sizeof comps || (e - b) % 8 || !heap_read(b, comps, e - b)) return 0;
+    for (size_t i = 0; i < (e - b) / 8; i++) {
+        uint64_t cv = 0, bb = 0, bv = 0;
+        if (heap_read(comps[i], &cv, 8) && cv == PARAMS_COMP_VTABLE && heap_read(comps[i] + 0x130, &bb, 8) && heap_read(bb, &bv, 8) &&
+            bv == BB_VTABLE) return bb;
+    }
+    return 0;
+}
+// a blackboard's float by its name's hash: its index (false: none, or nothing listens to it)
+static bool anim_float_index(uint64_t bb, uint64_t hash, uint32_t *idx) {
+    uint64_t b = 0, e = 0;
+    if (!heap_read(bb + 0x88, &b, 8) || !heap_read(bb + 0x90, &e, 8) || e <= b || e - b > 0x40 * 512) return false;
+    for (uint64_t p = b; p < e; p += 0x40) {
+        uint64_t ent[6];
+        if (!heap_read(p, ent, sizeof ent)) return false;
+        if (ent[0] != hash) continue;
+        if (ent[4] == ent[5]) return false;
+        *idx = (uint32_t)((p - b) / 0x40);
+        return true;
+    }
+    return false;
+}
+// (the call, from a guest thread: x0.., v0..: its state, kept; scratch: 8 bytes of guest memory)
+static void anim_set_float(Cpu *c, uint64_t bb, uint32_t idx, float val, uint64_t scratch) {
+    uint64_t sx[32], snzcv = c->nzcv;
+    __uint128_t sv[32];
+    memcpy(sx, c->x, sizeof sx), memcpy(sv, c->v, sizeof sv);
+    uint8_t *s = (uint8_t *)(uintptr_t)scratch;
+    memset(s, 0, 8), s[0] = 1, memcpy(s + 4, &idx, 4);
+    c->x[0] = bb, c->x[1] = scratch, c->v[0] = 0;
+    memcpy(&c->v[0], &val, 4);
+    guest_call(c, BB_SET_FLOAT);
+    memcpy(c->x, sx, sizeof sx), memcpy(c->v, sv, sizeof sv), c->nzcv = snzcv;
+}
+// our player's value, as its controller sets it (0x700010a6e0 hooked: our blackboard, the "move" index)
+static volatile uint64_t g_me_bb, g_me_bb_node;
+static volatile uint32_t g_me_move_idx = ~0u;
+static volatile float g_me_move;
+static int bb_set_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    uint64_t bb = g_me_bb;
+    if (!bb || c->x[0] != bb) return 0;
+    uint32_t idx = 0;
+    if (!heap_read(c->x[1] + 4, &idx, 4) || idx != g_me_move_idx) return 0;
+    float v;
+    memcpy(&v, &c->v[0], 4);
+    if (isfinite(v)) g_me_move = v;
+    return 0;
+}
+// a let-go stand-in back to standing ("move" 0) - from the next update of its node (a guest thread)
+static struct { uint64_t node, bb, scratch, at; uint32_t idx; } g_move_reset[8];
+static pthread_mutex_t g_move_lock = PTHREAD_MUTEX_INITIALIZER;
+static void stand_in_stop(Peer *p) {
+    if (!p->move_ok || !p->move_bb || p->move_given <= 0) { p->move_node = 0, p->move_ok = 0; return; }
+    pthread_mutex_lock(&g_move_lock);
+    for (int i = 0; i < 8; i++)
+        if (!g_move_reset[i].node) { g_move_reset[i].node = p->move_node, g_move_reset[i].bb = p->move_bb, g_move_reset[i].idx = p->move_idx,
+            g_move_reset[i].scratch = p->move_scratch, g_move_reset[i].at = g_frame; break; }
+    pthread_mutex_unlock(&g_move_lock);
+    p->move_node = 0, p->move_ok = 0, p->move_given = 0, p->move_scratch = 0;  // (the scratch goes with the reset: a new one
+}                                                                                 // for the next stand-in)
+static void move_reset_check(Cpu *c, uint64_t node) {
+    for (int i = 0; i < 8; i++) {
+        if (g_move_reset[i].node != node) continue;
+        pthread_mutex_lock(&g_move_lock);
+        uint64_t bb = g_move_reset[i].bb, s = g_move_reset[i].scratch;
+        uint32_t idx = g_move_reset[i].idx;
+        bool mine = g_move_reset[i].node == node;
+        if (mine) g_move_reset[i].node = 0;
+        pthread_mutex_unlock(&g_move_lock);
+        uint64_t v = 0;
+        if (mine && s && heap_read(bb, &v, 8) && v == BB_VTABLE) anim_set_float(c, bb, idx, 0.0f, s);
+    }
+}
+static void move_reset_expire(uint64_t frame) {  // (a node that went with its level isn't updated again)
+    pthread_mutex_lock(&g_move_lock);
+    for (int i = 0; i < 8; i++) if (g_move_reset[i].node && frame - g_move_reset[i].at > 600) g_move_reset[i].node = 0;
+    pthread_mutex_unlock(&g_move_lock);
+}
+static void stand_in_gone(Peer *p) { p->body = p->node = 0, p->move_node = 0, p->move_ok = 0, p->move_scratch = 0; }  // (with its level)
+// what a stand-in is given: their own value; from an older copy (no value) their speed: walking below ~4 m/s (research
+// LARECOMP_WORLD_MOVE=<v>: always v - a test)
+static float stand_in_move(const Peer *p) {
+    static float forced = -2;
+    if (forced == -2) forced = getenv("LARECOMP_WORLD_MOVE") ? (float)atof(getenv("LARECOMP_WORLD_MOVE")) : -1;
+    if (forced >= 0) return forced;
+    if (p->move >= 0) return p->move;
+    float s = sqrtf(p->vel[0] * p->vel[0] + p->vel[2] * p->vel[2]);
+    return s < 0.4f ? 0.0f : s < 4.0f ? 0.5f : 1.0f;
+}
+// (node_hook, the stand-in's node, a guest thread: once a frame - the value when it changes, and again every second: its
+// own AI changing state sets its own)
+static void stand_in_walk(Cpu *c, Peer *p, uint64_t node) {
+    uint64_t f = g_frame;
+    if (__atomic_exchange_n(&p->move_at, f, __ATOMIC_ACQ_REL) == f) return;
+    if (p->move_node != node) {
+        if (p->move_node) stand_in_stop(p);
+        p->move_node = node, p->move_bb = anim_bb_of_node(node), p->move_given = -1;
+        p->move_ok = p->move_bb && anim_float_index(p->move_bb, HASH_MOVE, &p->move_idx);
+        if (p->move_ok && !p->move_scratch) p->move_scratch = (uint64_t)(uintptr_t)hle_alloc(16);
+        LOG("[world] player %016llx's stand-in (node %llx): blackboard %llx, %s\n", (unsigned long long)p->id, (unsigned long long)node,
+            (unsigned long long)p->move_bb, p->move_ok ? "walks with them" : "no \"move\" - it slides");
+    }
+    if (!p->move_ok || !p->move_scratch) return;
+    float want = stand_in_move(p);
+    if (want == p->move_given && f - p->move_given_at < 60) return;
+    uint64_t v = 0;
+    if (!heap_read(p->move_bb, &v, 8) || v != BB_VTABLE) { p->move_ok = 0; return; }
+    anim_set_float(c, p->move_bb, p->move_idx, want, p->move_scratch);
+    p->move_given = want, p->move_given_at = f;
+}
 static int node_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     uint64_t n = c->x[0];
@@ -339,17 +479,14 @@ static int node_hook(Cpu *c, uint64_t addr) {
         float *q = (float *)(uintptr_t)(n + 0xd0), *t = (float *)(uintptr_t)(n + 0xe0);
         if (p->saved_node != n) memcpy(p->saved_q, q, 16), memcpy(p->saved_t, t, 12), p->saved_node = n;
         q[0] = 0, q[1] = sinf(p->yaw * 0.5f), q[2] = 0, q[3] = cosf(p->yaw * 0.5f);
-        t[0] = p->shown[0] + g_off, t[1] = p->shown[1], t[2] = p->shown[2];
-        static int animvel = -1;  // (research LARECOMP_WORLD_ANIMVEL=1: their speed written into the stand-in's body)
-        if (animvel < 0) animvel = getenv("LARECOMP_WORLD_ANIMVEL") ? atoi(getenv("LARECOMP_WORLD_ANIMVEL")) : 0;
-        uint64_t b = p->body;
-        if (animvel && b && is_body(b)) {
-            float *v = (float *)(uintptr_t)(b + 0xc0), *d = (float *)(uintptr_t)(b + 0xd0), *v2 = (float *)(uintptr_t)(b + 0xe0);
-            for (int k = 0; k < 3; k++) v[k] = v2[k] = k == 1 ? 0 : p->vel[k], d[k] = v[k] / 60.0f;
-        }
+        float oa = p->yaw + g_off_ahead * 0.0174533f;
+        t[0] = p->shown[0] + (g_off_ahead ? sinf(oa) * g_off : g_off), t[1] = p->shown[1], t[2] = p->shown[2] + (g_off_ahead ? cosf(oa) * g_off : 0);
+        stand_in_walk(c, p, n);  // (their walk, run, standing: the stand-in's animation)
         return 0;
     }
     if (*(const uint64_t *)(uintptr_t)n != NODE_VTABLE) return 0;
+    if (g_move_reset[0].node | g_move_reset[1].node | g_move_reset[2].node | g_move_reset[3].node | g_move_reset[4].node |
+        g_move_reset[5].node | g_move_reset[6].node | g_move_reset[7].node) move_reset_check(c, n);  // (a let-go stand-in)
     const void *nt = (const void *)(uintptr_t)(n + 0xe0);
     uint64_t mb = g_me_body;
     if (mb && !g_me_node && !memcmp(nt, (const void *)(uintptr_t)(mb + 0x90), 4) &&
@@ -507,6 +644,7 @@ static void trade_frame(uint64_t me, uint64_t frame) {
 // a stand-in let go: its node back where it stood (a station NPC's isn't written again by the game: it stayed where
 // the player was last seen, 2026-11-16) - unless it went with its level
 static void standin_release(Peer *p) {
+    stand_in_stop(p);  // (back to standing, from its node's next update)
     uint64_t n = p->saved_node, b = p->body;
     p->node = 0, p->saved_node = 0;
     if (!n || !b || !is_body(b) || *(const uint64_t *)(uintptr_t)n != NODE_VTABLE) return;
@@ -623,7 +761,7 @@ static void outfit_frame(Peer *p, uint64_t frame) {
     }
     if (p->dressed_body && (!is_body(p->dressed_body) || dressed_body_of(p->dressed_owner) != p->dressed_body)) {
         LOG("[world] player %016llx's dressed character is gone\n", (unsigned long long)p->id);
-        if (p->body == p->dressed_body) p->body = p->node = 0;
+        if (p->body == p->dressed_body) stand_in_gone(p);
         p->dressed_body = p->dressed_owner = 0, p->dressed_hash = p->armed_hash = 0;
     }
     // (their outfit and their look - the save's dress-up, worn as the character is made - both heard: the key of what
@@ -666,6 +804,7 @@ static void hooks_on(void) {
     if (g_hooked) return;
     g_hooked = true;
     rt_register_fnhook_at(NODE_UPDATE, node_hook);
+    rt_register_fnhook_at(BB_SET_FLOAT, bb_set_hook);
     if (!g_body_hooks) g_body_hooks = true, rt_register_fnhook_at(STEP_A, body_hook), rt_register_fnhook_at(STEP_B, body_hook);
 }
 void ghost_init(void) {  // (the test transport: LARECOMP_GHOST=<my port>,<peer port>[,<peer host>], Linux)
@@ -691,6 +830,7 @@ void ghost_init(void) {  // (the test transport: LARECOMP_GHOST=<my port>,<peer 
     g_udp_peer.sin_family = AF_INET, g_udp_peer.sin_port = htons((uint16_t)peer);
     inet_pton(AF_INET, host, &g_udp_peer.sin_addr);
     g_off = getenv("LARECOMP_GHOST_OFFSET") ? (float)atof(getenv("LARECOMP_GHOST_OFFSET")) : 0;
+    g_off_ahead = getenv("LARECOMP_GHOST_AHEAD") ? (float)atof(getenv("LARECOMP_GHOST_AHEAD")) : 0;
     g_self_test = getenv("LARECOMP_GHOST_SELF") != NULL, g_crowd_ok = getenv("LARECOMP_GHOST_CROWD") ? atoi(getenv("LARECOMP_GHOST_CROWD")) : 0;
     w_send = udp_send, w_recv = udp_recv;
     g_world = 1;
@@ -733,6 +873,16 @@ static void ghost_frame(uint64_t frame) {
     if (me != g_me_body) g_me_body = me, g_me_node = 0;
     uint64_t mn = g_me_node;
     if (mn && *(const uint64_t *)(uintptr_t)mn != NODE_VTABLE) g_me_node = mn = 0;
+    if (mn != g_me_bb_node) {  // (our blackboard: our "move" as our controller sets it - bb_set_hook)
+        uint64_t bb = mn ? anim_bb_of_node(mn) : 0;
+        uint32_t idx = ~0u;
+        if (bb && !anim_float_index(bb, HASH_MOVE, &idx)) bb = 0;
+        if (bb || !mn) {
+            g_me_bb = 0, g_me_move_idx = idx, g_me_move = 0, g_me_bb = bb, g_me_bb_node = mn;
+            if (bb) LOG("[world] our player's animation blackboard %llx (\"move\" #%u)\n", (unsigned long long)bb, idx);
+        }
+    }
+    move_reset_expire(frame);
     static uint64_t sent_ns;
     static float last[3];
     if (me && mn && now - sent_ns >= 50000000ull) {  // (ours, 20 a second: the body's position, the node's facing)
@@ -741,7 +891,8 @@ static void ghost_frame(uint64_t frame) {
         WorldPkt k = {.type = 2, .ver = 1, .from = g_self};
         for (int i = 0; i < 3; i++) k.w.p[i] = b[i], k.w.v[i] = dt < 0.5f ? (b[i] - last[i]) / dt : 0, last[i] = b[i];
         k.w.yaw = 2.0f * atan2f(q[1], q[3]);
-        world_send(&k, 16 + 28);
+        k.w.move = g_me_move;
+        world_send(&k, 16 + 32);
         sent_ns = now;
     }
     Look ours;
@@ -790,7 +941,7 @@ static void ghost_frame(uint64_t frame) {
             }
             continue;
         }
-        if (in.type != 2 || n < 44) continue;
+        if (in.type != 2 || n < 16 + 28) continue;
         Peer *p = NULL, *free_p = NULL;
         for (int i = 0; i < MAXPEER; i++) {
             if (g_peers[i].id == in.from) p = &g_peers[i];
@@ -806,6 +957,7 @@ static void ghost_frame(uint64_t frame) {
         }
         if (!p) continue;  // (more players than stand-ins)
         memcpy(p->pos, in.w.p, 12), memcpy(p->vel, in.w.v, 12), p->yaw = in.w.yaw, p->heard_ns = now;
+        p->move = n >= 16 + 32 && isfinite(in.w.move) ? fminf(fmaxf(in.w.move, 0.0f), 2.0f) : -1;
     }
     bool want_scan = false;
     for (int i = 0; i < MAXPEER; i++) {
@@ -818,7 +970,7 @@ static void ghost_frame(uint64_t frame) {
             continue;
         }
         outfit_frame(p, frame);
-        if (p->body && !is_body(p->body)) p->body = p->node = 0;  // (the stand-in went with its level)
+        if (p->body && !is_body(p->body)) stand_in_gone(p);  // (the stand-in went with its level)
         if (!p->body) want_scan = true;
         float age = (float)(now - p->heard_ns) / 1e9f;  // (shown: toward where they should be now, smoothly)
         if (age > 0.25f) age = 0.25f;
