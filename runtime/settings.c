@@ -38,7 +38,6 @@ static const char *settings_file(void) {
     .game_opts = -1,                                                        \
     .game_opts_next = -1,                                                   \
     .antialias = AA_SMAA,  /* (the game has no anti-aliasing of its own) */ \
-    .world_own_npc = 1,                                                     \
 }
 Settings g_settings = SETTINGS_DEFAULTS;
 void settings_defaults(Settings *s) { *s = (Settings)SETTINGS_DEFAULTS; }
@@ -68,7 +67,7 @@ static void parse_line(const char *line) {
     else if (!strcmp(key, "world_players")) g_settings.world_players = atoi(val) != 0;
     else if (!strcmp(key, "sync_saves")) g_settings.sync_saves = atoi(val) != 0;
     else if (!strcmp(key, "world_rate")) g_settings.world_rate = atoi(val) == 30 ? 30 : 20;
-    else if (!strcmp(key, "world_own_npc")) g_settings.world_own_npc = atoi(val) != 0;
+    else if (!strcmp(key, "world_own_npc")) {}  // (old test builds wrote it: their own townsperson is always on now)
     else if (!strcmp(key, "experimental")) g_settings.experimental = atoi(val) != 0, g_experimental_seen = true;
     else if (!strcmp(key, "frame_timing")) g_settings.fixed_steps = !strcmp(val, "fixed");
     else if (!strcmp(key, "render_height")) g_settings.res_height = atoi(val) >= 360 && atoi(val) <= 4320 ? atoi(val) : 0;
@@ -169,7 +168,6 @@ void settings_save(void) {
     fprintf(f, "world_players = %d\n", g_settings.world_players);
     fprintf(f, "sync_saves = %d\n", g_settings.sync_saves);
     fprintf(f, "world_rate = %d\n", g_settings.world_rate == 30 ? 30 : 20);
-    fprintf(f, "world_own_npc = %d\n", g_settings.world_own_npc);
     fprintf(f, "mouse_sens = %.3f\n", g_settings.mouse_sens);
     fprintf(f, "stick_deadzone = %.2f\n", g_settings.stick_deadzone);
     fprintf(f, "volume = %.2f\n", g_settings.volume);

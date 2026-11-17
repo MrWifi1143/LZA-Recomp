@@ -377,7 +377,7 @@ static struct { uint64_t peer, owner; uint32_t hash; } g_dressed[8];
 static int g_ndressed;
 static DressPart g_pparts[24];   // (our player's parts, as its character was made; g_npparts of them)
 static int g_npparts, g_pbody = -1;
-// ---- Their own townsperson (setting world_own_npc, on unless 0; LARECOMP_WORLD_OWN_NPC=0|1 overrides): a shown player
+// ---- Their own townsperson (always; LARECOMP_WORLD_OWN_NPC=0 for research only): a shown player
 // is a NEW townsperson the game makes for them where they are (hle/newnpc.c: the character placement spawn called again
 // with a kept station spawner's arguments, our name newnpc_<k> and their spot), made in their outfit and look from the
 // start (dress_hook knows it by its node's name: g_own[k % NOWN] says whose, in what) - not one taken from the street and
@@ -388,7 +388,7 @@ static int g_npparts, g_pbody = -1;
 static int own_npc(void) {
     static int e = -2;
     if (e == -2) e = getenv("LARECOMP_WORLD_OWN_NPC") ? atoi(getenv("LARECOMP_WORLD_OWN_NPC")) != 0 : -1;
-    return e >= 0 ? e : g_settings.world_own_npc != 0;
+    return e >= 0 ? e : 1;
 }
 void newnpc_on(void);
 bool newnpc_ready(void);
