@@ -350,6 +350,8 @@ static bool g_hooked;
 //   type 3 trade asked, 4 trade answered: u64 to, u32 code
 //   type 5 outfit: u8 part k, u8 parts n, u8 body type, then three strings (NUL-ended): the part's name, its .ccdatam
 //          ("ik_chara/<dir>/<last>.ccdatam" sent as "<dir>"), its variant (the item and colour); 96 bytes at most
+//   type 7 still here: nothing more - sent once a second while we have no player in the world (a menu, Outfit & Looks,
+//          a Link Trade, a loading screen): they keep our stand-in where it was instead of taking us for gone after 5 s
 //   type 6 look: u8 piece k of n (2), u8[6], 64 bytes of a Look (the save's dress-up: part hashes, options). The u8[6]
 //          begins with a u32 FNV-1a of the whole Look (0: an older copy): a look is taken only once both pieces carry
 //          the same one and it matches - a piece lost or late while they change clothes never makes a half-new look
@@ -1610,7 +1612,7 @@ static void ghost_frame(uint64_t frame) {
     }
     move_reset_expire(frame);
     vset_frame(frame, me && mn);  // (the names of everything the game has to wear: once in the world)
-    static uint64_t sent_ns;
+    static uint64_t sent_ns, alive_ns;
     static float last[3];
     if (me && mn && now - sent_ns >= 50000000ull) {  // (ours, 20 a second: the body's position, the node's facing)
         const float *b = (const float *)(uintptr_t)(me + 0x90), *q = (const float *)(uintptr_t)(mn + 0xd0);
@@ -1624,6 +1626,10 @@ static void ghost_frame(uint64_t frame) {
         k.w.move = g_me_move;
         world_send(&k, 16 + 32);
         sent_ns = now;
+    } else if ((!me || !mn) && now - sent_ns >= 1000000000ull && now - alive_ns >= 1000000000ull) {  // (no player of ours in the
+        WorldPkt k = {.type = 7, .ver = 1, .from = g_self};                                            //  world: still here, once
+        world_send(&k, 16);                                                                            //  a second)
+        alive_ns = now;
     }
     Look ours;
     if (me && frame % 60 == 30 && look_ours(&ours))  // (our real look, every second)
@@ -1661,6 +1667,7 @@ static void ghost_frame(uint64_t frame) {
         Peer *p = peer_from(&in, via);
         if (in.type == 3 || in.type == 4) { if (n >= 28 && p) trade_message(&in, frame); continue; }
         if (in.type == 5) { outfit_message(p, &in, (size_t)n); continue; }
+        if (in.type == 7) { if (p) p->heard_ns = now; continue; }  // (in a menu or loading: still here)
         if (in.type == 6) {
             if (!p || n < 16 + 8 + 64 || in.l.n != 2 || in.l.k >= 2) continue;
             size_t off = (size_t)in.l.k * 64, len = sizeof p->look - off < 64 ? sizeof p->look - off : 64;
@@ -1795,6 +1802,7 @@ static void ghost_frame(uint64_t frame) {
                 float e = a < 0 ? 0 : fminf(r, 250.0f) / 1000.0f;
                 for (int i = 0; i < 3; i++) target[i] = p->snap[k].p[i] + p->snap[k].v[i] * e;
                 p->yaw = p->snap[k].yaw, p->move = p->snap[k].move;
+                if (r > 250.0f && p->move > 0) p->move = 0;  // (nothing new for a while - a menu, a loading screen: standing)
             } else {
                 float ra = (float)(int32_t)(p->snap[a].t - p->snap[nw].t), rb = (float)(int32_t)(p->snap[a + 1].t - p->snap[nw].t);
                 float f = rb > ra ? (r - ra) / (rb - ra) : 1;
