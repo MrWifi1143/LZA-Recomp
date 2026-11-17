@@ -38,10 +38,11 @@ static volatile uint64_t g_frame;  // (the presents so far: warp_frame)
 static bool is_body(uint64_t o) { return o >= HEAP_BASE && o < HEAP_BASE + HEAP_MAX && *(const uint64_t *)(uintptr_t)o == BODY_VTABLE; }
 
 // dressed characters let go (a player who left or isn't shown any more, an outfit changed): put away until the game
-// removes them - gone_* below (owner: the character's object; body, node once known; col: its collision put away)
+// removes them - gone_* below (owner: the character's object; body, node once known; col_body: the body whose collision
+// was put away)
 #define MAXGONE 16
 #define GONE_Y (-500.0f)  // (where: under the street - the crowd lets a walker that far off its route go, 2026-11-14)
-static struct { volatile uint64_t owner, node, body; uint64_t since, peer, col_seen, lost_at, logged_at; int col, walker, watch; } g_gone[MAXGONE];
+static struct { volatile uint64_t owner, node, body; uint64_t since, peer, col_body, lost_at, logged_at; int walker, watch; } g_gone[MAXGONE];
 static volatile int g_ngone;  // (slots in use: the hooks look only while there are any)
 static pthread_mutex_t g_gone_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool gone_node(uint64_t n) {
@@ -235,8 +236,8 @@ __attribute__((constructor)) static void story_init(void) {
 // by shifting every copy of a station NPC's x and halving: the world matrices themselves are overwritten). A
 // character's own node: from its object (every one made is kept), else the one whose translation is its body's position. The
 // stand-in keeps its own model, turns toward their facing (not snapped to each heading heard), walks, runs and stands as
-// they do (stand_in_walk, their animation's locomotion value); a station NPC's collision is put away while it stands in
-// (col_frame - a walker's follows it);
+// they do (stand_in_walk, their animation's locomotion value); its collision is put away while it stands in (pres_frame:
+// a station NPC's stays where it stood, a walker's would follow it - neither blocks);
 // its Talk prompt is hidden - and A there asks that player to trade (below).
 //   (The game's own remote player - Private Battles' - is an ordinary character whose movement comes from the network,
 // 2026-11-14: a stand-in until that can be made in the field.)
@@ -305,12 +306,7 @@ typedef struct {
     int look_state;                  // (0 not checked yet, 1 the game has everything in it, 2 refused: their outfit alone)
     uint64_t via;                    // (who the transport says sent their packets: the server's id - their id can't be borrowed)
     int crowd_seen;                  // (their dressed character is a walker of the crowd: logged once)
-    uint64_t col_body, col_tried;    // (the stand-in whose collision is put away - col_at, as it was: col_was - see col_frame)
-    uint64_t col_at[4];
-    float col_was[4][3];
-    int ncol;
-    uint64_t col_seen, col_seen_at;  // (the stand-in, since when: a scan only after 2 s - see col_frame)
-    uint64_t pres_body, pres_rec, pres_id;  // (a walker stand-in's presence body in the physics world: its filter changed -
+    uint64_t pres_body, pres_rec, pres_id;  // (the stand-in's presence body in the physics world: its filter changed -
     uint32_t pres_was;                      //  pres_frame; pres_was: its own, put back on let-go)
     uint64_t armed_at;               // (when their last dressing was asked for: the next one not within 10 s - unless the last
                                      //  one went away, then at once)
@@ -577,7 +573,7 @@ static void move_reset_expire(uint64_t frame) {  // (a node that went with its l
 }
 static volatile int g_scan_soon;  // (a stand-in went with its level: the next one looked for at once, not within 10 s)
 static void stand_in_gone(Peer *p) {  // (with its level - its collision too)
-    p->col_body = 0, p->ncol = 0, p->pres_body = p->pres_rec = p->pres_id = 0;
+    p->pres_body = p->pres_rec = p->pres_id = 0;
     p->body = p->node = 0, p->move_node = 0, p->move_ok = 0, p->move_scratch = 0, g_scan_soon = 1;
 }
 // what a stand-in is given: their own value; from an older copy (no value) their speed: walking below ~4 m/s (research
@@ -728,126 +724,24 @@ static void *scan_bodies(void *arg) {
     return NULL;
 }
 
-// ---- A standing stand-in's collision. A station NPC's character body (an hknpCharacterProxy: vtable 0x7003be6218, its
-// transform at +0x60 / +0x90) isn't integrated - only the player's and the crowd's are (0x7000081ce0) - and what blocks
-// the player is not it: writing its +0x90 moved nothing (2026-11-16: the player, walked through the NPC's spot, stopped
-// 0.58 m short of it for 2 s whether its model, its body's +0x90 or both had been moved away). Its blockers are Havok
-// bodies of the physics world (hknpBody: a transform - 3 rotation columns, the translation at +0x30 - each after a
-// header u64 0x8000000001xxxxxx, the body's id in the low bits; 3-4 per NPC, at its position to the bit): with those put
-// away the player walked straight through. A body's broadphase box isn't the game's to move from here, so a moved body
-// wouldn't block at the stand-in's spot either: the stand-in's are put 1 km under the street while it stands in (no
-// collision), and back when it is let go. Found by a background heap scan (like scan_bodies) for each new stand-in that
-// isn't stepped, once it has stood in for 2 s (a character just made stands still until the crowd moves it: a walker, its
-// put-away bodies are put back as soon as it is seen stepped).
-//   A walker of the crowd standing in keeps its collision, and needs nothing: its body follows its node - to the
-// stand-in's spot, every frame (2026-11-16, two copies, LARECOMP_WORLD_LOG_STANDIN: the walker's proxy where it is drawn
-// to the centimetre, standing and walking) - so it blocks AT the stand-in like a person would (walked into it: stopped
-// 0.57 m short; the same walk alone went 7 m further) and nothing is left where the walker came from. Dead end: putting it
-// away like a station NPC's - no physics body of the world follows a walker at a fixed address (what a heap scan finds at
-// its spot, even checked twice 0.3 s apart, is scratch data - query / contact buffers - and writing it changed nothing).
-static bool body_stepped(uint64_t b, uint64_t frame);
-static struct { volatile int state; int peer; uint64_t body, at[4]; int n; } g_col;  // (state: 0 idle, 1 scanning, 2 found)
-static void *col_scan(void *arg) {
-    (void)arg;
-    float pos[3];
-    uint32_t xb, zb;
-    int n = 0;
-    if (heap_read(g_col.body + 0x90, pos, 12)) {
-        memcpy(&xb, &pos[0], 4), memcpy(&zb, &pos[2], 4);
-        const size_t chunk = 1u << 20;
-        uint8_t *buf = malloc(chunk + 0x40);
-        for (uint64_t a = HEAP_BASE; buf && a < HEAP_BASE + HEAP_MAX && n < 4; a += chunk) {
-            if (!heap_read(a - 0x40, buf, chunk + 0x40)) continue;  // (the 0x40 before it: the header of a body at its start)
-            for (size_t k = 0x40; k + 12 <= chunk + 0x40 && n < 4; k += 16) {
-                uint32_t x, z;
-                memcpy(&x, buf + k, 4), memcpy(&z, buf + k + 8, 4);
-                if (x != xb || z != zb) continue;
-                uint64_t hdr;
-                memcpy(&hdr, buf + k - 0x40, 8);
-                if (hdr >> 24 != 0x8000000001ull) continue;
-                g_col.at[n++] = a - 0x40 + k;
-            }
-        }
-        free(buf);
-    }
-    g_col.n = n;
-    __atomic_store_n(&g_col.state, 2, __ATOMIC_RELEASE);
-    return NULL;
-}
-static void col_restore(Peer *p) {
-    int back = 0;
-    if (p->col_body && p->col_body == p->body && is_body(p->body))
-        for (int i = 0; i < p->ncol; i++) {
-            float *t = (float *)(uintptr_t)p->col_at[i];
-            if (t[1] == p->col_was[i][1] - 1000.0f) t[1] = p->col_was[i][1], back++;  // (still as we left it: ours to put back)
-        }
-    if (back) LOG("[world] player %016llx's stand-in let go: its collision back (%d physics bodies)\n", (unsigned long long)p->id, back);
-    p->col_body = 0, p->ncol = 0;
-}
-static void col_frame(uint64_t frame) {
-    for (int i = 0; i < MAXPEER; i++) {  // (put away, then seen stepped: a walker after all - its own back)
-        Peer *p = &g_peers[i];
-        if (p->id && p->col_body && p->col_body == p->body && body_stepped(p->body, frame)) col_restore(p);
-    }
-    if (__atomic_load_n(&g_col.state, __ATOMIC_ACQUIRE) == 2 && g_col.peer < 0) {  // (a let-go dressed character's: away for good)
-        int i = -1 - g_col.peer;
-        if (g_gone[i].owner && g_gone[i].body == g_col.body && is_body(g_col.body) && !g_gone[i].walker && !body_stepped(g_col.body, frame)) {
-            for (int k = 0; k < g_col.n; k++) ((float *)(uintptr_t)g_col.at[k])[1] -= 1000.0f;
-            g_gone[i].col = 1;
-            LOG("[world] a let-go dressed character (%llx): its collision put away (%d physics bodies)\n", (unsigned long long)g_gone[i].owner, g_col.n);
-        }
-        g_col.state = 0;
-    }
-    if (__atomic_load_n(&g_col.state, __ATOMIC_ACQUIRE) == 2) {
-        Peer *p = &g_peers[g_col.peer];
-        if (p->id && p->body == g_col.body && p->node && is_body(p->body) && !p->col_body) {
-            p->col_body = p->body, p->ncol = g_col.n;
-            for (int i = 0; i < g_col.n; i++) {
-                float *t = (float *)(uintptr_t)g_col.at[i];
-                p->col_at[i] = g_col.at[i], memcpy(p->col_was[i], t, 12);
-                t[1] = p->col_was[i][1] - 1000.0f;
-            }
-            LOG("[world] player %016llx's stand-in: its collision put away (%d physics bodies)\n", (unsigned long long)p->id, g_col.n);
-        }
-        g_col.state = 0;
-    }
-    if (g_col.state) return;
-    for (int i = 0; i < MAXGONE && g_ngone; i++) {  // (a let-go dressed station NPC whose collision wasn't put away yet: 2 s
-        uint64_t b = g_gone[i].body;                //  after, still not stepped and where it stood - once)
-        if (!g_gone[i].owner || !b || g_gone[i].watch || g_gone[i].col || g_gone[i].col_seen || g_gone[i].walker || frame - g_gone[i].since < 120 ||
-            body_stepped(b, frame) || !is_body(b) || ((const float *)(uintptr_t)(b + 0x90))[1] < GONE_Y + 100.0f) continue;
-        pthread_t t;
-        g_gone[i].col_seen = frame;
-        g_col.peer = -1 - i, g_col.body = b, g_col.n = 0, g_col.state = 1;
-        if (pthread_create(&t, NULL, col_scan, NULL)) g_col.state = 0; else pthread_detach(t);
-        return;
-    }
-    for (int i = 0; i < MAXPEER; i++) {
-        Peer *p = &g_peers[i];
-        if (!p->id || !p->body || !p->node || p->col_body == p->body || p->col_tried == p->body || body_stepped(p->body, frame)) continue;
-        if (p->col_seen != p->body) { p->col_seen = p->body, p->col_seen_at = frame; continue; }
-        if (frame - p->col_seen_at < 120) continue;  // (2 s standing in, not stepped: not a walker)
-        pthread_t t;
-        p->col_tried = p->body;  // (once per stand-in)
-        g_col.peer = i, g_col.body = p->body, g_col.n = 0, g_col.state = 1;
-        if (pthread_create(&t, NULL, col_scan, NULL)) g_col.state = 0; else pthread_detach(t);
-        return;
-    }
-}
-
-// ---- a walker of the crowd standing in: it blocked and pushed like a person (walked into it: stopped 0.57 m short) - its
-// physics presence isn't at a fixed spot a heap scan finds (col_frame), it's the character proxy's own body in the hknp
-// world (2026-11-16, read-only Lua research, testout/za-mp5/tools/colf*.lua): a character proxy (BODY_VTABLE, as made at
+// ---- A stand-in's collision. Every character's physics presence is its character proxy's own body in the hknp world
+// (2026-11-16, read-only Lua research, testout/za-mp5/tools/colf*.lua): a character proxy (BODY_VTABLE, as made at
 // 0x700119d2c4 -> 0x700062e0b0 from its description) keeps its body's id at +0x38 (0x8000000001xxxxxx; created there with
 // a body description whose filter is the proxy's +0x40) and the world wrapper at +0x50; [wrapper+0x10] = the hknp world,
 // whose [+0x38] is the body array, 0xc0 each, indexed by id & 0xffffff (the make writes the record's +0xb8). A record:
 // transform (translation +0x30 = the proxy's spot), +0x50 / +0x84 the id's low half, +0x8c the collision filter info
 // (= the proxy's +0x40: the player 3, people 4, Pokemon 5 - the layers of system/physics/CollisionLayer/
 // collision_layer_main.trhcl: Player 3, NPC 4, SymbolPokemon 5 ... None 0x1f), +0xb0 the whole id. Only the layer pairs
-// listed there collide (Player-NPC is, NPC-NPC isn't); None is in no pair. So a walker standing in gets its own presence
-// body's filter set to None while it stands in - checked to be its own record (id at +0xb0, +0x50, +0x84) before each
-// write, and only while the filter is still the one it was made with or ours; its proxy's +0x40 (what its own steps cast
-// with - the ground) is left alone; on let-go the record, if still its own, gets its filter back.
+// listed there collide (Player-NPC is, NPC-NPC isn't); None is in no pair. So a stand-in gets its own presence body's
+// filter set to None while it stands in - checked to be its own record (id at +0xb0, +0x50, +0x84) before each write, and
+// only while the filter is still the one it was made with or ours; its proxy's +0x40 (what its own steps cast with - the
+// ground) is left alone; on let-go the record, if still its own, gets its filter back.
+//   A walker of the crowd's body follows its node - to the stand-in's spot - so it blocked AT the stand-in like a person
+// (walked into: stopped 0.57 m short); a station NPC's body isn't stepped and stays where the NPC stood - an invisible
+// wall there (stopped 0.58 m short of its old spot). Both walked through with the filter None (walker 2026-11-16 cw1,
+// station 2026-11-16 st1/st0). (Until then a station stand-in's blockers were found by a background heap scan for the bodies
+// at its spot - transforms after a header 0x8000000001xxxxxx: its record and copies of it - and put 1 km under the street;
+// this is exact and needs no scan.)
 // LARECOMP_WORLD_WALKER_COL=1: left as it was (an A/B).
 #define PRES_STRIDE 0xc0
 #define LAYER_NONE 0x1fu
@@ -868,28 +762,41 @@ static void pres_restore(Peer *p) {
         volatile uint32_t *f = (volatile uint32_t *)(uintptr_t)(p->pres_rec + 0x8c);
         if (*f == LAYER_NONE) {
             *f = p->pres_was;
-            LOG("[world] player %016llx's walker stand-in let go: it blocks again (physics filter %u back)\n", (unsigned long long)p->id, p->pres_was);
+            LOG("[world] player %016llx's stand-in let go: it blocks again (physics filter %u back)\n", (unsigned long long)p->id, p->pres_was);
         }
     }
     p->pres_body = p->pres_rec = p->pres_id = 0;
 }
+static bool body_stepped(uint64_t b, uint64_t frame);
+static bool pres_put_away(uint64_t body, uint64_t *rec, uint64_t *id, uint32_t *was) {  // (a character's presence: None)
+    uint64_t i = 0, r = presence_of(body, &i);
+    if (!r) return false;
+    volatile uint32_t *f = (volatile uint32_t *)(uintptr_t)(r + 0x8c);
+    uint32_t made_with = *(const volatile uint32_t *)(uintptr_t)(body + 0x40);
+    if (*f != made_with || made_with == LAYER_NONE) return false;  // (not the filter its proxy made it with: not touched)
+    *f = LAYER_NONE, *rec = r, *id = i, *was = made_with;
+    return true;
+}
 static void pres_frame(Peer *p, uint64_t frame) {  // (each frame, a shown player's stand-in)
+    (void)frame;
     static int off = -1;
     if (off < 0) off = getenv("LARECOMP_WORLD_WALKER_COL") != NULL;
-    bool walker = p->body && p->node && is_body(p->body) && body_stepped(p->body, frame);
-    if (p->pres_rec && (!walker || p->pres_body != p->body)) pres_restore(p);
-    if (!walker || off) return;
-    uint64_t id = 0, r = presence_of(p->body, &id);
-    if (!r) return;
-    volatile uint32_t *f = (volatile uint32_t *)(uintptr_t)(r + 0x8c);
-    if (p->pres_rec != r || p->pres_id != id) {
-        uint32_t made_with = *(const volatile uint32_t *)(uintptr_t)(p->body + 0x40);
-        if (*f != made_with || made_with == LAYER_NONE) return;  // (not the filter its proxy made it with: not touched)
-        p->pres_body = p->body, p->pres_rec = r, p->pres_id = id, p->pres_was = made_with;
-        LOG("[world] player %016llx's walker stand-in: its physics presence (body %llx) no longer blocks (filter %u -> none)\n",
-            (unsigned long long)p->id, (unsigned long long)id, made_with);
+    bool in = p->body && p->node && is_body(p->body);
+    if (p->pres_rec && (!in || p->pres_body != p->body)) pres_restore(p);
+    if (!in || off) return;
+    if (!p->pres_rec) {
+        uint64_t r, id;
+        uint32_t was;
+        if (!pres_put_away(p->body, &r, &id, &was)) return;
+        p->pres_body = p->body, p->pres_rec = r, p->pres_id = id, p->pres_was = was;
+        LOG("[world] player %016llx's stand-in: its physics presence (body %llx) no longer blocks (filter %u -> none)\n",
+            (unsigned long long)p->id, (unsigned long long)id, was);
+        return;
     }
-    if (*f == p->pres_was) *f = LAYER_NONE;  // (again if the game set its own back)
+    uint64_t rid = 0;  // (still its own record: again if the game set its own filter back)
+    if (!heap_read(p->pres_rec + 0xb0, &rid, 8) || rid != p->pres_id) { p->pres_body = p->pres_rec = p->pres_id = 0; return; }
+    volatile uint32_t *f = (volatile uint32_t *)(uintptr_t)(p->pres_rec + 0x8c);
+    if (*f == p->pres_was) *f = LAYER_NONE;
 }
 
 // ---- the walk-up trade: A by a player's stand-in (the stand-in's own Talk is kept from the game) asks that player; them
@@ -980,12 +887,10 @@ static void trade_frame(uint64_t me, uint64_t frame) {
 
 // a stand-in let go: its node back where it stood (a station NPC's isn't written again by the game: it stayed where
 // the player was last seen, 2026-11-16) - unless it went with its level
-static void col_restore(Peer *p);
 static void pres_restore(Peer *p);
 static void standin_release(Peer *p) {
     stand_in_stop(p);  // (back to standing, from its node's next update)
-    col_restore(p);    // (its collision back where it stands)
-    pres_restore(p);   // (a walker's physics presence: blocking again)
+    pres_restore(p);   // (its physics presence: blocking again)
     uint64_t n = p->saved_node, b = p->body;
     p->node = 0, p->saved_node = 0;
     if (!n || !b || !is_body(b) || *(const uint64_t *)(uintptr_t)n != NODE_VTABLE) return;
@@ -1258,14 +1163,14 @@ static void dressed_drop(uint64_t owner) {
 // for good: its node 500 m under the street at every update (a station NPC's node isn't written by the game, so it stays
 // there - drawn nowhere, its Talk out of reach; a walker's body follows its node, and is put there before each of its
 // steps too: the crowd lets a walker that far off its route go - removed, as 2026-11-14's stray walkers were) and its
-// collision (a station NPC's: the physics bodies at its body's spot, as col_frame puts a stand-in's away) kept away -
-// until the game removes the character (its level goes, the crowd lets it go: its object or its body gone).
+// collision (its physics presence's filter None, as pres_frame puts a stand-in's away: a station NPC's stays where it
+// stood) kept away - until the game removes the character (its level goes, the crowd lets it go: its object or its body gone).
 static bool gone_off(void) {  // (research LARECOMP_WORLD_GONE_OFF=1: left as they are - the old way, an A/B)
     static int off = -1;
     if (off < 0) off = getenv("LARECOMP_WORLD_GONE_OFF") != NULL;
     return off;
 }
-static void gone_add(uint64_t owner, uint64_t peer, int col) {
+static void gone_add(uint64_t owner, uint64_t peer, uint64_t col_body) {
     if (!owner) return;
     pthread_mutex_lock(&g_gone_lock);
     int f = -1;
@@ -1279,8 +1184,8 @@ static void gone_add(uint64_t owner, uint64_t peer, int col) {
         g_gone[f].owner = 0, g_gone[f].node = 0, g_gone[f].body = 0;
     }
     if (f >= 0) {
-        g_gone[f].body = 0, g_gone[f].node = 0, g_gone[f].since = g_frame, g_gone[f].peer = peer, g_gone[f].col = col;
-        g_gone[f].col_seen = 0, g_gone[f].walker = 0, g_gone[f].lost_at = 0, g_gone[f].logged_at = g_frame, g_gone[f].watch = gone_off();
+        g_gone[f].body = 0, g_gone[f].node = 0, g_gone[f].since = g_frame, g_gone[f].peer = peer, g_gone[f].col_body = col_body;
+        g_gone[f].walker = 0, g_gone[f].lost_at = 0, g_gone[f].logged_at = g_frame, g_gone[f].watch = gone_off();
         __atomic_store_n(&g_gone[f].owner, owner, __ATOMIC_RELEASE);
         int n = 0;
         for (int i = 0; i < MAXGONE; i++) n += g_gone[i].owner != 0;
@@ -1332,6 +1237,14 @@ static void gone_frame(uint64_t frame) {
                 LOG("[world] a let-go dressed character (%llx) lost its body (%.1f s after): its object stays, kept away by its node\n", (unsigned long long)ow, secs);
             }
         }
+        if (b && b != g_gone[i].col_body && !g_gone[i].watch) {  // (its collision: away for good - never put back)
+            uint64_t r, id;
+            uint32_t was;
+            if (pres_put_away(b, &r, &id, &was))
+                LOG("[world] a let-go dressed character (%llx): its physics presence (body %llx) no longer blocks\n", (unsigned long long)ow,
+                    (unsigned long long)id);
+            g_gone[i].col_body = b;
+        }
         if (b && !g_gone[i].walker && body_stepped(b, frame))
             g_gone[i].walker = 1, LOG("[world] a let-go dressed character (%llx) is a walker of the crowd: kept under the street till it lets it go\n",
                                       (unsigned long long)ow);
@@ -1348,8 +1261,8 @@ static void gone_frame(uint64_t frame) {
 static void standin_let_go(Peer *p, uint64_t owner) {
     bool dressed = owner && p->body && p->body == dressed_body_of(owner);
     if (!dressed || gone_off()) { standin_release(p); return; }
-    int col = p->col_body == p->body && p->ncol > 0;
-    p->col_body = 0, p->ncol = 0, p->saved_node = 0;  // (no collision or node back where it stood: it goes)
+    uint64_t col = p->pres_rec && p->pres_body == p->body ? p->body : 0;
+    p->pres_body = p->pres_rec = p->pres_id = 0, p->saved_node = 0;  // (no collision or node back where it stood: it goes)
     standin_release(p);
     p->body = 0;
     gone_add(owner, p->id, col);
@@ -1386,7 +1299,7 @@ static void standin_hide(Peer *p) {
     if (g_dress_want.peer == p->id) g_dress_want.peer = 0;
     pthread_mutex_unlock(&g_dress_lock);
     for (int i = 0; i < ng; i++) gone_add(gone[i], p->id, 0);
-    p->body = p->node = 0, p->col_body = 0, p->ncol = 0, p->col_tried = 0, p->col_seen = 0;
+    p->body = p->node = 0;
     p->dressed_body = p->dressed_owner = 0, p->dressed_hash = p->armed_hash = 0, p->armed_at = p->dressed_at = 0, p->crowd_seen = 0;
     p->show = 0;
 }
@@ -1602,7 +1515,6 @@ static void ghost_frame(uint64_t frame) {
     world_transport(frame);
     gone_frame(frame);
     if (!g_world) {
-        if (g_ngone && frame % 30 == 0) col_frame(frame);  // (the let-go ones' collision, with the world off too)
         return;
     }
     hooks_on();
@@ -1878,7 +1790,6 @@ static void ghost_frame(uint64_t frame) {
         }
     }
     trade_frame(me, frame);
-    col_frame(frame);
     static uint64_t scanned_at;
     if (want_scan && !g_scanning && me && mn && (!scanned_at || frame - scanned_at > 600 || (g_scan_soon && frame - scanned_at > 60))) {
         pthread_t t;
