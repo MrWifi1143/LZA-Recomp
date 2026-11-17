@@ -1829,7 +1829,7 @@ void vk_crash_note(void) {
     bool vs = strstr(tl_build_what, "vertex") || strstr(tl_build_what, "whole") || strstr(tl_build_what, "link");
     bool fs = strstr(tl_build_what, "fragment") || strstr(tl_build_what, "whole") || strstr(tl_build_what, "link");
     fprintf(stderr, "[vk] this thread was in the driver building %s of the program vs %llx fs %llx (fs hash %016llx)\n", tl_build_what,
-            (unsigned long long)p->code[0], (unsigned long long)p->code[1], p->code[1] ? (unsigned long long)vk_fs_hash(p->code[1]) : 0ull);
+            (unsigned long long)p->code[0], (unsigned long long)p->code[1], p->code[1] && !p->warm ? (unsigned long long)vk_fs_hash(p->code[1]) : 0ull);  // (a warm-up's copy: too short to hash)
     if (vs && p->vi && p->vi->msl) fprintf(stderr, "[vk] ---- its vertex GLSL ----\n%s\n[vk] ---- end ----\n", p->vi->msl);
     if (fs && p->fi && p->fi->msl) fprintf(stderr, "[vk] ---- its fragment GLSL ----\n%s\n[vk] ---- end ----\n", p->fi->msl);
     if (tl_build_glsl) fprintf(stderr, "[vk] ---- its compute GLSL ----\n%s\n[vk] ---- end ----\n", tl_build_glsl);
@@ -2233,7 +2233,8 @@ static void translate_program(void *arg) {
     if (p->vkey.xfb_count[0]) xfb_rewrite(p);
     p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
     if (dl_on < 0) dl_on = ENV("LARECOMP_VK_DEVLOST_TRACE") ? atoi(ENV("LARECOMP_VK_DEVLOST_TRACE")) : 0;
-    if (dl_on > 0 && p->code[1]) {  // (LARECOMP_VK_DEVLOST_TRACE: the GLSL kept for the dump)
+    if (dl_on > 0 && p->code[1] && !p->warm) {  // (LARECOMP_VK_DEVLOST_TRACE: the GLSL kept for the dump; not the warm-up's:
+        // its programs are freed right after, and their fragment copy can be shorter than what vk_fs_hash reads)
         extern uint64_t vk_fs_hash(uint64_t fs);
         vk_dl_note_program(vk_fs_hash(p->code[1]), p->vi->msl, p->fi ? p->fi->msl : NULL);
     }
