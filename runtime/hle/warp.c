@@ -317,6 +317,17 @@ typedef struct {
     DressPart parts[MAXPARTS];
     int nparts, body_type;
     uint32_t have, hash, dressed_hash, armed_hash;
+    // (with tags - each part carries their whole outfit's hash: the parts as they come, kept here until all of them carry
+    // the same one; then they are the outfit - a part lost while they change clothes never makes a half-new one)
+    DressPart parts_in[MAXPARTS];
+    uint32_t parts_tag[MAXPARTS], have_in, outfit_tag, look_took;  // (outfit_tag / look_took: the tags of what we have)
+    int hash_logged;
+    // (acknowledgements, type 8: ack_* = what they say they have of ours (acked: they have said so at least once - a copy
+    // that does; an older one never does and gets ours resent as before); told_* = what we last told them we have of
+    // theirs, when; poked: a part or a look piece of theirs came since - they're still sending, so may not have heard it)
+    uint32_t ack_o, ack_l, told_o, told_l;
+    int acked, poked;
+    uint64_t told_ns;
     uint64_t dressed_owner, dressed_body, dressed_at;
     uint64_t saved_node;             // (the stand-in's node as it was - put back when another one takes over / they leave)
     float saved_q[4], saved_t[3];
@@ -381,13 +392,20 @@ static bool g_hooked;
 //          copy - none): over the internet packets come late, unevenly and out of order (WorldWhere below)
 //   type 3 trade asked, 4 trade answered: u64 to, u32 code
 //   type 5 outfit: u8 part k, u8 parts n, u8 body type, then three strings (NUL-ended): the part's name, its .ccdatam
-//          ("ik_chara/<dir>/<last>.ccdatam" sent as "<dir>"), its variant (the item and colour); 96 bytes at most
+//          ("ik_chara/<dir>/<last>.ccdatam" sent as "<dir>"), its variant (the item and colour); 96 bytes at most.
+//          Its header's u8[6] begins with a u32 hash of the whole outfit (outfit_hash; 0: an older copy): taken once all
+//          parts carry the same one
+//   type 8 have: u64 to, u32 their outfit's hash, u32 their look's hash - what we have of that player's (0: not all of
+//          it). Sent when it changes, every 2 s while we lack some of it, and when they send again what we have. A player
+//          whose outfit and look everyone has acknowledged sends them only when they change, someone new comes, or once
+//          every 15 s for safety - they were a quarter of all traffic, resent every 2 s for good (2026-11-17)
 //   type 7 still here: nothing more - sent once a second while we have no player in the world (a menu, Outfit & Looks,
 //          a Link Trade, a loading screen): they keep our stand-in where it was instead of taking us for gone after 5 s
 //   type 6 look: u8 piece k of n (2), u8[6], 64 bytes of a Look (the save's dress-up: part hashes, options). The u8[6]
 //          begins with a u32 FNV-1a of the whole Look (0: an older copy): a look is taken only once both pieces carry
 //          the same one and it matches - a piece lost or late while they change clothes never makes a half-new look
 typedef struct { uint8_t type, ver, pad[6]; uint64_t from; union { struct { float p[3], yaw, v[3], move; } w; struct { uint64_t to; uint32_t code; } t;
+    struct { uint64_t to; uint32_t o, l; } a;
     struct { uint8_t k, n, body; char s[77]; } o; struct { uint8_t k, n, pad[6]; uint8_t d[64]; } l; }; } WorldPkt;
 
 // transport: the online server through the relay plugin, else (tests) UDP
@@ -1336,12 +1354,26 @@ static void outfit_message(Peer *p, const WorldPkt *k, size_t n) {
                                part.name, part.var);
         return;
     }
-    if (p->nparts != k->o.n) p->nparts = k->o.n, p->have = 0;
-    p->parts[k->o.k] = part;
+    if (p->nparts != k->o.n) p->nparts = k->o.n, p->have = 0, p->have_in = 0, p->outfit_tag = 0;
     p->body_type = g_pbody;
-    p->have |= 1u << k->o.k;
-    if (p->have != (1u << p->nparts) - 1) return;
+    uint32_t tag, all = (1u << p->nparts) - 1;
+    memcpy(&tag, k->pad, 4);
+    p->poked = 1;
+    if (tag) {  // (tagged: kept aside until every part carries the same whole-outfit hash)
+        p->parts_in[k->o.k] = part, p->parts_tag[k->o.k] = tag, p->have_in |= 1u << k->o.k;
+        if (p->have_in != all) return;
+        for (int i = 0; i < p->nparts; i++) if (p->parts_tag[i] != tag) return;
+        if (p->outfit_tag == tag && p->have == all) return;  // (the same again)
+        memcpy(p->parts, p->parts_in, sizeof p->parts);
+        p->have = all, p->outfit_tag = tag;
+    } else {  // (an older copy: part by part)
+        p->parts[k->o.k] = part;
+        p->have |= 1u << k->o.k;
+        if (p->have != all) return;
+    }
     uint32_t h = outfit_hash(p->parts, p->nparts);
+    if (tag && h != tag && !p->hash_logged++)  // (their hash of it and ours differ: a part didn't come over exactly - logged once)
+        LOG("[world] player %016llx's outfit hashes %08x here, %08x as sent\n", (unsigned long long)p->id, h, tag);
     if (h == p->hash) return;
     p->hash = h;
     LOG("[world] player %016llx's outfit: %d parts (%08x), hat %s, top %s\n", (unsigned long long)p->id, p->nparts, h,
@@ -1788,28 +1820,58 @@ static void ghost_frame(uint64_t frame) {
         world_send(&k, 16);                                                                            //  a second)
         alive_ns = now;
     }
+    // (our outfit and our look: sent while someone we hear hasn't acknowledged the ones we have now - they change, a
+    // player comes, an older copy never acknowledges -, else once every 15 s for safety: a whole round of the parts and
+    // the look once. LARECOMP_WORLD_RESEND=1: always, the old way - an A/B)
+    static int resend_always = -1;
+    if (resend_always < 0) resend_always = getenv("LARECOMP_WORLD_RESEND") && atoi(getenv("LARECOMP_WORLD_RESEND")) == 1;
+    static uint32_t our_o, our_l;
+    static uint64_t safety_ns;
+    static int round_o, round_l, need_was = -1;
+    int need_o = resend_always, need_l = resend_always;
+    for (int i = 0; i < MAXPEER; i++)
+        if (g_peers[i].id) need_o |= g_peers[i].ack_o != our_o || !our_o, need_l |= g_peers[i].ack_l != our_l || !our_l;
+    if (me && now - safety_ns >= 15000000000ull) safety_ns = now, round_o = 13, round_l = 1;
+    if ((need_o || need_l) != need_was) {
+        if (need_was >= 0)
+            LOG("[world] our outfit and look %s\n", need_o || need_l ? "sent: someone hasn't got them" : "acknowledged by everyone: sent again on a change, "
+                "a newcomer or every 15 s");
+        need_was = need_o || need_l;
+    }
     Look ours;
-    if (me && frame % 60 == 30 && look_ours(&ours))  // (our real look, every second)
+    if (me && frame % 60 == 30 && (need_l || round_l) && look_ours(&ours)) {  // (our real look, every second)
+        uint32_t lh = 2166136261u;
+        for (size_t b = 0; b < sizeof ours; b++) lh = (lh ^ ((const uint8_t *)&ours)[b]) * 16777619u;
+        our_l = lh;
+        if (round_l) round_l--;
         for (int k = 0; k < 2; k++) {
             WorldPkt w = {.type = 6, .ver = 1, .from = g_self};
             w.l.k = (uint8_t)k, w.l.n = 2;
-            uint32_t lh = 2166136261u;
-            for (size_t b = 0; b < sizeof ours; b++) lh = (lh ^ ((const uint8_t *)&ours)[b]) * 16777619u;
             memcpy(w.l.pad, &lh, 4);
             size_t off = (size_t)k * 64, len = sizeof ours - off < 64 ? sizeof ours - off : 64;
             memcpy(w.l.d, (const uint8_t *)&ours + off, len);
             world_send(&w, 16 + 8 + 64);
         }
-    if (me && frame % 8 == 0) {  // (our outfit, a part every 8 frames: the whole of it every ~2 s)
+    } else if (me && frame % 60 == 30 && look_ours(&ours)) {  // (not sent: still looked at - a change is sent at once)
+        uint32_t lh = 2166136261u;
+        for (size_t b = 0; b < sizeof ours; b++) lh = (lh ^ ((const uint8_t *)&ours)[b]) * 16777619u;
+        our_l = lh;
+    }
+    if (me && frame % 8 == 0) {  // (our outfit, a part every 8 frames: the whole of it every ~2 s while it's sent)
         static int part;
         DressPart o[MAXPARTS];
         int body, n = outfit_ours(o, &body);
         if (n) {
-            part = (part + 1) % n;
-            WorldPkt k = {.type = 5, .ver = 1, .from = g_self};
-            k.o.k = (uint8_t)part, k.o.n = (uint8_t)n, k.o.body = (uint8_t)(body < 0 ? 0xff : body);
-            size_t len = outfit_put(&k, &o[part]);
-            if (len) world_send(&k, len);
+            our_o = outfit_hash(o, n);
+            if (need_o || round_o > 0) {
+                if (round_o > 0) round_o--;
+                part = (part + 1) % n;
+                WorldPkt k = {.type = 5, .ver = 1, .from = g_self};
+                memcpy(k.pad, &our_o, 4);
+                k.o.k = (uint8_t)part, k.o.n = (uint8_t)n, k.o.body = (uint8_t)(body < 0 ? 0xff : body);
+                size_t len = outfit_put(&k, &o[part]);
+                if (len) world_send(&k, len);
+            }
         }
     }
     WorldPkt in;
@@ -1824,6 +1886,11 @@ static void ghost_frame(uint64_t frame) {
         Peer *p = peer_from(&in, via);
         if (in.type == 3 || in.type == 4) { if (n >= 28 && p) trade_message(&in, frame); continue; }
         if (in.type == 5) { outfit_message(p, &in, (size_t)n); continue; }
+        if (in.type == 8) {  // (what they have of ours: ours stop being resent once everyone has them)
+            if (p && n >= 32 && (in.a.to == g_self || (g_self_test && in.a.to == (g_self ^ 2))))
+                p->ack_o = in.a.o, p->ack_l = in.a.l, p->acked = 1;
+            continue;
+        }
         if (in.type == 7) {  // (in a menu or loading: still here - the wait since their last position was that, not lateness)
             if (p) p->heard_ns = now, p->away = 1, p->stretched -= p->waiting < p->stretched ? p->waiting : p->stretched, p->waiting = 0;
             continue;
@@ -1837,7 +1904,9 @@ static void ghost_frame(uint64_t frame) {
             if (tag) {  // (both pieces of the same look - the hash of what they make: theirs)
                 uint32_t h = 2166136261u;
                 for (size_t b = 0; b < sizeof p->look_in; b++) h = (h ^ ((const uint8_t *)&p->look_in)[b]) * 16777619u;
+                p->poked = 1;
                 if (p->look_tag[0] != tag || p->look_tag[1] != tag || h != tag) continue;
+                p->look_took = tag;  // (what we have of it: acknowledged, type 8)
                 if (p->look_have == 3 && !memcmp(&p->look, &p->look_in, offsetof(Look, f1))) continue;  // (the same again - the
                 // flags aside: look_check sets them, the body, from the parts; compared whole, every resend was a new look)
                 p->look = p->look_in, p->look_have = 3;
@@ -1926,6 +1995,20 @@ static void ghost_frame(uint64_t frame) {
         p->yaw = remainderf(in.w.yaw, 6.2831853f);  // (with send times: the moment drawn's, below)
         if (!p->nsnap) {  // (an older copy: no send times - drawn from the newest packet, below)
             p->move = n >= 16 + 32 && isfinite(in.w.move) ? fminf(fmaxf(in.w.move, 0.0f), 2.0f) : -1;
+        }
+    }
+    // (what we have of each player's outfit and look, told them - type 8: when it changes (at most 4 times a second),
+    // every 2 s while we lack some of it, and - at most every 2 s - when they sent some again: they may not have heard us)
+    for (int i = 0; i < MAXPEER; i++) {
+        Peer *p = &g_peers[i];
+        if (!p->id) continue;
+        uint32_t ho = p->nparts && p->have == (1u << p->nparts) - 1 ? p->outfit_tag : 0, hl = p->look_have == 3 ? p->look_took : 0;
+        uint64_t since = now - p->told_ns;
+        if (((ho != p->told_o || hl != p->told_l) && since >= 250000000ull) || (since >= 2000000000ull && (!ho || !hl || p->poked))) {
+            WorldPkt k = {.type = 8, .ver = 1, .from = g_self};
+            k.a.to = p->id, k.a.o = ho, k.a.l = hl;
+            world_send(&k, 32);
+            p->told_o = ho, p->told_l = hl, p->told_ns = now, p->poked = 0;
         }
     }
     static uint64_t chosen_at;
