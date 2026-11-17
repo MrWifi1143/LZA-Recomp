@@ -2210,6 +2210,15 @@ static uint32_t fb_put_parts(uint8_t *d, uint32_t w, const DressPart *parts, int
     return vbase;
 }
 void *hle_alloc(uint64_t size);
+// (research, hle/newnpc.c LARECOMP_NEWNPC_DRESS: the townspeople it makes - nodes named newnpc_<k> - wear our player's
+// outfit, mode 2; one per spawn asked)
+static volatile int g_dress_newnpc;
+static bool dress_is_newnpc(uint64_t owner) {
+    uint64_t n = node_of_owner(owner), np = 0;
+    char nm[8] = "";
+    return n && heap_read(n + 0x2b8, &np, 8) && heap_read(np, nm, 7) && !memcmp(nm, "newnpc_", 7);
+}
+void dress_newnpc_next(void) { __atomic_add_fetch(&g_dress_newnpc, 1, __ATOMIC_RELAXED); }
 static int dress_hook(Cpu *c, uint64_t addr) {
     uint64_t req = c->x[2], fbp = *(const uint64_t *)(uintptr_t)req;
     g_made[__atomic_fetch_add(&g_nmade, 1, __ATOMIC_RELAXED) % NMADE] = ((const uint64_t *)(uintptr_t)req)[6];  // (scan_bodies)
@@ -2273,6 +2282,9 @@ static int dress_hook(Cpu *c, uint64_t addr) {
         if (g_dress_mode == 1) parts[np++] = own;
         for (int k = 0; k < g_npparts && np < 25; k++) parts[np++] = g_pparts[k];
         g_dress_left--;
+    } else if (g_dress_newnpc > 0 && g_npparts && dress_is_newnpc(((const uint64_t *)(uintptr_t)req)[6])) {  // (hle/newnpc.c)
+        for (int k = 0; k < g_npparts && np < 25; k++) parts[np++] = g_pparts[k];
+        g_dress_newnpc--;
     }
     pthread_mutex_unlock(&g_dress_lock);
     if (!np) return 0;
@@ -2346,6 +2358,10 @@ static void dress_hook_on(void) {
     rt_register_fnhook_at(CC_MAKE, dress_hook);
     rt_register_fnhook_at(PART_BY_INDEX, part_index_hook);
     pose_hooks_on();  // (every character's pose, as it is made - the level's people at its load)
+}
+void dress_newnpc_init(void) {  // (hle/newnpc.c: from its constructor)
+    g_dress_mode = 2;
+    dress_hook_on();
 }
 __attribute__((constructor)) static void dress_init(void) {
     const char *e = getenv("LARECOMP_DRESS_NPC");
