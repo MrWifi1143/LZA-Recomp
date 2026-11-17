@@ -270,13 +270,23 @@ typedef struct {
     // (with send times: the stand-in is drawn a little in their past, between the two packets around that moment - it
     // never runs on past where they stopped or turned, as carrying the newest one on by its speed did. snap: the newest
     // NSNAP, oldest first; behind: how far behind their clock it is drawn (ms, past the way's quickest time) - eased
-    // toward behind_want (one send gap and the recent lateness) so a change never makes it jump back; base0: the first
-    // base, the origin of those ms)
-    struct { uint32_t t; float p[3], v[3], yaw, move; } snap[8];
+    // toward behind_want so a change never makes it jump back; base0: the first base, the origin of those ms.
+    // need: for each packet taken, how old the newest one before it was by then (ms past the way's quickest time) - how
+    // far behind the stand-in must be drawn not to run out of packets; behind_want = the 90th percentile of the last
+    // NNEED of them (+10 ms), so a lost packet now and then (two gaps) or a stall doesn't keep it far behind for long, as
+    // the old slowly forgotten maximum of the lateness did. Run out all the same: it waits where the newest one is (its
+    // clock stretched - behind grows), never carried on past it - so it never runs past where they stopped)
+#define NSNAP 24  // (1.2 s at 20 a second: behind is at most 400 ms + 600 ms stretched)
+#define NNEED 160 // (~8 s of packets)
+    struct { uint32_t t; float p[3], v[3], yaw, move; } snap[NSNAP];
     int nsnap;
     uint32_t base0;
-    float behind, behind_want, jit, gap;
-    float shown[3];                  // (where the stand-in is drawn: smoothed toward pos + vel * age)
+    float behind, behind_want, gap;
+    uint16_t need[NNEED];
+    int nneed, need_at;
+    uint32_t stretched;              // (frames drawn waiting for a packet - for the log)
+    float target_was[3];             // (the last frame's target: shown follows it exactly, a jump in it is eased out)
+    float shown[3];                  // (where the stand-in is drawn: the target, a jump in it eased out)
     float shown_yaw;                 // (its facing: turned toward theirs - not snapped to each heading heard)
     uint64_t heard_ns;
     volatile uint64_t body, node;    // (the stand-in's body, then its node)
@@ -1612,9 +1622,11 @@ static void ghost_frame(uint64_t frame) {
     }
     move_reset_expire(frame);
     vset_frame(frame, me && mn);  // (the names of everything the game has to wear: once in the world)
-    static uint64_t sent_ns, alive_ns;
+    static uint64_t sent_ns, alive_ns, due_ns;
     static float last[3];
-    if (me && mn && now - sent_ns >= 50000000ull) {  // (ours, 20 a second: the body's position, the node's facing)
+    if (me && mn && now >= due_ns) {  // (ours, 20 a second: the body's position, the node's facing - on a 50 ms beat, not
+        due_ns = now - due_ns < 100000000ull ? due_ns + 50000000ull : now + 50000000ull;  //  50 ms after the last frame sent:
+                                                       //  at 30 fps that was every 67 ms, and the others wait for each one)
         const float *b = (const float *)(uintptr_t)(me + 0x90), *q = (const float *)(uintptr_t)(mn + 0xd0);
         float dt = sent_ns ? (float)(now - sent_ns) / 1e9f : 1;
         WorldPkt k = {.type = 2, .ver = 1, .from = g_self};
@@ -1717,7 +1729,7 @@ static void ghost_frame(uint64_t frame) {
             p = free_p;
             memset(p, 0, sizeof *p);
             p->id = in.from, p->via = via;
-            memcpy(p->shown, in.w.p, 12), p->shown_yaw = remainderf(in.w.yaw, 6.2831853f);
+            memcpy(p->shown, in.w.p, 12), memcpy(p->target_was, in.w.p, 12), p->shown_yaw = remainderf(in.w.yaw, 6.2831853f);
             LOG("[world] player %016llx is here\n", (unsigned long long)in.from);
             g_choose_soon = 1;
         }
@@ -1737,14 +1749,23 @@ static void ghost_frame(uint64_t frame) {
             p->base = (int32_t)(p->base_win[0] - p->base_win[1]) < 0 ? p->base_win[0] : p->base_win[1];
             int32_t late = (int32_t)(off - p->base);
             p->late = late <= 0 ? 0 : late > 400 ? 0.4f : (float)late / 1000.0f;
-            if (p->nsnap) {  // (the send gap - 50 ms from a copy at 60 fps, 67 at 30 - and the recent lateness, slowly forgotten)
+            if (p->nsnap && (int32_t)(sent_ms - p->snap[p->nsnap - 1].t) > 1000) p->nsnap = 0;  // (back from a menu or a load:
+            if (p->nsnap) {  // (the send gap, for the log; how long we'd have waited for this one)   //  drawn afresh)
                 float g = (float)(int32_t)(sent_ms - p->snap[p->nsnap - 1].t);
                 if (g > 0 && g < 500) p->gap = p->gap ? p->gap + (g - p->gap) * 0.1f : g;
+                int32_t nd = (int32_t)((uint32_t)(now / 1000000ull) - p->base - p->snap[p->nsnap - 1].t);
+                p->need[p->need_at] = (uint16_t)(nd < 0 ? 0 : nd > 1000 ? 1000 : nd), p->need_at = (p->need_at + 1) % NNEED;
+                if (p->nneed < NNEED) p->nneed++;
             } else p->base0 = p->base;
-            p->jit = fmaxf(p->jit - 0.5f, p->late * 1000.0f);
-            p->behind_want = fminf(fmaxf((p->gap ? p->gap : 50) * 1.2f + p->jit + 10, 70), 300);
+            if (p->nneed) {  // (the 90th percentile of the waits: counted, 10 ms buckets)
+                uint16_t hist[101] = {0};
+                for (int k = 0; k < p->nneed; k++) hist[p->need[k] / 10]++;
+                int want = p->nneed - p->nneed / 10, c = 0, b = 0;
+                while (b < 100 && (c += hist[b]) < want) b++;
+                p->behind_want = fminf(fmaxf((float)(b * 10 + 10) + 10, 30), 400);
+            } else p->behind_want = 100;
             if (!p->nsnap) p->behind = p->behind_want;
-            if (p->nsnap == 8) memmove(&p->snap[0], &p->snap[1], sizeof p->snap[0] * 7), p->nsnap = 7;
+            if (p->nsnap == NSNAP) memmove(&p->snap[0], &p->snap[1], sizeof p->snap[0] * (NSNAP - 1)), p->nsnap = NSNAP - 1;
             int s = p->nsnap++;
             p->snap[s].t = sent_ms, memcpy(p->snap[s].p, in.w.p, 12), p->snap[s].yaw = remainderf(in.w.yaw, 6.2831853f);
             for (int k = 0; k < 3; k++) p->snap[s].v[k] = fminf(fmaxf(in.w.v[k], -60.0f), 60.0f);
@@ -1776,7 +1797,7 @@ static void ghost_frame(uint64_t frame) {
             continue;
         }
         if (!p->show) {  // (heard, not shown: kept up to date, nothing more)
-            memcpy(p->shown, p->pos, 12), p->shown_yaw = p->yaw;
+            memcpy(p->shown, p->pos, 12), memcpy(p->target_was, p->pos, 12), p->shown_yaw = p->yaw;
             continue;
         }
         outfit_frame(p, frame);
@@ -1794,15 +1815,19 @@ static void ghost_frame(uint64_t frame) {
             float step = dt * 100.0f, w = p->behind_want - (float)(int32_t)(p->base0 - p->base);  // (base0..base: the way's own
             p->behind = p->behind < w ? fminf(p->behind + step, w) : fmaxf(p->behind - step, w);  //  time changing - eased too)
             int nw = p->nsnap - 1;
-            float r = (float)(int32_t)((uint32_t)(now / 1000000ull) - p->base0 - p->snap[nw].t) - p->behind;  // (ms from the newest)
+            float age = (float)(int32_t)((uint32_t)(now / 1000000ull) - p->base0 - p->snap[nw].t);
+            float r = age - p->behind;  // (ms from the newest)
+            if (r > 0) {  // (run out: it waits at the newest - its clock held, up to 600 ms more than wanted; then held anyway)
+                if (p->behind < w + 600) p->behind = fminf(p->behind + r, w + 600);
+                r = 0, p->stretched++;
+            }
             int a = -1;
             for (int k = nw; k >= 0; k--) if ((float)(int32_t)(p->snap[k].t - p->snap[nw].t) <= r) { a = k; break; }
             if (a == nw || a < 0) {
                 int k = a < 0 ? 0 : nw;
-                float e = a < 0 ? 0 : fminf(r, 250.0f) / 1000.0f;
-                for (int i = 0; i < 3; i++) target[i] = p->snap[k].p[i] + p->snap[k].v[i] * e;
+                for (int i = 0; i < 3; i++) target[i] = p->snap[k].p[i];
                 p->yaw = p->snap[k].yaw, p->move = p->snap[k].move;
-                if (r > 250.0f && p->move > 0) p->move = 0;  // (nothing new for a while - a menu, a loading screen: standing)
+                if (age - w > 250.0f && p->move > 0) p->move = 0;  // (nothing new for a while - a menu, a loading screen: standing)
             } else {
                 float ra = (float)(int32_t)(p->snap[a].t - p->snap[nw].t), rb = (float)(int32_t)(p->snap[a + 1].t - p->snap[nw].t);
                 float f = rb > ra ? (r - ra) / (rb - ra) : 1;
@@ -1815,15 +1840,27 @@ static void ghost_frame(uint64_t frame) {
             if (age > 0.25f) age = 0.25f;
             for (int k = 0; k < 3; k++) target[k] = p->pos[k] + p->vel[k] * age;
         }
-        for (int k = 0; k < 3; k++) {
-            float d = target[k] - p->shown[k];
-            p->shown[k] = fabsf(d) > 8 ? target[k] : p->shown[k] + d * pull;  // (a jump of 8 m - a warp: at once)
-        }
+        if (p->nsnap) {  // (the target moves smoothly by itself: shown is it exactly - not a step behind, as following it was;
+            float j = 0, jw = 0;  //  a jump in it - faster than anyone runs: drawn afresh after a menu - is eased out; a jump
+            for (int k = 0; k < 3; k++) j += (target[k] - p->target_was[k]) * (target[k] - p->target_was[k]),  //  of 8 m - a warp:
+                                        jw += (target[k] - p->shown[k]) * (target[k] - p->shown[k]);           //  at once)
+            bool jump = sqrtf(j) > 20.0f * dt + 0.05f;
+            for (int k = 0; k < 3; k++) {
+                float e = p->shown[k] - (jump ? target[k] : p->target_was[k]);
+                p->shown[k] = sqrtf(jw) > 8 ? target[k] : target[k] + e * (1.0f - pull);
+                p->target_was[k] = target[k];
+            }
+        } else
+            for (int k = 0; k < 3; k++) {
+                float d = target[k] - p->shown[k];
+                p->shown[k] = fabsf(d) > 8 ? target[k] : p->shown[k] + d * pull;  // (a jump of 8 m - a warp: at once)
+                p->target_was[k] = p->shown[k];
+            }
         static int net_log = -1;  // (research LARECOMP_WORLD_LOG_NET=1: every 10 s, their packets taken / dropped as out of date)
         if (net_log < 0) net_log = getenv("LARECOMP_WORLD_LOG_NET") != NULL;
         if (net_log && frame % 600 == 0)
-            LOG("[world] player %016llx: %u packets in order, %u out of date dropped, this one %.0f ms late; drawn %.0f ms behind (wanted %.0f, gap %.0f)\n",
-                (unsigned long long)p->id, p->nseq, p->stale, p->late * 1000, p->behind, p->behind_want, p->gap);
+            LOG("[world] player %016llx: %u packets in order, %u out of date dropped, this one %.0f ms late; drawn %.0f ms behind (wanted %.0f, gap %.0f; %u frames waited)\n",
+                (unsigned long long)p->id, p->nseq, p->stale, p->late * 1000, p->behind, p->behind_want, p->gap, p->stretched);
         // (their facing comes 20 times a second, and their own turn is quick: their stand-in turns toward it - most of the
         // way in a tenth of a second, the short way round - rather than snapping to each heading)
         float dy = remainderf(p->yaw - p->shown_yaw, 6.2831853f);
