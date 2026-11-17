@@ -910,7 +910,10 @@ static void standin_release(Peer *p) {
 // items). Our own memory (HLE: descriptions made from peers' strings) is outside the heap: it can't vouch for itself.
 // The look's 13 slots are base, acc, bag, eyw, ftw, glv, hdw, hrs, lgw, drs, face, lwb, upb (checked: a save's 13 hashes
 // were those parts' names, in that order); the body-shaped three must share one body. Options aren't checked (all 18 at
-// 250 made odd hair, nothing worse) beyond keeping them under 64; the blob's two flags are always 1 (as a save's).
+// 250 made odd hair, nothing worse) beyond keeping them under 64. The blob's third field is the BODY (2026-11-16, a new
+// game's other body: the player's dress-up component +0x2f4 = 2, a p1 player's 1 - the deserialiser 0x7000479480 reads
+// only fields 0 and 2), so it comes from the clothes' own p1_/p2_ names; its second (+0x2e8) is 1 for both. A p2 look sent
+// with body 1 (as before) kept the other copy's level from ever finishing loading, as any body mismatch does.
 #define VSET_N 65536u
 static struct VsetEnt { uint64_t h; uint8_t slot, body; } *g_vset;
 static volatile int g_vset_state;  // 0 never scanned, 1 scanning, 2 ready
@@ -1027,7 +1030,7 @@ static bool look_check(Look *l, char *why, size_t wn, bool *pending) {
         }
     }
     for (int k = 0; k < 18; k++) if (l->opt[k] > 63) l->opt[k] = 63;
-    l->f1 = l->f2 = 1;
+    l->f1 = 1, l->f2 = (uint8_t)shaped;  // (shaped: 1 or 2 - the body-shaped parts' body, checked above)
     return true;
 }
 // a peer's outfit part (type 5) as it may go into a description: one of the 13 parts (by name), the part's own file
@@ -1136,6 +1139,8 @@ void world_self_outfit(void) {
     pthread_mutex_lock(&g_dress_lock);
     Look l;
     if (!look_ours(&l)) { pthread_mutex_unlock(&g_dress_lock); return; }  // (the save's look isn't there yet: as packets)
+    int lbody = 1;  // (its body, as look_check would find it: our upper body's p1_/p2_ name, once the names are known)
+    l.f1 = 1, l.f2 = vset_slot(l.part[12], &lbody) == 12 && (lbody == 1 || lbody == 2) ? (uint8_t)lbody : 1;
     g_dress_want.peer = g_self ^ 2, g_dress_want.n = n, g_dress_want.body = body, g_dress_want.look = l, g_dress_want.look_ok = true;
     uint32_t lh = 2166136261u;
     for (size_t b = 0; b < sizeof l; b++) lh = (lh ^ ((const uint8_t *)&l)[b]) * 16777619u;
@@ -1602,10 +1607,12 @@ static void ghost_frame(uint64_t frame) {
                 uint32_t h = 2166136261u;
                 for (size_t b = 0; b < sizeof p->look_in; b++) h = (h ^ ((const uint8_t *)&p->look_in)[b]) * 16777619u;
                 if (p->look_tag[0] != tag || p->look_tag[1] != tag || h != tag) continue;
-                if (p->look_have == 3 && !memcmp(&p->look, &p->look_in, sizeof p->look)) continue;  // (the same again)
+                if (p->look_have == 3 && !memcmp(&p->look, &p->look_in, offsetof(Look, f1))) continue;  // (the same again - the
+                // flags aside: look_check sets them, the body, from the parts; compared whole, every resend was a new look)
                 p->look = p->look_in, p->look_have = 3;
             } else {  // (an older copy: piece by piece)
-                if (!memcmp((uint8_t *)&p->look + off, in.l.d, len) && (p->look_have & 1u << in.l.k)) continue;  // (the same again)
+                size_t same = off + len > offsetof(Look, f1) ? offsetof(Look, f1) - off : len;  // (the flags aside, as above)
+                if (!memcmp((uint8_t *)&p->look + off, in.l.d, same) && (p->look_have & 1u << in.l.k)) continue;  // (the same again)
                 memcpy((uint8_t *)&p->look + off, in.l.d, len);
                 p->look_have |= 1u << in.l.k;
             }
@@ -2047,7 +2054,8 @@ static bool look_ours(Look *l) {
     uint32_t v[18];
     if (!heap_read(o + 0x80, v, sizeof v)) return false;
     for (int k = 0; k < 18; k++) l->opt[k] = (uint8_t)(v[k] > 255 ? 255 : v[k]);
-    l->f1 = l->f2 = 1;
+    l->f1 = l->f2 = 0;  // (the blob's flags - the body: not sent, each copy works them out from the parts, look_check -
+                        //  so our look's bytes never change when our names scan finishes)
     static uint64_t logged;
     if (logged != o && (logged = o)) {
         LOG("[world] our look: object %llx, hair %016llx, skin %u eyes %u lashes %u hair colour %u\n", (unsigned long long)o,
