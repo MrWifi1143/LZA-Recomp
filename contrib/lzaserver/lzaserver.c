@@ -19,6 +19,7 @@
 //                     'D' from payload                        a lobby member's payload
 //                     'X' from payload                        a shared-world player's payload
 // A packet whose id isn't the one that address said hello with is dropped (no speaking for others).
+// An id's hello from a new address is taken once the old address has been quiet 5 s (a home router's new port).
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -49,6 +50,7 @@ static uint64_t now_ms(void) {
 
 #define VERSION 1
 #define IDLE_MS 15000
+#define REBIND_MS 5000  // (an id whose address has been quiet this long may come back from another address)
 #define MAX_PER_SEC 3000  // (packets a client may send per second; more are dropped)
 
 typedef struct {
@@ -150,7 +152,18 @@ int main(int argc, char **argv) {
                 if (buf[0] == 'H' && n >= 11 && buf[1] == VERSION) {
                     if (!c) {
                         Client *dup = by_id(id);
-                        if (dup && !same_addr(&dup->addr, &from)) continue;  // (an id already in use elsewhere)
+                        // (an id already in use elsewhere: refused - unless that address has been quiet for REBIND_MS. A
+                        // player's home router can give them a new port (a NAT mapping renewed, Wi-Fi to cable): they keep
+                        // their id and lobby instead of being shut out until the old entry is forgotten 15 s later. A live
+                        // client says hello every 2 s, so a quiet one is gone: taking its id over can't cut anyone off)
+                        if (dup && !same_addr(&dup->addr, &from)) {
+                            if (now - dup->seen < REBIND_MS) continue;
+                            char w0[64], w1[64];
+                            snprintf(w0, sizeof w0, "%s", who(dup, w1));
+                            dup->addr = from, dup->seen = now;
+                            printf("~ %016llx moved from %s to %s\n", (unsigned long long)id, w0, who(dup, w1));
+                            continue;
+                        }
                         for (int i = 0; i < g_max && !c; i++)
                             if (!g_c[i].used) c = &g_c[i];
                         if (!c) continue;  // (full)
