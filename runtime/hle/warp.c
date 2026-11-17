@@ -294,7 +294,7 @@ typedef struct {
     // NNEED of them (+10 ms), so a lost packet now and then (two gaps) or a stall doesn't keep it far behind for long, as
     // the old slowly forgotten maximum of the lateness did. Run out all the same: it waits where the newest one is (its
     // clock stretched - behind grows), never carried on past it - so it never runs past where they stopped)
-#define NSNAP 24  // (1.2 s at 20 a second: behind is at most 400 ms + 600 ms stretched)
+#define NSNAP 36  // (1.2 s at 30 a second - world_rate -, 1.8 s at 20: behind is at most 400 ms + 600 ms stretched)
 #define NNEED 160 // (~8 s of packets)
     struct { uint32_t t; float p[3], v[3], yaw, move; } snap[NSNAP];
     int nsnap;
@@ -1762,9 +1762,16 @@ static void ghost_frame(uint64_t frame) {
     vset_frame(frame, me && mn);  // (the names of everything the game has to wear: once in the world)
     static uint64_t sent_ns, alive_ns, due_ns;
     static float last[3];
-    if (me && mn && now >= due_ns) {  // (ours, 20 a second: the body's position, the node's facing - on a 50 ms beat, not
-        due_ns = now - due_ns < 100000000ull ? due_ns + 50000000ull : now + 50000000ull;  //  50 ms after the last frame sent:
-                                                       //  at 30 fps that was every 67 ms, and the others wait for each one)
+    static uint64_t beat_ns;  // (ours 20 a second - the setting world_rate: 30; research LARECOMP_WORLD_RATE=<n>, 5..60)
+    if (!beat_ns) {
+        int r = getenv("LARECOMP_WORLD_RATE") ? atoi(getenv("LARECOMP_WORLD_RATE")) : g_settings.world_rate == 30 ? 30 : 20;
+        if (r < 5 || r > 60) r = 20;
+        beat_ns = 1000000000ull / (uint64_t)r;
+        LOG("[world] our position sent %d times a second\n", r);
+    }
+    if (me && mn && now >= due_ns) {  // (ours: the body's position, the node's facing - on a beat (50 ms at 20 a second),
+        due_ns = now - due_ns < 2 * beat_ns ? due_ns + beat_ns : now + beat_ns;  //  not 50 ms after the last frame sent: at
+                                                       //  30 fps that was every 67 ms, and the others wait for each one)
         const float *b = (const float *)(uintptr_t)(me + 0x90), *q = (const float *)(uintptr_t)(mn + 0xd0);
         float dt = sent_ns ? (float)(now - sent_ns) / 1e9f : 1;
         WorldPkt k = {.type = 2, .ver = 1, .from = g_self};
