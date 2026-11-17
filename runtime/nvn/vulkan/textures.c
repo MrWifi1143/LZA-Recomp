@@ -388,6 +388,12 @@ static TexBackend *tex_backend(NvnTexture *t) {
         }
         return b;
     }
+    if (t->finalized) {  // (objects.c nvnTextureFinalize: a use after the finalize job - its host object is about to be freed)
+        static uint64_t n;
+        n++;
+        if (!(n & (n - 1))) LOG("[vk] texture %ux%u fmt %#x used after its finalize (%llu)\n", t->width, t->height, t->format,
+                                (unsigned long long)n);
+    }
     uint64_t t0 = SDL_GetTicksNS();
     vk_collect_dead();
     uint64_t t1 = SDL_GetTicksNS();
@@ -415,7 +421,9 @@ void vk_tex_unscale(NvnTexture *t) {
     }
 }
 
+void vk_exec_texture_gone(NvnTexture *t);  // exec.c
 void backend_texture_destroyed(NvnTexture *t) {
+    vk_exec_texture_gone(t);  // (the running pass / target state: before the image goes)
     TexBackend *b = t->backend;
     if (b) {
         live_remove(b);

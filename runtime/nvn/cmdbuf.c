@@ -349,6 +349,7 @@ typedef struct {
     uint64_t depth;
     NvnTextureView dview;
     uint8_t has_dview;
+    uint64_t id[8], depth_id;  // (the textures' debug_id: exec.c checks the host objects are still those)
 } RtRec;
 NVN(nvnCommandBufferSetRenderTargets) {
     Snap s = snap(c);
@@ -357,10 +358,12 @@ NVN(nvnCommandBufferSetRenderTargets) {
     RtRec rt = {0};
     const uint64_t *colors = (const uint64_t *)(uintptr_t)s.x[2], *views = (const uint64_t *)(uintptr_t)s.x[3];
     for (int i = 0; i < n; i++) {
-        rt.tex[i] = colors && colors[i] ? (uint64_t)(uintptr_t)HOST(NvnTexture, colors[i]) : 0;
+        NvnTexture *t = colors && colors[i] ? HOST(NvnTexture, colors[i]) : NULL;
+        rt.tex[i] = (uint64_t)(uintptr_t)t, rt.id[i] = t ? t->debug_id : 0;
         if (views && views[i]) { rt.has_view[i] = 1; memcpy(&rt.views[i], (void *)(uintptr_t)views[i], sizeof(NvnTextureView)); }
     }
-    rt.depth = s.x[4] ? (uint64_t)(uintptr_t)HOST(NvnTexture, s.x[4]) : 0;
+    NvnTexture *d = s.x[4] ? HOST(NvnTexture, s.x[4]) : NULL;
+    rt.depth = (uint64_t)(uintptr_t)d, rt.depth_id = d ? d->debug_id : 0;
     if (s.x[5]) { rt.has_dview = 1; memcpy(&rt.dview, (void *)(uintptr_t)s.x[5], sizeof(NvnTextureView)); }
     CmdRec *r = record(c, CMD_SET_RENDER_TARGETS, sizeof rt, &s);
     r->x[0] = (uint64_t)n;
@@ -470,11 +473,12 @@ NVN(nvnCommandBufferClearColori) { CmdRec *r = record_copy(c, CMD_CLEAR_COLOR, 2
 NVN(nvnCommandBufferClearColorui) { CmdRec *r = record_copy(c, CMD_CLEAR_COLOR, 2, 16); r->x[5] = 2; }
 PLAIN(nvnCommandBufferClearDepthStencil, CMD_CLEAR_DEPTH_STENCIL)
 // ClearTexture(cmd, texture, view, region, color, mask)
-typedef struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; float color[4]; } ClearTexRec;
+typedef struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; float color[4]; uint64_t id; } ClearTexRec;
 static void clear_texture(Cpu *c, int kind) {
     Snap s = snap(c);
     ClearTexRec ct = {0};
-    ct.tex = (uint64_t)(uintptr_t)HOST(NvnTexture, s.x[1]);
+    NvnTexture *t = HOST(NvnTexture, s.x[1]);
+    ct.tex = (uint64_t)(uintptr_t)t, ct.id = t ? t->debug_id : 0;
     if (s.x[2]) { ct.has_view = 1; memcpy(&ct.view, (void *)(uintptr_t)s.x[2], sizeof ct.view); }
     if (s.x[3]) memcpy(ct.region, (void *)(uintptr_t)s.x[3], sizeof ct.region);
     if (s.x[4]) memcpy(ct.color, (void *)(uintptr_t)s.x[4], 16);
@@ -625,9 +629,10 @@ NVN(nvnCommandBufferPauseTransformFeedback) { Snap s_ = snap(c); record(c, CMD_X
 NVN(nvnCommandBufferResumeTransformFeedback) { Snap s_ = snap(c); record(c, CMD_XFB_BEGIN, 0, &s_); }
 
 // ---- copies
-typedef struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; } TexRef;
+typedef struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; uint64_t id; } TexRef;
 static void tex_ref(TexRef *t, uint64_t tex, uint64_t view, uint64_t region) {
-    t->tex = tex ? (uint64_t)(uintptr_t)HOST(NvnTexture, tex) : 0;
+    NvnTexture *h = tex ? HOST(NvnTexture, tex) : NULL;
+    t->tex = (uint64_t)(uintptr_t)h, t->id = h ? h->debug_id : 0;
     if (view) { t->has_view = 1; memcpy(&t->view, (void *)(uintptr_t)view, sizeof t->view); }
     if (region) memcpy(t->region, (void *)(uintptr_t)region, sizeof t->region);
 }
