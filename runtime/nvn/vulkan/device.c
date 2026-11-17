@@ -111,8 +111,15 @@ static void pick_device(void) {
     for (uint32_t i = 0; i < n; i++) {
         VkPhysicalDeviceProperties p;
         vkGetPhysicalDeviceProperties(pd[i], &p);
-        LOG("[vk] gpu %u: %s (api %u.%u.%u)\n", i, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
-            VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion));
+        char drv[32];  // (the driver's version as its vendor writes it: a crash report then says which driver)
+        uint32_t dv = p.driverVersion;
+        if (p.vendorID == 0x10DE) snprintf(drv, sizeof drv, "%u.%02u", dv >> 22, (dv >> 14) & 0xff);
+#ifdef _WIN32
+        else if (p.vendorID == 0x8086) snprintf(drv, sizeof drv, "%u.%u", dv >> 14, dv & 0x3fff);
+#endif
+        else snprintf(drv, sizeof drv, "%u.%u.%u", VK_API_VERSION_MAJOR(dv), VK_API_VERSION_MINOR(dv), VK_API_VERSION_PATCH(dv));
+        LOG("[vk] gpu %u: %s (api %u.%u.%u, driver %s)\n", i, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
+            VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion), drv);
         if (p.apiVersion < VK_API_VERSION_1_3) continue;
         int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 3 : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2 : 1;
         if ((int)i == want) score = 100;
