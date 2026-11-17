@@ -864,7 +864,7 @@ static pthread_mutex_t jobs_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t jobs_cond = PTHREAD_COND_INITIALIZER;
 
 static void *worker(void *a) {
-    (void)a;
+    { extern void hangwatch_thread(const char *name, int index); hangwatch_thread("shader worker", (int)(intptr_t)a); }
     { extern void cpupin_rest_push(void); cpupin_rest_push(); }  // (not on the render thread's CPU, which started it: cpupin.c)
     for (;;) {
         pthread_mutex_lock(&jobs_lock);
@@ -897,7 +897,7 @@ static void run_job(void (*fn)(void *), void *arg) {
         int n = SDL_GetNumLogicalCPUCores() - 4;  // (the machine's: plat_cpu_count is the caller's, the pinned render thread's 1)
         if (n < 4) n = 4;
         if (n > 16) n = 16;
-        for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }
+        for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, (void *)(intptr_t)i); }
     }
     Job *j = malloc(sizeof *j);
     j->fn = fn; j->arg = arg; j->next = NULL;
