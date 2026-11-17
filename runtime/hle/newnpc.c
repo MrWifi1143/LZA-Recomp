@@ -201,6 +201,25 @@ typedef struct { int k; float at[3], yaw; char want[64]; int nearest; } Req;
 static Req g_req[NREQ];
 static volatile int g_nreq;
 static int g_req_snap[MAXNEW];  // (k % MAXNEW: the kept spawn it was made from, +1 - newnpc_bad)
+#define NEWNPC_DROP_DEFAULT ""
+// The spawn's parameter entries ({u64 key hash, value name struct {hash, char *, len, ...}, ...}: a station NPC's are its
+// talk script "TalkNpcEmpty" (key ""), "Armor_NPCGeneral" and the tags PlacementNpcTeam, HumanCharacter, InteractNPC,
+// UiDependency - 2026-11-17). Dropped from ours: LARECOMP_NEWNPC_DROP=<name>[,<name>...] (research), else the default list
+static uint64_t g_drop[8];
+static int g_ndrop = -1;
+static bool newnpc_dropped(uint64_t h) {
+    if (g_ndrop < 0) {
+        const char *e = getenv("LARECOMP_NEWNPC_DROP");
+        char buf[256];
+        snprintf(buf, sizeof buf, "%s", e ? e : NEWNPC_DROP_DEFAULT);
+        g_ndrop = 0;
+        for (char *t = strtok(buf, ","); t && g_ndrop < 8; t = strtok(NULL, ","))
+            if (*t) g_drop[g_ndrop++] = fnv(t), LOG("[newnpc] ours made without the spawn entry \"%s\"\n", t);
+    }
+    for (int i = 0; i < g_ndrop; i++) if (h == g_drop[i]) return true;
+    return false;
+}
+
 static void do_spawn(Cpu *c, const Req *r) {
     pthread_mutex_lock(&g_lock);
     Snap s;
@@ -232,10 +251,16 @@ static void do_spawn(Cpu *c, const Req *r) {
     memcpy(nm, &h, 8), memcpy(nm + 8, &p, 8), memcpy(nm + 0x10, &len, 8), memcpy(nm + 0x18, &z, 8);
     memcpy(blk, s.blk, 0x300);
     uint64_t b = 0, e = 0;
-    if (s.nent) {  // (its own copy of the entries: the game may take them over)
+    if (s.nent) {  // (its own copy of the entries: the game may take them over - less the ones dropped, newnpc_drop)
         uint8_t *ents = hle_alloc(0xc0 * (uint64_t)s.nent);
-        memcpy(ents, s.ents, 0xc0 * (size_t)s.nent);
-        b = (uint64_t)(uintptr_t)ents, e = b + 0xc0 * (uint64_t)s.nent;
+        int n = 0;
+        for (int k = 0; k < s.nent; k++) {
+            uint64_t kh, vh;
+            memcpy(&kh, s.ents + 0xc0 * k, 8), memcpy(&vh, s.ents + 0xc0 * k + 8, 8);
+            if (newnpc_dropped(kh) || newnpc_dropped(vh)) continue;
+            memcpy(ents + 0xc0 * n++, s.ents + 0xc0 * k, 0xc0);
+        }
+        b = (uint64_t)(uintptr_t)ents, e = b + 0xc0 * (uint64_t)n;
     }
     memcpy(blk + 0x1a0, &b, 8), memcpy(blk + 0x1a8, &e, 8), memcpy(blk + 0x1b0, &e, 8);
     float *t = (float *)(blk + 0x40 + 0x30), *q = (float *)(blk + 0x40 + 0x20);

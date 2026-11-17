@@ -465,6 +465,7 @@ static int g_udp = -1;
 static struct sockaddr_in g_udp_peer;
 static float g_off;  // (LARECOMP_GHOST_OFFSET=<m>: one copy shown beside itself, a loopback test)
 static float g_off_ahead;  // (LARECOMP_GHOST_AHEAD=<degrees>: the offset that far from their facing - in the camera's view)
+static float g_off_turn;   // (LARECOMP_GHOST_TURN=<degrees>: the stand-in turned that much from their facing - its profile in view)
 static int g_self_test;  // (LARECOMP_GHOST_SELF=1: our own packets count as another player's - one copy, a loopback test)
 static void udp_send(const void *p, size_t n) { sendto(g_udp, p, n, 0, (struct sockaddr *)&g_udp_peer, sizeof g_udp_peer); }
 static int udp_recv(uint64_t *from, void *p, size_t cap) {
@@ -476,6 +477,7 @@ ssize_t process_vm_readv(pid_t, const struct iovec *, unsigned long, const struc
 #else
 static const float g_off = 0;
 static const float g_off_ahead = 0;
+static const float g_off_turn = 0;
 static const int g_self_test = 0;
 #endif
 static void world_send(const WorldPkt *k, size_t n) { if (w_send) w_send(k, n); }
@@ -928,7 +930,7 @@ static int node_hook(Cpu *c, uint64_t addr) {
         if (*(const uint64_t *)(uintptr_t)n != NODE_VTABLE) return 0;
         float *q = (float *)(uintptr_t)(n + 0xd0), *t = (float *)(uintptr_t)(n + 0xe0);
         if (p->saved_node != n) memcpy(p->saved_q, q, 16), memcpy(p->saved_t, t, 12), p->saved_node = n;
-        q[0] = 0, q[1] = sinf(p->shown_yaw * 0.5f), q[2] = 0, q[3] = cosf(p->shown_yaw * 0.5f);
+        q[0] = 0, q[1] = sinf((p->shown_yaw + g_off_turn) * 0.5f), q[2] = 0, q[3] = cosf((p->shown_yaw + g_off_turn) * 0.5f);
         float oa = p->yaw + g_off_ahead * 0.0174533f;
         t[0] = p->shown[0] + (g_off_ahead ? sinf(oa) * g_off : g_off), t[1] = p->shown[1], t[2] = p->shown[2] + (g_off_ahead ? cosf(oa) * g_off : 0);
         stand_in_walk(c, p, n);  // (their walk, run, standing: the stand-in's animation)
@@ -2045,6 +2047,7 @@ void ghost_init(void) {  // (the test transport: LARECOMP_GHOST=<my port>,<peer 
     inet_pton(AF_INET, host, &g_udp_peer.sin_addr);
     g_off = getenv("LARECOMP_GHOST_OFFSET") ? (float)atof(getenv("LARECOMP_GHOST_OFFSET")) : 0;
     g_off_ahead = getenv("LARECOMP_GHOST_AHEAD") ? (float)atof(getenv("LARECOMP_GHOST_AHEAD")) : 0;
+    g_off_turn = getenv("LARECOMP_GHOST_TURN") ? (float)atof(getenv("LARECOMP_GHOST_TURN")) * 0.0174533f : 0;
     g_self_test = getenv("LARECOMP_GHOST_SELF") != NULL;
     w_send = udp_send, w_recv = udp_recv;
     g_world = 1;
