@@ -285,7 +285,11 @@ typedef struct {
     float behind, behind_want, gap;
     uint16_t need[NNEED];
     int nneed, need_at;
-    uint32_t stretched;              // (frames drawn waiting for a packet - for the log)
+    uint32_t stretched;              // (frames drawn waiting for a packet - for the log: late packets only; not while they are
+                                     //  away - a menu, a loading screen: "still here" heard - nor once the wait is past its
+                                     //  stretch, the stand-in simply standing there)
+    int away;                        // (a "still here" heard since their last position: in a menu or loading)
+    uint32_t waiting;                // (frames waited since their last position: taken back off when "still here" comes)
     float target_was[3];             // (the last frame's target: shown follows it exactly, a jump in it is eased out)
     float shown[3];                  // (where the stand-in is drawn: the target, a jump in it eased out)
     float shown_yaw;                 // (its facing: turned toward theirs - not snapped to each heading heard)
@@ -1596,7 +1600,10 @@ static void ghost_frame(uint64_t frame) {
         Peer *p = peer_from(&in, via);
         if (in.type == 3 || in.type == 4) { if (n >= 28 && p) trade_message(&in, frame); continue; }
         if (in.type == 5) { outfit_message(p, &in, (size_t)n); continue; }
-        if (in.type == 7) { if (p) p->heard_ns = now; continue; }  // (in a menu or loading: still here)
+        if (in.type == 7) {  // (in a menu or loading: still here - the wait since their last position was that, not lateness)
+            if (p) p->heard_ns = now, p->away = 1, p->stretched -= p->waiting < p->stretched ? p->waiting : p->stretched, p->waiting = 0;
+            continue;
+        }
         if (in.type == 6) {
             if (!p || n < 16 + 8 + 64 || in.l.n != 2 || in.l.k >= 2) continue;
             size_t off = (size_t)in.l.k * 64, len = sizeof p->look - off < 64 ? sizeof p->look - off : 64;
@@ -1690,7 +1697,7 @@ static void ghost_frame(uint64_t frame) {
             for (int k = 0; k < 3; k++) p->snap[s].v[k] = fminf(fmaxf(in.w.v[k], -60.0f), 60.0f);
             p->snap[s].move = n >= 16 + 32 && isfinite(in.w.move) ? fminf(fmaxf(in.w.move, 0.0f), 2.0f) : -1;
         }
-        memcpy(p->pos, in.w.p, 12), p->heard_ns = now;
+        memcpy(p->pos, in.w.p, 12), p->heard_ns = now, p->away = 0, p->waiting = 0;
         for (int k = 0; k < 3; k++) p->vel[k] = fminf(fmaxf(in.w.v[k], -60.0f), 60.0f);
         p->yaw = remainderf(in.w.yaw, 6.2831853f);  // (with send times: the moment drawn's, below)
         if (!p->nsnap) {  // (an older copy: no send times - drawn from the newest packet, below)
@@ -1737,8 +1744,11 @@ static void ghost_frame(uint64_t frame) {
             float age = (float)(int32_t)((uint32_t)(now / 1000000ull) - p->base0 - p->snap[nw].t);
             float r = age - p->behind;  // (ms from the newest)
             if (r > 0) {  // (run out: it waits at the newest - its clock held, up to 600 ms more than wanted; then held anyway)
-                if (p->behind < w + 600) p->behind = fminf(p->behind + r, w + 600);
-                r = 0, p->stretched++;
+                if (p->behind < w + 600) {
+                    p->behind = fminf(p->behind + r, w + 600);
+                    if (!p->away) p->stretched++, p->waiting++;  // (a late packet waited for - not their menu time)
+                }
+                r = 0;
             }
             int a = -1;
             for (int k = nw; k >= 0; k--) if ((float)(int32_t)(p->snap[k].t - p->snap[nw].t) <= r) { a = k; break; }
