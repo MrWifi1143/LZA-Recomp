@@ -6,6 +6,17 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsA`)
 
+## 2026-11-17: LegendsA-v1.3.3
+
+Previous release: LegendsA-v1.3.2. Game version: Pokemon Legends: Arceus 1.1.1. A hotfix: same game code as 1.3.0, so
+nothing is rebuilt on start (the hotfix zip is enough on Windows).
+
+- The freeze in long sessions is fixed (the same bug as Z-A's 30+ minute freeze): the table of shader pipelines had a
+  fixed size, and once it filled up the next new pipeline searched it forever. The shader tables now grow instead.
+- Legends: Arceus files of another version than 1.1.1 (the base game 1.0.0 without the update, say) are refused at
+  setup with a clear message saying which version is needed, instead of crashing in game. An install set up with
+  them by an earlier release opens the start screen with that message instead of booting the game.
+
 ## 2026-11-15: LegendsA-v1.3.2
 
 Previous release: LegendsA-v1.3.1. Game version: Pokemon Legends: Arceus 1.1.1. Same game code as 1.3.0, so nothing
