@@ -23,7 +23,8 @@
 //     spawn <x> <y> <z> [<yaw degrees> [<NPC data name part>]]    near <dx> <dz> [<yaw> [<data>]]  (beside the player)
 //     remove <k>     (newnpc_<k>: put under the street - the game lets it go itself)
 //     list           (the NPC data kept)        tele <dx> <dz> / goto <x> <y> <z>  (test: the player moved)
-//   LARECOMP_NEWNPC_DRESS=1: each new one wears our player's outfit (warp.c's dressing, mode 2).
+//   The shared world (hle/warp.c, setting world_own_npc) makes its other players' stand-ins this way: newnpc_on /
+// newnpc_ready / newnpc_spawn / newnpc_number / newnpc_bad below; warp.c dresses them (by their node's name) as they are made.
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -32,6 +33,7 @@
 #include <unistd.h>
 
 #include "../hle.h"
+#include "../platform.h"
 
 void rt_register_fnhook_at(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
 typedef int (*FnHook)(Cpu *c, uint64_t addr);
@@ -56,16 +58,15 @@ typedef struct {
     uint8_t *name, *blk, *ents;  // (guest copies: the name struct 0x40, S 0x300, the entries)
     int nent;
     char data[64];               // (the NPC data's name)
+    float at[3];                 // (where its own station NPC stands: the shared world's own townspeople take the nearest)
+    int bad;                     // (what it makes isn't a townsperson: not used for the shared world again)
 } Snap;
 static Snap g_snaps[MAXDATA];
 static int g_nsnaps;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static int g_on = -1, g_dress;
-static volatile int g_pending;   // (a spawn asked for)
-static float g_at[3], g_yaw;
-static char g_want[64];          // (the NPC data asked for: part of its name, "" any)
-static int g_count;
+static int g_on = -1;
+static int g_count;              // (the last k given: newnpc_<k>)
 static volatile uint64_t g_player_owner;
 static volatile uint64_t g_node[MAXNEW], g_owner[MAXNEW], g_body[MAXNEW], g_away_at[MAXNEW];
 static volatile int g_away[MAXNEW], g_naway;
@@ -79,10 +80,10 @@ static uint64_t fnv(const char *s) {
     for (; *s; s++) h = (h ^ (uint8_t)*s) * 0x100000001b3ull;
     return h;
 }
+bool warp_heap_read(uint64_t a, void *out, size_t n);  // (hle/warp.c: an unmapped or uncommitted range - false, no fault)
 static bool rd(uint64_t a, void *o, size_t n) {
     if (a < 0x7000000000ull || a >= 0x7400000000ull) return false;
-    memcpy(o, (const void *)(uintptr_t)a, n);
-    return true;
+    return warp_heap_read(a, o, n);
 }
 static void name_of(uint64_t ns, char *o, size_t n) {  // (a name struct {hash, char *, len, ...})
     uint64_t p = 0, len = 0;
@@ -93,7 +94,9 @@ static void name_of(uint64_t ns, char *o, size_t n) {  // (a name struct {hash, 
 // ---- keeping station spawns
 static int spawn_hook(Cpu *c, uint64_t addr) {
     (void)addr;
-    if (c->x[30] != STATION_LR) return 0;
+    static int keep = -1;  // (test LARECOMP_NEWNPC_KEEP=0: none kept - the shared world's fallback, as where no station is loaded)
+    if (keep < 0) keep = !getenv("LARECOMP_NEWNPC_KEEP") || atoi(getenv("LARECOMP_NEWNPC_KEEP")) != 0;
+    if (c->x[30] != STATION_LR || !keep) return 0;
     char data[64];
     name_of(c->x[1], data, sizeof data);
     pthread_mutex_lock(&g_lock);
@@ -116,7 +119,9 @@ static int spawn_hook(Cpu *c, uint64_t addr) {
     for (int k = 0; k < s->nent; k++) s->ents[0xc0 * k + 0x68] = 0, s->ents[0xc0 * k + 0xa0] = 0, s->ents[0xc0 * k + 0xb0] = 0;
     s->x0 = c->x[0], s->x1 = c->x[1], s->x6 = c->x[6];
     rd(c->x[1], &s->x1_hash, 8);
+    if (strcmp(s->data, data)) s->bad = 0;
     snprintf(s->data, sizeof s->data, "%s", data);
+    memcpy(s->at, (const void *)(uintptr_t)(c->x[4] + 0x30), 12);
     pthread_mutex_unlock(&g_lock);
     static int logged;
     if (logged++ < 3) {
@@ -186,22 +191,34 @@ static int node_hook(Cpu *c, uint64_t addr) {
     return g_prev_node ? g_prev_node(c, addr) : 0;
 }
 
-// ---- the spawn
-static void do_spawn(Cpu *c) {
+// ---- the spawn: from the character manager's update (the game thread that realises characters). A request: where,
+// facing (radians), the NPC data wanted (part of its name, "" any; research) or the nearest live station to `at` (the
+// shared world: its area is the one most likely loaded as long as that spot is), and the number k of its name newnpc_<k>
+typedef struct { int k; float at[3], yaw; char want[64]; int nearest; } Req;
+#define NREQ 16
+static Req g_req[NREQ];
+static volatile int g_nreq;
+static int g_req_snap[MAXNEW];  // (k % MAXNEW: the kept spawn it was made from, +1 - newnpc_bad)
+static void do_spawn(Cpu *c, const Req *r) {
     pthread_mutex_lock(&g_lock);
     Snap s;
     int found = -1;
-    for (int i = g_nsnaps - 1; i >= 0 && found < 0; i--)  // (the newest kept that is still there and fits)
-        if (snap_alive(&g_snaps[i]) && (!g_want[0] || strstr(g_snaps[i].data, g_want))) found = i;
+    float best = 1e30f;
+    for (int i = g_nsnaps - 1; i >= 0; i--) {  // (the newest kept that is still there and fits; or the nearest)
+        if (!snap_alive(&g_snaps[i]) || (r->nearest && g_snaps[i].bad) || (r->want[0] && !strstr(g_snaps[i].data, r->want))) continue;
+        float dx = g_snaps[i].at[0] - r->at[0], dz = g_snaps[i].at[2] - r->at[2], d = dx * dx + dz * dz;
+        if (!r->nearest) { found = i; break; }
+        if (d < best) best = d, found = i;
+    }
     if (found >= 0) s = g_snaps[found];
     pthread_mutex_unlock(&g_lock);
     if (found < 0) {
-        LOG("[newnpc] no station spawn kept%s%s whose area is loaded: walk near townspeople first\n", g_want[0] ? " for " : "", g_want);
+        LOG("[newnpc] no station spawn kept%s%s whose area is loaded: newnpc_%03d not made\n", r->want[0] ? " for " : "", r->want, r->k);
         return;
     }
-    int k = ++g_count;
+    g_req_snap[r->k % MAXNEW] = found + 1;
     char *name = hle_alloc(32);
-    snprintf(name, 32, "newnpc_%03d", k);
+    snprintf(name, 32, "newnpc_%03d", r->k);
     uint8_t *nm = hle_alloc(0x40), *blk = hle_alloc(0x300), *out = hle_alloc(32);
     memcpy(nm, s.name, 0x40);
     uint64_t h = fnv(name), p = (uint64_t)(uintptr_t)name, len = strlen(name), z = 0;
@@ -215,10 +232,8 @@ static void do_spawn(Cpu *c) {
     }
     memcpy(blk + 0x1a0, &b, 8), memcpy(blk + 0x1a8, &e, 8), memcpy(blk + 0x1b0, &e, 8);
     float *t = (float *)(blk + 0x40 + 0x30), *q = (float *)(blk + 0x40 + 0x20);
-    t[0] = g_at[0], t[1] = g_at[1], t[2] = g_at[2];
-    float a = g_yaw * (float)M_PI / 180.0f;
-    q[0] = 0, q[1] = sinf(a / 2), q[2] = 0, q[3] = cosf(a / 2);
-    if (g_dress) { extern void dress_newnpc_next(void); dress_newnpc_next(); }
+    t[0] = r->at[0], t[1] = r->at[1], t[2] = r->at[2];
+    q[0] = 0, q[1] = sinf(r->yaw / 2), q[2] = 0, q[3] = cosf(r->yaw / 2);
     uint64_t sx[32], snzcv = c->nzcv;
     __uint128_t sv[32];
     memcpy(sx, c->x, sizeof sx), memcpy(sv, c->v, sizeof sv);
@@ -227,23 +242,82 @@ static void do_spawn(Cpu *c) {
     c->x[8] = (uint64_t)(uintptr_t)out;
     guest_call(c, PLACE_SPAWN);
     memcpy(c->x, sx, sizeof sx), memcpy(c->v, sv, sizeof sv), c->nzcv = snzcv;
-    LOG("[newnpc] spawned %s (NPC data %s) at %.2f %.2f %.2f yaw %.0f\n", name, s.data, g_at[0], g_at[1], g_at[2], g_yaw);
+    LOG("[newnpc] spawned %s (NPC data %s, its station %.0f m away) at %.2f %.2f %.2f yaw %.0f\n", name, s.data,
+        sqrtf((s.at[0] - r->at[0]) * (s.at[0] - r->at[0]) + (s.at[2] - r->at[2]) * (s.at[2] - r->at[2])), r->at[0], r->at[1], r->at[2],
+        r->yaw * 57.29578f);
 }
 static int mgr_hook(Cpu *c, uint64_t addr) {
     (void)addr;
-    if (g_pending) {
-        g_pending = 0;
-        do_spawn(c);
-    }
+    if (!g_nreq) return 0;
+    Req r[NREQ];
+    pthread_mutex_lock(&g_lock);
+    int n = g_nreq;
+    memcpy(r, g_req, sizeof *r * (size_t)n);
+    g_nreq = 0;
+    pthread_mutex_unlock(&g_lock);
+    for (int i = 0; i < n; i++) do_spawn(c, &r[i]);
     return 0;
+}
+static int queue(const float at[3], float yaw, const char *want, int nearest) {
+    pthread_mutex_lock(&g_lock);
+    int k = 0;
+    if (g_nreq < NREQ) {
+        Req *r = &g_req[g_nreq];
+        k = r->k = ++g_count;
+        memcpy(r->at, at, 12), r->yaw = yaw, r->nearest = nearest;
+        snprintf(r->want, sizeof r->want, "%s", want ? want : "");
+        g_nreq++;
+    }
+    pthread_mutex_unlock(&g_lock);
+    return k;
+}
+
+// ---- for the shared world (hle/warp.c, setting world_own_npc): its other players' stand-ins made like this
+static bool g_api_on;
+void newnpc_on(void) {
+    if (g_api_on || g_on > 0) return;  // (research LARECOMP_NEWNPC: already)
+    g_api_on = true;
+    rt_register_fnhook_at(PLACE_SPAWN, spawn_hook);
+    rt_register_fnhook_at(CHAR_MGR, mgr_hook);
+}
+// a station spawn kept whose area is loaded (its spawner still there): one can be made now
+bool newnpc_ready(void) {
+    static uint64_t at;  // (looked at again at most every 0.2 s: asked each frame for each player waiting)
+    static bool any;
+    uint64_t now = plat_now_ns();
+    pthread_mutex_lock(&g_lock);
+    if (!at || now - at > 200000000ull) {
+        at = now, any = false;
+        for (int i = 0; i < g_nsnaps && !any; i++) any = !g_snaps[i].bad && snap_alive(&g_snaps[i]);
+    }
+    bool r = any;
+    pthread_mutex_unlock(&g_lock);
+    return r;
+}
+// one made at `at` facing yaw (radians) at the character manager's next update: its number k (its node newnpc_<k>), 0
+// none (too many asked at once)
+int newnpc_spawn(const float at[3], float yaw) { return queue(at, yaw, NULL, 1); }
+// a node's k (newnpc_<k>), 0 another's
+int newnpc_number(uint64_t node) {
+    uint64_t v = 0, np = 0;
+    char nm[16] = "";
+    int k;
+    if (!rd(node, &v, 8) || v != NODE_VTABLE || !rd(node + 0x2b8, &np, 8) || !rd(np, nm, 15)) return 0;
+    nm[15] = 0;
+    return sscanf(nm, "newnpc_%d", &k) == 1 && k > 0 ? k : 0;
+}
+// newnpc_<k> isn't a townsperson (a story character's station): its kept spawn not used for these again
+void newnpc_bad(int k) {
+    int i = g_req_snap[k % MAXNEW] - 1;
+    pthread_mutex_lock(&g_lock);
+    if (i >= 0 && i < g_nsnaps && !g_snaps[i].bad) g_snaps[i].bad = 1, LOG("[newnpc] NPC data %s makes no townsperson: not used again\n", g_snaps[i].data);
+    pthread_mutex_unlock(&g_lock);
 }
 
 // (hooks registered before plugins load: theirs chain in front of these - runtime/plugin.c)
 __attribute__((constructor)) static void newnpc_init(void) {
     g_on = getenv("LARECOMP_NEWNPC") != NULL;
     if (!g_on) return;
-    g_dress = getenv("LARECOMP_NEWNPC_DRESS") != NULL;
-    if (g_dress) { extern void dress_newnpc_init(void); dress_newnpc_init(); }  // (before ours: chained behind it)
     rt_register_fnhook_at(PLACE_SPAWN, spawn_hook);
     rt_register_fnhook_at(CHAR_MGR, mgr_hook);
     g_prev_make = rt_fnhook_get(CC_MAKE);
@@ -293,13 +367,14 @@ void newnpc_frame(uint64_t frame) {  // (each frame: runtime/hle/input.c; the re
     unlink(path);
     float x, y, zz, yaw = 0, dx, dz, p[3];
     int rk;
+    int asked = 0;
     if (sscanf(line, "spawn %f %f %f %f %63s", &x, &y, &zz, &yaw, want) >= 3) {
-        g_at[0] = x, g_at[1] = y, g_at[2] = zz, g_yaw = yaw;
-        snprintf(g_want, sizeof g_want, "%s", want), g_pending = 1;
+        float at[3] = {x, y, zz};
+        asked = queue(at, yaw * (float)M_PI / 180.0f, want, 0);
     } else if (sscanf(line, "near %f %f %f %63s", &dx, &dz, &yaw, want) >= 2) {
         if (!player_pos(p)) { LOG("[newnpc] near: no player position yet\n"); return; }
-        g_at[0] = p[0] + dx, g_at[1] = p[1], g_at[2] = p[2] + dz, g_yaw = yaw;
-        snprintf(g_want, sizeof g_want, "%s", want), g_pending = 1;
+        float at[3] = {p[0] + dx, p[1], p[2] + dz};
+        asked = queue(at, yaw * (float)M_PI / 180.0f, want, 0);
     } else if (sscanf(line, "remove %d", &rk) == 1 && rk > 0 && rk < MAXNEW) {
         if (!g_node[rk]) { LOG("[newnpc] newnpc_%03d: none made\n", rk); return; }
         g_away_at[rk] = frame, g_away[rk] = 1, g_naway = 1;
@@ -316,5 +391,5 @@ void newnpc_frame(uint64_t frame) {  // (each frame: runtime/hle/input.c; the re
         g_tele[0] = x, g_tele[1] = y, g_tele[2] = zz, g_tele_n = 20;
         LOG("[newnpc] the player goes to %.1f %.1f %.1f\n", x, y, zz);
     } else LOG("[newnpc] unknown command: %s", line);
-    if (g_pending) LOG("[newnpc] asked: %s", line);
+    if (asked) LOG("[newnpc] asked (newnpc_%03d): %s", asked, line);
 }

@@ -59,6 +59,7 @@ typedef struct {
     char online_server[128];  // an online server for Link Play (contrib/lzaserver: "<host>[:port]"; "" Steam friends) - the relay plugin reads it
     int world_players;        // 1: on an online server, show the other players walking around the world (opt-in; hle/warp.c)
     int world_rate;           // our position sent this many times a second in the shared world: 20 (0 = 20, the default) or 30
+    int world_own_npc;        // 1 (default): each shown player is a townsperson made for them (hle/newnpc.c), 0: one borrowed from the street
     int next_fps, next_res_height;  // set in game (hle/za_options.c; the height + 1), 0 = not: for the ini, from the next start
 } Settings;
 

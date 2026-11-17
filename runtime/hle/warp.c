@@ -42,17 +42,17 @@ static bool is_body(uint64_t o) { return o >= HEAP_BASE && o < HEAP_BASE + HEAP_
 // was put away)
 #define MAXGONE 16
 #define GONE_Y (-500.0f)  // (where: under the street - the crowd lets a walker that far off its route go, 2026-11-14)
-static struct { volatile uint64_t owner, node, body; uint64_t since, peer, col_body, lost_at, logged_at; int walker, watch; } g_gone[MAXGONE];
+static struct { volatile uint64_t owner, node, body; uint64_t since, peer, col_body, lost_at; } g_gone[MAXGONE];
 static volatile int g_ngone;  // (slots in use: the hooks look only while there are any)
 static pthread_mutex_t g_gone_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool gone_node(uint64_t n) {
     if (!g_ngone) return false;
-    for (int i = 0; i < MAXGONE; i++) if (g_gone[i].node == n && g_gone[i].owner && !g_gone[i].watch) return true;
+    for (int i = 0; i < MAXGONE; i++) if (g_gone[i].node == n && g_gone[i].owner) return true;
     return false;
 }
 static bool gone_body(uint64_t b) {
     if (!g_ngone || !b) return false;
-    for (int i = 0; i < MAXGONE; i++) if (g_gone[i].body == b && g_gone[i].owner && !g_gone[i].watch) return true;
+    for (int i = 0; i < MAXGONE; i++) if (g_gone[i].body == b && g_gone[i].owner) return true;
     return false;
 }
 static volatile int g_world;   // (the shared world on: sending and showing - below)
@@ -245,9 +245,10 @@ __attribute__((constructor)) static void story_init(void) {
 // Mods page, with an online server - contrib/lzaserver - joined through the relay plugin; or LARECOMP_GHOST=<my port>,
 // <peer port>[,<peer host>] for two copies over UDP, a test). Each copy sends its player's position, speed and facing
 // ~20 times a second; the others show each player - the nearest few, world_choose - with a character of their own level
-// standing in: a story/station NPC
-// near our player (a character body 3-40 m away that isn't stepped), until a townsperson made in their outfit - a station
-// NPC or a walker of the crowd, below - takes over; moved through its transform node. A node (vtable 0x7003be0d28) keeps its local scale at
+// standing in: a townsperson the game makes for them where they are, in their outfit and look (world_own_npc, below; on
+// unless set to 0), or - that off, or no station of a loaded level to make one from - one borrowed: a station NPC near
+// our player (a character body 3-40 m away that isn't stepped), until a townsperson made in their outfit - a station NPC
+// or a walker of the crowd, below - takes over; moved through its transform node. A node (vtable 0x7003be0d28) keeps its local scale at
 // +0xc0, rotation at +0xd0 (quaternion xyzw) and translation at +0xe0, and 0x7001ccf27c (x0 the node; called many times
 // a frame) makes its world matrices (+0x40, +0x80) from them - writing the translation moves the model (found 2026-11-14
 // by shifting every copy of a station NPC's x and halving: the world matrices themselves are overwritten). A
@@ -337,7 +338,6 @@ typedef struct {
     Look look_in;                    // (the pieces as they come - copied to look once they belong together)
     int look_state;                  // (0 not checked yet, 1 the game has everything in it, 2 refused: their outfit alone)
     uint64_t via;                    // (who the transport says sent their packets: the server's id - their id can't be borrowed)
-    int crowd_seen;                  // (their dressed character is a walker of the crowd: logged once)
     uint64_t pres_body, pres_rec, pres_id;  // (the stand-in's presence body in the physics world: its filter changed -
     uint32_t pres_was;                      //  pres_frame; pres_was: its own, put back on let-go)
     uint64_t armed_at;               // (when their last dressing was asked for: the next one not within 10 s - unless the last
@@ -359,6 +359,11 @@ typedef struct {
     int show, noticed;
     uint64_t shown_at;
     float dist;
+    // (their own townsperson - world_own_npc, below: newnpc_<own_k> asked for them and not found yet (0 none), when)
+    int own_k;
+    uint64_t own_at;
+    uint64_t here_ns, key_ns;        // (when they were first heard; when what they wear last changed - the log's timings)
+    uint32_t key_seen;
 } Peer;
 static bool look_ours(Look *l);
 // the shared world's dressing: the next townsperson made wears `want` (its player then waits for it); each one made
@@ -370,6 +375,28 @@ static struct { uint64_t peer, owner; uint32_t hash; } g_dressed[8];
 static int g_ndressed;
 static DressPart g_pparts[24];   // (our player's parts, as its character was made; g_npparts of them)
 static int g_npparts, g_pbody = -1;
+// ---- Their own townsperson (setting world_own_npc, on unless 0; LARECOMP_WORLD_OWN_NPC=0|1 overrides): a shown player
+// is a NEW townsperson the game makes for them where they are (hle/newnpc.c: the character placement spawn called again
+// with a kept station spawner's arguments, our name newnpc_<k> and their spot), made in their outfit and look from the
+// start (dress_hook knows it by its node's name: g_own[k % NOWN] says whose, in what) - not one taken from the street and
+// dressed when the next one happens to be made (that waited for the crowd: 3 s to over 45 s, and needed the crowd and
+// station bookkeeping). It goes with its level (its station's area: a trip away, a loading screen) and is made again; on
+// an outfit change a new one is made at once and the old one put away (gone_add). No station spawn of a loaded area kept
+// (none seen yet - indoors, a level just loading): the old way, a townsperson borrowed (scan_bodies, g_dress_want).
+static int own_npc(void) {
+    static int e = -2;
+    if (e == -2) e = getenv("LARECOMP_WORLD_OWN_NPC") ? atoi(getenv("LARECOMP_WORLD_OWN_NPC")) != 0 : -1;
+    return e >= 0 ? e : g_settings.world_own_npc != 0;
+}
+void newnpc_on(void);
+bool newnpc_ready(void);
+int newnpc_spawn(const float at[3], float yaw);
+int newnpc_number(uint64_t node);
+void newnpc_bad(int k);
+#define NOWN 64
+// (k: newnpc_<k>; n 0: plain - their outfit not heard in time; failed: made, but its station's NPC data is no townsperson)
+static struct { int k, failed, made; uint64_t peer; uint32_t key; DressPart parts[MAXPARTS]; int n, body; Look look; bool look_ok; } g_own[NOWN];
+static volatile int g_own_used;  // (one asked for: dress_hook looks at node names from then on)
 static uint32_t outfit_hash(const DressPart *p, int n) {
     uint32_t h = 2166136261u;
     for (int k = 0; k < n; k++)
@@ -384,6 +411,7 @@ static volatile int g_nshow;
 static uint64_t g_self;               // (this copy's id in the world)
 static volatile int g_scanning;
 static volatile uint64_t g_me_body, g_me_node;  // (our player's body and node: the node has the model's facing)
+static uint64_t g_me_since;                      // (the frame our player's body became this one: a level settled)
 static bool g_hooked;
 
 // ---- packets (both ways the same, little-endian): {u8 type, u8 version 1, u8[6], u64 from, ...}
@@ -425,8 +453,6 @@ static struct sockaddr_in g_udp_peer;
 static float g_off;  // (LARECOMP_GHOST_OFFSET=<m>: one copy shown beside itself, a loopback test)
 static float g_off_ahead;  // (LARECOMP_GHOST_AHEAD=<degrees>: the offset that far from their facing - in the camera's view)
 static int g_self_test;  // (LARECOMP_GHOST_SELF=1: our own packets count as another player's - one copy, a loopback test)
-static int g_crowd_ok;   // (LARECOMP_GHOST_CROWD=1: a walker of the crowd - a stepped body - may stand in before the dressed one
-                         //  comes too; 2: only those, never dressed - research)
 static void udp_send(const void *p, size_t n) { sendto(g_udp, p, n, 0, (struct sockaddr *)&g_udp_peer, sizeof g_udp_peer); }
 static int udp_recv(uint64_t *from, void *p, size_t cap) {
     ssize_t n = recv(g_udp, p, cap, 0);
@@ -437,7 +463,7 @@ ssize_t process_vm_readv(pid_t, const struct iovec *, unsigned long, const struc
 #else
 static const float g_off = 0;
 static const float g_off_ahead = 0;
-static const int g_self_test = 0, g_crowd_ok = 0;
+static const int g_self_test = 0;
 #endif
 static void world_send(const WorldPkt *k, size_t n) { if (w_send) w_send(k, n); }
 #ifndef _WIN32
@@ -466,6 +492,7 @@ static bool heap_read(uint64_t a, void *out, size_t n) {
 #endif
 }
 
+bool warp_heap_read(uint64_t a, void *out, size_t n) { return heap_read(a, out, n); }  // (hle/newnpc.c)
 static Peer *peer_of_node(uint64_t n) {
     for (int k = 0, m = g_nshow; k < m; k++) { Peer *p = &g_peers[g_show_idx[k]]; if (p->id && p->node == n) return p; }
     return NULL;
@@ -512,7 +539,8 @@ static bool anim_float_index(uint64_t bb, uint64_t hash, uint32_t *idx) {
     return false;
 }
 // (the call, from a guest thread: x0.., v0..: its state, kept; scratch: 8 bytes of guest memory; fn: one of the
-// blackboard's setters - x2 the int / bool, s0 the float)
+// blackboard's setters - x2 the int / bool, s0 the float. t_ours: the setters' hooks below let our own sets through)
+static __thread int t_ours;
 static void anim_set(Cpu *c, uint64_t fn, uint64_t bb, uint32_t idx, int32_t ival, float val, uint64_t scratch) {
     uint64_t sx[32], snzcv = c->nzcv;
     __uint128_t sv[32];
@@ -521,8 +549,57 @@ static void anim_set(Cpu *c, uint64_t fn, uint64_t bb, uint32_t idx, int32_t iva
     memset(s, 0, 8), s[0] = 1, memcpy(s + 4, &idx, 4);
     c->x[0] = bb, c->x[1] = scratch, c->x[2] = (uint64_t)(uint32_t)ival, c->v[0] = 0;
     memcpy(&c->v[0], &val, 4);
+    t_ours = 1;
     guest_call(c, fn);
+    t_ours = 0;
     memcpy(c->x, sx, sizeof sx), memcpy(c->v, sv, sizeof sv), c->nzcv = snzcv;
+}
+// ---- A stand-in does what its player does, nothing of its own: the AI of the townsperson it is (a station NPC's - its
+// own one is made from a station's data too) sets its blackboard as it goes - sit / talk / wait / loop poses, "move" for
+// a stroll - and those sets of a stand-in's are overridden as they happen (the hooked setters change the value before the
+// game's setter runs: "move" their player's, a pose parameter its standing value), so its animation only ever has what
+// its player does. Its triggers too (0x700010ba8c, x0 the blackboard, x1 the key, w2 1 fire / 0 reset): a station NPC's AI
+// fires once_action_trigger (a gesture at whoever stands by - with once_action_int its kind) and move_to_bump (its stumble
+// when walked into) - reset instead; its eyes still blink (2026-11-17, LARECOMP_WORLD_LOG_AI on our own townsperson: blinks,
+// once_action, move_to_bump / bump_to_move, wait_to_squat - nothing else in 30 s). Research LARECOMP_WORLD_LOG_AI=1: every
+// set of a stand-in's blackboard not ours, logged (name, value, the caller)
+static const Peer *standin_of_bb(uint64_t bb) {
+    for (int k = 0, m = g_nshow; k < m; k++) {
+        const Peer *p = &g_peers[g_show_idx[k]];
+        if (p->id && p->move_ok && p->move_bb == bb) return p;
+    }
+    return NULL;
+}
+static int ai_log(void) {
+    static int l = -1;
+    if (l < 0) l = getenv("LARECOMP_WORLD_LOG_AI") != NULL;
+    return l;
+}
+static void bb_name(Cpu *c, uint64_t bb, uint64_t tab, char *nm, size_t n) {  // (the parameter a setter's key names)
+    uint32_t idx = 0;
+    uint64_t b = 0, e = 0, ent[3] = {0};
+    snprintf(nm, n, "?");
+    if (heap_read(c->x[1] + 4, &idx, 4) && heap_read(bb + tab, &b, 8) && heap_read(bb + tab + 8, &e, 8) && e > b && idx < (e - b) / 0x40 &&
+        heap_read(b + (uint64_t)idx * 0x40, ent, sizeof ent) && ent[2] && ent[2] < n && heap_read(ent[1], nm, ent[2])) nm[ent[2]] = 0;
+}
+static void ai_set_log(Cpu *c, uint64_t bb, uint64_t tab, char kind, const char *what) {
+    char nm[48];
+    bb_name(c, bb, tab, nm, sizeof nm);
+    float f;
+    memcpy(&f, &c->v[0], 4);
+    if (kind == 'f') LOG("[world] AI set of a stand-in's %s (float) %.3f from %llx%s\n", nm, f, (unsigned long long)c->x[30], what);
+    else LOG("[world] AI set of a stand-in's %s (%c) %d from %llx%s\n", nm, kind, (int)(uint32_t)c->x[2], (unsigned long long)c->x[30], what);
+}
+#define BB_SET_TRIGGER 0x700010ba8cull
+static int ai_trigger_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    if (t_ours || !g_nshow || !(c->x[2] & 0xff) || !standin_of_bb(c->x[0])) return 0;
+    char nm[48];
+    bb_name(c, c->x[0], 0xc8, nm, sizeof nm);
+    bool keep = !strncmp(nm, "eye_", 4);  // (blinking)
+    if (ai_log()) ai_set_log(c, c->x[0], 0xc8, 't', keep ? "" : " - reset instead");
+    if (!keep) c->x[2] &= ~0xffull;
+    return 0;
 }
 static void anim_set_float(Cpu *c, uint64_t bb, uint32_t idx, float val, uint64_t scratch) { anim_set(c, BB_SET_FLOAT, bb, idx, 0, val, scratch); }
 
@@ -537,8 +614,7 @@ static void anim_set_float(Cpu *c, uint64_t bb, uint32_t idx, float val, uint64_
 // level's people are made at its load); a plain stand-in is never one in such a pose (scan_bodies passes them over); a
 // dressed one, made from whoever came next, is stood up (stand_in_walk; again if its AI puts it back) and a stand-in let
 // go gets its own values back (stand_in_stop: sits down again where it sat).
-//   LARECOMP_WORLD_POSE=0: as before (neither) - an A/B; =2 (research): a plain stand-in in such a pose PREFERRED (stood
-// up, given back on let-go - the test of that path); =3 (research): preferred and NOT stood up (the old look of that).
+//   LARECOMP_WORLD_POSE=0: as before (neither) - an A/B.
 #define BB_SET_INT 0x700010aad4ull
 #define BB_SET_BOOL 0x700010e8b8ull
 #define POSE_N 10
@@ -573,7 +649,24 @@ static int pose_hook(Cpu *c, uint64_t addr) {  // (the int and bool setters: x0 
     uint64_t h = *(const uint64_t *)(uintptr_t)(b + (uint64_t)idx * 0x40);
     int k = 0;
     while (k < POSE_N && (g_pose_hash[k] != h || (k_pose[k].kind == 'i') != is_int)) k++;
+    bool standin = !t_ours && g_nshow && standin_of_bb(bb);
+    if (standin && k == POSE_N && !is_int && (c->x[2] & 0xff)) {  // (its stumble when walked into: not started)
+        char nm[48];
+        bb_name(c, bb, 0xa8, nm, sizeof nm);
+        bool bump = !strcmp(nm, "move_to_bump");
+        if (ai_log()) ai_set_log(c, bb, 0xa8, 'b', bump ? " - 0 instead" : "");
+        if (bump) c->x[2] &= ~0xffull;
+        return 0;
+    }
+    if (standin && ai_log()) ai_set_log(c, bb, is_int ? 0x68 : 0xa8, is_int ? 'i' : 'b', k < POSE_N ? " - standing instead" : "");
     if (k == POSE_N) return 0;
+    if (standin) {  // (a stand-in's AI posing it: it stays standing - what it set is kept as its own, for its let-go)
+        int32_t v = is_int ? (int32_t)(uint32_t)c->x[2] : (int32_t)(c->x[2] & 0xff);
+        Peer *p = (Peer *)standin_of_bb(bb);
+        if (p && v != k_pose[k].neutral) p->pose_was[k] = v, p->pose_cleared |= (uint16_t)(1u << k);
+        c->x[2] = (c->x[2] & ~(is_int ? 0xffffffffull : 0xffull)) | (uint32_t)k_pose[k].neutral;
+        return 0;
+    }
     int32_t v = is_int ? (int32_t)(uint32_t)c->x[2] : (int32_t)(c->x[2] & 0xff);
     unsigned bk = pose_bucket(bb);
     pthread_mutex_lock(&g_pose_lock);
@@ -651,6 +744,16 @@ static volatile float g_me_move;
 static int bb_set_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     uint64_t bb = g_me_bb;
+    if (!t_ours && g_nshow && c->x[0] != bb) {  // (a stand-in's: its "move" stays their player's)
+        const Peer *p = standin_of_bb(c->x[0]);
+        uint32_t idx = 0;
+        if (p) {
+            bool mv = heap_read(c->x[1] + 4, &idx, 4) && idx == p->move_idx && p->move_given >= 0;
+            if (ai_log()) ai_set_log(c, c->x[0], 0x88, 'f', mv ? " - theirs instead" : "");
+            if (mv) memcpy(&c->v[0], &p->move_given, 4);
+        }
+        return 0;
+    }
     if (!bb || c->x[0] != bb) return 0;
     uint32_t idx = 0;
     if (!heap_read(c->x[1] + 4, &idx, 4) || idx != g_me_move_idx) return 0;
@@ -785,7 +888,7 @@ static void stand_in_walk(Cpu *c, Peer *p, uint64_t node) {
                 (unsigned long long)p->move_bb, p->move_ok ? "walks with them" : "no \"move\" yet");
     }
     if (!p->move_ok || !p->move_scratch) return;
-    if ((pose_mode() == 1 || pose_mode() == 2) && f - p->pose_at >= 10) {  // (in a pose of its own - sitting, talking: stood up; looked at a few times a
+    if (pose_mode() && f - p->pose_at >= 10) {  // (in a pose of its own - sitting, talking: stood up; looked at a few times a
         p->pose_at = f;                         //  second - its AI may put it back)
         uint64_t v = 0;
         if (heap_read(p->move_bb, &v, 8) && v == BB_VTABLE && pose_stand_up(c, p, p->move_bb, p->move_scratch)) p->move_given = -2;
@@ -860,11 +963,6 @@ static uint64_t node_of_body(uint64_t body) {
 }
 static uint64_t g_scan_me;
 #define LAYER_NPC 4u
-static bool layer_any(void) {
-    static int any = -1;
-    if (any < 0) any = getenv("LARECOMP_WORLD_LAYER_ANY") && atoi(getenv("LARECOMP_WORLD_LAYER_ANY")) == 1;
-    return any;
-}
 // (a body passed over as no person - logged once each: its layer by the names of system/physics/CollisionLayer/
 // collision_layer_main.trhcl)
 static void not_person_log(uint64_t o, uint32_t layer, float d, const float *at) {
@@ -886,7 +984,6 @@ static void *scan_bodies(void *arg) {
     enum { NC = 16 };
     uint64_t cand[NC];
     float cd[NC];
-    bool cst[NC];
     int nc = 0, count = 0;
     const size_t chunk = 1u << 20;
     uint64_t *buf = malloc(chunk);
@@ -900,26 +997,24 @@ static void *scan_bodies(void *arg) {
             const float *q = (const float *)((const char *)buf + k * 8 + 0x90);
             float d = sqrtf((q[0] - px) * (q[0] - px) + (q[2] - pz) * (q[2] - pz));
             if (!(d > 3 && d < 40)) continue;
-            bool skip = false;
+            bool skip = false;  // (stepped: a walker of the crowd - it follows its route, not its node)
             pthread_mutex_lock(&g_body_lock);
-            bool stepped = false;
-            for (int i = 0; i < NBODY; i++) if (g_bodies[i].o == o && g_frame - g_bodies[i].last <= 30) stepped = true;
-            if (g_crowd_ok == 2 ? !stepped : stepped && !g_crowd_ok) skip = true;
+            for (int i = 0; i < NBODY; i++) if (g_bodies[i].o == o && g_frame - g_bodies[i].last <= 30) skip = true;
             pthread_mutex_unlock(&g_body_lock);
             for (int i = 0; i < MAXPEER; i++) if (g_peers[i].body == o) skip = true;
             if (skip || gone_body(o)) continue;  // (a let-go dressed character isn't anyone's stand-in again)
             // (a person only: its proxy's collision layer NPC (4). Not stepped is not enough - by the Vert Pokemon Center a
             // body on layer 14, InlandOnlySymbolPokemon (a Pokemon of the town, not made as a character), was taken and
-            // walked about as a player, 2026-11-17. Research LARECOMP_WORLD_LAYER_ANY=1: any layer, the old way)
+            // walked about as a player, 2026-11-17)
             uint32_t layer = *(const uint32_t *)((const char *)buf + k * 8 + 0x40) & 0x1f;
-            if (layer != LAYER_NPC && !layer_any()) {
+            if (layer != LAYER_NPC) {
                 not_person_log(o, layer, d, q);
                 continue;
             }
             if (nc == NC && d >= cd[NC - 1]) continue;  // (kept sorted, nearest first)
             int j = nc < NC ? nc++ : NC - 1;
-            while (j > 0 && cd[j - 1] > d) cand[j] = cand[j - 1], cd[j] = cd[j - 1], cst[j] = cst[j - 1], j--;
-            cand[j] = o, cd[j] = d, cst[j] = stepped;
+            while (j > 0 && cd[j - 1] > d) cand[j] = cand[j - 1], cd[j] = cd[j - 1], j--;
+            cand[j] = o, cd[j] = d;
         }
     }
     free(buf);
@@ -927,32 +1022,20 @@ static void *scan_bodies(void *arg) {
     // above; a body whose node isn't known yet can't be told - stood up once it stands in, if it must be)
     uint64_t cnode[NC];
     bool cposed[NC];
-    int nposed = 0, mode = pose_mode();
+    int mode = pose_mode();
     char pnames[NC][96];
     for (int j = 0; j < nc; j++) {
         cnode[j] = node_of_body(cand[j]), cposed[j] = false, pnames[j][0] = 0;
         uint64_t bb = mode && cnode[j] ? anim_bb_of_node(cnode[j]) : 0;
         int32_t v[POSE_N];
-        if (bb && pose_of(bb, v)) cposed[j] = true, nposed++, pose_names(v, pnames[j], sizeof pnames[j]);
+        if (bb && pose_of(bb, v)) cposed[j] = true, pose_names(v, pnames[j], sizeof pnames[j]);
     }
-    if ((mode == 2 || mode == 3) && nposed)  // (research: the ones in a pose first)
-        for (int j = 1; j < nc; j++)
-            for (int m = j; m > 0 && cposed[m] && !cposed[m - 1]; m--) {
-                uint64_t t = cand[m]; cand[m] = cand[m - 1], cand[m - 1] = t;
-                t = cnode[m]; cnode[m] = cnode[m - 1], cnode[m - 1] = t;
-                float d = cd[m]; cd[m] = cd[m - 1], cd[m - 1] = d;
-                bool b = cst[m]; cst[m] = cst[m - 1], cst[m - 1] = b;
-                b = cposed[m]; cposed[m] = cposed[m - 1], cposed[m - 1] = b;
-                char tn[96]; memcpy(tn, pnames[m], 96), memcpy(pnames[m], pnames[m - 1], 96), memcpy(pnames[m - 1], tn, 96);
-            }
     int used = 0;
     for (int i = 0; i < MAXPEER && used < nc; i++)
         if (g_peers[i].id && g_peers[i].show && !g_peers[i].body) {
-            // (LARECOMP_GHOST_CROWD: a walker only if it is a character made - one of the crowd; the plaza's Pokemon are
-            // stepped too, 2026-11-16: a Pokemon stood in)
             for (; used < nc; used++) {
-                if (cst[used] && !cnode[used]) continue;
-                if (cposed[used] && mode == 1) {
+                if (cnode[used] && newnpc_number(cnode[used])) continue;  // (one made for a player - ours, or let go)
+                if (cposed[used]) {
                     LOG("[world] (not %llx, %.1f m from us: it sits or talks - %s)\n", (unsigned long long)cand[used], cd[used], pnames[used]);
                     continue;
                 }
@@ -1409,8 +1492,8 @@ static void outfit_message(Peer *p, const WorldPkt *k, size_t n) {
 }
 // (LARECOMP_GHOST_SELF, one copy: we are the other player too - our first townsperson is dressed for "them" at once)
 void world_self_outfit(void) {
-    if (!g_self_test || getenv("LARECOMP_WORLD_OUTFIT") || getenv("LARECOMP_WORLD_LOOK")) return;  // (a changed look: checked, as
-                                                                                                   //  another player's would be)
+    // (a changed look: checked, as another player's would be; their own townsperson: made from the packets as it is asked for)
+    if (!g_self_test || getenv("LARECOMP_WORLD_OUTFIT") || getenv("LARECOMP_WORLD_LOOK") || own_npc()) return;
     DressPart o[MAXPARTS];
     int body, n = outfit_ours(o, &body);
     pthread_mutex_lock(&g_dress_lock);
@@ -1438,6 +1521,16 @@ static bool body_stepped(uint64_t b, uint64_t frame) {  // (the crowd's and the 
     pthread_mutex_unlock(&g_body_lock);
     return st;
 }
+static void gone_add(uint64_t owner, uint64_t peer, uint64_t col_body);
+static void dressed_add(uint64_t peer, uint64_t owner, uint32_t hash) {  // (a character made for them: kept until it stands in)
+    pthread_mutex_lock(&g_dress_lock);
+    bool full = g_ndressed == 8;
+    int i = full ? 7 : g_ndressed++;
+    uint64_t lost = full ? g_dressed[7].owner : 0, lost_peer = g_dressed[7].peer;
+    g_dressed[i].peer = peer, g_dressed[i].owner = owner, g_dressed[i].hash = hash;
+    pthread_mutex_unlock(&g_dress_lock);
+    if (lost) gone_add(lost, lost_peer, 0);  // (no room to keep it: put away, not left in their clothes)
+}
 static void dressed_drop(uint64_t owner) {
     pthread_mutex_lock(&g_dress_lock);
     for (int i = 0; i < g_ndressed; i++) if (g_dressed[i].owner == owner) g_dressed[i] = g_dressed[--g_ndressed], i--;
@@ -1451,11 +1544,6 @@ static void dressed_drop(uint64_t owner) {
 // steps too: the crowd lets a walker that far off its route go - removed, as 2026-11-14's stray walkers were) and its
 // collision (its physics presence's filter None, as pres_frame puts a stand-in's away: a station NPC's stays where it
 // stood) kept away - until the game removes the character (its level goes, the crowd lets it go: its object or its body gone).
-static bool gone_off(void) {  // (research LARECOMP_WORLD_GONE_OFF=1: left as they are - the old way, an A/B)
-    static int off = -1;
-    if (off < 0) off = getenv("LARECOMP_WORLD_GONE_OFF") != NULL;
-    return off;
-}
 static void gone_add(uint64_t owner, uint64_t peer, uint64_t col_body) {
     if (!owner) return;
     pthread_mutex_lock(&g_gone_lock);
@@ -1471,7 +1559,7 @@ static void gone_add(uint64_t owner, uint64_t peer, uint64_t col_body) {
     }
     if (f >= 0) {
         g_gone[f].body = 0, g_gone[f].node = 0, g_gone[f].since = g_frame, g_gone[f].peer = peer, g_gone[f].col_body = col_body;
-        g_gone[f].walker = 0, g_gone[f].lost_at = 0, g_gone[f].logged_at = g_frame, g_gone[f].watch = gone_off();
+        g_gone[f].lost_at = 0;
         __atomic_store_n(&g_gone[f].owner, owner, __ATOMIC_RELEASE);
         int n = 0;
         for (int i = 0; i < MAXGONE; i++) n += g_gone[i].owner != 0;
@@ -1479,8 +1567,8 @@ static void gone_add(uint64_t owner, uint64_t peer, uint64_t col_body) {
     }
     pthread_mutex_unlock(&g_gone_lock);
     if (f >= 0)
-        LOG("[world] player %016llx's dressed character %llx let go: %s\n", (unsigned long long)peer, (unsigned long long)owner,
-            gone_off() ? "left as it is (LARECOMP_WORLD_GONE_OFF), watched" : "put away until the game removes it");
+        LOG("[world] player %016llx's dressed character %llx let go: put away until the game removes it\n", (unsigned long long)peer,
+            (unsigned long long)owner);
 }
 static void gone_drop(int i) {
     pthread_mutex_lock(&g_gone_lock);
@@ -1494,7 +1582,7 @@ static void gone_drop(int i) {
 // then, for good: an object of the same address later is another character. Forgotten once the game removed it: its
 // object no longer a character, or its node no longer its own (2026-11-16: 1.1 s under the street, a let-go station NPC
 // and walkers alike lost their bodies - the object stays a while without one: still kept away, by its node), or, never
-// placed, after 20 s. LARECOMP_WORLD_GONE_OFF: only watched - where it is, every 10 s)
+// placed, after 20 s)
 static void gone_frame(uint64_t frame) {
     if (!g_ngone) return;
     for (int i = 0; i < MAXGONE; i++) {
@@ -1523,7 +1611,7 @@ static void gone_frame(uint64_t frame) {
                 LOG("[world] a let-go dressed character (%llx) lost its body (%.1f s after): its object stays, kept away by its node\n", (unsigned long long)ow, secs);
             }
         }
-        if (b && b != g_gone[i].col_body && !g_gone[i].watch) {  // (its collision: away for good - never put back)
+        if (b && b != g_gone[i].col_body) {  // (its collision: away for good - never put back)
             uint64_t r, id;
             uint32_t was;
             if (pres_put_away(b, &r, &id, &was))
@@ -1531,22 +1619,12 @@ static void gone_frame(uint64_t frame) {
                     (unsigned long long)id);
             g_gone[i].col_body = b;
         }
-        if (b && !g_gone[i].walker && body_stepped(b, frame))
-            g_gone[i].walker = 1, LOG("[world] a let-go dressed character (%llx) is a walker of the crowd: kept under the street till it lets it go\n",
-                                      (unsigned long long)ow);
-        if (g_gone[i].watch && frame - g_gone[i].logged_at >= 600) {
-            g_gone[i].logged_at = frame;
-            const float *t = (const float *)(uintptr_t)(n + 0xe0), *m = g_me_body ? (const float *)(uintptr_t)(g_me_body + 0x90) : NULL;
-            float d = m ? sqrtf((t[0] - m[0]) * (t[0] - m[0]) + (t[2] - m[2]) * (t[2] - m[2])) : -1;
-            LOG("[world] a let-go dressed character (%llx) still here, %.1f s after: %.1f %.1f %.1f, %.1f m from us%s\n", (unsigned long long)ow,
-                secs, t[0], t[1], t[2], d, b ? (body_stepped(b, frame) ? " (walking)" : " (standing)") : " (no body)");
-        }
     }
 }
 // (a player's stand-in let go: if it is their dressed character it is put away, its collision with it - never put back)
 static void standin_let_go(Peer *p, uint64_t owner) {
     bool dressed = owner && p->body && p->body == dressed_body_of(owner);
-    if (!dressed || gone_off()) { standin_release(p); return; }
+    if (!dressed) { standin_release(p); return; }
     uint64_t col = p->pres_rec && p->pres_body == p->body ? p->body : 0;
     p->pres_body = p->pres_rec = p->pres_id = 0, p->saved_node = 0;  // (no collision or node back where it stood: it goes)
     standin_release(p);
@@ -1586,7 +1664,7 @@ static void standin_hide(Peer *p) {
     pthread_mutex_unlock(&g_dress_lock);
     for (int i = 0; i < ng; i++) gone_add(gone[i], p->id, 0);
     p->body = p->node = 0;
-    p->dressed_body = p->dressed_owner = 0, p->dressed_hash = p->armed_hash = 0, p->armed_at = p->dressed_at = 0, p->crowd_seen = 0;
+    p->dressed_body = p->dressed_owner = 0, p->dressed_hash = p->armed_hash = 0, p->armed_at = p->dressed_at = 0;
     p->show = 0;
 }
 // ---- Who is shown: the nearest players. Everyone on the server in the shared world is heard (up to MAXPEER), but only
@@ -1649,7 +1727,6 @@ static void world_choose(uint64_t me, uint64_t frame) {
     g_nshow = shown;
 }
 static void outfit_frame(Peer *p, uint64_t frame) {
-    if (g_crowd_ok == 2) return;  // (research: the crowd's stand-ins only)
     if (p->dressed_body && (!is_body(p->dressed_body) || dressed_body_of(p->dressed_owner) != p->dressed_body)) {
         LOG("[world] player %016llx's dressed character is gone: the next one made wears their outfit\n", (unsigned long long)p->id);
         if (p->body == p->dressed_body) stand_in_gone(p);
@@ -1680,14 +1757,31 @@ static void outfit_frame(Peer *p, uint64_t frame) {
                 p->look_refused_at = frame, LOG("[world] player %016llx's look refused: %s - shown in their outfit alone\n", (unsigned long long)p->id, why);
         }
     }
-    if (p->dressed_body && p->body == p->dressed_body && !p->crowd_seen && body_stepped(p->dressed_body, frame))
-        p->crowd_seen = 1, LOG("[world] player %016llx's dressed character is a walker of the crowd (stands in all the same)\n", (unsigned long long)p->id);
     uint32_t key = p->hash && p->look_state ? p->hash ^ (p->look_state == 1 ? p->look_hash : 0x5eed) : 0;
-    if (!key || p->dressed_hash == key) return;
+    bool settled = g_me_body && g_me_node && frame - g_me_since > 90;
+    if (own_npc() && !key && !p->dressed_owner && p->shown_at && frame - p->shown_at > 480) key = 1;  // (their outfit not heard 8 s
+    if (key != p->key_seen) p->key_seen = key, p->key_ns = world_now_ns();                             //  after they were shown: one
+    if (!key || p->dressed_hash == key) return;                                                         //  as it is)
+    bool own = own_npc() && newnpc_ready();
     uint64_t owner = 0;
     pthread_mutex_lock(&g_dress_lock);
     for (int i = 0; i < g_ndressed; i++) if (g_dressed[i].peer == p->id && g_dressed[i].hash == key) owner = g_dressed[i].owner;
-    if (!owner && p->armed_hash != key && !g_dress_want.peer && (!p->armed_at || frame - p->armed_at > 600) && g_dressings < 400) {
+    if (!owner && own) {  // (their own, made now where they are: asked for again if it isn't made within 5 s or wasn't one)
+        if (g_dress_want.peer == p->id) g_dress_want.peer = 0;
+        int i = p->own_k % NOWN;
+        bool waiting = p->own_k && g_own[i].k == p->own_k && g_own[i].key == key && !g_own[i].failed && frame - p->own_at < (g_own[i].made ? 1200u : 300u);
+        int k = !waiting && settled && (!p->own_at || frame - p->own_at >= 60) && g_dressings < 1000 ? newnpc_spawn(p->shown, p->shown_yaw) : 0;
+        if (k) {
+            i = k % NOWN;
+            g_own[i].k = k, g_own[i].failed = 0, g_own[i].made = 0, g_own[i].peer = p->id, g_own[i].key = key;
+            g_own[i].n = key == 1 ? 0 : p->nparts, g_own[i].body = p->body_type, g_own[i].look = p->look, g_own[i].look_ok = key != 1 && p->look_state == 1;
+            memcpy(g_own[i].parts, p->parts, sizeof p->parts);
+            g_own_used = 1;
+            p->own_k = k, p->own_at = frame, p->armed_hash = key, p->dressed_at = 0;
+            LOG("[world] player %016llx: their own townsperson newnpc_%03d asked for at %.1f %.1f %.1f (%s)\n", (unsigned long long)p->id, k, p->shown[0],
+                p->shown[1], p->shown[2], key == 1 ? "as it is: their outfit not heard yet" : "in their outfit");
+        }
+    } else if (!owner && p->armed_hash != key && !g_dress_want.peer && (!p->armed_at || frame - p->armed_at > 600) && g_dressings < 400) {
         g_dress_want.peer = p->id, g_dress_want.n = p->nparts, g_dress_want.body = p->body_type, g_dress_want.hash = key;  // (the next
         g_dress_want.look = p->look, g_dress_want.look_ok = p->look_state == 1;                                         // made: theirs)
         p->armed_at = frame;
@@ -1700,8 +1794,9 @@ static void outfit_frame(Peer *p, uint64_t frame) {
     uint64_t b = dressed_body_of(owner);
     if (!b) {
         if (!p->dressed_at) p->dressed_at = frame;
-        if (frame - p->dressed_at > 1200) dressed_drop(owner), gone_add(owner, p->id, 0), p->armed_hash = 0, p->dressed_at = 0;  // (never
-        return;                                                                                                              //  placed)
+        if (frame - p->dressed_at > (own ? 600u : 1200u))  // (never placed)
+            dressed_drop(owner), gone_add(owner, p->id, 0), p->armed_hash = 0, p->dressed_at = 0, p->own_k = 0, p->own_at = 0;
+        return;
     }
     // (a station NPC or a walker of the crowd - in a busy square nearly every one made is a walker: either stands in. Its
     // node is its own, from its object - a walker's body and node part between its animation's step and its body's, and
@@ -1709,7 +1804,9 @@ static void outfit_frame(Peer *p, uint64_t frame) {
     uint64_t node = node_of_owner(owner), old = p->dressed_owner;
     if (p->body != b) standin_let_go(p, old);  // (the plain stand-in goes back; one dressed in their old outfit is put away)
     if (old && old != owner) gone_add(old, p->id, 0);
-    p->dressed_hash = key, p->dressed_owner = owner, p->dressed_body = b, p->dressed_at = 0, p->crowd_seen = 0;
+    if (p->own_k) LOG("[world] player %016llx: newnpc_%03d placed %.1f s after it was asked for\n", (unsigned long long)p->id, p->own_k,
+                      (double)(frame - p->own_at) / 60.0);
+    p->dressed_hash = key, p->dressed_owner = owner, p->dressed_body = b, p->dressed_at = 0, p->own_k = 0;
     p->body = b, p->node = node;  // (0: found by node_hook at the body's spot)
     uint64_t others[8];
     int no = 0;
@@ -1721,8 +1818,10 @@ static void outfit_frame(Peer *p, uint64_t frame) {
         }
     pthread_mutex_unlock(&g_dress_lock);
     for (int i = 0; i < no; i++) gone_add(others[i], p->id, 0);  // (made for them earlier, never placed: put away too)
-    LOG("[world] player %016llx is shown by a townsperson in their outfit (body %llx, node %llx, %s)\n", (unsigned long long)p->id,
-        (unsigned long long)b, (unsigned long long)node, body_stepped(b, frame) ? "a walker of the crowd" : "standing");
+    uint64_t now = world_now_ns();
+    LOG("[world] player %016llx is shown by a townsperson in their outfit (body %llx, node %llx, %s) - %.1f s after they were first heard, "
+        "%.1f s after their outfit and look were\n", (unsigned long long)p->id, (unsigned long long)b, (unsigned long long)node,
+        body_stepped(b, frame) ? "a walker of the crowd" : "standing", (double)(now - p->here_ns) / 1e9, (double)(now - p->key_ns) / 1e9);
 }
 
 // (the player a packet is from - known by their id and, through the server, by the sender the server names; NULL else)
@@ -1737,6 +1836,7 @@ static void hooks_on(void) {
     rt_register_fnhook_at(NODE_UPDATE, node_hook);
     rt_register_fnhook_at(BB_SET_FLOAT, bb_set_hook);
     rt_register_fnhook_at(INTERACT_NPC_UPDATE, interact_hook);
+    rt_register_fnhook_at(BB_SET_TRIGGER, ai_trigger_hook);
     if (!g_body_hooks) g_body_hooks = true, rt_register_fnhook_at(STEP_A, body_hook), rt_register_fnhook_at(STEP_B, body_hook);
 }
 void ghost_init(void) {  // (the test transport: LARECOMP_GHOST=<my port>,<peer port>[,<peer host>], Linux)
@@ -1763,7 +1863,7 @@ void ghost_init(void) {  // (the test transport: LARECOMP_GHOST=<my port>,<peer 
     inet_pton(AF_INET, host, &g_udp_peer.sin_addr);
     g_off = getenv("LARECOMP_GHOST_OFFSET") ? (float)atof(getenv("LARECOMP_GHOST_OFFSET")) : 0;
     g_off_ahead = getenv("LARECOMP_GHOST_AHEAD") ? (float)atof(getenv("LARECOMP_GHOST_AHEAD")) : 0;
-    g_self_test = getenv("LARECOMP_GHOST_SELF") != NULL, g_crowd_ok = getenv("LARECOMP_GHOST_CROWD") ? atoi(getenv("LARECOMP_GHOST_CROWD")) : 0;
+    g_self_test = getenv("LARECOMP_GHOST_SELF") != NULL;
     w_send = udp_send, w_recv = udp_recv;
     g_world = 1;
     dress_hook_on();  // (our player's outfit is kept as its character is made: before the world is up)
@@ -1806,7 +1906,7 @@ static void ghost_frame(uint64_t frame) {
     hooks_on();
     uint64_t now = world_now_ns();
     uint64_t me = player_body(frame);
-    if (me != g_me_body) g_me_body = me, g_me_node = 0;
+    if (me != g_me_body) g_me_body = me, g_me_node = 0, g_me_since = frame;
     uint64_t mn = g_me_node;
     if (mn && *(const uint64_t *)(uintptr_t)mn != NODE_VTABLE) g_me_node = mn = 0;
     if (mn != g_me_bb_node) {  // (our blackboard: our "move" as our controller sets it - bb_set_hook)
@@ -1975,7 +2075,7 @@ static void ghost_frame(uint64_t frame) {
             if (taken || !free_p) continue;  // (more players than we keep, none nearer: they wait)
             p = free_p;
             memset(p, 0, sizeof *p);
-            p->id = in.from, p->via = via;
+            p->id = in.from, p->via = via, p->here_ns = now;
             memcpy(p->shown, in.w.p, 12), memcpy(p->target_was, in.w.p, 12), p->shown_yaw = remainderf(in.w.yaw, 6.2831853f);
             LOG("[world] player %016llx is here\n", (unsigned long long)in.from);
             g_choose_soon = 1;
@@ -2066,7 +2166,9 @@ static void ghost_frame(uint64_t frame) {
             LOG("[world] player %016llx's stand-in went with its level: another one at once\n", (unsigned long long)p->id);
             stand_in_gone(p);
         }
-        if (!p->body) want_scan = true;
+        // (none: one borrowed from the street - with world_own_npc only where their own can't be made, 5 s after they were
+        // shown: a level loads its stations a moment after our player is in it)
+        if (!p->body && (!own_npc() || (frame - p->shown_at > 300 && !newnpc_ready()))) want_scan = true;
         pres_frame(p, frame);
         float target[3], pull = 1.0f - expf(-dt * 25.8f);  // (pull: 0.35 of the way a frame at 60 fps - the same at any rate)
         if (p->nsnap) {
@@ -2210,15 +2312,6 @@ static uint32_t fb_put_parts(uint8_t *d, uint32_t w, const DressPart *parts, int
     return vbase;
 }
 void *hle_alloc(uint64_t size);
-// (research, hle/newnpc.c LARECOMP_NEWNPC_DRESS: the townspeople it makes - nodes named newnpc_<k> - wear our player's
-// outfit, mode 2; one per spawn asked)
-static volatile int g_dress_newnpc;
-static bool dress_is_newnpc(uint64_t owner) {
-    uint64_t n = node_of_owner(owner), np = 0;
-    char nm[8] = "";
-    return n && heap_read(n + 0x2b8, &np, 8) && heap_read(np, nm, 7) && !memcmp(nm, "newnpc_", 7);
-}
-void dress_newnpc_next(void) { __atomic_add_fetch(&g_dress_newnpc, 1, __ATOMIC_RELAXED); }
 static int dress_hook(Cpu *c, uint64_t addr) {
     uint64_t req = c->x[2], fbp = *(const uint64_t *)(uintptr_t)req;
     g_made[__atomic_fetch_add(&g_nmade, 1, __ATOMIC_RELAXED) % NMADE] = ((const uint64_t *)(uintptr_t)req)[6];  // (scan_bodies)
@@ -2247,10 +2340,12 @@ static int dress_hook(Cpu *c, uint64_t addr) {
             (unsigned long long)(out ? *(const uint64_t *)(uintptr_t)(out + 8) : 0));
         return 1;
     }
-    if (n != 1) return 0;
-    DressPart own;
-    part_of(b, vec + 4 + fb_u32(vec + 4, 0), &own);
-    if (!strstr(own.path, "savm_cc_vr")) return 0;  // (townspeople only)
+    DressPart own = {{0}};
+    if (n == 1) part_of(b, vec + 4 + fb_u32(vec + 4, 0), &own);
+    bool towns = n == 1 && strstr(own.path, "savm_cc_vr");  // (townspeople only)
+    uint64_t owner = ((const uint64_t *)(uintptr_t)req)[6];
+    int ownk = g_own_used ? newnpc_number(node_of_owner(owner)) : 0;  // (one made for a player: world_own_npc)
+    if (!towns && !ownk) return 0;
     int body = f14 ? f14[0] : -1;
     DressPart parts[25];
     int np = 0, to_body = -1;
@@ -2263,17 +2358,18 @@ static int dress_hook(Cpu *c, uint64_t addr) {
     pthread_mutex_lock(&g_dress_lock);
     Look want_look;
     bool want_look_ok = false;
-    // (research LARECOMP_WORLD_DRESS_ONLY=<text>[,<n>]: only a townsperson whose .ccdatam path has <text> - the n-th such
-    // one made, 1 unless given - e.g. tr0064,2: at the Vert Pokemon Center the second tourist made is the one sitting by it)
-    static char only[64];
-    static int only_n = -1, only_seen;
-    if (only_n < 0) {
-        const char *e = getenv("LARECOMP_WORLD_DRESS_ONLY");
-        only_n = 1;
-        if (e) { snprintf(only, sizeof only, "%s", e); char *k = strchr(only, ','); if (k) *k = 0, only_n = atoi(k + 1); }
-    }
-    bool only_ok = !only[0] || (strstr(own.path, only) && ++only_seen >= only_n);
-    if (g_dress_want.peer && only_ok) {  // (a player of the shared world waiting for a look)
+    int own_state = 0;  // (one made for a player: 1 theirs, 2 no townsperson, 3 nobody's any more)
+    if (ownk) {
+        int i = ownk % NOWN;
+        if (g_own[i].k != ownk) own_state = 3;
+        else if (!towns) own_state = 2, g_own[i].failed = 1, for_peer = g_own[i].peer;
+        else {
+            own_state = 1, g_own[i].made = 1;
+            for_peer = g_own[i].peer, hash = g_own[i].key, to_body = g_own[i].body, want_look = g_own[i].look, want_look_ok = g_own[i].look_ok;
+            for (int k = 0; k < g_own[i].n; k++) parts[np++] = g_own[i].parts[k];
+            if (np) g_dressings++;
+        }
+    } else if (g_dress_want.peer) {  // (a player of the shared world waiting for a look)
         for_peer = g_dress_want.peer, hash = g_dress_want.hash, to_body = g_dress_want.body, want_look = g_dress_want.look;
         want_look_ok = g_dress_want.look_ok, g_dressings++;
         for (int k = 0; k < g_dress_want.n; k++) parts[np++] = g_dress_want.parts[k];
@@ -2282,12 +2378,22 @@ static int dress_hook(Cpu *c, uint64_t addr) {
         if (g_dress_mode == 1) parts[np++] = own;
         for (int k = 0; k < g_npparts && np < 25; k++) parts[np++] = g_pparts[k];
         g_dress_left--;
-    } else if (g_dress_newnpc > 0 && g_npparts && dress_is_newnpc(((const uint64_t *)(uintptr_t)req)[6])) {  // (hle/newnpc.c)
-        for (int k = 0; k < g_npparts && np < 25; k++) parts[np++] = g_pparts[k];
-        g_dress_newnpc--;
     }
     pthread_mutex_unlock(&g_dress_lock);
-    if (!np) return 0;
+    if (own_state >= 2) {  // (not one to stand in: put away as soon as it is placed - the game then removes it)
+        if (own_state == 2) newnpc_bad(ownk);
+        LOG("[dress] newnpc_%03d (%s) %s: put away\n", ownk, n == 1 ? own.path : "a character of many parts",
+            own_state == 2 ? "is no townsperson" : "was asked for by no one shown now");
+        gone_add(owner, for_peer, 0);
+        return 0;
+    }
+    if (!np) {
+        if (own_state == 1) {  // (a plain one of their own - their outfit not heard in time: stands in as it is)
+            dressed_add(for_peer, owner, hash);
+            LOG("[dress] newnpc_%03d %s made for another player as it is (character %llx)\n", ownk, own.path, (unsigned long long)owner);
+        }
+        return 0;
+    }
     if (for_peer || g_dress_mode == 2)
         for (int k = 0; k < np; k++) if (!strcmp(parts[k].name, "base")) snprintf(parts[k].name, sizeof parts[k].name, "default");
     // copy the description (8 KB: it and what follows it in its file) into guest memory and add the new parts list
@@ -2299,18 +2405,9 @@ static int dress_hook(Cpu *c, uint64_t addr) {
     memcpy(d + f15o, &(uint32_t){vpos - (uint32_t)f15o}, 4);
     if (f14 && to_body >= 0) d[f14 - b] = (uint8_t)to_body;  // (the player's body type: theirs)
     *(uint64_t *)(uintptr_t)req = (uint64_t)(uintptr_t)d;
-    uint64_t owner = ((const uint64_t *)(uintptr_t)req)[6];
-    if (for_peer) {
-        pthread_mutex_lock(&g_dress_lock);
-        bool full = g_ndressed == 8;
-        int i = full ? 7 : g_ndressed++;
-        uint64_t lost = full ? g_dressed[7].owner : 0, lost_peer = g_dressed[7].peer;
-        g_dressed[i].peer = for_peer, g_dressed[i].owner = owner, g_dressed[i].hash = hash;
-        pthread_mutex_unlock(&g_dress_lock);
-        if (lost) gone_add(lost, lost_peer, 0);  // (no room to keep it: put away, not left in their clothes)
-    }
-    LOG("[dress] townsperson %s (body type %d) dressed in %s's %d parts (character %llx, description %p)\n", own.path, body,
-        for_peer ? "another player" : "our player", np, (unsigned long long)owner, (void *)d);
+    if (for_peer) dressed_add(for_peer, owner, hash);
+    LOG("[dress] %s%s (body type %d) dressed in %s's %d parts (character %llx, description %p)\n", ownk ? "their own townsperson, " : "townsperson ",
+        own.path, body, for_peer ? "another player" : "our player", np, (unsigned long long)owner, (void *)d);
     if (for_peer && want_look_ok) { extern bool look_wear_at_make(Cpu *c, uint64_t owner, const Look *l); look_wear_at_make(c, owner, &want_look); }
     uint64_t out = c->x[8];
     rt_call_original(c, addr);
@@ -2358,10 +2455,7 @@ static void dress_hook_on(void) {
     rt_register_fnhook_at(CC_MAKE, dress_hook);
     rt_register_fnhook_at(PART_BY_INDEX, part_index_hook);
     pose_hooks_on();  // (every character's pose, as it is made - the level's people at its load)
-}
-void dress_newnpc_init(void) {  // (hle/newnpc.c: from its constructor)
-    g_dress_mode = 2;
-    dress_hook_on();
+    if (own_npc()) newnpc_on();  // (the station spawns kept as the levels load: their own townspeople made from them)
 }
 __attribute__((constructor)) static void dress_init(void) {
     const char *e = getenv("LARECOMP_DRESS_NPC");
