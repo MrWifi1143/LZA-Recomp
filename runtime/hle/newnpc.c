@@ -60,6 +60,7 @@ typedef struct {
     char data[64];               // (the NPC data's name)
     float at[3];                 // (where its own station NPC stands: the shared world's own townspeople take the nearest)
     int bad;                     // (what it makes isn't a townsperson: not used for the shared world again)
+    int miss;                    // (one asked from it wasn't made - newnpc_missed: others first, until its area loads again)
 } Snap;
 static Snap g_snaps[MAXDATA];
 static int g_nsnaps;
@@ -120,6 +121,7 @@ static int spawn_hook(Cpu *c, uint64_t addr) {
     s->x0 = c->x[0], s->x1 = c->x[1], s->x6 = c->x[6];
     rd(c->x[1], &s->x1_hash, 8);
     if (strcmp(s->data, data)) s->bad = 0;
+    s->miss = 0;
     snprintf(s->data, sizeof s->data, "%s", data);
     memcpy(s->at, (const void *)(uintptr_t)(c->x[4] + 0x30), 12);
     pthread_mutex_unlock(&g_lock);
@@ -204,10 +206,15 @@ static void do_spawn(Cpu *c, const Req *r) {
     Snap s;
     int found = -1;
     float best = 1e30f;
-    for (int i = g_nsnaps - 1; i >= 0; i--) {  // (the newest kept that is still there and fits; or the nearest)
+    for (int i = g_nsnaps - 1; i >= 0; i--) {  // (the newest kept that is still there and fits; or the nearest - a townsperson
         if (!snap_alive(&g_snaps[i]) || (r->nearest && g_snaps[i].bad) || (r->want[0] && !strstr(g_snaps[i].data, r->want))) continue;
         float dx = g_snaps[i].at[0] - r->at[0], dz = g_snaps[i].at[2] - r->at[2], d = dx * dx + dz * dz;
         if (!r->nearest) { found = i; break; }
+        // (of an area's own people - NPC data npc_A<area>_..., not a quest giver's or the Pokemon Center's (npc_lostball_01,
+        // npc_t1veil01_pclady: theirs may carry more than a look) - and not one whose last wasn't made, first)
+        const char *dn = g_snaps[i].data;
+        bool plain = !strncmp(dn, "npc_A", 5) && dn[5] >= '0' && dn[5] <= '9';
+        d += (plain ? 0 : 1e6f) + (g_snaps[i].miss ? 1e7f : 0);
         if (d < best) best = d, found = i;
     }
     if (found >= 0) s = g_snaps[found];
@@ -305,6 +312,13 @@ int newnpc_number(uint64_t node) {
     if (!rd(node, &v, 8) || v != NODE_VTABLE || !rd(node + 0x2b8, &np, 8) || !rd(np, nm, 15)) return 0;
     nm[15] = 0;
     return sscanf(nm, "newnpc_%d", &k) == 1 && k > 0 ? k : 0;
+}
+// newnpc_<k> wasn't made (asked from a spawner whose area was just going or coming): its kept spawn after others
+void newnpc_missed(int k) {
+    int i = g_req_snap[k % MAXNEW] - 1;
+    pthread_mutex_lock(&g_lock);
+    if (i >= 0 && i < g_nsnaps) g_snaps[i].miss++;
+    pthread_mutex_unlock(&g_lock);
 }
 // newnpc_<k> isn't a townsperson (a story character's station): its kept spawn not used for these again
 void newnpc_bad(int k) {

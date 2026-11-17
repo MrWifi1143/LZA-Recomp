@@ -395,6 +395,7 @@ bool newnpc_ready(void);
 int newnpc_spawn(const float at[3], float yaw);
 int newnpc_number(uint64_t node);
 void newnpc_bad(int k);
+void newnpc_missed(int k);
 // (how far from us theirs is made: the game realises people within ~58-60 m of the player and keeps them to ~75 m
 // (hle/za_fixes.c); one asked for 90 m off was never made - 2026-11-17, fake players at 5..100 m: 5-60 m made at once.
 // LARECOMP_WORLD_OWN_RANGE=<m>)
@@ -1794,7 +1795,10 @@ static void outfit_frame(Peer *p, uint64_t frame) {
     if (!owner && own) {  // (their own, made now where they are: asked for again if it isn't made within 5 s or wasn't one)
         if (g_dress_want.peer == p->id) g_dress_want.peer = 0;
         int i = p->own_k % NOWN;
-        bool waiting = p->own_k && g_own[i].k == p->own_k && g_own[i].key == key && !g_own[i].failed && frame - p->own_at < (g_own[i].made ? 1200u : 300u);
+        // (made 0.0-0.1 s after it is asked for; not made within 2 s - its spawner's area was just going or coming, after a
+        // put-back: never made, 2026-11-17 - another station's then)
+        bool waiting = p->own_k && g_own[i].k == p->own_k && g_own[i].key == key && !g_own[i].failed && frame - p->own_at < (g_own[i].made ? 1200u : 120u);
+        if (!waiting && p->own_k && g_own[i].k == p->own_k && !g_own[i].made && frame - p->own_at >= 120) newnpc_missed(p->own_k), p->own_k = 0;
         int k = !waiting && settled && (!p->own_at || frame - p->own_at >= 60) && g_dressings < 1000 ? newnpc_spawn(p->shown, p->shown_yaw) : 0;
         if (k) {
             i = k % NOWN;
