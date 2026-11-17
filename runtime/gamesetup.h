@@ -35,7 +35,14 @@ enum {
     SETUP_FAIL_PLA_VERSION, // Legends: Arceus, but not 1.1.1 (game_pla_unsupported; last: --prepare's exit codes stay)
     SETUP_FAIL_ROMFS,       // the RomFS image's tables don't find the game's own files (romfs_check: a base game dump
                             // the update doesn't fit), or a set-up image like that (game_romfs_broken)
+    // (from .nsp / .xci: nxpkg_check)
+    SETUP_FAIL_DAMAGED_BASE,    // the base game's file is damaged or altered (an NCA's SHA-256 isn't its content id)
+    SETUP_FAIL_DAMAGED_UPDATE,  // the update's
+    SETUP_FAIL_MISMATCH,        // both fine, but the image isn't (its hash tree or romfs_check): they don't fit
+                                // together, or a packing nxpkg doesn't read right (details in the log, for a report)
 };
+// The damaged file's name (SETUP_FAIL_DAMAGED_*), "" otherwise.
+const char *setup_fail_file(void);
 
 // While the game code is compiled: the estimated minutes left (from the pace so far), -1 before there is one.
 int setup_minutes_left(void);

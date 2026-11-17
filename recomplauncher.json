@@ -75,7 +75,12 @@
     "26": "No keys were found for your game files. Add the prod.keys dumped from your own Switch.",
     "27": "Your keys can't open those game files. Dump prod.keys again from your Switch on its current system version.",
     "28": "Only the update was found, not the base game. Add the base game's .nsp / .xci too.",
-    "29": "Those game files couldn't be read. The dump may be damaged; details in lasrecomp.log."
+    "29": "Those game files couldn't be read. The dump may be damaged; details in lasrecomp.log.",
+    "30": "This needs Pokémon Legends: Arceus version 1.1.1 (the base game and the 1.1.1 update); those files are another version. Update the game to 1.1.1 on your Switch and dump the base game and the update.",
+    "31": "The game can't find its own files in those: the base game doesn't fit the update. Dump the base game again from your own Switch; details in lasrecomp.log.",
+    "32": "Your base game file is damaged or altered (what's in it doesn't match its own checksum). Dump the base game again from your own Switch.",
+    "33": "Your 1.1.1 update file is damaged or altered (what's in it doesn't match its own checksum). Dump the 1.1.1 update again from your own Switch.",
+    "34": "Your game files are intact, but the base game and the update don't fit together (or are packed in a way the setup doesn't expect). Please send lasrecomp.log in a bug report on Discord; a fresh dump of the base game may also help."
   },
   "groups": [
     { "id": "Display" },
