@@ -361,6 +361,8 @@ static void create_device(void) {
     b->robustBufferAccess = h->robustBufferAccess;  // guest shaders index cbufs freely: keep OOB reads harmless
     if (ENV("LARECOMP_NO_ROBUST")) b->robustBufferAccess = VK_FALSE;  // (research: what the bounds checks cost)
     b->shaderClipDistance = h->shaderClipDistance;
+    b->shaderImageGatherExtended = h->shaderImageGatherExtended;  // (TLD4 with offsets: textureGatherOffset(s) - the validation layer)
+    b->drawIndirectFirstInstance = h->drawIndirectFirstInstance;  // (the game's indirect draws start at instance 250000+)
     extern bool g_maxwell_gmem_table;  // (the chunk table needs no sparse buffer)
     if (g_vk.lazyhost && !g_maxwell_gmem_table && !(h->sparseBinding && h->sparseResidencyBuffer)) {  // (a plugin's device: not the one gpuheap.c looked at)
         extern void gpuheap_host_cancel(void);
