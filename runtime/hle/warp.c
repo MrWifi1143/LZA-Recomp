@@ -290,6 +290,8 @@ typedef struct {
     float saved_q[4], saved_t[3];
     Look look;                       // (their real look: type 6 packets, 2 pieces; worn by their dressed character once whole)
     uint32_t look_have, look_hash;
+    uint32_t look_tag[2];            // (each piece's whole-look hash as sent: both the same, and it matches, or not taken)
+    Look look_in;                    // (the pieces as they come - copied to look once they belong together)
     int look_state;                  // (0 not checked yet, 1 the game has everything in it, 2 refused: their outfit alone)
     uint64_t via;                    // (who the transport says sent their packets: the server's id - their id can't be borrowed)
     int crowd_seen;                  // (their dressed character is a walker of the crowd: logged once)
@@ -348,7 +350,9 @@ static bool g_hooked;
 //   type 3 trade asked, 4 trade answered: u64 to, u32 code
 //   type 5 outfit: u8 part k, u8 parts n, u8 body type, then three strings (NUL-ended): the part's name, its .ccdatam
 //          ("ik_chara/<dir>/<last>.ccdatam" sent as "<dir>"), its variant (the item and colour); 96 bytes at most
-//   type 6 look: u8 piece k of n (2), u8[6], 64 bytes of a Look (the save's dress-up: part hashes, options)
+//   type 6 look: u8 piece k of n (2), u8[6], 64 bytes of a Look (the save's dress-up: part hashes, options). The u8[6]
+//          begins with a u32 FNV-1a of the whole Look (0: an older copy): a look is taken only once both pieces carry
+//          the same one and it matches - a piece lost or late while they change clothes never makes a half-new look
 typedef struct { uint8_t type, ver, pad[6]; uint64_t from; union { struct { float p[3], yaw, v[3], move; } w; struct { uint64_t to; uint32_t code; } t;
     struct { uint8_t k, n, body; char s[77]; } o; struct { uint8_t k, n, pad[6]; uint8_t d[64]; } l; }; } WorldPkt;
 
@@ -1452,6 +1456,13 @@ static void outfit_frame(Peer *p, uint64_t frame) {
             p->look_hash = h, p->look_state = 1;
             LOG("[world] player %016llx's look heard (skin %u, eyes %u, hair colour %u)\n", (unsigned long long)p->id, p->look.opt[0],
                 p->look.opt[3], p->look.opt[11]);
+            char t[13 * 17 + 1];  // (all of it: line for line comparable with their own "our look" lines)
+            size_t w = 0;
+            for (int k = 0; k < 13; k++) w += (size_t)snprintf(t + w, sizeof t - w, " %016llx", (unsigned long long)p->look.part[k]);
+            LOG("[world]   its parts%s\n", t);
+            w = 0;
+            for (int k = 0; k < 18; k++) w += (size_t)snprintf(t + w, sizeof t - w, " %u", p->look.opt[k]);
+            LOG("[world]   its options%s\n", t);
         } else if (!pending) {
             p->look_state = 2;
             if (!p->look_refused_at || frame - p->look_refused_at > 1800)
@@ -1619,6 +1630,9 @@ static void ghost_frame(uint64_t frame) {
         for (int k = 0; k < 2; k++) {
             WorldPkt w = {.type = 6, .ver = 1, .from = g_self};
             w.l.k = (uint8_t)k, w.l.n = 2;
+            uint32_t lh = 2166136261u;
+            for (size_t b = 0; b < sizeof ours; b++) lh = (lh ^ ((const uint8_t *)&ours)[b]) * 16777619u;
+            memcpy(w.l.pad, &lh, 4);
             size_t off = (size_t)k * 64, len = sizeof ours - off < 64 ? sizeof ours - off : 64;
             memcpy(w.l.d, (const uint8_t *)&ours + off, len);
             world_send(&w, 16 + 8 + 64);
@@ -1650,9 +1664,20 @@ static void ghost_frame(uint64_t frame) {
         if (in.type == 6) {
             if (!p || n < 16 + 8 + 64 || in.l.n != 2 || in.l.k >= 2) continue;
             size_t off = (size_t)in.l.k * 64, len = sizeof p->look - off < 64 ? sizeof p->look - off : 64;
-            if (!memcmp((uint8_t *)&p->look + off, in.l.d, len) && (p->look_have & 1u << in.l.k)) continue;  // (the same again)
-            memcpy((uint8_t *)&p->look + off, in.l.d, len);
-            p->look_have |= 1u << in.l.k;
+            uint32_t tag;
+            memcpy(&tag, in.l.pad, 4);
+            memcpy((uint8_t *)&p->look_in + off, in.l.d, len), p->look_tag[in.l.k] = tag;
+            if (tag) {  // (both pieces of the same look - the hash of what they make: theirs)
+                uint32_t h = 2166136261u;
+                for (size_t b = 0; b < sizeof p->look_in; b++) h = (h ^ ((const uint8_t *)&p->look_in)[b]) * 16777619u;
+                if (p->look_tag[0] != tag || p->look_tag[1] != tag || h != tag) continue;
+                if (p->look_have == 3 && !memcmp(&p->look, &p->look_in, sizeof p->look)) continue;  // (the same again)
+                p->look = p->look_in, p->look_have = 3;
+            } else {  // (an older copy: piece by piece)
+                if (!memcmp((uint8_t *)&p->look + off, in.l.d, len) && (p->look_have & 1u << in.l.k)) continue;  // (the same again)
+                memcpy((uint8_t *)&p->look + off, in.l.d, len);
+                p->look_have |= 1u << in.l.k;
+            }
             p->look_state = 0;  // (changed: checked again - outfit_frame)
             continue;
         }
@@ -2076,6 +2101,10 @@ static bool look_ours(Look *l) {
             (unsigned long long)l->part[4], (unsigned long long)l->part[5], (unsigned long long)l->part[6], (unsigned long long)l->part[7],
             (unsigned long long)l->part[8], (unsigned long long)l->part[9], (unsigned long long)l->part[10], (unsigned long long)l->part[11],
             (unsigned long long)l->part[12]);
+        char t[18 * 4 + 1];
+        size_t w = 0;
+        for (int k = 0; k < 18; k++) w += (size_t)snprintf(t + w, sizeof t - w, " %u", l->opt[k]);
+        LOG("[world]   its options%s\n", t);
     }
     static const char *lk = (const char *)1;  // (research LARECOMP_WORLD_LOOK="<option>=<n>;...": options changed - a test)
     if (lk == (const char *)1) lk = getenv("LARECOMP_WORLD_LOOK");
