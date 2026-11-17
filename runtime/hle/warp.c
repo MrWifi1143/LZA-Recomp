@@ -242,7 +242,7 @@ __attribute__((constructor)) static void story_init(void) {
 }
 
 // ---- The shared world: other players walking around Lumiose (opt-in: larecomp.ini world_players = 1, the launcher's
-// Mods page, with an online server - contrib/lzaserver - joined through the relay plugin; or LARECOMP_GHOST=<my port>,
+// Options > Online tab, with an online server - contrib/lzaserver, signed in - joined through the relay plugin; or LARECOMP_GHOST=<my port>,
 // <peer port>[,<peer host>] for two copies over UDP, a test). Each copy sends its player's position, speed and facing
 // ~20 times a second; the others show each player - the nearest few, world_choose - with a character of their own level
 // standing in: a townsperson the game makes for them where they are, in their outfit and look (world_own_npc, below; on
@@ -2102,14 +2102,17 @@ static void server_notice_frame(uint64_t frame) {
     int st = state(name, sizeof name);
     bool away = st == 3 || st == 4 || st == 5;
     if (st == was && !(away && frame - told_at >= 7200)) return;
-    char t[320];
+    char t[400];
+    const char *lt = "";  // (the log's words: never the server's address)
     t[0] = 0;
-    if (st == 3) snprintf(t, sizeof t, "Can't reach the online server (%s) - online play waits for it. Is the address right, and the server running?", name);
-    else if (st == 4) snprintf(t, sizeof t, "Lost the connection to the online server (%s) - trying again...", name);
-    else if (st == 5) snprintf(t, sizeof t, "The online server's name (%s) can't be found - check the address (Mods page) and your connection.", name);
-    else if (st == 2 && (was == 3 || was == 4 || was == 5)) snprintf(t, sizeof t, was == 4 ? "Connected to the online server again." : "Online server reached (%s).", name);
-    if (t[0]) menu_notice_for(t, st == 2 ? 5000 : 10000), told_at = frame, LOG("[online] told: %s\n", t);
-    else if (st != was) LOG("[online] the server (%s): %s\n", name, st == 1 ? "asked, no answer yet" : st == 2 ? "answering" : "not in use");
+    if (st == 3) snprintf(t, sizeof t, "Can't reach the online server (%s) - online play waits for it. Is the address right, and the server running?", name), lt = "can't reach the server";
+    else if (st == 4) snprintf(t, sizeof t, "Lost the connection to the online server (%s) - trying again...", name), lt = "lost the server";
+    else if (st == 5) snprintf(t, sizeof t, "The online server's name (%s) can't be found - check the address (launcher > Options > Online) and your connection.", name), lt = "the server's name doesn't resolve";
+    else if (st == 6) snprintf(t, sizeof t, "Sign in to %s to play online there: launcher > Options > Online. (Playing offline needs no account.)", name), lt = "sign in to play on that server";
+    else if (st == 2 && (was == 3 || was == 4 || was == 5)) snprintf(t, sizeof t, was == 4 ? "Connected to the online server again." : "Online server reached (%s).", name), lt = was == 4 ? "connected again" : "server reached";
+    else if (st == 2 && was == 6) snprintf(t, sizeof t, "Signed in on %s: online play is on.", name), lt = "signed in: online play on";
+    if (t[0]) menu_notice_for(t, st == 2 ? 5000 : st == 6 ? 12000 : 10000), told_at = frame, LOG("[online] told: %s\n", lt);
+    else if (st != was) LOG("[online] the server: %s\n", st == 1 ? "asked, no answer yet" : st == 2 ? "answering" : "not in use");
     was = st;
 }
 

@@ -61,6 +61,18 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
         extern void *plugins_symbol(const char *name);
         void (*code)(const char *) = (void (*)(const char *))plugins_symbol("larecomp_relay_code");
         if (code) code(text);
+        // (the server needs an account and this copy isn't signed in on it: said now, at the join - not a silent
+        // search that never finds anyone; runtime/acct.c, contrib/lzaserver)
+        int (*state)(char *, size_t) = (int (*)(char *, size_t))plugins_symbol("larecomp_server_state");
+        char srv[256] = "";
+        if (state && state(srv, sizeof srv) == 6) {
+            extern void menu_notice_for(const char *text, unsigned ms);
+            char t[400];
+            snprintf(t, sizeof t, "Sign in to %s to join players there: launcher > Options > Online. (Nearby play and "
+                                  "Steam friends - no server set - need no account.)", srv);
+            menu_notice_for(t, 12000);
+            LOG("[online] told at a Link Code: sign in to play on that server\n");
+        }
     }
     if (!ok) snprintf(text, sizeof text, "%s", initial);  // cancelled: keep what was there
     LOG("[swkbd] text entry \"%s\" / \"%s\" / \"%s\" (max %d, initial \"%s\"): %s \"%s\"\n", header, sub, guide, max_len, initial,

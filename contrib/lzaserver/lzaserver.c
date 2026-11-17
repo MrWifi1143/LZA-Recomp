@@ -1,19 +1,23 @@
 // lzaserver: an online server for PL:A Recomp / PL:Z-A Recomp's local play (Link Trades, Private Battles) - anyone can
-// run one; players put its address in the launcher (Mods > Online server) and switch the relay plugin on. Players who
+// run one; players put its address in the launcher (Options > Online) and switch online play on. Players who
 // enter the same Link Code in the same game meet in a lobby here, and the server passes their games' traffic between
 // them (the game's own "Nearby" play, carried over the internet). Nothing about the players is kept: a client is an
 // address and a random id, forgotten 15 s after its last packet. No Nintendo service is involved or imitated.
 //
 //   lzaserver [--port 39200] [--max-clients 256] [--bind ADDR]      (UDP; open / forward that port)
 //
-// Accounts and save sync (optional for players; lzaserver_accounts.c, protocol in runtime/acct_proto.h): TCP + TLS on
-// the same port number - open / forward TCP too. Players who make an account here can have the server keep their save
-// and pick it up on another copy of the game (another PC, the PS5 port). Options:
+// Accounts and save sync (lzaserver_accounts.c, protocol in runtime/acct_proto.h): TCP + TLS on the same port number -
+// open / forward TCP too. Playing HERE needs an account here (Link Play by Link Code, the shared world): a client whose
+// hello doesn't carry a valid play ticket (acct_proto.h) is told 'A' 1 "sign in" and gets nothing passed on - the game
+// says "Sign in to <server> to join". Nobody needs an account to play the game itself, offline or nearby. Signed-in
+// players' saves are kept here and picked up by another copy of the game (another PC, the PS5 port). Options:
 //   --data DIR            accounts, saves and the server's own certificate (default ./lzaserver-data)
 //   --cert FILE --key FILE  your own certificate (PEM, e.g. from Let's Encrypt) instead of the server's own
 //   --signup open|closed  new accounts from the game (default open); closed: --add-user NAME (password on stdin)
 //   --save-max-mb 32 --save-versions 10 --quota-mb 256 --max-accounts 1000
-//   --no-accounts         Link Play only (also: build with -DLZA_NO_ACCOUNTS, then this file alone is the server)
+//   --open-play           accounts (and save sync) kept, but anyone may play here - no sign-in needed
+//   --no-accounts         no accounts at all: anyone may play here, the old open server - e.g. at home on a LAN (also:
+//                         build with -DLZA_NO_ACCOUNTS, then this file alone is the server)
 //
 // Protocol (UDP, every packet starts with its type byte; ids are u64 little-endian, picked at random by each client):
 //   client -> server  'H' ver(1) id game(1: Arceus, 2: Z-A)   hello / keep-alive, every 2 s
@@ -29,6 +33,9 @@
 //                     'X' from payload                        a shared-world player's payload
 //   server -> client  'C' cookie[8]                           the answer to every hello: this address's cookie
 //   client -> server  'H' ver(1) id game(1) cookie[8]         a hello with the cookie last heard (19 bytes)
+//                     ... ticket[8] mac[8]                    signed in: a play ticket + MAC (35 bytes, acct_proto.h)
+//   server -> client  'A' status(1)                           (accounts required) the answer to a hello with the
+//                                                             cookie: 0 in, 1 sign in to play here, 2 ticket unknown
 // A packet whose id isn't the one that address said hello with is dropped (no speaking for others).
 // An id's hello from a new address is taken once the old address has been quiet 5 s (a home router's new port) - with
 // that address's cookie if the id's old address had one.
@@ -54,6 +61,7 @@
 #include <string.h>
 #include <time.h>
 #ifndef LZA_NO_ACCOUNTS
+#include "acct_proto.h"
 #include "lzaserver_accounts.h"
 #endif
 #ifdef _WIN32
@@ -96,12 +104,18 @@ typedef struct {
     bool verified, old_logged;  // (its hello echoed its address's cookie: see above)
     uint32_t budget;            // (unverified: bytes it may still be sent - what it sent, less what it was sent)
     uint64_t trimmed;           // (bytes not sent to it for want of budget, for the log)
+    bool in;                    // (signed in: its hello carried a play ticket's MAC - or the server needs no account)
+    uint8_t auth_said;          // (the last 'A' status sent, + 1: logged on change)
+    char user[32];              // (the ticket's account)
 } Client;
 
 static Client *g_c;
 static int g_max = 256;
 static sock_t g_s;
 static uint64_t g_fwd_packets, g_fwd_bytes, g_world_packets, g_trimmed;
+// Accounts required to play here (the default with accounts; --no-accounts / --open-play: anyone) - acct_proto.h
+static bool g_need_auth;
+#define PLAYS(c) (!g_need_auth || (c)->in)
 
 // ---- cookies: SipHash-2-4 (keyed hash) of {address, port, id, minute} with a secret made at start
 static uint64_t g_key[2];
@@ -192,16 +206,47 @@ static void earn(Client *c, int n) {  // (an unverified address sent n bytes: th
     if (!c->verified) c->budget = c->budget + (uint32_t)n > BUDGET_MAX ? BUDGET_MAX : c->budget + (uint32_t)n;
 }
 
+// A hello that echoed its address's cookie (so 'A' goes to whoever really is there): signed in? Its play ticket's MAC
+// over the hello (acct_proto.h) - each hello again: a ticket signed out or expired takes the player out within 2 s
+static void hello_auth(Client *c, const uint8_t *b, int n) {
+    if (!g_need_auth) return;
+    uint8_t st = 1;
+    char user[32] = "";
+#ifndef LZA_NO_ACCOUNTS
+    if (n >= ACCT_HELLO_AUTH_LEN) {
+        uint8_t key[16];
+        uint64_t mac;
+        memcpy(&mac, b + 27, 8);
+        st = 2;
+        if (accounts_ticket(b + 19, key, user, sizeof user) && acct_siphash(key, b, 27) == mac) st = 0;
+        memset(key, 0, sizeof key);
+    }
+#else
+    (void)b, (void)n;
+#endif
+    bool was = c->in;
+    c->in = st == 0;
+    if (c->in) snprintf(c->user, sizeof c->user, "%s", user);
+    uint8_t a[2] = {'A', st};
+    send_to(c, a, sizeof a);
+    if (c->auth_said != st + 1 || was != c->in) {
+        printf("  %016llx %s%s\n", (unsigned long long)c->id, st == 0 ? "signed in as " : st == 1 ? "not signed in: told to sign in (can't play here)"
+               : "its play ticket isn't known (expired / signed out / a restart): told", st == 0 ? c->user : "");
+        c->auth_said = st + 1;
+    }
+    if (was && !c->in) c->code[0] = 0, c->world = false;  // (out: its lobby and the shared world too)
+}
+
 static void members(void) {  // (each lobby member: the others, with their hosting flag)
     static uint8_t b[2 + 9 * 64];
     for (int i = 0; i < g_max; i++) {
         Client *c = &g_c[i];
-        if (!c->used || !c->code[0]) continue;
+        if (!c->used || !c->code[0] || !PLAYS(c)) continue;
         int n = 0;
         b[0] = 'M';
         for (int j = 0; j < g_max && n < 64; j++) {
             Client *o = &g_c[j];
-            if (j == i || !o->used || o->game != c->game || strcmp(o->code, c->code)) continue;
+            if (j == i || !o->used || !PLAYS(o) || o->game != c->game || strcmp(o->code, c->code)) continue;
             memcpy(b + 2 + 9 * n, &o->id, 8), b[2 + 9 * n + 8] = o->hosting;
             n++;
         }
@@ -217,6 +262,7 @@ int main(int argc, char **argv) {
     AccountsOptions ao = {0};
     bool accounts = true;
     const char *add_user = NULL;
+    bool open_play = false;
     snprintf(ao.data, sizeof ao.data, "lzaserver-data");
     ao.signup = true, ao.save_max_mb = 32, ao.versions = 10, ao.quota_mb = 256, ao.max_accounts = 1000;
 #define ARG(name) (!strcmp(argv[i], name) && i + 1 < argc)
@@ -236,12 +282,13 @@ int main(int argc, char **argv) {
         else if (ARG("--max-accounts")) ao.max_accounts = atoi(argv[++i]);
         else if (ARG("--add-user")) add_user = argv[++i];
         else if (!strcmp(argv[i], "--no-accounts")) accounts = false;
+        else if (!strcmp(argv[i], "--open-play")) open_play = true;
 #endif
         else {
             fprintf(stderr, "lzaserver [--port 39200] [--max-clients 256] [--bind ADDR]\n"
 #ifndef LZA_NO_ACCOUNTS
                             "          [--data DIR] [--cert FILE --key FILE] [--signup open|closed] [--save-max-mb 32]\n"
-                            "          [--save-versions 10] [--quota-mb 256] [--max-accounts 1000] [--no-accounts]\n"
+                            "          [--save-versions 10] [--quota-mb 256] [--max-accounts 1000] [--no-accounts | --open-play]\n"
                             "lzaserver [--data DIR] --add-user NAME     (the password: one line on stdin)\n"
 #endif
             );
@@ -274,7 +321,10 @@ int main(int argc, char **argv) {
         if (ao.save_max_mb < 1) ao.save_max_mb = 1;
         if (ao.versions < 1) ao.versions = 1;
         if (accounts_start(&ao)) return 1;
-    } else printf("lzaserver: no accounts (--no-accounts)\n");
+        g_need_auth = !open_play;
+        printf(g_need_auth ? "lzaserver: playing here needs an account on this server (--open-play / --no-accounts: anyone)\n"
+                           : "lzaserver: anyone may play here (--open-play); accounts keep saves only\n");
+    } else printf("lzaserver: no accounts (--no-accounts): anyone may play here\n");
 #endif
     static uint8_t buf[65536], out[65536];
     uint64_t last_list = 0, last_stats = now_ms();
@@ -315,6 +365,12 @@ int main(int argc, char **argv) {
                             dup->addr = from, dup->seen = now, dup->verified = echoed, dup->budget = 0, dup->since = now;
                             earn(dup, n - (int)sizeof ck);
                             printf("~ %016llx moved from %s to %s%s\n", (unsigned long long)id, w0, who(dup, w1), echoed ? " (verified)" : "");
+                            // (signed in again from there: ids are public - the lobby lists - so a moved id is "in" only
+                            // with its play ticket's MAC over the new address's cookie)
+                            bool was_in = dup->in;
+                            dup->in = false;
+                            if (echoed) hello_auth(dup, buf, n);
+                            if (g_need_auth && was_in && !dup->in) dup->code[0] = 0, dup->world = false;
                             continue;
                         }
                         for (int i = 0; i < g_max && !c; i++)
@@ -333,11 +389,13 @@ int main(int argc, char **argv) {
                     }
                     earn(c, n - (int)sizeof ck);  // (the cookie answer has already spent that much of it)
                     c->seen = now;
+                    if (c->id == id && echoed) hello_auth(c, buf, n);
                     continue;
                 }
                 if (!c || c->id != id) continue;  // (unknown, or speaking for another)
                 c->seen = now;
                 earn(c, n);
+                if (!PLAYS(c)) continue;  // (not signed in: nothing it sends goes anywhere)
                 if (now - c->window >= 1000) c->window = now, c->count = 0;
                 if (++c->count > MAX_PER_SEC) continue;
                 if (buf[0] == 'L' && n >= 17) {
@@ -362,7 +420,7 @@ int main(int argc, char **argv) {
                     memcpy(out + 9, buf + 9, (size_t)n - 9);
                     for (int i = 0; i < g_max; i++) {
                         Client *t = &g_c[i];
-                        if (t == c || !t->used || !t->world || t->game != c->game) continue;
+                        if (t == c || !t->used || !PLAYS(t) || !t->world || t->game != c->game) continue;
                         send_to(t, out, (size_t)n);
                         g_world_packets++;
                     }
@@ -370,7 +428,7 @@ int main(int argc, char **argv) {
                     uint64_t to;
                     memcpy(&to, buf + 9, 8);
                     Client *t = by_id(to);
-                    if (!t || !c->code[0] || t->game != c->game || strcmp(t->code, c->code)) continue;  // (only within a lobby)
+                    if (!t || !PLAYS(t) || !c->code[0] || t->game != c->game || strcmp(t->code, c->code)) continue;  // (only within a lobby)
                     out[0] = 'D';
                     memcpy(out + 1, &id, 8);
                     memcpy(out + 9, buf + 17, (size_t)n - 17);

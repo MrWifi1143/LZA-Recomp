@@ -16,3 +16,7 @@ typedef struct {
 
 int accounts_start(const AccountsOptions *o);  // 0: listening (its own threads)
 int accounts_add_user(const AccountsOptions *o, const char *name);
+// A play ticket (JOIN, acct_proto.h) by its id: its key and account name; false: unknown or expired (any thread)
+#include <stdint.h>
+#include <stddef.h>
+bool accounts_ticket(const uint8_t id[8], uint8_t key[16], char *name, size_t n);

@@ -9,31 +9,41 @@ that talk to Nintendo's servers stay offline.
 
 ## For players
 
-1. Launcher > **Mods**: switch the **Steam relay** plugin on.
-2. In **Online server** (same page), type the server's address, e.g. `play.example.org` or `203.0.113.5:39200`.
+Playing the game never needs an account: offline (and nearby / with Steam friends) it uses the save on your PC as
+always. Playing **on a server** does: an account on that server.
+
+1. Launcher > **Options > Online**: type the server's address, e.g. `play.example.org` or `203.0.113.5:39200`, and tick
+   **Online play** (the Steam relay plugin - the same tick box as on the Mods page).
+2. Under **Account**, type a name and password and press **Create account** (an account **on that server only**), or
+   **Sign in** to one you made before. You stay signed in (a token in `online/accounts.txt`); **Sign out** ends it.
 3. Start the game, go to the trade (Arceus: Simona in the Galaxy Hall, Link Trade, nearby; Z-A: Link Play, Link Trade
-   or Private Battle, nearby) and enter a Link Code. Your friend does the same with the same code.
+   or Private Battle, nearby) and enter a Link Code. Your friend does the same with the same code. **Show other
+   players walking around** shows the server's other players in the world (Z-A).
 
-Pick a code nobody else would use: anyone on that server who types the same code lands in the same lobby, just like
-codes on the Switch.
+Not signed in, the server lets you in no further: the game says "Sign in to <server> to play online there" (and at a
+Link Code) - everything else plays as usual. Pick a code nobody else would use: anyone on that server who types the
+same code lands in the same lobby, just like codes on the Switch.
 
-### Accounts and save sync (optional)
+### Your save and the account
 
-In **Online server** (Mods page) there is also **Account**: a name and password make an account **on that server
-only** (Create account), or sign in to one you made before. Nobody needs one: Link Play and walking around work the
-same without. Signed in, **Sync saves with this account** (on by default) has the server keep your save:
+Signing in links the save on your PC to the account (**Keep my save synced with this account**, on by default):
 
-- when the game saves, your save goes up a moment later (and when you quit);
-- when the game starts, if the server has a newer save (from another PC, or the PS5 version signed in to the same
-  account on the same server), it comes down - the save you had is kept in `save/sync-backups/`;
+- the first sign-in with nothing on the server sends your save up; if the server already has one (you played on
+  another PC), the newer one is used and the other is kept as a backup (`save/sync-backups/`) - the Online tab says
+  which;
+- while you play, the save on your PC is the one that counts (like Steam Cloud): it's synced when the game starts (if
+  the server can be reached), a moment after each save, and when you quit;
+- offline in between is fine - no errors; what couldn't go up goes up once the server answers again (tried every
+  30 s while the game runs, and at the next start);
 - if both changed (you played on two machines without syncing in between), nothing is overwritten: the newer one is
   used and the other is kept as a backup (`save/sync-backups/`, and the server keeps its last 10 versions too).
-  The launcher's Mods page shows what the last sync did.
+  **Sync now** and the last sync's result are on the Online tab.
 
 The password is sent encrypted (TLS) and is never stored on your PC - only a sign-in token
 (`online/accounts.txt`). The first time you sign in to a server, the game remembers that server's key; if the key
 ever changes, the game refuses to talk to it ("the server's identity changed") until you press **Forget the
-server's key** - only do that if the server's owner says they changed it.
+server's key** - only do that if the server's owner says they changed it. The game's log never holds your password,
+token or the server's address.
 
 ## Running a server
 
@@ -43,7 +53,8 @@ firewall and forward both on the router.
 ```sh
 make lzaserver              # in the repository: build/lzaserver (Windows: PLATFORM=windows ... build/win/lzaserver.exe)
 ./lzaserver --port 39200 --max-clients 256
-cc -O2 -DLZA_NO_ACCOUNTS -o lzaserver lzaserver.c   # Link Play only, no accounts: just this file, any C compiler
+./lzaserver --no-accounts  # an open server (anyone plays, no accounts) - e.g. for friends on your own LAN
+cc -O2 -DLZA_NO_ACCOUNTS -o lzaserver lzaserver.c   # the same, just this file, any C compiler
 ```
 
 Accounts and saves live in `--data` (default `./lzaserver-data`): back that folder up. Options:
@@ -58,7 +69,13 @@ Accounts and saves live in `--data` (default `./lzaserver-data`): back that fold
 | `--quota-mb N` | 256 | per account, all versions of all games together |
 | `--max-accounts N` | 1000 | |
 | `--cert FILE --key FILE` | | your own certificate (PEM, e.g. Let's Encrypt for your domain) instead of the server's own |
-| `--no-accounts` | | Link Play only |
+| `--open-play` | | accounts and save sync kept, but anyone may play here without signing in |
+| `--no-accounts` | | no accounts at all: anyone may play here (the old open server, e.g. on a LAN) |
+
+By default playing here needs an account here: a game's hello must carry a play ticket (asked for over TLS with the
+player's session, kept in memory 24 hours, ended with the session; the UDP hello carries only its id and a SipHash MAC
+over the hello and the address's cookie - the key never goes over UDP). Without one the player is told to sign in and
+nothing they send is passed on.
 
 Security: TLS 1.3 only (Mbed TLS). Without `--cert`, the server makes its own certificate at its first start
 (`<data>/tls/`, keep `key.pem` private and backed up - a new key makes every player's game refuse the server until

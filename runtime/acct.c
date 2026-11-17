@@ -1,7 +1,15 @@
-// Online server accounts and save sync (optional). A player may make an account on the online server set in the
-// launcher (larecomp.ini online_server; contrib/lzaserver) - tied to that server only - and let it keep their save, so
-// another copy of the game signed in to the same account (another PC, the PS5 port: this file is in their shared
-// runtime) carries on from it. Without an account nothing here does anything.
+// Online server accounts and save sync. Playing the game never needs an account: offline, with the save on this PC,
+// nothing here does anything. An account lives on one online server (larecomp.ini online_server; contrib/lzaserver;
+// the launcher's Options > Online tab) and is what PLAYING on that server needs (Link Play by Link Code, the shared
+// world - an lzaserver lets only signed-in players in unless it runs with --no-accounts / --open-play). Nearby play
+// (ldn.c) and Steam friends (no server set) need none.
+// Signing in links the save on this PC to the account (Steam Cloud style): the save here stays the truth while playing;
+// it's synced at start (if the server can be reached), after each save and at quit - offline in between is fine, what
+// couldn't go up goes up once the server answers again (tried every 30 s). Another copy of the game signed in to the
+// same account (another PC, the PS5 port: this file is in their shared runtime) carries on from it.
+// Play tickets: while the game runs, a thread here gets a ticket for the signed-in account (JOIN, acct_proto.h) and
+// hands it to the relay plugin (larecomp_server_ticket), whose hellos prove it to the server.
+// Logs never hold a password, a token or the server's address (alog hides the addresses it has seen).
 //
 // Security: TLS 1.3 (Mbed TLS, third_party/mbedtls). The server's key is pinned the first time this copy talks to it
 // (online/known_servers.txt: SHA-256 of the public key, per server address); later a different key is refused, unless
@@ -97,14 +105,45 @@ void menu_notice_for(const char *text, unsigned ms);  // (ui/menu.mm)
 static bool g_log;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;  // (the files under online/, the sync state)
 
+// (the server addresses seen: never written to the log - alog puts "<server>" in their place)
+static pthread_mutex_t g_hide_lock = PTHREAD_MUTEX_INITIALIZER;
+static char g_hide[8][256];
+static int g_nhide;
+static void hide_in_log(const char *s) {
+    if (!s || strlen(s) < 2) return;
+    pthread_mutex_lock(&g_hide_lock);
+    bool have = false;
+    for (int i = 0; i < g_nhide && !have; i++) have = !strcmp(g_hide[i], s);
+    if (!have) snprintf(g_hide[g_nhide < 8 ? g_nhide++ : 7], sizeof g_hide[0], "%s", s);
+    pthread_mutex_unlock(&g_hide_lock);
+}
+static void scrub(char *b, size_t bn) {  // (the server addresses seen -> "<server>")
+    char o[1400];
+    pthread_mutex_lock(&g_hide_lock);
+    for (int i = 0; i < g_nhide; i++) {  // (the longest first would be nicer; "host:port" is added before "host")
+        char *at;
+        while ((at = strstr(b, g_hide[i]))) {
+            snprintf(o, sizeof o, "%.*s<server>%s", (int)(at - b), b, at + strlen(g_hide[i]));
+            snprintf(b, bn, "%s", o);
+        }
+    }
+    pthread_mutex_unlock(&g_hide_lock);
+}
 static void alog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void alog(const char *fmt, ...) {
-    char b[1024];
+    char b[1300];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(b, sizeof b, fmt, ap);
     va_end(ap);
+    scrub(b, sizeof b);
     LOG("[account] %s\n", b);
+}
+static void say(const char *m) {  // (lasrecomp --account's answer: its stdout is the log - the address left out too)
+    char b[1300];
+    snprintf(b, sizeof b, "%s", m);
+    scrub(b, sizeof b);
+    printf("%s\n", b);
 }
 
 // ------------------------------------------------------------------ small helpers
@@ -165,6 +204,7 @@ static bool parse_server(const char *s, char *host, size_t hn, int *port, char *
     for (char *q = host; *q; q++)
         if (*q == ' ' || *q == '/') return false;
     snprintf(key, kn, "%s:%d", host, *port);
+    hide_in_log(key), hide_in_log(s), hide_in_log(host);
     return true;
 }
 
@@ -454,7 +494,8 @@ static bool call(Tls *t, const char *head, const void *body, uint32_t bn, char *
     rh[h[0]] = 0;
     uint8_t *b = h[1] ? malloc(h[1]) : NULL;
     if (h[1] && (!b || !tls_rw(t, b, h[1], false))) { free(b); return false; }
-    if (g_log) alog("<- %.120s (%u bytes)", strncmp(rh, "OK ", 3) || !strchr(rh, ':') ? rh : "OK <token>", h[1]);
+    if (g_log) alog("<- %.120s (%u bytes)", !strncmp(head, "JOIN", 4) && !strncmp(rh, "OK ", 3) ? "OK <play ticket>"  // (never its key)
+                                          : strncmp(rh, "OK ", 3) || !strchr(rh, ':') ? rh : "OK <token>", h[1]);
     if (rb) *rb = b, *rbn = h[1];
     else free(b);
     return true;
@@ -493,6 +534,22 @@ bool acct_signed_in(char *name, size_t n) {  // (the launcher asks every frame: 
     if (c_in) snprintf(name, n, "%s", c_name);
     return c_in;
 }
+
+// The server says the session token is no good (signed out elsewhere, 180 days unused, the account's sessions reset):
+// forgotten here too - the Online tab shows "signed out" with why (acct_session_ended), the save stays as it is
+static volatile bool g_session_ended;
+static void session_ended(const char *server) {
+    char host[256], key[300];
+    int port;
+    if (!parse_server(server, host, sizeof host, &port, key, sizeof key)) return;
+    pthread_mutex_lock(&g_lock);
+    kv_set(ACCOUNTS_FILE, key, NULL, true);
+    pthread_mutex_unlock(&g_lock);
+    g_session_ended = true;
+    g_ui_gen++;
+    alog("the server ended this copy's sign-in: signed out here too");
+}
+bool acct_session_ended(void) { return g_session_ended; }
 
 static int account_op(int op, const char *server, const char *name, const char *pass, char *msg, size_t mn, bool *key_changed) {
     char host[256], key[300];
@@ -570,6 +627,7 @@ static int account_op(int op, const char *server, const char *name, const char *
     bool saved = kv_set(ACCOUNTS_FILE, key, rh + 3, true);
     pthread_mutex_unlock(&g_lock);
     if (!saved) { snprintf(msg, mn, "Signed in, but couldn't write online/accounts.txt"); return 1; }
+    g_session_ended = false;
     char pp[100] = "";
     if (first) pin_pretty(pin, pp);
     snprintf(msg, mn, "%s as %s on %s.%s%s", op == ACCT_OP_CREATE ? "Account made: signed in" : "Signed in", lname, key,
@@ -578,17 +636,53 @@ static int account_op(int op, const char *server, const char *name, const char *
     return 0;
 }
 
+// A play ticket (JOIN) for the account signed in on server: 1 got it, 0 not signed in there (or the server ended the
+// sign-in), -1 couldn't ask (offline, ...)
+static int ticket_get(const char *server, uint8_t id[8], uint8_t key[16]) {
+    char token[ACCT_TOKEN_MAX + 8], tkey[300], err[300], rh[ACCT_MAX_HEADER], head[200];
+    if (!token_of(server, token, sizeof token, tkey, sizeof tkey)) return 0;
+    Tls t;
+    if (!tls_open(&t, server, err, sizeof err, NULL, NULL)) return -1;
+    snprintf(head, sizeof head, "JOIN %s", token);
+    bool ok = call(&t, head, NULL, 0, rh, sizeof rh, NULL, NULL);
+    tls_close(&t);
+    mbedtls_platform_zeroize(head, sizeof head);
+    if (!ok) return -1;
+    if (!strncmp(rh, "ERR signin", 10)) { session_ended(server); return 0; }
+    char ih[20], kh[40];
+    int secs = 0;
+    int r = sscanf(rh, "OK %19s %39s %d", ih, kh, &secs) == 3 && strlen(ih) == 16 && strlen(kh) == 32 ? 1 : -1;
+    for (int i = 0; r == 1 && i < 8; i++) { unsigned v; sscanf(ih + 2 * i, "%2x", &v); id[i] = (uint8_t)v; }
+    for (int i = 0; r == 1 && i < 16; i++) { unsigned v; sscanf(kh + 2 * i, "%2x", &v); key[i] = (uint8_t)v; }
+    mbedtls_platform_zeroize(rh, sizeof rh);
+    mbedtls_platform_zeroize(kh, sizeof kh);
+    if (r != 1) alog("play ticket: an odd answer");
+    return r;
+}
+
+static void link_save(char *msg, size_t mn);  // (below: the save sync after a sign-in)
 // the launcher's buttons, on a thread of their own
 static pthread_mutex_t g_ui_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile bool g_ui_busy;
-static char g_ui_msg[512];
+static char g_ui_msg[1800];
 static bool g_ui_err, g_ui_keychg;
 typedef struct { int op; char server[160], name[64], pass[ACCT_PASS_MAX + 1]; } UiJob;
 static void *ui_thread(void *arg) {
     UiJob *j = arg;
-    char msg[512];
+    char msg[1800];
     bool kc;
-    int r = account_op(j->op, j->server, j->name, j->pass, msg, sizeof msg, &kc);
+    int r = 0;
+    kc = false;
+    if (j->op == ACCT_OP_SYNC) link_save(msg, sizeof msg);
+    else {
+        r = account_op(j->op, j->server, j->name, j->pass, msg, sizeof msg, &kc);
+        if (!r && (j->op == ACCT_OP_LOGIN || j->op == ACCT_OP_CREATE)) {  // (signed in: this PC's save linked to it now)
+            char m2[1200];
+            link_save(m2, sizeof m2);
+            size_t l = strlen(msg);
+            snprintf(msg + l, sizeof msg - l, "\n%s", m2);
+        }
+    }
     mbedtls_platform_zeroize(j->pass, sizeof j->pass);
     free(j);
     pthread_mutex_lock(&g_ui_lock);
@@ -617,7 +711,7 @@ void acct_ui_start(int op, const char *name, const char *password) {
 }
 bool acct_ui_busy(void) { return g_ui_busy; }
 const char *acct_ui_message(bool *error) {
-    static char copy[512];
+    static char copy[1800];
     pthread_mutex_lock(&g_ui_lock);
     snprintf(copy, sizeof copy, "%s", g_ui_msg);
     if (error) *error = g_ui_err;
@@ -943,6 +1037,7 @@ static int upload(Tls *t, Sync *y, const Snap *s, Head *h, char *err, size_t en)
         state_save(y);
         return 1;
     }
+    if (!strncmp(rh, "ERR signin", 10)) { snprintf(err, en, "the server ended this sign-in"); return -2; }
     if (strncmp(rh, "OK ", 3) || !head_parse(rh + 3, h)) { snprintf(err, en, "%s", err_text(rh)); return -1; }
     y->version = h->version, y->counter++;
     snprintf(y->chash, sizeof y->chash, "%s", s->chash);
@@ -961,7 +1056,8 @@ static const char *when(long long t, char *b, size_t n) {
     return b;
 }
 
-// The sync at boot (see the top). Returns 0 in step / done, 1 failed (the game plays with the save it has)
+// The sync at boot / after a sign-in (see the top). Returns 0 in step / done, 1 failed, 2 the server couldn't be
+// reached (offline: the game plays with the save it has, synced when the server answers again)
 static int sync_now(Sync *y, char *msg, size_t mn) {
     Snap local;
     if (!snap_take(&local, y->dir)) { snprintf(msg, mn, "Save sync: couldn't read the save in %s", y->dir); return 1; }
@@ -969,21 +1065,26 @@ static int sync_now(Sync *y, char *msg, size_t mn) {
     char err[400], rh[ACCT_MAX_HEADER], head[300], w1[32], w2[32], bak[900];
     if (!open_with_token(&t, y, err, sizeof err)) {
         snap_free(&local);
-        snprintf(msg, mn, "Save sync skipped: %s", err);
-        return 1;
+        bool keychg = g_last_tls == TLS_KEY_CHANGED;
+        snprintf(msg, mn, keychg ? "Save sync skipped: %s" : "Save sync: offline (%s) - the save here is used and synced when the server answers", err);
+        return keychg ? 1 : 2;
     }
     snprintf(head, sizeof head, "INFO %s %s", y->token, y->game);
     int ret = 1;
     Head h;
     if (!call(&t, head, NULL, 0, rh, sizeof rh, NULL, NULL)) { snprintf(msg, mn, "Save sync skipped: the server didn't answer"); goto out; }
-    if (!strncmp(rh, "ERR signin", 10)) { snprintf(msg, mn, "Save sync: signed out by the server - sign in again (launcher > Mods)"); goto out; }
+    if (!strncmp(rh, "ERR signin", 10)) {
+        session_ended(y->server);
+        snprintf(msg, mn, "Save sync: the server ended this sign-in - sign in again (launcher > Options > Online). The save here is untouched.");
+        goto out;
+    }
     if (strncmp(rh, "OK ", 3)) { snprintf(msg, mn, "Save sync: %s", err_text(rh)); goto out; }
     bool have = strcmp(rh, "OK 0") && head_parse(rh + 3, &h);
     bool local_changed = strcmp(local.chash, y->chash) != 0;
     if (!have) {  // (nothing on the server yet)
         if (!local.n) { snprintf(msg, mn, "Save sync: no save here or on the server yet"); ret = 0; goto out; }
         int r = upload(&t, y, &local, &h, err, sizeof err);
-        if (r == 1) snprintf(msg, mn, "Save sync: your save went up to the server (the first one there)"), ret = 0;
+        if (r == 1) snprintf(msg, mn, "Save sync: linked - your save went up to the server (the first one there)"), ret = 0;
         else snprintf(msg, mn, "Save sync: couldn't upload: %s", r ? err : "the server changed meanwhile");
         goto out;
     }
@@ -1062,14 +1163,24 @@ static bool g_sync_on;
 static pthread_mutex_t g_up_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_up_cond = PTHREAD_COND_INITIALIZER;
 static Snap *g_pending;      // (the latest committed save not uploaded yet)
-static uint64_t g_pending_at;  // (ms: when it was committed)
+static uint64_t g_pending_at;  // (ms: when it was committed; 0 = at once)
+static Snap *g_retry;        // (offline: the latest save that couldn't go up - again when the server answers)
+static uint64_t g_retry_at;  // (ms: the last try)
 static bool g_uploading, g_exiting;
 static uint64_t g_upload_delay = 2000;  // (ms after the last commit; LARECOMP_ACCT_UPLOAD_DELAY_MS: tests of the upload at exit)
+#define RETRY_MS 30000
 
 static uint64_t ms_now(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+static void snap_drop(Snap *s) {
+    if (s) snap_free(s), free(s);
+}
+static void retry_keep(Snap *s) {  // (under g_up_lock: s is the newest that couldn't go up - an older one is dropped)
+    snap_drop(g_retry);
+    g_retry = s, g_retry_at = ms_now();
 }
 static void *uploader(void *arg) {
     (void)arg;
@@ -1086,40 +1197,65 @@ static void *uploader(void *arg) {
         Snap *s = g_pending;
         g_pending = NULL;
         g_uploading = true;
+        bool was_retry = g_pending_at == 0;
         pthread_mutex_unlock(&g_up_lock);
         snap_hash(s);
         pthread_mutex_lock(&g_lock);
         bool changed = strcmp(s->chash, g_sync.chash) != 0;
         pthread_mutex_unlock(&g_lock);
+        Snap *keep = NULL;  // (couldn't go up: tried again later)
         if (changed) {
             Tls t;
             char err[400];
             Head h;
-            if (!open_with_token(&t, &g_sync, err, sizeof err)) set_last("Save sync: the save couldn't go up: %s", err);
-            else {
+            if (!open_with_token(&t, &g_sync, err, sizeof err)) {
+                // (offline: no error shown - the save here is the truth; it goes up when the server answers)
+                set_last("Save sync: offline - this save stays here and goes up when the server answers (%s)", err);
+                keep = s, s = NULL;
+            } else {
                 int r = upload(&t, &g_sync, s, &h, err, sizeof err);
                 tls_close(&t);
-                if (r == 1) set_last("Save sync: your save went up to the server (save %lld)", h.version);
+                if (r == 1) set_last("Save sync: your save went up to the server (save %lld)%s", h.version, was_retry ? " - caught up after being offline" : "");
                 else if (r == 0) {
                     set_last("Save sync: the server has a newer save from %s - this one stays here, nothing is "
                              "overwritten; sorted out at the next start", h.device);
                     menu_notice_for("Save sync: the server has a newer save from another device - "
                                     "sorted out at the next start (nothing overwritten)", 8000);
-                } else set_last("Save sync: the save couldn't go up: %s", err);
+                } else if (r == -2) {
+                    session_ended(g_sync.server);
+                    set_last("Save sync: the server ended this sign-in - the save stays here; sign in again (launcher > Options > Online)");
+                } else set_last("Save sync: the save couldn't go up (%s) - trying again", err), keep = s, s = NULL;
             }
         }
-        snap_free(s);
-        free(s);
+        snap_drop(s);
         pthread_mutex_lock(&g_up_lock);
+        if (keep) {
+            if (!g_pending) retry_keep(keep);  // (a newer commit meanwhile replaces it)
+            else snap_drop(keep);
+        } else if (changed && !g_pending) snap_drop(g_retry), g_retry = NULL;
         g_uploading = false;
         pthread_cond_broadcast(&g_up_cond);
     }
     return NULL;
 }
+static bool retry_now(bool force) {  // (the save that couldn't go up, queued again: when RETRY_MS passed, or force)
+    pthread_mutex_lock(&g_up_lock);
+    bool go = g_retry && !g_pending && !g_uploading && (force || ms_now() - g_retry_at >= RETRY_MS);
+    if (go) {
+        g_pending = g_retry, g_retry = NULL, g_pending_at = 0;
+        pthread_cond_broadcast(&g_up_cond);
+    }
+    pthread_mutex_unlock(&g_up_lock);
+    return go;
+}
 void acct_exit(void) {  // (the last save's upload, waited for: 20 s at most)
     static bool done;
     if (!g_sync_on || done) return;
     done = true;
+    pthread_mutex_lock(&g_up_lock);
+    uint64_t last_try = g_retry_at;
+    pthread_mutex_unlock(&g_up_lock);
+    if (ms_now() - last_try >= 10000) retry_now(true);  // (offline until now: once more - unless it just failed)
     pthread_mutex_lock(&g_up_lock);
     g_exiting = true;
     pthread_cond_broadcast(&g_up_cond);
@@ -1132,8 +1268,54 @@ void acct_exit(void) {  // (the last save's upload, waited for: 20 s at most)
         nanosleep(&d, NULL);
         pthread_mutex_lock(&g_up_lock);
     }
+    bool left = g_pending || g_uploading || g_retry;
     pthread_mutex_unlock(&g_up_lock);
-    if (had) alog("quitting: %s", g_pending || g_uploading ? "the upload didn't finish in 20 s (it goes up at the next start)" : "the save is up");
+    if (had || left) alog("quitting: %s", left ? "the save isn't up yet (offline) - it goes up at the next start" : "the save is up");
+}
+
+// While the game runs (thread): the play ticket for the relay plugin, and the save that couldn't go up tried again
+static void *online_thread(void *arg) {
+    (void)arg;
+    void *plugins_symbol(const char *name);
+    void (*set_ticket)(const uint8_t *, const uint8_t *) = NULL;
+    int (*auth)(void) = NULL, (*state)(char *, size_t) = NULL;
+    bool gave = false;
+    uint64_t next = 0, backoff = 5000, started = ms_now();
+    int was_state = 0;
+    for (;;) {
+        struct timespec d = {1, 0};
+        nanosleep(&d, NULL);
+        uint64_t now = ms_now();
+        if (!set_ticket && now - started < 60000) {  // (the relay plugin: loaded before the game starts)
+            set_ticket = (void (*)(const uint8_t *, const uint8_t *))plugins_symbol("larecomp_server_ticket");
+            auth = (int (*)(void))plugins_symbol("larecomp_server_auth");
+            state = (int (*)(char *, size_t))plugins_symbol("larecomp_server_state");
+            if (!auth || !state) set_ticket = NULL;
+        }
+        if (set_ticket && state(NULL, 0)) {
+            char tok[ACCT_TOKEN_MAX + 8], key[300];
+            bool in = token_of(g_settings.online_server, tok, sizeof tok, key, sizeof key);
+            mbedtls_platform_zeroize(tok, sizeof tok);
+            if (!in && gave) set_ticket(NULL, NULL), gave = false, alog("play ticket dropped (signed out)");
+            if (in && (!gave || auth() == 3) && now >= next) {
+                uint8_t id[8], k[16];
+                int r = ticket_get(g_settings.online_server, id, k);
+                if (r == 1) {
+                    set_ticket(id, k), gave = true, backoff = 5000, next = now + 10000;
+                    alog("play ticket: got one for the server (online play as the signed-in account)");
+                } else if (r == 0) {
+                    if (gave) set_ticket(NULL, NULL);
+                    gave = false, next = now + 60000;
+                } else next = now + backoff, backoff = backoff * 2 > 120000 ? 120000 : backoff * 2;
+                mbedtls_platform_zeroize(k, sizeof k);
+            }
+            int st = state(NULL, 0);
+            if (g_sync_on && st == 2 && was_state != 2 && was_state) retry_now(true);  // (the server answers again: catch up now)
+            was_state = st;
+        }
+        if (g_sync_on) retry_now(false);
+    }
+    return NULL;
 }
 
 static const char *save_root(void) {
@@ -1141,15 +1323,30 @@ static const char *save_root(void) {
     return e ? e : g_save_dir;
 }
 void acct_boot_sync(uint64_t program_id) {
+    static bool online_started;
+    if (!online_started) {  // (tickets: whether or not saves sync)
+        online_started = true;
+        pthread_t th;
+        if (!pthread_create(&th, NULL, online_thread, NULL)) pthread_detach(th);
+    }
     if (g_sync_on) return;  // (a reboot to the title: once per run)
     if (!sync_setup(&g_sync, program_id, save_root())) return;
     char msg[1200];
     uint64_t t0 = ms_now();
-    sync_now(&g_sync, msg, sizeof msg);
+    int r = sync_now(&g_sync, msg, sizeof msg);
     set_last("%s", msg);
     alog("(%llu ms)", (unsigned long long)(ms_now() - t0));
     if (strstr(msg, "CONFLICT") || strstr(msg, "first time") || strstr(msg, "loaded the save"))
         menu_notice_for(msg, 30000);
+    if (r == 2) {  // (offline: a save changed since the last sync goes up once the server answers - the game hasn't run yet)
+        Snap *s = malloc(sizeof *s);
+        if (snap_take(s, g_sync.dir) && s->n && strcmp(s->chash, g_sync.chash)) {
+            pthread_mutex_lock(&g_up_lock);
+            retry_keep(s);
+            pthread_mutex_unlock(&g_up_lock);
+            alog("offline at start: this save goes up when the server answers");
+        } else snap_free(s), free(s);
+    }
     g_sync_on = true;
     if (getenv("LARECOMP_ACCT_UPLOAD_DELAY_MS")) g_upload_delay = strtoull(getenv("LARECOMP_ACCT_UPLOAD_DELAY_MS"), NULL, 10);
     pthread_t th;
@@ -1169,6 +1366,7 @@ void acct_save_committed(const char *fs_root) {
     if (g_pending) snap_free(g_pending), free(g_pending);
     g_pending = s;
     g_pending_at = ms_now();
+    if (g_retry) snap_drop(g_retry), g_retry = NULL;  // (this newer one replaces what couldn't go up)
     pthread_cond_broadcast(&g_up_cond);
     pthread_mutex_unlock(&g_up_lock);
     if (g_log) alog("save committed (%d files)", s->n);
@@ -1187,6 +1385,26 @@ static uint64_t program_id_of(const char *root) {  // (main.npdm's ACI0, as main
     if (f) fclose(f);
     return id;
 }
+static char g_game_root[512] = "extracted";
+static uint64_t g_cli_pid;  // (lasrecomp --account ... --program-id: the game without its files here, tests)
+void acct_set_game_root(const char *root) {
+    if (root && root[0]) snprintf(g_game_root, sizeof g_game_root, "%s", root);
+}
+// Signed in (the launcher, lasrecomp --account login): the save on this PC linked to the account - the first sign-in
+// with nothing on the server sends it up; both having one: the newer is used, the other kept (sync_now)
+static void link_save(char *msg, size_t mn) {
+    if (!g_settings.sync_saves) {
+        snprintf(msg, mn, "Save sync is off: the save on this PC isn't linked to the account (Keep my save synced)");
+        return;
+    }
+    uint64_t id = g_cli_pid ? g_cli_pid : program_id_of(g_game_root);
+    if (!id) { snprintf(msg, mn, "The save links to the account once the game files are set up (at the game's next start)"); return; }
+    Sync y;
+    if (!sync_setup(&y, id, save_root())) { snprintf(msg, mn, "Not signed in on this server"); return; }
+    sync_now(&y, msg, mn);
+    set_last("%s", msg);
+}
+
 int acct_cli(int argc, char **argv) {
     const char *cmd = NULL, *user = "", *pwfile = getenv("LARECOMP_ACCT_PASSWORD_FILE"), *server = NULL, *pid = NULL;
     for (int i = 1; i < argc; i++) {
@@ -1197,20 +1415,23 @@ int acct_cli(int argc, char **argv) {
         else if (!strcmp(argv[i], "--program-id") && i + 1 < argc) pid = argv[++i];
     }
     settings_load();
+    if (pid) g_cli_pid = strtoull(pid, NULL, 16);
     if (server) snprintf(g_settings.online_server, sizeof g_settings.online_server, "%s", server);
     if (!cmd) return 2;
     char msg[1200];
     bool kc;
     if (!strcmp(cmd, "status")) {
         char name[64];
-        if (acct_signed_in(name, sizeof name)) printf("signed in as %s on %s\n", name, g_settings.online_server);
-        else printf("not signed in on %s\n", g_settings.online_server[0] ? g_settings.online_server : "(no server set)");
-        printf("last sync: %s\n", acct_last_sync()[0] ? acct_last_sync() : "never");
+        if (acct_signed_in(name, sizeof name)) printf("signed in as %s on the server set\n", name);
+        else printf("not signed in on %s\n", g_settings.online_server[0] ? "the server set" : "(no server set)");
+        char ls[800];
+        snprintf(ls, sizeof ls, "last sync: %s", acct_last_sync()[0] ? acct_last_sync() : "never");
+        say(ls);
         return 0;
     }
     if (!strcmp(cmd, "logout") || !strcmp(cmd, "forget-key")) {
         int r = account_op(cmd[0] == 'l' ? ACCT_OP_LOGOUT : ACCT_OP_FORGET_KEY, g_settings.online_server, "", "", msg, sizeof msg, &kc);
-        printf("%s\n", msg);
+        say(msg);
         return r;
     }
     if (!strcmp(cmd, "login") || !strcmp(cmd, "create")) {
@@ -1221,7 +1442,12 @@ int acct_cli(int argc, char **argv) {
         pw[strcspn(pw, "\r\n")] = 0;
         int r = account_op(cmd[0] == 'c' ? ACCT_OP_CREATE : ACCT_OP_LOGIN, g_settings.online_server, user, pw, msg, sizeof msg, &kc);
         mbedtls_platform_zeroize(pw, sizeof pw);
-        printf("%s%s\n", msg, kc ? " [key changed]" : "");
+        say(msg);
+        if (kc) say("[key changed]");
+        if (!r && !getenv("LARECOMP_ACCT_NO_LINK")) {  // (as the launcher: the save here linked to the account)
+            link_save(msg, sizeof msg);
+            say(msg);
+        }
         return r;
     }
     if (!strcmp(cmd, "sync")) {
@@ -1231,7 +1457,7 @@ int acct_cli(int argc, char **argv) {
         if (!sync_setup(&y, id, save_root())) { printf("not signed in (or sync_saves = 0)\n"); return 1; }
         int r = sync_now(&y, msg, sizeof msg);
         set_last("%s", msg);
-        printf("%s\n", msg);
+        say(msg);
         return r;
     }
     fprintf(stderr, "--account create | login | logout | status | sync | forget-key\n");

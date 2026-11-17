@@ -1,6 +1,7 @@
-// lzaserver accounts and save sync (optional; protocol: runtime/acct_proto.h). Players may make an account on this
-// server - only on this server - and have it keep their save, so another copy of the game (another PC, the PS5 port)
-// signed in to the same account picks it up. Playing without an account changes nothing; Link Play needs none.
+// lzaserver accounts and save sync (protocol: runtime/acct_proto.h). Players make an account on this server - only on
+// this server - to play here (Link Play by Link Code, the shared world: a play ticket, JOIN, proves it in the UDP hello -
+// lzaserver.c; --open-play / --no-accounts: anyone) and to have it keep their save, so another copy of the game
+// (another PC, the PS5 port) signed in to the same account picks it up. The game itself needs no account.
 //
 // TCP + TLS 1.3 (Mbed TLS, third_party/mbedtls) on the same port number as the UDP Link Play port. Passwords: only a
 // salted Argon2id hash is kept (Monocypher, third_party/monocypher; 19 MiB, 2 passes - OWASP's minimum; the parameters
@@ -363,6 +364,75 @@ static bool session_check(const char *token, char *name, bool drop) {
     if (changed) write_file_atomic(p, out, (size_t)k);
     pthread_mutex_unlock(&g_store);
     free(s);
+    return ok;
+}
+
+// ---- play tickets (acct_proto.h): Link Play / the shared world through this server need one; made by JOIN, kept in
+// memory only (a restart: the games ask again), dropped with their session (LOGOUT) or ACCT_TICKET_S after made
+#define MAX_TICKETS 4096
+#define TICKETS_PER_ACCOUNT 16
+typedef struct {
+    bool used;
+    uint8_t id[8], key[16], sess[32];  // (sess: the session token's hash - its sign-out drops the ticket)
+    char name[ACCT_NAME_MAX + 1];
+    int64_t made;
+} Ticket;
+static Ticket g_tickets[MAX_TICKETS];
+static pthread_mutex_t g_tick = PTHREAD_MUTEX_INITIALIZER;
+static void token_hash(const char *token, uint8_t out[32]) {  // (as session_check: SHA-256 of the secret's hex)
+    const char *c = strchr(token, ':');
+    sha256(c ? c + 1 : token, c ? strlen(c + 1) : strlen(token), out);
+}
+static bool ticket_new(const char *name, const char *token, char *out, size_t on) {
+    pthread_mutex_lock(&g_tick);
+    Ticket *t = NULL, *oldest = NULL, *oldest_mine = NULL;
+    int mine = 0;
+    for (int i = 0; i < MAX_TICKETS; i++) {
+        Ticket *k = &g_tickets[i];
+        if (k->used && now_s() - k->made >= ACCT_TICKET_S) k->used = false;
+        if (!k->used) { if (!t) t = k; continue; }
+        if (!oldest || k->made < oldest->made) oldest = k;
+        if (!strcmp(k->name, name)) {
+            mine++;
+            if (!oldest_mine || k->made < oldest_mine->made) oldest_mine = k;
+        }
+    }
+    if (mine >= TICKETS_PER_ACCOUNT) t = oldest_mine;  // (one account's games can't fill the table)
+    else if (!t) t = oldest;
+    memset(t, 0, sizeof *t);
+    t->used = true, t->made = now_s();
+    rnd(t->id, sizeof t->id);
+    rnd(t->key, sizeof t->key);
+    token_hash(token, t->sess);
+    snprintf(t->name, sizeof t->name, "%s", name);
+    char ih[17], kh[33];
+    hex(t->id, 8, ih);
+    hex(t->key, 16, kh);
+    snprintf(out, on, "OK %s %s %d", ih, kh, ACCT_TICKET_S);
+    crypto_wipe(kh, sizeof kh);
+    pthread_mutex_unlock(&g_tick);
+    return true;
+}
+static void tickets_drop(const char *token) {  // (its session signed out)
+    uint8_t h[32];
+    token_hash(token, h);
+    pthread_mutex_lock(&g_tick);
+    for (int i = 0; i < MAX_TICKETS; i++)
+        if (g_tickets[i].used && !memcmp(g_tickets[i].sess, h, 32)) crypto_wipe(&g_tickets[i], sizeof g_tickets[i]);
+    pthread_mutex_unlock(&g_tick);
+}
+bool accounts_ticket(const uint8_t id[8], uint8_t key[16], char *name, size_t n) {
+    bool ok = false;
+    pthread_mutex_lock(&g_tick);
+    for (int i = 0; i < MAX_TICKETS && !ok; i++) {
+        Ticket *t = &g_tickets[i];
+        if (!t->used || memcmp(t->id, id, 8)) continue;
+        if (now_s() - t->made >= ACCT_TICKET_S) { t->used = false; break; }
+        memcpy(key, t->key, 16);
+        snprintf(name, n, "%s", t->name);
+        ok = true;
+    }
+    pthread_mutex_unlock(&g_tick);
     return ok;
 }
 
@@ -739,8 +809,17 @@ static void *conn_thread(void *arg) {
             bool out = f[0][0] == 'L';
             if (nf != 2 || !session_check(f[1], name, out)) ok = replyf(c, "ERR signin Signed out: sign in again");
             else {
-                if (out) logf_("%s signed out a device (%s)\n", name, c->ip);
+                if (out) logf_("%s signed out a device (%s)\n", name, c->ip), tickets_drop(f[1]);
                 ok = out ? replyf(c, "OK") : replyf(c, "OK %s", name);
+            }
+        } else if (!strcmp(f[0], "JOIN")) {  // (a play ticket: acct_proto.h)
+            char name[ACCT_NAME_MAX + 1], out[120];
+            if (nf != 2 || !session_check(f[1], name, false)) ok = replyf(c, "ERR signin Signed out: sign in again");
+            else {
+                ticket_new(name, f[1], out, sizeof out);
+                ok = reply(c, out, NULL, 0);
+                crypto_wipe(out, sizeof out);
+                logf_("%s: a play ticket (%s)\n", name, c->ip);
             }
         } else if (!strcmp(f[0], "INFO") || !strcmp(f[0], "GET") || !strcmp(f[0], "PUT") || !strcmp(f[0], "LIST"))
             ok = do_save(c, f, nf, body, h[1]);

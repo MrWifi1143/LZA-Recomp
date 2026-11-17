@@ -22,9 +22,11 @@
 // joins with it sends that token first (a hello), and the host lets that player in like a friend for this session.
 // Plugin -> helper 'K' the token (8 bytes), 'J' join (u64 host id + its token); helper -> plugin 'G' a guest joined (u64).
 //
-// An online server instead of Steam (contrib/lzaserver; larecomp.ini online_server = <host>[:port], the launcher's Mods
-// page, or LARECOMP_RELAY_SERVER): no Steam, no friends list - players who enter the same Link Code meet in a lobby
-// on the server, which passes their traffic on (larecomp_relay_code: runtime/hle/swkbd.c tells the code).
+// An online server instead of Steam (contrib/lzaserver; larecomp.ini online_server = <host>[:port], the launcher's
+// Options > Online tab, or LARECOMP_RELAY_SERVER): no Steam, no friends list - players who enter the same Link Code meet
+// in a lobby on the server, which passes their traffic on (larecomp_relay_code: runtime/hle/swkbd.c tells the code).
+// An lzaserver with accounts lets only signed-in players play: the hello carries a play ticket from runtime/acct.c
+// (larecomp_server_ticket; acct_proto.h). The server's address is never written to the log.
 //
 // The Steam API is not shipped: libsteam_api.so is loaded from the Steam install (Steam's own copy - SteamVR's - or any
 // game's), or LARECOMP_STEAM_API=<path>. LARECOMP_RELAY_FAKE=<this port>,<peer port> (tests): no Steam - the relay's
@@ -100,6 +102,7 @@ static __attribute__((unused)) const char *relay_key(void) {
 #endif
 #else
 #include "../../runtime/plugin.h"
+#include "../../runtime/acct_proto.h"  // (the play ticket's MAC in the hello)
 
 static const LarecompPluginApi *A;
 #define LOG(...) A->log(__VA_ARGS__)
@@ -562,6 +565,15 @@ static volatile int g_srv_ever;
 // everything. An older server never sends one (the 8 more bytes of our hello it ignores).
 static uint8_t g_srv_cookie[8];
 static volatile int g_srv_have_cookie, g_srv_hello_now;
+// Signed in (acct_proto.h "Play tickets"): an lzaserver with accounts lets only signed-in players play. The game's
+// runtime (runtime/acct.c) gets a ticket over TLS for the account signed in on this server and hands it here
+// (larecomp_server_ticket); each hello carries its id and a MAC keyed by it (the key itself never goes out). The server
+// answers 'A': 0 in, 1 sign-in needed, 2 ticket not known (the runtime asks for a new one: larecomp_server_auth).
+static pthread_mutex_t g_tk_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint8_t g_tk_id[8], g_tk_key[16];
+static int g_tk_have;
+static volatile int g_srv_auth;               // (the last 'A': 0 none heard, 1 in, 2 sign-in needed, 3 ticket not known)
+static volatile uint64_t g_srv_auth_at, g_srv_out_since;  // (ms: the last 'A'; since when not in)
 static struct sockaddr_in srv_addr_of(uint64_t ap) {
     struct sockaddr_in a;
     memset(&a, 0, sizeof a);
@@ -578,10 +590,7 @@ static bool server_resolve(void) {
     if (ap != was) {
         g_srv_ap = ap;
         if (was) {
-            struct in_addr o = {.s_addr = (uint32_t)(was >> 16)}, n = {.s_addr = ip};
-            char ob[32];
-            snprintf(ob, sizeof ob, "%s", inet_ntoa(o));
-            LOG("[steamrelay] online server %s: its address changed (%s -> %s) - following it\n", g_srv_host, ob, inet_ntoa(n));
+            LOG("[steamrelay] online server: its address changed - following it\n");
             g_srv_have_cookie = 0;  // (another machine: its own cookie)
         }
         g_srv_hello_now = 1;
@@ -599,8 +608,8 @@ static void *resolver(void *arg) {
         if (t - last < (!g_srv_resolved || quiet ? 10000u : 60000u)) continue;
         last = t;
         bool had = g_srv_resolved;
-        if (server_resolve()) { if (!had) LOG("[steamrelay] online server %s: address found\n", g_srv_host); }
-        else if (had) LOG("[steamrelay] online server %s: the name didn't resolve this time (the last address kept)\n", g_srv_host);
+        if (server_resolve()) { if (!had) LOG("[steamrelay] online server: address found\n"); }
+        else if (had) LOG("[steamrelay] online server: the name didn't resolve this time (the last address kept)\n");
     }
     return NULL;
 }
@@ -611,10 +620,20 @@ static void srv_send(const void *p, size_t n) {
     sendto(g_srv, (const char *)p, (int)n, 0, (const struct sockaddr *)&a, sizeof a);
 }
 static void srv_hello(void) {
-    uint8_t b[19] = {'H', 1};
+    uint8_t b[ACCT_HELLO_AUTH_LEN] = {'H', 1};
     memcpy(b + 2, &g_srv_id, 8), b[10] = g_srv_game;
-    if (g_srv_have_cookie) memcpy(b + 11, g_srv_cookie, 8);
-    srv_send(b, g_srv_have_cookie ? 19 : 11);
+    size_t n = 11;
+    if (g_srv_have_cookie) {
+        memcpy(b + 11, g_srv_cookie, 8), n = 19;
+        pthread_mutex_lock(&g_tk_lock);
+        if (g_tk_have) {  // (the play ticket: its id and the MAC over the hello so far - acct_proto.h)
+            memcpy(b + 19, g_tk_id, 8);
+            uint64_t mac = acct_siphash(g_tk_key, b, 27);
+            memcpy(b + 27, &mac, 8), n = ACCT_HELLO_AUTH_LEN;
+        }
+        pthread_mutex_unlock(&g_tk_lock);
+    }
+    srv_send(b, n);
     if (g_srv_code[0]) {
         uint8_t l[17] = {'L'};
         memcpy(l + 1, &g_srv_id, 8), memcpy(l + 9, g_srv_code, 8);
@@ -894,6 +913,14 @@ static void *pump(void *arg) {
                         if (!g_srv_have_cookie) LOG("[steamrelay] online server: answering (cookie taken)\n");
                         memcpy(g_srv_cookie, m + 1, 8), g_srv_have_cookie = 1, g_srv_hello_now = 1;
                     }
+                } else if (m[0] == 'A' && n >= 2) {  // (signed in or not: see g_tk_lock)
+                    int st = m[1] == 0 ? 1 : m[1] == 1 ? 2 : 3, was = g_srv_auth;
+                    if (st != 1 && (was == 1 || !g_srv_out_since)) g_srv_out_since = t ? t : 1;
+                    if (st == 1) g_srv_out_since = 0;
+                    g_srv_auth = st, g_srv_auth_at = t;
+                    if (st != was) LOG("[steamrelay] online server: %s\n", st == 1 ? "signed in - online play on"
+                                                                      : st == 2 ? "it needs an account - no play ticket (yet): signed in on it? (launcher > Options > Online)"
+                                                                                : "it doesn't know our play ticket (expired / restarted) - asking for a new one");
                 } else if (m[0] == 'X' && n >= 9 && n <= 9 + 96) {
                     pthread_mutex_lock(&g_wq_lock);
                     int nt = (g_wq_tail + 1) % 64;
@@ -1008,14 +1035,31 @@ void larecomp_relay_code(const char *code) {
 // The online server's state (runtime/hle/warp.c tells the player when it can't be reached, drops or comes back): 0 no
 // server in use, 1 not heard from yet, 2 answering, 3 never answered in 8 s, 4 stopped answering 8 s ago, 5 its name
 // doesn't resolve (8 s in). `name` gets the server as it was given (host[:port]).
+// 6: it answers, but needs an account and this copy isn't signed in on it (5 s: a ticket on its way isn't counted).
 int larecomp_server_state(char *name, size_t size) {
     if (g_srv == NO_SOCK) return 0;
     if (name && size) snprintf(name, size, "%s", g_srv_host);
-    uint64_t t = now_ms(), heard = g_srv_heard, since = g_srv_since;
+    uint64_t t = now_ms(), heard = g_srv_heard, since = g_srv_since, out = g_srv_out_since;
     if (!g_srv_resolved) return t - since >= 8000 ? 5 : 1;
-    if (heard && t - heard < 8000) return 2;
+    if (heard && t - heard < 8000) return g_srv_auth >= 2 && t - g_srv_auth_at < 8000 && out && t - out >= 5000 ? 6 : 2;
     if (t - since < 8000) return 1;
     return g_srv_ever ? 4 : 3;
+}
+
+// Signed in on the server (runtime/acct.c): the play ticket for this server's account (NULL: none - signed out), and the
+// server's last word on it: 0 nothing heard (or a server that needs no account), 1 in, 2 sign-in needed, 3 the ticket
+// isn't known (ask for a new one)
+void larecomp_server_ticket(const uint8_t *id, const uint8_t *key) {
+    pthread_mutex_lock(&g_tk_lock);
+    g_tk_have = id && key;
+    if (g_tk_have) memcpy(g_tk_id, id, 8), memcpy(g_tk_key, key, 16);
+    else memset(g_tk_key, 0, sizeof g_tk_key);
+    pthread_mutex_unlock(&g_tk_lock);
+    g_srv_hello_now = 1;  // (said at once)
+}
+int larecomp_server_auth(void) {
+    if (g_srv == NO_SOCK) return 0;
+    return g_srv_auth_at && now_ms() - g_srv_auth_at < 8000 ? g_srv_auth : 0;
 }
 
 // The shared world (runtime/hle/warp.c): 1 when an online server is in use (the world needs one)
@@ -1045,7 +1089,7 @@ int larecomp_world_recv(uint64_t *from, void *p, size_t cap) {  // (the oldest w
     return n;
 }
 
-// The online server's address: LARECOMP_RELAY_SERVER, or larecomp.ini's online_server (the launcher's Mods page)
+// The online server's address: LARECOMP_RELAY_SERVER, or larecomp.ini's online_server (the launcher's Options > Online tab)
 static bool server_config(char *out, size_t size) {
     const char *e = getenv("LARECOMP_RELAY_SERVER");
     if (e && e[0]) { snprintf(out, size, "%s", e); return true; }
@@ -1067,7 +1111,7 @@ static bool server_start(const char *spec) {
     g_srv = socket(AF_INET, SOCK_DGRAM, 0);
     if (g_srv == NO_SOCK) return false;
     nonblocking(g_srv);
-    if (!server_resolve()) LOG("[steamrelay] online server %s: address not found (yet) - trying again every 10 s\n", spec);
+    if (!server_resolve()) LOG("[steamrelay] online server: address not found (yet) - trying again every 10 s\n");
     return true;
 }
 
@@ -1117,7 +1161,8 @@ int larecomp_plugin_init(const LarecompPluginApi *api, LarecompPluginHooks *hook
         g_srv_since = now_ms();
         srv_hello();
         g_resolver_on = !pthread_create(&g_resolver, NULL, resolver, NULL);
-        LOG("[steamrelay] online play through the server %s (players with the same Link Code meet there)\n", server);
+        LOG("[steamrelay] online play through an online server (players with the same Link Code meet there; the address "
+            "isn't logged)\n");
     } else if (fake && sscanf(fake, "%u,%u", &mine, &peer) == 2) {
         g_fake = socket(AF_INET, SOCK_DGRAM, 0);
         struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)mine), .sin_addr.s_addr = htonl(0x7F000001u)};
