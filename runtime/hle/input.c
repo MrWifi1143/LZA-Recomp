@@ -752,6 +752,8 @@ void input_frame(uint64_t frame) {
     host_test_frame(frame);
     extern void warp_frame(uint64_t frame);  // (LARECOMP_WARP: hle/warp.c)
     warp_frame(frame);
+    extern void newnpc_frame(uint64_t frame);  // (LARECOMP_NEWNPC research: hle/newnpc.c)
+    newnpc_frame(frame);
     extern void plugins_game_frame(uint64_t frame);  // (runtime/plugin.h hooks.game_frame)
     plugins_game_frame(frame);
     {   // LARECOMP_LIVE=<dir> (testing): steered while it runs - lines appended to <dir>/cmd, "<frames> <keys>" with keys
