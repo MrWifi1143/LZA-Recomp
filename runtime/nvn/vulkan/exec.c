@@ -1397,6 +1397,27 @@ typedef struct {
     bool warm;          // (vk_warm_program's: released right after, no pipeline parts)
 } Prog;
 
+// What this thread is building, for a crash inside the driver (rt_fatal_trace -> vk_crash_note): NVIDIA's compiler dying
+// on one program (Windows: an access violation in nvoglv64.dll under vkCreateGraphicsPipelines on a shader worker) then
+// names that program and puts its GLSL in the log - the code to reproduce it with
+static __thread const Prog *tl_build_prog;
+static __thread const char *tl_build_what, *tl_build_glsl;  // (glsl: a compute program's)
+#define BUILDING(p, what) (tl_build_prog = (p), tl_build_what = (what), tl_build_glsl = NULL)
+#define BUILT() (tl_build_prog = NULL)
+uint64_t vk_fs_hash(uint64_t fs);
+void vk_crash_note(void) {
+    const Prog *p = tl_build_prog;
+    if (!p) return;
+    bool vs = strstr(tl_build_what, "vertex") || strstr(tl_build_what, "whole") || strstr(tl_build_what, "link");
+    bool fs = strstr(tl_build_what, "fragment") || strstr(tl_build_what, "whole") || strstr(tl_build_what, "link");
+    fprintf(stderr, "[vk] this thread was in the driver building %s of the program vs %llx fs %llx (fs hash %016llx)\n", tl_build_what,
+            (unsigned long long)p->code[0], (unsigned long long)p->code[1], p->code[1] ? (unsigned long long)vk_fs_hash(p->code[1]) : 0ull);
+    if (vs && p->vi && p->vi->msl) fprintf(stderr, "[vk] ---- its vertex GLSL ----\n%s\n[vk] ---- end ----\n", p->vi->msl);
+    if (fs && p->fi && p->fi->msl) fprintf(stderr, "[vk] ---- its fragment GLSL ----\n%s\n[vk] ---- end ----\n", p->fi->msl);
+    if (tl_build_glsl) fprintf(stderr, "[vk] ---- its compute GLSL ----\n%s\n[vk] ---- end ----\n", tl_build_glsl);
+    fflush(stderr);
+}
+
 static VkPipelineLayout make_layout(Prog *p, int nsets, VkShaderStageFlags s0, VkShaderStageFlags s1) {
     p->set_layout[0] = vk_set_layout(p->binds, p->nbinds, 0, s0);
     if (nsets > 1) p->set_layout[1] = vk_set_layout(p->binds, p->nbinds, 1, s1);
@@ -2684,7 +2705,11 @@ static void lib_build(Lib *l, int part, const PipeKey *k) {
             pi.pNext = &s.ri, pi.pColorBlendState = &s.cb, pi.pMultisampleState = &s.ms;
             break;
         }
+        BUILDING(k->prog, part == VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT ? "the vertex shader part"
+                          : part == VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT ? "the fragment shader part"
+                          : part == VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT ? "the vertex input part" : "the output part");
         lib_create(l, &pi, (VkGraphicsPipelineLibraryFlagsEXT)part);
+        BUILT();
     }
 }
 
@@ -2732,7 +2757,9 @@ static bool gpl_link(Pipe *pp) {
     VkPipelineLibraryCreateInfoKHR li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR, .libraryCount = 4, .pLibraries = parts};
     VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &li, .layout = k->prog->layout};
     uint64_t t0 = SDL_GetTicksNS();
+    BUILDING(k->prog, "the link");
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, VK_NULL_HANDLE, 1, &pi, NULL, &pp->pipe);
+    BUILT();
     atomic_fetch_add(&stat_link_ns, SDL_GetTicksNS() - t0);
     atomic_fetch_add(&stat_links, 1);
     if (r != VK_SUCCESS) {
@@ -2752,10 +2779,12 @@ static void gpl_optimize(void *arg) {  // (gpl_lto: the pipeline linked again, o
                                        .flags = VK_PIPELINE_CREATE_LINK_TIME_OPTIMIZATION_BIT_EXT, .layout = pp->k.prog->layout};
     uint64_t t0 = SDL_GetTicksNS();
     VkPipeline p = VK_NULL_HANDLE;
+    BUILDING(pp->k.prog, "the optimized link");
     if (vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p) == VK_SUCCESS) {
         atomic_fetch_add(&new_pipes, 1);
         atomic_store(&pp->optimized, p);
     }
+    BUILT();
     atomic_fetch_add(&stat_opt_ns, SDL_GetTicksNS() - t0);
     atomic_fetch_add(&stat_opts, 1);
 }
@@ -2795,7 +2824,9 @@ static void build_pipeline(void *arg) {
     uint64_t tp = SDL_GetTicksNS();
     extern bool g_pipe_exec_stats;
     if (g_pipe_exec_stats) s.pi.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
+    BUILDING(k->prog, "the whole pipeline");
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, tl_warm ? VK_NULL_HANDLE : g_vk.pcache, 1, &s.pi, NULL, &pp->pipe);
+    BUILT();
     atomic_fetch_add(&stat_pipe_ns, SDL_GetTicksNS() - tp);
     if (r == VK_SUCCESS && g_pipe_exec_stats) pipe_exec_report(pp->pipe, k->prog->code[0], k->prog->code[1]);
     if (r != VK_SUCCESS) {
@@ -4171,7 +4202,9 @@ static void build_compute(void *arg) {
                                                 .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main",
                                                 .pSpecializationInfo = &spec},
                                       .layout = cp->p.layout};
+    BUILDING(&cp->p, "the compute pipeline"), tl_build_glsl = cp->si->msl;
     VkResult r = vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &ci, NULL, &cp->pipe);
+    BUILT();
     atomic_fetch_add(&stat_compiles, 1);
     if (r == VK_SUCCESS) atomic_fetch_add(&new_pipes, 1);
     atomic_store(&cp->p.state, r == VK_SUCCESS ? 1 : 2);
