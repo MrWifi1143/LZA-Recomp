@@ -203,21 +203,24 @@ __attribute__((constructor)) static void story_init(void) {
 // ---- The shared world: other players walking around Lumiose (opt-in: larecomp.ini world_players = 1, the launcher's
 // Mods page, with an online server - contrib/lzaserver - joined through the relay plugin; or LARECOMP_GHOST=<my port>,
 // <peer port>[,<peer host>] for two copies over UDP, a test). Each copy sends its player's position, speed and facing
-// ~20 times a second; the others show each player with a character of their own level standing in: a story/station NPC
+// ~20 times a second; the others show each player - the nearest few, world_choose - with a character of their own level
+// standing in: a story/station NPC
 // near our player (a character body 3-40 m away that isn't stepped), until a townsperson made in their outfit - a station
 // NPC or a walker of the crowd, below - takes over; moved through its transform node. A node (vtable 0x7003be0d28) keeps its local scale at
 // +0xc0, rotation at +0xd0 (quaternion xyzw) and translation at +0xe0, and 0x7001ccf27c (x0 the node; called many times
 // a frame) makes its world matrices (+0x40, +0x80) from them - writing the translation moves the model (found 2026-11-14
 // by shifting every copy of a station NPC's x and halving: the world matrices themselves are overwritten). A
-// character's own node is the one whose translation is its body's position (a dressed one's: from its object). The
+// character's own node: from its object (every one made is kept), else the one whose translation is its body's position. The
 // stand-in keeps its own model, turns toward their facing (not snapped to each heading heard), walks, runs and stands as
-// they do (stand_in_walk, their animation's locomotion value); its collision is put away while it stands in (col_frame);
+// they do (stand_in_walk, their animation's locomotion value); a station NPC's collision is put away while it stands in
+// (col_frame - a walker's follows it);
 // its Talk prompt is hidden - and A there asks that player to trade (below).
 //   (The game's own remote player - Private Battles' - is an ordinary character whose movement comes from the network,
 // 2026-11-14: a stand-in until that can be made in the field.)
 #define NODE_VTABLE 0x7003be0d28ull
 #define NODE_UPDATE 0x7001ccf27cull
-#define MAXPEER 4
+#define MAXPEER 32  // (players heard at once: where they are, their outfits and looks kept)
+#define MAXSHOW 8   // (players shown at once - the nearest ones, world_choose: LARECOMP_WORLD_SHOW, 4 unless set)
 #define PEER_TIMEOUT_NS 5000000000ull
 #ifdef _WIN32
 #include <windows.h>
@@ -252,6 +255,7 @@ typedef struct {
     uint64_t col_at[4];
     float col_was[4][3];
     int ncol;
+    uint64_t col_seen, col_seen_at;  // (the stand-in, since when: a scan only after 2 s - see col_frame)
     uint64_t armed_at;               // (when their last dressing was asked for: the next one not within 10 s - unless the last
                                      //  one went away, then at once)
     int refused;                     // (outfit parts refused, logged once)
@@ -262,6 +266,10 @@ typedef struct {
     uint64_t move_node, move_bb, move_at, move_given_at, move_scratch, move_tried;
     uint32_t move_idx;
     int move_ok;
+    // (shown: one of the nearest players - only they get a stand-in, world_choose; since when; how far they were)
+    int show, noticed;
+    uint64_t shown_at;
+    float dist;
 } Peer;
 static bool look_ours(Look *l);
 // the shared world's dressing: the next townsperson made wears `want` (its player then waits for it); each one made
@@ -281,6 +289,9 @@ static uint32_t outfit_hash(const DressPart *p, int n) {
     return h;
 }
 static Peer g_peers[MAXPEER];
+// the shown players' slots (g_peers indices; the guest threads' hooks look only at these - world_choose rebuilds it)
+static volatile uint8_t g_show_idx[MAXSHOW];
+static volatile int g_nshow;
 static uint64_t g_self;               // (this copy's id in the world)
 static volatile int g_scanning;
 static volatile uint64_t g_me_body, g_me_node;  // (our player's body and node: the node has the model's facing)
@@ -313,7 +324,8 @@ static struct sockaddr_in g_udp_peer;
 static float g_off;  // (LARECOMP_GHOST_OFFSET=<m>: one copy shown beside itself, a loopback test)
 static float g_off_ahead;  // (LARECOMP_GHOST_AHEAD=<degrees>: the offset that far from their facing - in the camera's view)
 static int g_self_test;  // (LARECOMP_GHOST_SELF=1: our own packets count as another player's - one copy, a loopback test)
-static int g_crowd_ok;   // (LARECOMP_GHOST_CROWD=1: a stepped body - the crowd's - may stand in too; 2: only those, research)
+static int g_crowd_ok;   // (LARECOMP_GHOST_CROWD=1: a walker of the crowd - a stepped body - may stand in before the dressed one
+                         //  comes too; 2: only those, never dressed - research)
 static void udp_send(const void *p, size_t n) { sendto(g_udp, p, n, 0, (struct sockaddr *)&g_udp_peer, sizeof g_udp_peer); }
 static int udp_recv(uint64_t *from, void *p, size_t cap) {
     ssize_t n = recv(g_udp, p, cap, 0);
@@ -348,7 +360,7 @@ static bool heap_read(uint64_t a, void *out, size_t n) {
 }
 
 static Peer *peer_of_node(uint64_t n) {
-    for (int i = 0; i < MAXPEER; i++) if (g_peers[i].id && g_peers[i].node == n) return &g_peers[i];
+    for (int k = 0, m = g_nshow; k < m; k++) { Peer *p = &g_peers[g_show_idx[k]]; if (p->id && p->node == n) return p; }
     return NULL;
 }
 
@@ -443,7 +455,7 @@ static int interact_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     if (!g_world) return 0;
     bool any = false;
-    for (int i = 0; i < MAXPEER; i++) any |= g_peers[i].id && g_peers[i].move_ok;
+    for (int k = 0, m = g_nshow; k < m; k++) any |= g_peers[g_show_idx[k]].id && g_peers[g_show_idx[k]].move_ok;
     if (!any) return 0;
     static struct { uint64_t comp, bb, at; } cache[64];
     static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -460,7 +472,10 @@ static int interact_hook(Cpu *c, uint64_t addr) {
         pthread_mutex_unlock(&lock);
     }
     if (!bb) return 0;
-    for (int i = 0; i < MAXPEER; i++) if (g_peers[i].id && g_peers[i].move_ok && g_peers[i].move_bb == bb) return 1;  // (no Talk)
+    for (int k = 0, m = g_nshow; k < m; k++) {
+        const Peer *p = &g_peers[g_show_idx[k]];
+        if (p->id && p->move_ok && p->move_bb == bb) return 1;  // (no Talk)
+    }
     return 0;
 }
 // a let-go stand-in back to standing ("move" 0) - from the next update of its node (a guest thread)
@@ -556,8 +571,8 @@ static int node_hook(Cpu *c, uint64_t addr) {
         g_me_node = n;
         LOG("[world] our player's node %llx\n", (unsigned long long)n);
     }
-    for (int i = 0; i < MAXPEER; i++) {  // (a stand-in's node: the one at its body's spot)
-        Peer *s = &g_peers[i];
+    for (int k = 0, m = g_nshow; k < m; k++) {  // (a stand-in's node: the one at its body's spot)
+        Peer *s = &g_peers[g_show_idx[k]];
         uint64_t b = s->body;
         if (!s->id || !b || s->node) continue;
         if (!memcmp(nt, (const void *)(uintptr_t)(b + 0x90), 4) && !memcmp((const void *)(uintptr_t)(n + 0xe8), (const void *)(uintptr_t)(b + 0x98), 4)) {
@@ -569,7 +584,23 @@ static int node_hook(Cpu *c, uint64_t addr) {
 }
 
 // every character body in the heap (a background thread): for each player without a stand-in, the nearest body 3-40 m
-// from `me` that isn't stepped and isn't standing in already
+// from `me` that isn't stepped and isn't standing in already. Its node: the character's own, through its object (every
+// character made is kept - g_made, from the make's hook - and an object leads to its body, dressed_body_of); a walker of
+// the crowd's body and its own node part between its animation's step and its body's, so the node at its body's spot
+// (node_hook's way, kept for a character made before the hook) can be another one of its (2026-11-16)
+#define NMADE 1024
+static uint64_t g_made[NMADE];  // (the newest NMADE characters made: their objects - the make request's +0x30)
+static volatile unsigned g_nmade;
+static uint64_t dressed_body_of(uint64_t owner);
+static uint64_t node_of_owner(uint64_t owner);
+static uint64_t node_of_body(uint64_t body) {
+    unsigned n = g_nmade;
+    for (unsigned k = 0; k < NMADE && k < n; k++) {
+        uint64_t ow = g_made[(n - 1 - k) % NMADE];
+        if (ow && dressed_body_of(ow) == body) return node_of_owner(ow);
+    }
+    return 0;
+}
 static uint64_t g_scan_me;
 static void *scan_bodies(void *arg) {
     (void)arg;
@@ -578,6 +609,7 @@ static void *scan_bodies(void *arg) {
     enum { NC = 16 };
     uint64_t cand[NC];
     float cd[NC];
+    bool cst[NC];
     int nc = 0, count = 0;
     const size_t chunk = 1u << 20;
     uint64_t *buf = malloc(chunk);
@@ -601,17 +633,22 @@ static void *scan_bodies(void *arg) {
             if (skip) continue;
             if (nc == NC && d >= cd[NC - 1]) continue;  // (kept sorted, nearest first)
             int j = nc < NC ? nc++ : NC - 1;
-            while (j > 0 && cd[j - 1] > d) cand[j] = cand[j - 1], cd[j] = cd[j - 1], j--;
-            cand[j] = o, cd[j] = d;
+            while (j > 0 && cd[j - 1] > d) cand[j] = cand[j - 1], cd[j] = cd[j - 1], cst[j] = cst[j - 1], j--;
+            cand[j] = o, cd[j] = d, cst[j] = stepped;
         }
     }
     free(buf);
     int used = 0;
     for (int i = 0; i < MAXPEER && used < nc; i++)
-        if (g_peers[i].id && !g_peers[i].body) {
-            g_peers[i].node = 0, g_peers[i].body = cand[used];
-            LOG("[world] player %016llx: stand-in %llx, %.1f m from us (%d characters)\n", (unsigned long long)g_peers[i].id,
-                (unsigned long long)cand[used], cd[used], count);
+        if (g_peers[i].id && g_peers[i].show && !g_peers[i].body) {
+            uint64_t node = node_of_body(cand[used]);
+            // (LARECOMP_GHOST_CROWD: a walker only if it is a character made - one of the crowd; the plaza's Pokemon are
+            // stepped too, 2026-11-16: a Pokemon stood in)
+            while (cst[used] && !node && ++used < nc) node = node_of_body(cand[used]);
+            if (used == nc) break;
+            g_peers[i].node = node, g_peers[i].body = cand[used];  // (no node yet: node_hook finds it at the body's spot)
+            LOG("[world] player %016llx: stand-in %llx, %.1f m from us (%d characters; its node %s)\n", (unsigned long long)g_peers[i].id,
+                (unsigned long long)cand[used], cd[used], count, node ? "from its object" : "at its spot");
             used++;
         }
     g_scanning = 0;
@@ -627,7 +664,14 @@ static void *scan_bodies(void *arg) {
 // away the player walked straight through. A body's broadphase box isn't the game's to move from here, so a moved body
 // wouldn't block at the stand-in's spot either: the stand-in's are put 1 km under the street while it stands in (no
 // collision), and back when it is let go. Found by a background heap scan (like scan_bodies) for each new stand-in that
-// isn't stepped (a walker of the crowd carries its own).
+// isn't stepped, once it has stood in for 2 s (a character just made stands still until the crowd moves it: a walker, its
+// put-away bodies are put back as soon as it is seen stepped).
+//   A walker of the crowd standing in keeps its collision, and needs nothing: its body follows its node - to the
+// stand-in's spot, every frame (2026-11-16, two copies, LARECOMP_WORLD_LOG_STANDIN: the walker's proxy where it is drawn
+// to the centimetre, standing and walking) - so it blocks AT the stand-in like a person would (walked into it: stopped
+// 0.57 m short; the same walk alone went 7 m further) and nothing is left where the walker came from. Dead end: putting it
+// away like a station NPC's - no physics body of the world follows a walker at a fixed address (what a heap scan finds at
+// its spot, even checked twice 0.3 s apart, is scratch data - query / contact buffers - and writing it changed nothing).
 static bool body_stepped(uint64_t b, uint64_t frame);
 static struct { volatile int state; int peer; uint64_t body, at[4]; int n; } g_col;  // (state: 0 idle, 1 scanning, 2 found)
 static void *col_scan(void *arg) {
@@ -668,6 +712,10 @@ static void col_restore(Peer *p) {
     p->col_body = 0, p->ncol = 0;
 }
 static void col_frame(uint64_t frame) {
+    for (int i = 0; i < MAXPEER; i++) {  // (put away, then seen stepped: a walker after all - its own back)
+        Peer *p = &g_peers[i];
+        if (p->id && p->col_body && p->col_body == p->body && body_stepped(p->body, frame)) col_restore(p);
+    }
     if (__atomic_load_n(&g_col.state, __ATOMIC_ACQUIRE) == 2) {
         Peer *p = &g_peers[g_col.peer];
         if (p->id && p->body == g_col.body && p->node && is_body(p->body) && !p->col_body) {
@@ -685,6 +733,8 @@ static void col_frame(uint64_t frame) {
     for (int i = 0; i < MAXPEER; i++) {
         Peer *p = &g_peers[i];
         if (!p->id || !p->body || !p->node || p->col_body == p->body || p->col_tried == p->body || body_stepped(p->body, frame)) continue;
+        if (p->col_seen != p->body) { p->col_seen = p->body, p->col_seen_at = frame; continue; }
+        if (frame - p->col_seen_at < 120) continue;  // (2 s standing in, not stepped: not a walker)
         pthread_t t;
         p->col_tried = p->body;  // (once per stand-in)
         g_col.peer = i, g_col.body = p->body, g_col.n = 0, g_col.state = 1;
@@ -1051,6 +1101,77 @@ static void dressed_drop(uint64_t owner) {
     for (int i = 0; i < g_ndressed; i++) if (g_dressed[i].owner == owner) g_dressed[i] = g_dressed[--g_ndressed], i--;
     pthread_mutex_unlock(&g_dress_lock);
 }
+// a player no longer shown (or gone): their stand-in goes back, their dressed character is theirs no more (it stays a
+// townsperson in their clothes, wherever the crowd takes it) and a dressing asked for them isn't made
+static void standin_hide(Peer *p) {
+    standin_release(p);
+    pthread_mutex_lock(&g_dress_lock);
+    for (int i = 0; i < g_ndressed; i++) if (g_dressed[i].peer == p->id) g_dressed[i] = g_dressed[--g_ndressed], i--;
+    if (g_dress_want.peer == p->id) g_dress_want.peer = 0;
+    pthread_mutex_unlock(&g_dress_lock);
+    p->body = p->node = 0, p->col_body = 0, p->ncol = 0, p->col_tried = 0, p->col_seen = 0;
+    p->dressed_body = p->dressed_owner = 0, p->dressed_hash = p->armed_hash = 0, p->armed_at = p->dressed_at = 0, p->crowd_seen = 0;
+    p->show = 0;
+}
+// ---- Who is shown: the nearest players. Everyone on the server in the shared world is heard (up to MAXPEER), but only
+// the N nearest to our player (LARECOMP_WORLD_SHOW=<n>[,<metres>]: 4 within 150 m unless set, n at most MAXSHOW) get a
+// stand-in - each one is a townsperson taken from the street and, once dressed, a crowd character of their own. Chosen
+// again every second and whenever someone comes or goes; without flicker: a shown player keeps their place for 5 s at
+// least and is counted 8 m nearer than they are (one not shown must be clearly nearer to take it), and the range is
+// 20 m longer for them. Who loses their place is let go like a player who left (standin_hide).
+static int g_show_n = -1;
+static float g_show_range;
+static volatile int g_choose_soon;
+static void world_choose(uint64_t me, uint64_t frame) {
+    if (g_show_n < 0) {
+        const char *e = getenv("LARECOMP_WORLD_SHOW");
+        int n = 4;
+        float r = 150;
+        if (e) sscanf(e, "%d,%f", &n, &r);
+        g_show_n = n < 0 ? 0 : n > MAXSHOW ? MAXSHOW : n, g_show_range = r > 10 ? r : 10;
+        if (e) LOG("[world] the %d nearest players within %.0f m are shown\n", g_show_n, g_show_range);
+    }
+    if (!me) return;  // (no player: as it was - a level loading)
+    const float *a = (const float *)(uintptr_t)(me + 0x90);
+    int order[MAXPEER], n = 0;
+    float score[MAXPEER];
+    for (int i = 0; i < MAXPEER; i++) {
+        Peer *p = &g_peers[i];
+        if (!p->id) continue;
+        float dx = p->pos[0] - a[0], dy = p->pos[1] - a[1], dz = p->pos[2] - a[2];
+        p->dist = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (p->dist > g_show_range + (p->show ? 20 : 0) && !(p->show && frame - p->shown_at < 300)) continue;
+        float sc = p->show ? (frame - p->shown_at < 300 ? -1e9f + p->dist : p->dist - 8) : p->dist;
+        int j = n++;
+        while (j > 0 && score[j - 1] > sc) order[j] = order[j - 1], score[j] = score[j - 1], j--;
+        order[j] = i, score[j] = sc;
+    }
+    bool want[MAXPEER] = {0};
+    for (int k = 0; k < n && k < g_show_n; k++) want[order[k]] = true;
+    int shown = 0, heard = 0;
+    for (int i = 0; i < MAXPEER; i++) heard += g_peers[i].id != 0;
+    for (int i = 0; i < MAXPEER; i++) {  // (first the ones losing their place: a stand-in of theirs may be the next one's)
+        Peer *p = &g_peers[i];
+        if (p->id && p->show && !want[i]) {
+            LOG("[world] player %016llx no longer shown (%.0f m away): nearer players take their place\n", (unsigned long long)p->id, p->dist);
+            standin_hide(p);
+        }
+    }
+    uint8_t idx[MAXSHOW];
+    for (int i = 0; i < MAXPEER; i++) {
+        Peer *p = &g_peers[i];
+        if (!p->id || !want[i]) continue;
+        if (!p->show) {
+            p->show = 1, p->shown_at = frame;
+            LOG("[world] player %016llx shown (%.0f m away; %d heard)\n", (unsigned long long)p->id, p->dist, heard);
+            if (!p->noticed) p->noticed = 1, menu_notice_for("Another player is nearby.", 3000);
+        }
+        if (shown < MAXSHOW) idx[shown++] = (uint8_t)i;
+    }
+    // (the guest threads' hooks read the list while it changes: a slot seen twice or missed for one frame is harmless)
+    for (int k = 0; k < shown; k++) g_show_idx[k] = idx[k];
+    g_nshow = shown;
+}
 static void outfit_frame(Peer *p, uint64_t frame) {
     if (g_crowd_ok == 2) return;  // (research: the crowd's stand-ins only)
     if (p->dressed_body && (!is_body(p->dressed_body) || dressed_body_of(p->dressed_owner) != p->dressed_body)) {
@@ -1179,7 +1300,8 @@ static void world_transport(uint64_t frame) {
     g_world = want;
     LOG("[world] %s\n", want ? "on: other players on the online server are shown" : "off");
     if (!want) {  // (their stand-ins go back where they stood)
-        for (int i = 0; i < MAXPEER; i++) if (g_peers[i].id) standin_release(&g_peers[i]);
+        g_nshow = 0;
+        for (int i = 0; i < MAXPEER; i++) if (g_peers[i].id) standin_hide(&g_peers[i]);
         memset(g_peers, 0, sizeof g_peers);
     }
 }
@@ -1269,19 +1391,35 @@ static void ghost_frame(uint64_t frame) {
                 if (g_peers[i].id == in.from || (via && g_peers[i].id && g_peers[i].via == via)) taken = true;
                 else if (!g_peers[i].id && !free_p) free_p = &g_peers[i];
             }
-            if (taken || !free_p) continue;  // (more players than stand-ins)
+            if (!taken && !free_p && me) {  // (more players than we keep: one clearly nearer than the farthest of those not shown
+                const float *m = (const float *)(uintptr_t)(me + 0x90);  //  takes their place - far ones mustn't keep
+                float dx = in.w.p[0] - m[0], dy = in.w.p[1] - m[1], dz = in.w.p[2] - m[2];  //  a near one out)
+                float d = sqrtf(dx * dx + dy * dy + dz * dz), farthest = 0;
+                for (int i = 0; i < MAXPEER; i++)
+                    if (!g_peers[i].show && g_peers[i].dist > farthest) farthest = g_peers[i].dist, free_p = &g_peers[i];
+                if (free_p && d < farthest - 10) {
+                    static uint64_t logged_at;
+                    if (!logged_at || frame - logged_at > 600)
+                        logged_at = frame, LOG("[world] player %016llx (%.0f m away) heard in place of %016llx (%.0f m): %d kept at most\n",
+                                               (unsigned long long)in.from, d, (unsigned long long)free_p->id, farthest, MAXPEER);
+                    standin_hide(free_p);
+                } else free_p = NULL;
+            }
+            if (taken || !free_p) continue;  // (more players than we keep, none nearer: they wait)
             p = free_p;
             memset(p, 0, sizeof *p);
             p->id = in.from, p->via = via;
             memcpy(p->shown, in.w.p, 12), p->shown_yaw = remainderf(in.w.yaw, 6.2831853f);
             LOG("[world] player %016llx is here\n", (unsigned long long)in.from);
-            menu_notice_for("Another player is nearby.", 3000);
+            g_choose_soon = 1;
         }
         memcpy(p->pos, in.w.p, 12), p->heard_ns = now;
         for (int k = 0; k < 3; k++) p->vel[k] = fminf(fmaxf(in.w.v[k], -60.0f), 60.0f);
         p->yaw = remainderf(in.w.yaw, 6.2831853f);
         p->move = n >= 16 + 32 && isfinite(in.w.move) ? fminf(fmaxf(in.w.move, 0.0f), 2.0f) : -1;
     }
+    static uint64_t chosen_at;
+    if (g_choose_soon || frame - chosen_at >= 60) g_choose_soon = 0, chosen_at = frame, world_choose(me, frame);
     bool want_scan = false;
     static uint64_t prev_ns;  // (the time since the last frame: the turn below is the same at any frame rate)
     float dt = prev_ns && now > prev_ns ? (float)(now - prev_ns) / 1e9f : 1.0f / 60;
@@ -1292,8 +1430,14 @@ static void ghost_frame(uint64_t frame) {
         if (!p->id) continue;
         if (now - p->heard_ns > PEER_TIMEOUT_NS) {  // (gone quiet: their stand-in goes back)
             LOG("[world] player %016llx left\n", (unsigned long long)p->id);
-            standin_release(p);
+            bool was_shown = p->show;
+            standin_hide(p);
             memset(p, 0, sizeof *p);
+            if (was_shown) world_choose(me, frame);  // (out of the shown list now - and someone else may take the place)
+            continue;
+        }
+        if (!p->show) {  // (heard, not shown: kept up to date, nothing more)
+            memcpy(p->shown, p->pos, 12), p->shown_yaw = p->yaw;
             continue;
         }
         outfit_frame(p, frame);
@@ -1315,6 +1459,13 @@ static void ghost_frame(uint64_t frame) {
         static int turn_log = -1;  // (research LARECOMP_WORLD_LOG_TURN=1: each frame of a turn, heard vs shown)
         if (turn_log < 0) turn_log = getenv("LARECOMP_WORLD_LOG_TURN") != NULL;
         if (turn_log && fabsf(dy) > 0.02f) LOG("[world] turn: frame %llu heard %.3f shown %.3f\n", (unsigned long long)frame, p->yaw, p->shown_yaw);
+        static int where_log = -1;  // (research LARECOMP_WORLD_LOG_STANDIN=<n>: every n frames where the stand-in is drawn, its
+        if (where_log < 0) where_log = getenv("LARECOMP_WORLD_LOG_STANDIN") ? atoi(getenv("LARECOMP_WORLD_LOG_STANDIN")) : 0;  // body, us)
+        if (where_log > 0 && frame % (uint64_t)where_log == 0 && p->body && is_body(p->body) && me) {
+            const float *b = (const float *)(uintptr_t)(p->body + 0x90), *m = (const float *)(uintptr_t)(me + 0x90);
+            LOG("[world] standin frame %llu shown %.2f %.2f %.2f body %.2f %.2f %.2f us %.2f %.2f %.2f%s\n", (unsigned long long)frame,
+                p->shown[0], p->shown[1], p->shown[2], b[0], b[1], b[2], m[0], m[1], m[2], body_stepped(p->body, frame) ? " (stepped)" : "");
+        }
     }
     trade_frame(me, frame);
     col_frame(frame);
@@ -1389,6 +1540,7 @@ static uint32_t fb_put_parts(uint8_t *d, uint32_t w, const DressPart *parts, int
 void *hle_alloc(uint64_t size);
 static int dress_hook(Cpu *c, uint64_t addr) {
     uint64_t req = c->x[2], fbp = *(const uint64_t *)(uintptr_t)req;
+    g_made[__atomic_fetch_add(&g_nmade, 1, __ATOMIC_RELAXED) % NMADE] = ((const uint64_t *)(uintptr_t)req)[6];  // (scan_bodies)
     if (fbp < HEAP_BASE || fbp >= HEAP_BASE + HEAP_MAX) return 0;
     const uint8_t *b = (const uint8_t *)(uintptr_t)fbp;
     uint64_t root = fb_u32(b, 0);
