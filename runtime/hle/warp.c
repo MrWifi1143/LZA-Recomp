@@ -1777,14 +1777,14 @@ static void outfit_frame(Peer *p, uint64_t frame) {
     if (key != p->key_seen) p->key_seen = key, p->key_ns = world_now_ns();                             //  after they were shown: one
     if (!key || p->dressed_hash == key) return;                                                         //  as it is)
     bool own = own_npc() && !p->own_none_at, borrow = !own_npc() || frame - p->own_none_at > 300;
-    float far = own_range(), d2 = 0;
+    float reach = own_range(), d2 = 0;
     if (g_me_body) {
         const float *m = (const float *)(uintptr_t)(g_me_body + 0x90);
         d2 = (p->shown[0] - m[0]) * (p->shown[0] - m[0]) + (p->shown[2] - m[2]) * (p->shown[2] - m[2]);
     }
-    if (own && d2 > far * far) {  // (the game realises characters near the player only: one made farther off isn't, until we come by)
+    if (own && d2 > reach * reach) {  // (the game realises characters near the player only: one made farther off isn't, until we come by)
         if (!p->own_far) p->own_far = 1, LOG("[world] player %016llx is %.0f m from us: their own townsperson once they are within %.0f m\n",
-                                             (unsigned long long)p->id, sqrtf(d2), far);
+                                             (unsigned long long)p->id, sqrtf(d2), reach);
         return;
     }
     p->own_far = 0;
