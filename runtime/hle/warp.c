@@ -1781,7 +1781,8 @@ static void outfit_frame(Peer *p, uint64_t frame) {
     float reach = own_range(), d2 = 0;
     if (g_me_body) {
         const float *m = (const float *)(uintptr_t)(g_me_body + 0x90);
-        d2 = (p->shown[0] - m[0]) * (p->shown[0] - m[0]) + (p->shown[2] - m[2]) * (p->shown[2] - m[2]);
+        d2 = (p->shown[0] - m[0]) * (p->shown[0] - m[0]) + (p->shown[1] - m[1]) * (p->shown[1] - m[1]) +
+             (p->shown[2] - m[2]) * (p->shown[2] - m[2]);  // (up and down too: one falling off the level is far)
     }
     if (own && d2 > reach * reach) {  // (the game realises characters near the player only: one made farther off isn't, until we come by)
         if (!p->own_far) p->own_far = 1, LOG("[world] player %016llx is %.0f m from us: their own townsperson once they are within %.0f m\n",
