@@ -1183,10 +1183,13 @@ static struct {
     uint64_t inactive_ns, again_ns;
 } g_tl;
 // (backing the game out of a search that didn't link: stage 1 "Do you want to stop searching?" - B, then A for Yes - as
-// long as the game is still in Link Play (it can be slow to open that question while it is busy: the A then went
-// nowhere, 2026-11-17), up to 6 times; stage 2 once it has left: B past "You canceled your search.", then B through Link
-// Trade, Link Play and the menu to the field)
-static struct { int stage, tries; uint64_t quiet_ns; } g_bo;
+// long as the game is still searching (it can be slow to open that question while it is busy: the A then went nowhere,
+// 2026-11-17 - the next try is A alone, the one after B and A again), up to 6 times; stage 2 once it has stopped: B past "You canceled your search.", then B through Link
+// Trade, Link Play and the menu to the field. "Still searching" = an ldn command in the last second, 3 s after the last
+// try ended: judged by the 3 s Link Play window instead, a second try came right after the search had stopped - its B
+// took the message away and its A opened Nearby Players' Link Code keyboard, which then waited for typing)
+uint64_t ldn_trade_active_ns(void);
+static struct { int stage, tries; uint64_t tried_ns; } g_bo;
 static void trade_link_send(uint8_t state) {
     WorldPkt k = {.type = 9, .ver = 1, .from = g_self};
     k.t.to = g_tl.with, k.t.code = g_tl.code, k.t.state = state;
@@ -1200,23 +1203,28 @@ static void trade_link_end(const char *why, bool tell, bool back_out) {
     ldn_trade_role(0, 0);
     g_tl.role = 0;
     if (!g_tl.matched) g_kbd_auto_once[0] = 0;  // (a Link Code still waiting for a keyboard: not for the next one the player opens)
-    if (back_out) g_bo.stage = 1, g_bo.tries = 0, g_bo.quiet_ns = 0;
+    if (back_out) g_bo.stage = 1, g_bo.tries = 0, g_bo.tried_ns = world_now_ns() - 3000000000ull;
 }
 static void back_out_frame(int st, uint64_t now) {
+    (void)st;
     if (!g_bo.stage || input_macro_busy()) return;
-    if (st & 8) {
-        g_bo.quiet_ns = 0;
-        if (g_bo.stage == 1 && g_bo.tries < 6) g_bo.tries++, input_macro("300ms -\n170ms B\n2000ms -\n170ms A\n2500ms -\n");
-        else if (g_bo.stage == 1) g_bo.stage = 0, LOG("[world] trade: couldn't stop the game's search - left to the player\n");
-        return;
-    }
-    if (!g_bo.quiet_ns) { g_bo.quiet_ns = now; return; }
-    if (now - g_bo.quiet_ns < 500000000ull) return;
-    if (g_bo.stage == 1 && g_bo.tries) {
+    if (!g_bo.tried_ns) g_bo.tried_ns = now;  // (a try just ended - or none yet: watch the next 3 s)
+    if (now - g_bo.tried_ns < 3000000000ull) return;
+    uint64_t a = ldn_trade_active_ns();
+    bool searching = a && now - a < 1000000000ull && a > g_bo.tried_ns;
+    if (searching && g_bo.tries < 6) {  // (odd tries B then A; even ones A alone - the question came up late and is open)
+        g_bo.tries++, g_bo.tried_ns = 0;
+        input_macro(g_bo.tries & 1 ? "300ms -\n170ms B\n2000ms -\n170ms A\n2500ms -\n" : "300ms -\n170ms A\n2500ms -\n");
+    } else if (searching) {
         g_bo.stage = 0;
-        input_macro("170ms B\n2000ms -\n170ms B\n2500ms -\n170ms B\n2500ms -\n170ms B\n1000ms -\n");
-        LOG("[world] trade: the game's search stopped (%d tr%s) - back to the field\n", g_bo.tries, g_bo.tries == 1 ? "y" : "ies");
-    } else g_bo.stage = 0;
+        LOG("[world] trade: couldn't stop the game's search - left to the player\n");
+    } else {
+        g_bo.stage = 0;
+        if (g_bo.tries) {
+            input_macro("170ms B\n2500ms -\n170ms B\n2500ms -\n170ms B\n2500ms -\n170ms B\n1000ms -\n");
+            LOG("[world] trade: the game's search stopped (%d tr%s) - back to the field\n", g_bo.tries, g_bo.tries == 1 ? "y" : "ies");
+        }
+    }
 }
 static void trade_link_frame(uint64_t frame) {
     (void)frame;

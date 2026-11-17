@@ -798,6 +798,8 @@ int ldn_trade_state(void) {
     return r;
 }
 
+uint64_t ldn_trade_active_ns(void) { return T.active_ns; }  // (the game's last ldn command, plat_now_ns)
+
 SERVICE("ldn:u", ldn_u) {
     (void)s;
     if (req->cmd == 0) ipc_return_object(resp, service_new("IUserLocalCommunicationService", ldn_user, NULL)), LOG("[ldn] service opened\n");
