@@ -4,7 +4,16 @@
 // them (the game's own "Nearby" play, carried over the internet). Nothing about the players is kept: a client is an
 // address and a random id, forgotten 15 s after its last packet. No Nintendo service is involved or imitated.
 //
-//   lzaserver [--port 39200] [--max-clients 256]      (UDP; open / forward that port)
+//   lzaserver [--port 39200] [--max-clients 256] [--bind ADDR]      (UDP; open / forward that port)
+//
+// Accounts and save sync (optional for players; lzaserver_accounts.c, protocol in runtime/acct_proto.h): TCP + TLS on
+// the same port number - open / forward TCP too. Players who make an account here can have the server keep their save
+// and pick it up on another copy of the game (another PC, the PS5 port). Options:
+//   --data DIR            accounts, saves and the server's own certificate (default ./lzaserver-data)
+//   --cert FILE --key FILE  your own certificate (PEM, e.g. from Let's Encrypt) instead of the server's own
+//   --signup open|closed  new accounts from the game (default open); closed: --add-user NAME (password on stdin)
+//   --save-max-mb 32 --save-versions 10 --quota-mb 256 --max-accounts 1000
+//   --no-accounts         Link Play only (also: build with -DLZA_NO_ACCOUNTS, then this file alone is the server)
 //
 // Protocol (UDP, every packet starts with its type byte; ids are u64 little-endian, picked at random by each client):
 //   client -> server  'H' ver(1) id game(1: Arceus, 2: Z-A)   hello / keep-alive, every 2 s
@@ -26,6 +35,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifndef LZA_NO_ACCOUNTS
+#include "lzaserver_accounts.h"
+#endif
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -108,11 +120,39 @@ static void members(void) {  // (each lobby member: the others, with their hosti
 
 int main(int argc, char **argv) {
     int port = 39200;
+    const char *bind_addr = "";
+#ifndef LZA_NO_ACCOUNTS
+    AccountsOptions ao = {0};
+    bool accounts = true;
+    const char *add_user = NULL;
+    snprintf(ao.data, sizeof ao.data, "lzaserver-data");
+    ao.signup = true, ao.save_max_mb = 32, ao.versions = 10, ao.quota_mb = 256, ao.max_accounts = 1000;
+#define ARG(name) (!strcmp(argv[i], name) && i + 1 < argc)
+#endif
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--max-clients") && i + 1 < argc) g_max = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--bind") && i + 1 < argc) bind_addr = argv[++i];
+#ifndef LZA_NO_ACCOUNTS
+        else if (ARG("--data")) snprintf(ao.data, sizeof ao.data, "%s", argv[++i]);
+        else if (ARG("--cert")) snprintf(ao.cert, sizeof ao.cert, "%s", argv[++i]);
+        else if (ARG("--key")) snprintf(ao.key, sizeof ao.key, "%s", argv[++i]);
+        else if (ARG("--signup")) ao.signup = strcmp(argv[++i], "closed") != 0;
+        else if (ARG("--save-max-mb")) ao.save_max_mb = atoi(argv[++i]);
+        else if (ARG("--save-versions")) ao.versions = atoi(argv[++i]);
+        else if (ARG("--quota-mb")) ao.quota_mb = atoi(argv[++i]);
+        else if (ARG("--max-accounts")) ao.max_accounts = atoi(argv[++i]);
+        else if (ARG("--add-user")) add_user = argv[++i];
+        else if (!strcmp(argv[i], "--no-accounts")) accounts = false;
+#endif
         else {
-            fprintf(stderr, "lzaserver [--port 39200] [--max-clients 256]\n");
+            fprintf(stderr, "lzaserver [--port 39200] [--max-clients 256] [--bind ADDR]\n"
+#ifndef LZA_NO_ACCOUNTS
+                            "          [--data DIR] [--cert FILE --key FILE] [--signup open|closed] [--save-max-mb 32]\n"
+                            "          [--save-versions 10] [--quota-mb 256] [--max-accounts 1000] [--no-accounts]\n"
+                            "lzaserver [--data DIR] --add-user NAME     (the password: one line on stdin)\n"
+#endif
+            );
             return 2;
         }
     }
@@ -123,13 +163,26 @@ int main(int argc, char **argv) {
     WSAStartup(MAKEWORD(2, 2), &wsa);
 #endif
     setvbuf(stdout, NULL, _IOLBF, 0);
+#ifndef LZA_NO_ACCOUNTS
+    if (add_user) return accounts_add_user(&ao, add_user);
+#endif
     g_s = socket(AF_INET, SOCK_DGRAM, 0);
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)port), .sin_addr.s_addr = htonl(INADDR_ANY)};
+    if (bind_addr[0]) a.sin_addr.s_addr = inet_addr(bind_addr);
     if (g_s == NO_SOCK || bind(g_s, (struct sockaddr *)&a, sizeof a)) {
         fprintf(stderr, "lzaserver: can't use UDP port %d\n", port);
         return 1;
     }
     printf("lzaserver %d: UDP port %d, up to %d players\n", VERSION, port, g_max);
+#ifndef LZA_NO_ACCOUNTS
+    if (accounts) {
+        ao.port = port;
+        snprintf(ao.bind, sizeof ao.bind, "%s", bind_addr);
+        if (ao.save_max_mb < 1) ao.save_max_mb = 1;
+        if (ao.versions < 1) ao.versions = 1;
+        if (accounts_start(&ao)) return 1;
+    } else printf("lzaserver: no accounts (--no-accounts)\n");
+#endif
     static uint8_t buf[65536], out[65536];
     uint64_t last_list = 0, last_stats = now_ms();
     for (;;) {

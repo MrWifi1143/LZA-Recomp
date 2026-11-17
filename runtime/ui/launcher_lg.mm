@@ -34,6 +34,7 @@
 
 extern "C" void vk_describe_gpu(char *name, size_t n, int *vram_gb, bool *integrated);  // nvn/vulkan/device.c
 extern "C" {
+#include "acct.h"
 #include "gamesetup.h"
 #include "input_bind.h"
 #include "mods.h"
@@ -1276,6 +1277,92 @@ extern "C" void launcher_lg_run(const char *root) {
             ImGui::EndCombo();
         }
     };
+    // The online server (the Mods page; the classic start screen's Online section): its address, the shared world, and
+    // an optional account there
+    auto online_section = [&]() {
+        // (contrib/steamrelay + contrib/lzaserver: Link Play through a server someone runs, in place of Steam friends)
+        ImGui::Spacing();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(T("Online server", "Servidor online"));
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputTextWithHint("##server", T("address:port - empty: Steam friends", "endereço:porta - vazio: amigos da Steam"),
+                                 g_settings.online_server, sizeof g_settings.online_server);
+        {
+            bool w = g_settings.world_players != 0;
+            if (ImGui::Checkbox(T("Show other players walking around (online server)", "Mostrar outros jogadores andando (servidor online)"), &w))
+                g_settings.world_players = w;
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        ImGui::TextWrapped("%s", T("With the Steam relay plugin on: players who enter the same Link Code meet on that server. "
+                                    "Applies the next time the game starts.",
+                                    "Com o plugin Steam relay ligado: quem digitar o mesmo Código de Conexão se encontra nesse servidor. "
+                                    "Vale a partir da próxima vez que o jogo iniciar."));
+        ImGui::PopStyleColor();
+        // (runtime/acct.c: an optional account on that server - its save kept there, synced with other copies of the game)
+        ImGui::Spacing();
+        static char acct_name[64], acct_pass[128];
+        char signed_name[64];
+        bool busy = acct_ui_busy(), in = acct_signed_in(signed_name, sizeof signed_name);
+        ImGui::BeginDisabled(!g_settings.online_server[0]);
+        if (in) {
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("%s %s", T("Account on this server:", "Conta neste servidor:"), signed_name);
+            ImGui::SameLine();
+            ImGui::BeginDisabled(busy);
+            if (ImGui::SmallButton(T("Sign out", "Sair"))) acct_ui_start(ACCT_OP_LOGOUT, NULL, NULL);
+            ImGui::EndDisabled();
+            ImGui::Checkbox(T("Sync saves with this account", "Sincronizar saves com esta conta"), &g_settings.sync_saves);
+            const char *last = acct_last_sync();
+            if (last[0]) {
+                ImGui::PushStyleColor(ImGuiCol_Text, strstr(last, "CONFLICT") ? k_yellow : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                ImGui::TextWrapped("%s %s", T("Last sync:", "Última sincronização:"), last);
+                ImGui::PopStyleColor();
+            }
+        } else {
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(T("Account (optional)", "Conta (opcional)"));
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(170);
+            ImGui::InputTextWithHint("##acct_name", T("name", "nome"), acct_name, sizeof acct_name, ImGuiInputTextFlags_CharsNoBlank);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(170);
+            bool enter = ImGui::InputTextWithHint("##acct_pass", T("password", "senha"), acct_pass, sizeof acct_pass,
+                                                  ImGuiInputTextFlags_Password | ImGuiInputTextFlags_EnterReturnsTrue);
+            ImGui::SameLine();
+            ImGui::BeginDisabled(busy || !acct_name[0] || !acct_pass[0]);
+            int op = ACCT_OP_NONE;
+            if (ImGui::Button(T("Sign in", "Entrar")) || (enter && acct_name[0] && acct_pass[0] && !busy)) op = ACCT_OP_LOGIN;
+            ImGui::SameLine();
+            if (ImGui::Button(T("Create account", "Criar conta"))) op = ACCT_OP_CREATE;
+            ImGui::EndDisabled();
+            if (op) {
+                acct_ui_start(op, acct_name, acct_pass);
+                memset(acct_pass, 0, sizeof acct_pass);  // (never kept: the server hands out a sign-in token)
+            }
+        }
+        ImGui::EndDisabled();
+        bool err = false;
+        const char *m = acct_ui_message(&err);
+        if (busy) ImGui::TextDisabled("%s", T("Talking to the server...", "Falando com o servidor..."));
+        else if (m[0]) {
+            ImGui::PushStyleColor(ImGuiCol_Text, err ? k_red : k_green);
+            ImGui::TextWrapped("%s", m);
+            ImGui::PopStyleColor();
+            if (err && acct_ui_key_changed() && ImGui::SmallButton(T("Forget the server's key", "Esquecer a chave do servidor")))
+                acct_ui_start(ACCT_OP_FORGET_KEY, NULL, NULL);
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        ImGui::TextWrapped("%s", T("You can play without an account. One made here lives on this server only; with Sync saves on, "
+                                    "your save goes up when the game saves and comes down when you start on another PC or the PS5 version. "
+                                    "If both changed, nothing is overwritten: the newer is used and the other kept as a backup "
+                                    "(save/sync-backups). Your password goes encrypted and isn't stored on this PC.",
+                                    "Dá para jogar sem conta. Uma conta criada aqui vale só neste servidor; com Sincronizar saves ligado, "
+                                    "o save sobe quando o jogo salva e desce quando você joga em outro PC ou na versão de PS5. "
+                                    "Se os dois mudaram, nada é sobrescrito: o mais novo é usado e o outro guardado como backup "
+                                    "(save/sync-backups). A senha vai criptografada e não fica salva neste PC."));
+        ImGui::PopStyleColor();
+    };
     // The launcher's Mods page: Add / Remove / the folder at the top, then every mod - translations (mods/, one at a
     // time) and plugins (plugins/) - with a tick box each
     auto mods_page = [&]() {
@@ -1362,25 +1449,7 @@ extern "C" void launcher_lg_run(const char *root) {
                                     "Mods ligados carregam na ordem (as setas): onde dois mudam o mesmo arquivo ou textura, o de cima vence. "
                                     "Plugins carregam ao iniciar: uma mudança reinicia o jogo uma vez ao apertar Jogar."));
         ImGui::PopStyleColor();
-        // (contrib/steamrelay + contrib/lzaserver: Link Play through a server someone runs, in place of Steam friends)
-        ImGui::Spacing();
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted(T("Online server", "Servidor online"));
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(-1);
-        ImGui::InputTextWithHint("##server", T("address:port - empty: Steam friends", "endereço:porta - vazio: amigos da Steam"),
-                                 g_settings.online_server, sizeof g_settings.online_server);
-        {
-            bool w = g_settings.world_players != 0;
-            if (ImGui::Checkbox(T("Show other players walking around (online server)", "Mostrar outros jogadores andando (servidor online)"), &w))
-                g_settings.world_players = w;
-        }
-        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-        ImGui::TextWrapped("%s", T("With the Steam relay plugin on: players who enter the same Link Code meet on that server. "
-                                    "Applies the next time the game starts.",
-                                    "Com o plugin Steam relay ligado: quem digitar o mesmo Código de Conexão se encontra nesse servidor. "
-                                    "Vale a partir da próxima vez que o jogo iniciar."));
-        ImGui::PopStyleColor();
+        online_section();
         if (ImGui::BeginPopupModal("##remove", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
             bool tr = mod_sel < nmods;
             int i = tr ? mod_sel : mod_sel - nmods;
@@ -1455,6 +1524,7 @@ extern "C" void launcher_lg_run(const char *root) {
         if (pad_open) controller_section();
         if (keys_test) ImGui::SetNextItemOpen(true, ImGuiCond_Once);
         if (ImGui::CollapsingHeader(T("Keyboard", "Teclado"))) keys_section();
+        if (ImGui::CollapsingHeader(T("Online", "Online"))) online_section();  // (the PS5 port's start screen too)
         ImGui::Spacing();
         recommended_row();  // (above, where the Play button keeps the view)
         ImGui::BeginDisabled(!ready);

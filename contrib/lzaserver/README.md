@@ -17,18 +17,59 @@ that talk to Nintendo's servers stay offline.
 Pick a code nobody else would use: anyone on that server who types the same code lands in the same lobby, just like
 codes on the Switch.
 
+### Accounts and save sync (optional)
+
+In **Online server** (Mods page) there is also **Account**: a name and password make an account **on that server
+only** (Create account), or sign in to one you made before. Nobody needs one: Link Play and walking around work the
+same without. Signed in, **Sync saves with this account** (on by default) has the server keep your save:
+
+- when the game saves, your save goes up a moment later (and when you quit);
+- when the game starts, if the server has a newer save (from another PC, or the PS5 version signed in to the same
+  account on the same server), it comes down - the save you had is kept in `save/sync-backups/`;
+- if both changed (you played on two machines without syncing in between), nothing is overwritten: the newer one is
+  used and the other is kept as a backup (`save/sync-backups/`, and the server keeps its last 10 versions too).
+  The launcher's Mods page shows what the last sync did.
+
+The password is sent encrypted (TLS) and is never stored on your PC - only a sign-in token
+(`online/accounts.txt`). The first time you sign in to a server, the game remembers that server's key; if the key
+ever changes, the game refuses to talk to it ("the server's identity changed") until you press **Forget the
+server's key** - only do that if the server's owner says they changed it.
+
 ## Running a server
 
-One UDP port (default **39200**): open it in the firewall and forward it on the router.
+One port number (default **39200**) for **UDP** (Link Play) and **TCP** (accounts and save sync): open both in the
+firewall and forward both on the router.
 
 ```sh
 make lzaserver              # in the repository: build/lzaserver (Windows: PLATFORM=windows ... build/win/lzaserver.exe)
-cc -O2 -o lzaserver lzaserver.c   # or just this file, on any machine with a C compiler
 ./lzaserver --port 39200 --max-clients 256
+cc -O2 -DLZA_NO_ACCOUNTS -o lzaserver lzaserver.c   # Link Play only, no accounts: just this file, any C compiler
 ```
 
-It prints who comes and goes (an address and a random id) and, every minute, how much it passed on. Nothing is
-stored; a player is forgotten 15 s after their last packet. It uses almost no CPU: a few hundred packets a second per
+Accounts and saves live in `--data` (default `./lzaserver-data`): back that folder up. Options:
+
+| Option | Default | |
+|---|---|---|
+| `--data DIR` | `lzaserver-data` | accounts, saves, the server's own certificate |
+| `--bind ADDR` | all | the address to listen on (UDP and TCP) |
+| `--signup open\|closed` | open | `closed`: no new accounts from the game; make them with `lzaserver --data DIR --add-user NAME` (password on stdin) |
+| `--save-max-mb N` | 32 | the largest save taken (a Z-A save is about 6 MB) |
+| `--save-versions N` | 10 | versions of each game's save kept per account |
+| `--quota-mb N` | 256 | per account, all versions of all games together |
+| `--max-accounts N` | 1000 | |
+| `--cert FILE --key FILE` | | your own certificate (PEM, e.g. Let's Encrypt for your domain) instead of the server's own |
+| `--no-accounts` | | Link Play only |
+
+Security: TLS 1.3 only (Mbed TLS). Without `--cert`, the server makes its own certificate at its first start
+(`<data>/tls/`, keep `key.pem` private and backed up - a new key makes every player's game refuse the server until
+they press Forget the server's key) and prints its key fingerprint: publish it so players can compare. Passwords are
+stored as salted Argon2id hashes (19 MiB, 2 passes), sessions as SHA-256 of random tokens (180 days unused: gone,
+at most 10 devices per account). Sign-in tries: 5 wrong per account and 8 wrong per address in 10 minutes, then a
+wait; 3 new accounts per address per hour; 32 connections at once, 4 per address. These counters are in memory (a
+restart clears them).
+
+It prints who comes and goes (an address and a random id) and, every minute, how much it passed on. For Link Play
+nothing is stored; a player is forgotten 15 s after their last packet (accounts: above). It uses almost no CPU: a few hundred packets a second per
 trade.
 
 ### systemd
@@ -40,8 +81,9 @@ Description=lzaserver (PL:A / PL:Z-A Recomp Link Play)
 After=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/lzaserver --port 39200
+ExecStart=/usr/local/bin/lzaserver --port 39200 --data /var/lib/lzaserver
 DynamicUser=yes
+StateDirectory=lzaserver
 Restart=on-failure
 
 [Install]
@@ -51,18 +93,27 @@ WantedBy=multi-user.target
 ### Docker
 
 ```dockerfile
+# (build context: the repository root)
 FROM alpine:3.20 AS build
 RUN apk add --no-cache build-base
-COPY lzaserver.c /src/
-RUN cc -O2 -static -o /lzaserver /src/lzaserver.c
+COPY contrib/lzaserver /src/contrib/lzaserver
+COPY runtime/acct_proto.h /src/runtime/
+COPY third_party/mbedtls /src/third_party/mbedtls
+COPY third_party/monocypher /src/third_party/monocypher
+WORKDIR /src
+RUN cc -O2 -static -Ithird_party/mbedtls/include -Ithird_party/mbedtls '-DMBEDTLS_CONFIG_FILE="lza_mbedtls_config.h"' \
+       -Ithird_party/mbedtls/library -Iruntime -Ithird_party contrib/lzaserver/lzaserver.c contrib/lzaserver/lzaserver_accounts.c \
+       third_party/monocypher/monocypher.c third_party/mbedtls/library/*.c -o /lzaserver -lpthread
 
 FROM scratch
 COPY --from=build /lzaserver /lzaserver
-EXPOSE 39200/udp
-ENTRYPOINT ["/lzaserver", "--port", "39200"]
+EXPOSE 39200/udp 39200/tcp
+VOLUME /data
+ENTRYPOINT ["/lzaserver", "--port", "39200", "--data", "/data"]
 ```
 
-`docker build -t lzaserver . && docker run -d -p 39200:39200/udp lzaserver`
+`docker build -f contrib/lzaserver/Dockerfile -t lzaserver . && docker run -d -p 39200:39200/udp -p 39200:39200/tcp -v lzaserver-data:/data lzaserver`
+(the Dockerfile above, saved as `contrib/lzaserver/Dockerfile`: its compile line is checked with gcc, the image itself not built yet)
 
 ### AMP (CubeCoders)
 
@@ -73,4 +124,5 @@ No ready-made AMP template yet. AMP's Generic module can run any program: point 
 
 See the comment at the top of `lzaserver.c` (UDP; hello / lobby / hosting / data packets; a client may only speak with
 the id it said hello with; data only reaches members of the same game's lobby). The game side is the relay plugin,
-`contrib/steamrelay/steamrelay.c` (its "online server" mode).
+`contrib/steamrelay/steamrelay.c` (its "online server" mode). Accounts and save sync: `runtime/acct_proto.h` (TCP +
+TLS), server `lzaserver_accounts.c`, game `runtime/acct.c` (in the runtime itself, so the PS5 port has it too).
