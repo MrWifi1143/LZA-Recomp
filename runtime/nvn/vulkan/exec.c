@@ -2879,7 +2879,7 @@ static void lib_build(Lib *l, int part, const PipeKey *k) {
     {
         PipeInfo s;
         pipe_info(&s, k);
-        static const VkPipelineRenderingCreateInfo no_targets = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+        VkPipelineRenderingCreateInfo no_targets = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
         VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pDynamicState = &s.dy};
         switch (part) {
         case VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT:
