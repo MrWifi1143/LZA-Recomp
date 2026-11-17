@@ -33,6 +33,8 @@ enum {
     SETUP_FAIL_NO_BASE,     // the update's package without the base game's
     SETUP_FAIL_UNPACK,      // a package couldn't be read (damaged, or a layout runtime/nxpkg.c doesn't read)
     SETUP_FAIL_PLA_VERSION, // Legends: Arceus, but not 1.1.1 (game_pla_unsupported; last: --prepare's exit codes stay)
+    SETUP_FAIL_ROMFS,       // the RomFS image's tables don't find the game's own files (romfs_check: a base game dump
+                            // the update doesn't fit), or a set-up image like that (game_romfs_broken)
 };
 
 // While the game code is compiled: the estimated minutes left (from the pace so far), -1 before there is one.
@@ -49,6 +51,9 @@ int game_build(const char *exefs);
 // Legends: Arceus, but not 1.1.1 (the base game alone, an older update): not played - the runtime's hooks are at
 // 1.1.1's addresses, other code in any other build (SETUP_FAIL_PLA_VERSION).
 bool game_pla_unsupported(const char *exefs);
+// <data root>/extracted/romfs.bin is there but the game wouldn't find its own files in it (romfs_check, once per file
+// size / time): not played - the game would stop at its first file (SETUP_FAIL_ROMFS).
+bool game_romfs_broken(void);
 // That exefs/main's module id (the NSO header's build id, its first 8 bytes) in hex, "?" (false) when unreadable.
 bool game_module_id(const char *exefs, char out[17]);
 // Its version ("1.0.0", "1.0.2"...: the builds known by their build id; "1.0.0" otherwise), told to the game (am).

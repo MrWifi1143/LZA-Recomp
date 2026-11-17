@@ -326,3 +326,100 @@ bool romfs_copy_file(const char *src, const char *dst, void (*progress)(uint64_t
     uint64_t done = 0;
     return copy_file(src, dst, (uint64_t)st.st_size, &done, (uint64_t)st.st_size, progress);
 }
+
+// ---- the image's tables, checked as the game's RomFS code uses them (romfs_build.h romfs_check)
+#ifdef _WIN32
+#define ck_seek(f, o) _fseeki64(f, (long long)(o), SEEK_SET)
+#define ck_size(f) (_fseeki64(f, 0, SEEK_END), (uint64_t)_ftelli64(f))
+#else
+#define ck_seek(f, o) fseeko(f, (off_t)(o), SEEK_SET)
+#define ck_size(f) (fseeko(f, 0, SEEK_END), (uint64_t)ftello(f))
+#endif
+
+static uint32_t name_hash_n(uint32_t parent, const uint8_t *name, uint32_t n) {
+    uint32_t h = parent ^ 123456789u;
+    for (uint32_t i = 0; i < n; i++) h = ((h >> 5) | (h << 27)) ^ name[i];
+    return h;
+}
+static uint32_t get32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
+
+// Entry `want` of a table (dir entries: hash link at +0x10, name length +0x14, name +0x18; file entries: +0x18, +0x1C,
+// +0x20) found again through its hash bucket, as the game looks a name up: the chain from the bucket, entries with the
+// same parent and name. Chains are bounded (a broken table may loop).
+static bool found_by_hash(const uint8_t *tab, uint64_t tsize, const uint8_t *hash, uint32_t nb, uint32_t parent,
+                          uint32_t want, uint32_t link, uint32_t at_len, uint64_t max_steps) {
+    uint32_t nl = get32(tab + want + at_len);
+    const uint8_t *name = tab + want + at_len + 4;
+    uint32_t e = get32(hash + 4 * (name_hash_n(parent, name, nl) % nb));
+    for (uint64_t steps = 0; e != EMPTY && steps < max_steps; steps++) {
+        if ((e & 3) || (uint64_t)e + at_len + 4 > tsize) return false;
+        uint32_t el = get32(tab + e + at_len);
+        if ((uint64_t)e + at_len + 4 + el > tsize) return false;
+        if (get32(tab + e) == parent && el == nl && !memcmp(tab + e + at_len + 4, name, nl)) return e == want;
+        e = get32(tab + e + link);
+    }
+    return false;
+}
+
+bool romfs_check(const char *path, char *why, size_t why_size) {
+    #define CK_FAIL(...) do { if (why) snprintf(why, why_size, __VA_ARGS__); goto done; } while (0)
+    bool ok = false;
+    uint8_t *dh = NULL, *dm = NULL, *fh = NULL, *fm = NULL;
+    FILE *f = fopen(path, "rb");
+    if (!f) CK_FAIL("can't open %s", path);
+    uint64_t h[10], size = ck_size(f);
+    if (ck_seek(f, 0) || fread(h, 1, sizeof h, f) != sizeof h || h[0] != 0x50) CK_FAIL("no RomFS header");
+    // header: size, dir hash (off, size), dir entries, file hash, file entries, data offset
+    for (int t = 0; t < 4; t++) {
+        uint64_t off = h[1 + 2 * t], sz = h[2 + 2 * t];
+        if (!sz || sz > (64u << 20) || off > size || sz > size - off || ((t == 0 || t == 2) && (sz & 3)))
+            CK_FAIL("table %d outside the image (offset %llx, size %llx)", t, (unsigned long long)off, (unsigned long long)sz);
+    }
+    uint8_t **tabs[4] = {&dh, &dm, &fh, &fm};
+    for (int t = 0; t < 4; t++) {
+        uint64_t off = h[1 + 2 * t], sz = h[2 + 2 * t];
+        if (!(*tabs[t] = malloc(sz)) || ck_seek(f, off) || fread(*tabs[t], 1, sz, f) != sz) CK_FAIL("can't read table %d", t);
+    }
+    uint64_t dsz = h[4], fsz = h[8];
+    uint32_t ndb = (uint32_t)(h[2] / 4), nfb = (uint32_t)(h[6] / 4);
+    uint64_t dmax = dsz / 0x18 + 1, fmax = fsz / 0x20 + 1;  // (no chain is longer than its table has entries)
+    if (dsz < 0x18 || get32(dm + 0x14) != 0) CK_FAIL("no root directory");
+    int files = 0, lost = 0;
+    char first[600] = "";
+    for (uint64_t o = 0; o + 0x20 <= fsz;) {
+        uint32_t parent = get32(fm + o), nl = get32(fm + o + 0x1C);
+        if (o + 0x20 + nl > fsz) CK_FAIL("file entry %llx runs past its table", (unsigned long long)o);
+        files++;
+        // its directories, root first (parent chain up to the root, offset 0)
+        uint32_t chain[64];
+        int depth = 0;
+        bool good = true;
+        for (uint32_t d = parent; d != 0; d = get32(dm + d)) {
+            if (depth == 64 || (d & 3) || (uint64_t)d + 0x18 > dsz || (uint64_t)d + 0x18 + get32(dm + d + 0x14) > dsz) { good = false; break; }
+            chain[depth++] = d;
+        }
+        uint32_t cur = 0;
+        for (int i = depth - 1; good && i >= 0; i--) {
+            good = found_by_hash(dm, dsz, dh, ndb, cur, chain[i], 0x10, 0x14, dmax);
+            cur = chain[i];
+        }
+        if (good) good = found_by_hash(fm, fsz, fh, nfb, parent, (uint32_t)o, 0x18, 0x1C, fmax);
+        if (!good && !lost++) {  // (the first one lost, for the log: its path as the entries spell it)
+            char p[600] = "";
+            for (int i = depth - 1; i >= 0; i--) {
+                uint32_t l = get32(dm + chain[i] + 0x14);
+                snprintf(p + strlen(p), sizeof p - strlen(p), "%.*s/", (int)(l < 100 ? l : 100), (const char *)dm + chain[i] + 0x18);
+            }
+            snprintf(first, sizeof first, "%s%.*s", p, (int)(nl < 100 ? nl : 100), (const char *)fm + o + 0x20);
+        }
+        o += 0x20 + align4(nl);
+    }
+    if (!files) CK_FAIL("no files in the file table");
+    if (lost) CK_FAIL("%d of its %d files can't be found by name (first: %s)", lost, files, first);
+    ok = true;
+done:
+    free(dh), free(dm), free(fh), free(fm);
+    if (f) fclose(f);
+    return ok;
+    #undef CK_FAIL
+}

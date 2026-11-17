@@ -332,6 +332,12 @@ int main(int argc, char **argv) {
         LOG("[boot] %s: Legends: Arceus, but not 1.1.1 - the start screen instead of the game\n", boot_exefs);
         skip_launcher = false;
     }
+    // (a RomFS image whose tables don't find the game's own files - a base game dump the update wasn't made for: the
+    // game would stop at its first file, "exception ... accessing 0" while the shaders load. The start screen says why.)
+    if (skip_launcher && !strcmp(root, "extracted") && game_romfs_broken()) {
+        LOG("[boot] extracted/romfs.bin: the game's files can't be found by name in it - the start screen instead of the game\n");
+        skip_launcher = false;
+    }
     for (bool title = !skip_launcher || force_launcher;;) {
         if (title) {  // start screen: resolution, fullscreen, anti-aliasing, translation, keys (runtime/ui/launcher_lg.mm)
             extern void discord_set_screen(int screen);

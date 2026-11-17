@@ -531,19 +531,23 @@ static void game_files_section(SDL_Window *win) {
     }
     // (game files set up by an earlier release from another Arceus version: asked for again, as a failed setup would)
     if (!ready && st < SETUP_FAIL_NOT_FOUND && game_pla_unsupported("extracted/exefs")) st = SETUP_FAIL_PLA_VERSION;
+    // (and an image whose tables don't find the game's files - a base game dump the update doesn't fit: the same)
+    if (!ready && st < SETUP_FAIL_NOT_FOUND && game_romfs_broken()) st = SETUP_FAIL_ROMFS;
     if (st >= SETUP_FAIL_NOT_FOUND) {
         static const char *const en[] = {"No game files found in that folder.", "Those are compressed game files (.nsz / .xcz).",
                                          "That's not a supported game (Pokémon Legends: Arceus).", "The files couldn't be copied.",
                                          "The game code didn't build.", "The game code builder is missing from this copy.",
                                          "No keys found for those game files (prod.keys).", "Your keys can't open those game files.",
                                          "Only the update was found, not the base game.", "Those game files couldn't be read.",
-                                         "This needs Pokémon Legends: Arceus version 1.1.1 (the base game and the 1.1.1 update); those files are another version."};
+                                         "This needs Pokémon Legends: Arceus version 1.1.1 (the base game and the 1.1.1 update); those files are another version.",
+                                         "The game can't find its own files in those: the base game doesn't fit the update."};
         static const char *const pt[] = {"Nenhum arquivo do jogo nessa pasta.", "Esses são arquivos do jogo comprimidos (.nsz / .xcz).",
                                          "Esse não é um jogo suportado (Pokémon Legends: Arceus).", "Os arquivos não puderam ser copiados.",
                                          "O código do jogo não compilou.", "O compilador do código do jogo não está nesta cópia.",
                                          "Nenhuma chave encontrada para esses arquivos (prod.keys).", "As suas chaves não abrem esses arquivos.",
                                          "Só a atualização foi encontrada, não o jogo base.", "Esses arquivos do jogo não puderam ser lidos.",
-                                         "É preciso o Pokémon Legends: Arceus versão 1.1.1 (o jogo base e a atualização 1.1.1); esses arquivos são de outra versão."};
+                                         "É preciso o Pokémon Legends: Arceus versão 1.1.1 (o jogo base e a atualização 1.1.1); esses arquivos são de outra versão.",
+                                         "O jogo não encontra os próprios arquivos neles: o jogo base não combina com a atualização."};
         static const char *const en_h[] = {"Choose the folder with your .nsp / .xci files, or the one that holds exefs and romfs.",
                                            "Decompress them first (nsz -D), or dump them as .nsp / .xci.",
                                            "Pick the folder of your own Pokémon Legends: Arceus.", "Check there are about 6 GB free and try again.",
@@ -552,7 +556,8 @@ static void game_files_section(SDL_Window *win) {
                                            "Dump prod.keys again from your Switch on its current system version; details in lasrecomp.log.",
                                            "Put the base game's .nsp / .xci in the same folder as the update.",
                                            "The dump may be damaged; details in lasrecomp.log.",
-                                           "Update the game to 1.1.1 on your Switch, dump the base game and the update, and put both in one folder (README)."};
+                                           "Update the game to 1.1.1 on your Switch, dump the base game and the update, and put both in one folder (README).",
+                                           "Dump the base game again from your own Switch (cartridge or installed game), put it in one folder with the 1.1.1 update and pick that folder; details in lasrecomp.log."};
         static const char *const pt_h[] = {"Escolha a pasta com os seus arquivos .nsp / .xci, ou a que tem exefs e romfs.",
                                            "Descomprima antes (nsz -D), ou faça o dump como .nsp / .xci.",
                                            "Escolha a pasta do seu Pokémon Legends: Arceus.", "Confira se há uns 6 GB livres e tente de novo.",
@@ -561,7 +566,8 @@ static void game_files_section(SDL_Window *win) {
                                            "Faça o dump do prod.keys de novo no Switch com a versão atual do sistema; detalhes no lasrecomp.log.",
                                            "Coloque o .nsp / .xci do jogo base na mesma pasta da atualização.",
                                            "O dump pode estar danificado; detalhes no lasrecomp.log.",
-                                           "Atualize o jogo para a 1.1.1 no Switch, faça o dump do jogo base e da atualização e coloque os dois numa pasta (README)."};
+                                           "Atualize o jogo para a 1.1.1 no Switch, faça o dump do jogo base e da atualização e coloque os dois numa pasta (README).",
+                                           "Faça o dump do jogo base de novo no seu próprio Switch (cartucho ou jogo instalado), coloque numa pasta com a atualização 1.1.1 e escolha essa pasta; detalhes no lasrecomp.log."};
         int k = st - SETUP_FAIL_NOT_FOUND;
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 900);
         ImGui::TextColored(k_red, "%s", T(en[k], pt[k]));
@@ -1466,6 +1472,10 @@ extern "C" void launcher_lg_run(const char *root) {
             } else if (st == SETUP_FAIL_PLA_VERSION || (st < SETUP_FAIL_NOT_FOUND && game_pla_unsupported("extracted/exefs"))) {
                 ImGui::TextColored(k_red, "%s", T("This needs Pokémon Legends: Arceus version 1.1.1; those files are another version.",
                                                   "É preciso o Pokémon Legends: Arceus versão 1.1.1; esses arquivos são de outra versão."));
+                ImGui::TextDisabled("%s", T("Open Game Files for what to do.", "Abra Arquivos do jogo para ver o que fazer."));
+            } else if (st == SETUP_FAIL_ROMFS || (st < SETUP_FAIL_NOT_FOUND && game_romfs_broken())) {
+                ImGui::TextColored(k_red, "%s", T("The game can't find its own files: the base game doesn't fit the update.",
+                                                  "O jogo não encontra os próprios arquivos: o jogo base não combina com a atualização."));
                 ImGui::TextDisabled("%s", T("Open Game Files for what to do.", "Abra Arquivos do jogo para ver o que fazer."));
             } else if (st >= SETUP_FAIL_NOT_FOUND) {
                 ImGui::TextColored(k_red, "%s", T("The game files couldn't be set up.", "Os arquivos do jogo não puderam ser preparados."));
