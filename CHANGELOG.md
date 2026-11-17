@@ -5,6 +5,21 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsZA`)
 
+## 2026-11-17: LegendsZA-v1.2.3
+
+Previous release: LegendsZA-v1.2.2. Game version: Pokemon Legends: Z-A 2.0.2. A hotfix: same game code as 1.2.0, so
+nothing is rebuilt on start (the hotfix zip is enough on Windows).
+
+- The freeze after 30+ minutes (often in a battle as a move is chosen, music playing on) is fixed. The table of
+  shader pipelines had a fixed size; late in a long session it filled up and the next new pipeline searched it
+  forever. The shader tables now grow instead. Reported on Discord by players on an RTX 4070 SUPER and an RTX 4060 Ti.
+- A Link Play room (Private Battle) no longer hangs the GPU (device lost) now and then: indirect draws whose
+  arguments hold garbage are skipped for that frame instead of drawing billions of instances.
+- Steam Deck and other screens below 1536x864: the broadcast hologram and the title screen no longer show garbage
+  down the right and bottom edges.
+- A freeze without a crash now writes a report to lasrecomp.log ([hang] lines: what every thread waits on, and the
+  render thread's call stack), so a freeze can be tracked down from the log.
+
 ## 2026-11-15: LegendsZA-v1.2.2
 
 Previous release: LegendsZA-v1.2.1. Game version: Pokemon Legends: Z-A 2.0.2. Same game
