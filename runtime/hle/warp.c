@@ -364,6 +364,8 @@ typedef struct {
     uint64_t own_at;
     uint64_t here_ns, key_ns;        // (when they were first heard; when what they wear last changed - the log's timings)
     uint32_t key_seen;
+    uint64_t own_none_at;            // (since when no station of a loaded level was there to make theirs from - 5 s: borrowed)
+    int own_far;                     // (too far from us for theirs to be made: logged once until nearer)
 } Peer;
 static bool look_ours(Look *l);
 // the shared world's dressing: the next townsperson made wears `want` (its player then waits for it); each one made
@@ -393,6 +395,14 @@ bool newnpc_ready(void);
 int newnpc_spawn(const float at[3], float yaw);
 int newnpc_number(uint64_t node);
 void newnpc_bad(int k);
+// (how far from us theirs is made: the game realises people within ~58-60 m of the player and keeps them to ~75 m
+// (hle/za_fixes.c); one asked for 90 m off was never made - 2026-11-17, fake players at 5..100 m: 5-60 m made at once.
+// LARECOMP_WORLD_OWN_RANGE=<m>)
+static float own_range(void) {
+    static float r = -1;
+    if (r < 0) r = getenv("LARECOMP_WORLD_OWN_RANGE") ? (float)atof(getenv("LARECOMP_WORLD_OWN_RANGE")) : 55;
+    return r;
+}
 #define NOWN 64
 // (k: newnpc_<k>; n 0: plain - their outfit not heard in time; failed: made, but its station's NPC data is no townsperson)
 static struct { int k, failed, made; uint64_t peer; uint32_t key; DressPart parts[MAXPARTS]; int n, body; Look look; bool look_ok; } g_own[NOWN];
@@ -1757,12 +1767,27 @@ static void outfit_frame(Peer *p, uint64_t frame) {
                 p->look_refused_at = frame, LOG("[world] player %016llx's look refused: %s - shown in their outfit alone\n", (unsigned long long)p->id, why);
         }
     }
+    if (own_npc()) {  // (their own can be made here: a station of a loaded level kept - none for 5 s, one borrowed: below, ghost_frame)
+        if (newnpc_ready()) p->own_none_at = 0;
+        else if (!p->own_none_at) p->own_none_at = frame;
+    }
     uint32_t key = p->hash && p->look_state ? p->hash ^ (p->look_state == 1 ? p->look_hash : 0x5eed) : 0;
     bool settled = g_me_body && g_me_node && frame - g_me_since > 90;
     if (own_npc() && !key && !p->dressed_owner && p->shown_at && frame - p->shown_at > 480) key = 1;  // (their outfit not heard 8 s
     if (key != p->key_seen) p->key_seen = key, p->key_ns = world_now_ns();                             //  after they were shown: one
     if (!key || p->dressed_hash == key) return;                                                         //  as it is)
-    bool own = own_npc() && newnpc_ready();
+    bool own = own_npc() && !p->own_none_at, borrow = !own_npc() || frame - p->own_none_at > 300;
+    float far = own_range(), d2 = 0;
+    if (g_me_body) {
+        const float *m = (const float *)(uintptr_t)(g_me_body + 0x90);
+        d2 = (p->shown[0] - m[0]) * (p->shown[0] - m[0]) + (p->shown[2] - m[2]) * (p->shown[2] - m[2]);
+    }
+    if (own && d2 > far * far) {  // (the game realises characters near the player only: one made farther off isn't, until we come by)
+        if (!p->own_far) p->own_far = 1, LOG("[world] player %016llx is %.0f m from us: their own townsperson once they are within %.0f m\n",
+                                             (unsigned long long)p->id, sqrtf(d2), far);
+        return;
+    }
+    p->own_far = 0;
     uint64_t owner = 0;
     pthread_mutex_lock(&g_dress_lock);
     for (int i = 0; i < g_ndressed; i++) if (g_dressed[i].peer == p->id && g_dressed[i].hash == key) owner = g_dressed[i].owner;
@@ -1781,7 +1806,8 @@ static void outfit_frame(Peer *p, uint64_t frame) {
             LOG("[world] player %016llx: their own townsperson newnpc_%03d asked for at %.1f %.1f %.1f (%s)\n", (unsigned long long)p->id, k, p->shown[0],
                 p->shown[1], p->shown[2], key == 1 ? "as it is: their outfit not heard yet" : "in their outfit");
         }
-    } else if (!owner && p->armed_hash != key && !g_dress_want.peer && (!p->armed_at || frame - p->armed_at > 600) && g_dressings < 400) {
+    } else if (!owner && !own && borrow && p->armed_hash != key && !g_dress_want.peer && (!p->armed_at || frame - p->armed_at > 600) &&
+               g_dressings < 400) {
         g_dress_want.peer = p->id, g_dress_want.n = p->nparts, g_dress_want.body = p->body_type, g_dress_want.hash = key;  // (the next
         g_dress_want.look = p->look, g_dress_want.look_ok = p->look_state == 1;                                         // made: theirs)
         p->armed_at = frame;
@@ -1806,7 +1832,7 @@ static void outfit_frame(Peer *p, uint64_t frame) {
     if (old && old != owner) gone_add(old, p->id, 0);
     if (p->own_k) LOG("[world] player %016llx: newnpc_%03d placed %.1f s after it was asked for\n", (unsigned long long)p->id, p->own_k,
                       (double)(frame - p->own_at) / 60.0);
-    p->dressed_hash = key, p->dressed_owner = owner, p->dressed_body = b, p->dressed_at = 0, p->own_k = 0;
+    p->dressed_hash = key, p->dressed_owner = owner, p->dressed_body = b, p->dressed_at = 0, p->own_k = 0, p->own_none_at = 0;
     p->body = b, p->node = node;  // (0: found by node_hook at the body's spot)
     uint64_t others[8];
     int no = 0;
@@ -2168,7 +2194,7 @@ static void ghost_frame(uint64_t frame) {
         }
         // (none: one borrowed from the street - with world_own_npc only where their own can't be made, 5 s after they were
         // shown: a level loads its stations a moment after our player is in it)
-        if (!p->body && (!own_npc() || (frame - p->shown_at > 300 && !newnpc_ready()))) want_scan = true;
+        if (!p->body && (!own_npc() || (p->own_none_at && frame - p->own_none_at > 300))) want_scan = true;
         pres_frame(p, frame);
         float target[3], pull = 1.0f - expf(-dt * 25.8f);  // (pull: 0.35 of the way a frame at 60 fps - the same at any rate)
         if (p->nsnap) {
