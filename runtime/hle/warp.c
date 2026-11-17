@@ -841,11 +841,17 @@ static void trade_send(int accept, uint64_t to, uint32_t code) {
     k.t.to = to, k.t.code = code;
     for (int i = 0; i < 3; i++) world_send(&k, 16 + 12);
 }
-static void trade_start(uint32_t code) {
+// (wait_ms: the one who asked goes in later than the one who answered. Each game looks for a room a few times, then
+// opens one itself; going in at the same moment - the asker starts when the answer comes, a moment after the answerer -
+// both looked while neither had a room, then both opened one and waited for each other until the game gave up
+// (2026-11-16, four copies at ~33 fps: 1 of 2 tries). 6 s later, the asker's looks come after the answerer's room is open.)
+static void trade_start(uint32_t code, unsigned wait_ms) {
     snprintf(g_kbd_auto_once, sizeof g_kbd_auto_once, "%08u", code);
     // X (menu), up to Link Play, A; right twice to Link Trade, A; Nearby Players, A; the Link Code entry answers itself
-    input_macro("200ms -\n170ms X\n2500ms -\n170ms UP\n500ms -\n170ms A\n4000ms -\n170ms RIGHT\n500ms -\n170ms RIGHT\n"
-                "500ms -\n170ms A\n3000ms -\n170ms A\n1000ms -\n");
+    char m[256];
+    snprintf(m, sizeof m, "%ums -\n170ms X\n2500ms -\n170ms UP\n500ms -\n170ms A\n4000ms -\n170ms RIGHT\n500ms -\n170ms RIGHT\n"
+             "500ms -\n170ms A\n3000ms -\n170ms A\n1000ms -\n", 200 + wait_ms);
+    input_macro(m);
     char t[96];
     snprintf(t, sizeof t, "Trading with the other player (Link Code %04u %04u)", code / 10000, code % 10000);
     menu_notice_for(t, 8000);
@@ -855,7 +861,7 @@ static void trade_start(uint32_t code) {
 static void trade_message(const WorldPkt *k, uint64_t frame) {
     if (k->t.to != g_self || k->t.code >= 100000000u) return;  // (a Link Code has 8 digits)
     if (k->type == 4) {
-        if (g_trade == 1 && k->from == g_trade_with && k->t.code == g_trade_code) trade_start(k->t.code);
+        if (g_trade == 1 && k->from == g_trade_with && k->t.code == g_trade_code) trade_start(k->t.code, 6000);
         return;
     }
     if (g_trade == 2 && k->from == g_trade_with && k->t.code == g_trade_code) return;  // (a repeat)
@@ -905,7 +911,7 @@ static void trade_frame(uint64_t me, uint64_t frame) {
     eat = true;
     if (theirs && g_trade == 2) {
         trade_send(1, g_trade_with, g_trade_code);
-        trade_start(g_trade_code);
+        trade_start(g_trade_code, 0);
     } else if (!theirs || g_trade == 0) {
         g_trade_code = 10000000u + (uint32_t)(world_now_ns() / 1000 % 89999999u);
         g_trade = 1, g_trade_with = by->id, g_trade_at = frame;

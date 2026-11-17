@@ -700,17 +700,20 @@ static uint64_t g_pad_obj;
 volatile int g_inject_plus;  // frames to hold Plus for the game (movie.c: A / B skip the opening movie too)
 RT_ON_RESET(input_reboot_reset) { g_pad_obj = 0; g_inject_plus = 0; }  // (reboot: the controller object was guest memory)
 // The scripted-input queue: LARECOMP_LIVE's commands and input_macro()'s (lines "<frames> <keys>" or "<n>ms <keys>")
-static struct { long len; bool ms; char keys[120]; } g_mq[256];
+static struct { long len; bool ms, macro; char keys[120]; } g_mq[256];  // (macro: an input_macro() line)
 static int g_mqh, g_mqt;
 static bool g_mq_active;
 static bool g_mq_macro;  // (input_macro's lines queued: busy until the queue is empty)
-static void mq_push_line(const char *line) {
+static bool g_mq_now_macro;  // (the line pressing now is input_macro()'s: never swallowed)
+static void mq_push_line_as(const char *line, bool macro) {
     long len;
     char keys[120], unit[8] = "";
     bool ms = sscanf(line, "%ld%7[ms] %119s", &len, unit, keys) == 3 && !strcmp(unit, "ms");
     if ((ms || sscanf(line, "%ld %119s", &len, keys) == 2) && (g_mqt + 1) % 256 != g_mqh)
-        g_mq[g_mqt].len = len, g_mq[g_mqt].ms = ms, snprintf(g_mq[g_mqt].keys, 120, "%s", keys), g_mqt = (g_mqt + 1) % 256;
+        g_mq[g_mqt].len = len, g_mq[g_mqt].ms = ms, g_mq[g_mqt].macro = macro, snprintf(g_mq[g_mqt].keys, 120, "%s", keys),
+        g_mqt = (g_mqt + 1) % 256;
 }
+static void mq_push_line(const char *line) { mq_push_line_as(line, false); }
 // Buttons pressed for the player, on top of their own input (the input thread: from input_frame's callees only)
 void input_macro(const char *lines) {
     for (const char *l = lines; l && *l;) {
@@ -718,7 +721,7 @@ void input_macro(const char *lines) {
         char line[160];
         size_t n = e ? (size_t)(e - l) : strlen(l);
         snprintf(line, sizeof line, "%.*s", (int)(n < sizeof line - 1 ? n : sizeof line - 1), l);
-        mq_push_line(line);
+        mq_push_line_as(line, true);
         l = e ? e + 1 : NULL;
     }
     g_mq_macro = true;
@@ -827,6 +830,7 @@ void input_frame(uint64_t frame) {
 #undef qt
 #undef active
             script_buttons = b, script_lx = lx, script_ly = ly, script_rx = rx, script_ry = ry;
+            g_mq_now_macro = g_mq_active && g_mq[g_mqh].macro;
             if (dir || g_mq_active || g_mqh != g_mqt) return;
         }
     }
@@ -1019,7 +1023,7 @@ static void fill_state(Cpu *c) {
     const uint64_t zr = input_pad_finger_on() ? 1ull << BTN_ZR : 0;  // (with the finger on, the controller's ZR touches)
     if (wheel_until[0] || wheel_until[1]) recompute_keyboard();  // (a wheel notch's binding lets go by time)
     uint64_t b = menu ? script_buttons & ~zr : ((key_buttons | plugin_buttons | (pad_buttons & ~zr)) & ~g_input_swallow) |
-                                               (script_buttons & ~zr & (g_mq_macro ? ~0ull : ~g_input_swallow));
+                                               (script_buttons & ~zr & (g_mq_now_macro ? ~0ull : ~g_input_swallow));
     {
         uint64_t menu_mouse_buttons(Cpu *c);  // (runtime/hle/menu_mouse.c: the mouse in the game's menus)
         uint64_t m = menu_mouse_buttons(c);
