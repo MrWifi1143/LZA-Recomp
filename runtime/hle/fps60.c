@@ -709,15 +709,27 @@ static uint64_t g_last_step = 16666667;  // (the step written last: the table en
 // up to LARECOMP_CATCHUP_MS (1 s): more is a load.
 // A step shows in the picture of the next present (measured with LARECOMP_RT_PATTERN): the step written now is the
 // time between this frame's present and the next one's.
+// The levels count periods of a grid: the frame rate's own period, but half of it at 72 fps (72 is half a 144 Hz
+// screen's refresh): there a level of 2 is 72, 3 is 48 (every frame shown for 3 refreshes) and 4 is 36. On the
+// period itself 72 had only 72 and 36: a frame that takes 15-20 ms (over 72's 13.9, well under 48's 20.8) sat at 36.
+// The steps stay whole grid periods (the 144 fps setting's).
 // LARECOMP_RT_PACE=0: as before (A/B); LARECOMP_RT_LAG=<presents> (research): that lag; LARECOMP_RT_LOG=1: the level's
-// changes (2: also its state every 2 s).
+// changes (2: also its state every 2 s); LARECOMP_RT_GRID=<fps> (research): the grid's rate (0: the frame rate's own).
 #define RT_LAG_MAX 4
 #define RT_LAG 1  // (the presents between a step written and the picture it moved: measured)
 static uint64_t g_due;               // (the frame being presented's time: 0 none, the pacer's own clock)
 static uint64_t g_dues[RT_LAG_MAX];  // (this frame's time and the next ones' already decided; [0] = 0: none)
 static uint64_t g_paced_at;          // (when the last present's wait ended)
 static uint64_t g_rt_debt;           // (world time still to make up)
-static unsigned g_rt_level = 1;      // (periods between frames)
+static unsigned g_rt_level = 1;      // (grid periods between frames)
+// (grid periods in the frame rate's period: 2 at 72 fps, above; else 1)
+static unsigned rt_grid_sub(uint64_t rate_ns) {
+    static int grid = -2;
+    if (grid == -2) grid = getenv("LARECOMP_RT_GRID") ? atoi(getenv("LARECOMP_RT_GRID")) : -1;
+    unsigned fps = (unsigned)((1000000000ull + rate_ns / 2) / rate_ns);
+    if (grid >= 0) return grid > (int)fps && grid % (int)fps == 0 ? (unsigned)grid / fps : 1;
+    return fps == 72 ? 2 : 1;
+}
 uint64_t pla60_present_due(void) { return g_due; }
 void pla60_pace_restart(void) { g_dues[0] = g_paced_at = 0; }  // (present_pace: after a pause)
 static uint64_t paced_step(uint64_t now, int64_t max_behind) {
@@ -731,9 +743,9 @@ static uint64_t paced_step(uint64_t now, int64_t max_behind) {
     static uint64_t lates, lates_old, last_ready, changed_at, tried_at, backoff = 1000000000ull, late_sum, slack = ~0ull, slack_now = ~0ull;
     static unsigned late_n, frames;
     static uint64_t early[8];  // (how early the last 8 frames were ready: 0 late)
-    uint64_t p = g_pla60_ns, kmax = 33333334u / p ? 33333334u / p : 1;
+    uint64_t rate_p = g_pla60_ns, sub = rt_grid_sub(rate_p), p = rate_p / sub, kmax = 33333334u / p ? 33333334u / p : 1;
     static uint64_t level_p;
-    if (p != level_p) level_p = p, g_rt_level = 1;  // (another frame rate: from its own period again)
+    if (rate_p != level_p) level_p = rate_p, g_rt_level = (unsigned)sub;  // (another frame rate: from its own period again)
     if (!g_dues[0] || now > g_dues[0] + (uint64_t)max_behind) {
         static int logged;
         if (g_dues[0] && logged++ < 20) LOG("[fps60] a %.0f ms stall: the step clock starts over\n", (double)(now - g_dues[0]) / 1e6);
@@ -745,7 +757,7 @@ static uint64_t paced_step(uint64_t now, int64_t max_behind) {
         for (int i = 0; i < lag; i++) g_dues[i] += d;
         g_rt_debt += d;
         if (g_rt_debt > (uint64_t)max_behind) g_rt_debt = (uint64_t)max_behind;
-        if (d > 500000 && d > p / 4) lates |= 1, late_sum += now - last_ready, late_n++;  // (a little late: the next step makes it up)
+        if (d > 500000 && d > rate_p / 4) lates |= 1, late_sum += now - last_ready, late_n++;  // (a little late: the next step makes it up)
         slack_now = 0, early[frames % 8] = 0;
     } else {
         early[frames % 8] = g_dues[0] - now;
@@ -762,9 +774,10 @@ static uint64_t paced_step(uint64_t now, int64_t max_behind) {
         if (log) LOG("[fps60] frames late: %u periods a frame (%.0f fps), was %u; next try lower in %.0f s at the earliest\n", g_rt_level,
                      1e9 / (double)(g_rt_level * p), old, backoff / 1e9);
         lates = lates_old = 0, late_sum = late_n = 0, changed_at = now, slack = slack_now = ~0ull;
-    } else if (g_rt_level > 1 && !(lates & 0xffffffffull) && now - changed_at > backoff && slack != ~0ull && slack > p + 500000) {
+    } else if (g_rt_level > sub && !(lates & 0xffffffffull) && now - changed_at > backoff && slack != ~0ull && slack > p + 500000) {
         unsigned fit = (unsigned)((slack - 500000) / p), half = (g_rt_level + 1) / 2;  // (periods to spare; at most half)
         g_rt_level = g_rt_level > fit + half ? g_rt_level - fit : half;
+        if (g_rt_level < sub) g_rt_level = (unsigned)sub;  // (never above the frame rate)
         changed_at = tried_at = now, slack = slack_now = ~0ull;
         if (log) LOG("[fps60] trying %u periods a frame (%.0f fps)\n", g_rt_level, 1e9 / (double)(g_rt_level * p));
     }
