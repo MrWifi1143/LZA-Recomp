@@ -430,6 +430,8 @@ static bool g_hooked;
 //          before it sent 44). Its header's u8[6] = u16 sequence, u32 the sender's clock in ms when sent (0: an older
 //          copy - none): over the internet packets come late, unevenly and out of order (WorldWhere below)
 //   type 3 trade asked, 4 trade answered: u64 to, u32 code
+//   type 9 trade link: u64 to, u32 code, u8 state - during a walk-up trade, how the Link Trade goes: 1 our room is up
+//          (the answerer, who hosts: on a change and every 0.5 s while up), 0 it closed, 3 we gave up / stopped (unmatched)
 //   type 5 outfit: u8 part k, u8 parts n, u8 body type, then three strings (NUL-ended): the part's name, its .ccdatam
 //          ("ik_chara/<dir>/<last>.ccdatam" sent as "<dir>"), its variant (the item and colour); 96 bytes at most.
 //          Its header's u8[6] begins with a u32 hash of the whole outfit (outfit_hash; 0: an older copy): taken once all
@@ -443,7 +445,7 @@ static bool g_hooked;
 //   type 6 look: u8 piece k of n (2), u8[6], 64 bytes of a Look (the save's dress-up: part hashes, options). The u8[6]
 //          begins with a u32 FNV-1a of the whole Look (0: an older copy): a look is taken only once both pieces carry
 //          the same one and it matches - a piece lost or late while they change clothes never makes a half-new look
-typedef struct { uint8_t type, ver, pad[6]; uint64_t from; union { struct { float p[3], yaw, v[3], move; } w; struct { uint64_t to; uint32_t code; } t;
+typedef struct { uint8_t type, ver, pad[6]; uint64_t from; union { struct { float p[3], yaw, v[3], move; } w; struct { uint64_t to; uint32_t code; uint8_t state; } t;
     struct { uint64_t to; uint32_t o, l; } a;
     struct { uint8_t k, n, body; char s[77]; } o; struct { uint8_t k, n, pad[6]; uint8_t d[64]; } l; }; } WorldPkt;
 
@@ -1160,11 +1162,147 @@ static void trade_send(int accept, uint64_t to, uint32_t code) {
     k.t.to = to, k.t.code = code;
     for (int i = 0; i < 3; i++) world_send(&k, 16 + 12);
 }
-// (wait_ms: the one who asked goes in later than the one who answered. Each game looks for a room a few times, then
-// opens one itself; going in at the same moment - the asker starts when the answer comes, a moment after the answerer -
-// both looked while neither had a room, then both opened one and waited for each other until the game gave up
-// (2026-11-16, four copies at ~33 fps: 1 of 2 tries). 6 s later, the asker's looks come after the answerer's room is open.)
-static void trade_start(uint32_t code, unsigned wait_ms) {
+// ---- the link of a walk-up trade. Each game, left alone, looks for a room a few times and then opens one for a few
+// seconds, over and over; two copies going in at once both opened rooms and waited for each other (2026-11-16), and the
+// fix then - the asker going in 6 s later - still paired only about half the time through a lagged server (2026-11-17:
+// the answerer's rooms were up 2.6-3.9 s at a time, the asker's looks waited 250 ms for answers that took 160-600 ms).
+// Now the roles are fixed in runtime/services/ldn.c (ldn_trade_role): the answerer hosts, the asker only joins - its
+// looks wait until the answerer's room is up. The answerer says so here (type 9 state 1), the asker's looks then find it
+// at once (they ask the lobby every second too: an older answerer doesn't say). Not linked by the end of TRADE_LINK_S:
+// both are told (state 3), a notice says so, and the game is backed out of its search to the field.
+int ldn_trade_state(void);  // (1 our room open, 2 someone joined it, 4 we joined a room, 8 the game is in Link Play)
+void ldn_trade_role(int role, unsigned secs);
+void ldn_trade_partner(int up);
+#define TRADE_LINK_S 75
+static struct {
+    int role;              // 0 none, 1 we host (we answered), 2 we join (we asked)
+    uint64_t with;
+    uint32_t code;
+    uint64_t start_ns, linked_ns, up_sent_ns;
+    int up_sent, matched, active, dropped, retries, again_presses;
+    uint64_t inactive_ns, again_ns;
+} g_tl;
+// (backing the game out of a search that didn't link: stage 1 "Do you want to stop searching?" - B, then A for Yes - as
+// long as the game is still in Link Play (it can be slow to open that question while it is busy: the A then went
+// nowhere, 2026-11-17), up to 6 times; stage 2 once it has left: B past "You canceled your search.", then B through Link
+// Trade, Link Play and the menu to the field)
+static struct { int stage, tries; uint64_t quiet_ns; } g_bo;
+static void trade_link_send(uint8_t state) {
+    WorldPkt k = {.type = 9, .ver = 1, .from = g_self};
+    k.t.to = g_tl.with, k.t.code = g_tl.code, k.t.state = state;
+    world_send(&k, 16 + 13);
+}
+static void trade_link_end(const char *why, bool tell, bool back_out) {
+    LOG("[world] trade: %s (%s, %.1f s after it began)\n", why, g_tl.role == 1 ? "we host" : "we join",
+        (double)(world_now_ns() - g_tl.start_ns) / 1e9);
+    if (tell)
+        for (int i = 0; i < 3; i++) trade_link_send(3);
+    ldn_trade_role(0, 0);
+    g_tl.role = 0;
+    if (!g_tl.matched) g_kbd_auto_once[0] = 0;  // (a Link Code still waiting for a keyboard: not for the next one the player opens)
+    if (back_out) g_bo.stage = 1, g_bo.tries = 0, g_bo.quiet_ns = 0;
+}
+static void back_out_frame(int st, uint64_t now) {
+    if (!g_bo.stage || input_macro_busy()) return;
+    if (st & 8) {
+        g_bo.quiet_ns = 0;
+        if (g_bo.stage == 1 && g_bo.tries < 6) g_bo.tries++, input_macro("300ms -\n170ms B\n2000ms -\n170ms A\n2500ms -\n");
+        else if (g_bo.stage == 1) g_bo.stage = 0, LOG("[world] trade: couldn't stop the game's search - left to the player\n");
+        return;
+    }
+    if (!g_bo.quiet_ns) { g_bo.quiet_ns = now; return; }
+    if (now - g_bo.quiet_ns < 500000000ull) return;
+    if (g_bo.stage == 1 && g_bo.tries) {
+        g_bo.stage = 0;
+        input_macro("170ms B\n2000ms -\n170ms B\n2500ms -\n170ms B\n2500ms -\n170ms B\n1000ms -\n");
+        LOG("[world] trade: the game's search stopped (%d tr%s) - back to the field\n", g_bo.tries, g_bo.tries == 1 ? "y" : "ies");
+    } else g_bo.stage = 0;
+}
+static void trade_link_frame(uint64_t frame) {
+    (void)frame;
+    uint64_t now = world_now_ns();
+    int st = ldn_trade_state();
+    back_out_frame(st, now);
+    if (!g_tl.role) return;
+    if (st & 8) g_tl.active = 1, g_tl.inactive_ns = 0;
+    else if (g_tl.active && !g_tl.inactive_ns) g_tl.inactive_ns = now;
+    if (g_tl.role == 1) {  // (our room: the other is told when it is up, again every 0.5 s - a lost one - and when it closes)
+        int up = st & 1;
+        if (up != g_tl.up_sent || (up && now - g_tl.up_sent_ns >= 500000000ull)) {
+            trade_link_send((uint8_t)up);
+            if (up != g_tl.up_sent) LOG("[world] trade: our room is %s t %llu\n", up ? "up" : "closed", (unsigned long long)(now / 1000000));
+            g_tl.up_sent = up, g_tl.up_sent_ns = now;
+        }
+    }
+    bool linked = (st & 6) != 0;
+    if (!linked && g_tl.linked_ns && !g_tl.matched) {
+        g_tl.dropped = 1;
+        LOG("[world] trade: the link dropped %.1f s after it was made (the game's own session over it failed)\n",
+            (double)(now - g_tl.linked_ns) / 1e9);
+    }
+    if (!linked) g_tl.linked_ns = 0;
+    else if (!g_tl.linked_ns) g_tl.linked_ns = now;
+    if (!g_tl.matched && g_tl.linked_ns && now - g_tl.linked_ns >= 12000000000ull) {  // (a join the game gives up on - its own
+        // session over the link failing - leaves within ~5 s: 1.4 s through the moderate lag, 4.5-4.9 s through the harsh)
+        g_tl.matched = 1;
+        LOG("[world] trade: linked with %016llx (%s) %.1f s after it began\n", (unsigned long long)g_tl.with,
+            g_tl.role == 1 ? "they joined our room" : "we joined their room", (double)(g_tl.linked_ns - g_tl.start_ns) / 1e9);
+    }
+    // (we joined, then the game's own session over the link failed - through a lagged server it can give up a few seconds
+    // in: "No one could be found!", and back to Nearby / Faraway Players once that is dismissed. The one who joins goes
+    // again - A past the message, A for Nearby Players, the Link Code answers itself - while the other keeps its room up.
+    // One A every 3 s until the game is looking again: the message can take a while to come up, and an A before it went
+    // nowhere - a fixed A, A then left the game on Nearby / Faraway, 2026-11-17)
+    if (g_tl.again_ns) {
+        if (st & 8) {
+            g_tl.again_ns = 0, g_tl.active = 1, g_tl.inactive_ns = 0;
+            LOG("[world] trade: the game is looking again (%d press%s)\n", g_tl.again_presses, g_tl.again_presses == 1 ? "" : "es");
+        } else if (now - g_tl.again_ns >= 3000000000ull && !input_macro_busy()) {
+            if (g_tl.again_presses >= 4) {
+                g_tl.again_ns = 0;  // (not looking again: given up - the search-ended path below tells the other)
+                LOG("[world] trade: the game didn't start looking again\n");
+            } else {
+                g_tl.again_ns = now, g_tl.again_presses++;
+                snprintf(g_kbd_auto_once, sizeof g_kbd_auto_once, "%08u", g_tl.code);
+                input_macro("170ms A\n300ms -\n");
+            }
+            return;
+        } else return;
+    }
+    if (g_tl.role == 2 && g_tl.dropped && !g_tl.matched && g_tl.inactive_ns && now - g_tl.inactive_ns >= 1000000000ull &&
+        g_tl.retries < 3 && now - g_tl.start_ns < (uint64_t)(TRADE_LINK_S - 15) * 1000000000ull && !input_macro_busy()) {
+        g_tl.retries++, g_tl.dropped = 0, g_tl.again_presses = 1, g_tl.again_ns = now;
+        snprintf(g_kbd_auto_once, sizeof g_kbd_auto_once, "%08u", g_tl.code);
+        input_macro("170ms A\n300ms -\n");
+        menu_notice_for("The link dropped - linking up again...", 5000);
+        LOG("[world] trade: linking up again (try %d)\n", g_tl.retries + 1);
+        return;
+    }
+    if (g_tl.inactive_ns && now - g_tl.inactive_ns >= 4000000000ull) {  // (out of Link Play: the trade is over, or it was left)
+        if (g_tl.matched) trade_link_end("over", false, false);
+        else menu_notice_for("The trade search ended before you linked up.", 6000), trade_link_end("search ended before it linked", true, false);
+        return;
+    }
+    if (!g_tl.matched && now - g_tl.start_ns >= (uint64_t)TRADE_LINK_S * 1000000000ull) {
+        menu_notice_for("Couldn't link up with the other player for the trade. Back to the field - try again.", 8000);
+        trade_link_end("not linked in time", true, (st & 8) != 0);
+    }
+}
+static void trade_link_message(const WorldPkt *k) {  // (type 9)
+    if (!g_tl.role || k->from != g_tl.with || k->t.to != g_self || k->t.code != g_tl.code) return;
+    if (k->t.state <= 1 && g_tl.role == 2) {
+        static int was;
+        ldn_trade_partner(k->t.state);
+        if (k->t.state != was) LOG("[world] trade: their room is %s t %llu\n", k->t.state ? "up" : "closed", (unsigned long long)(world_now_ns() / 1000000));
+        was = k->t.state;
+    } else if (k->t.state == 3 && !g_tl.matched) {
+        menu_notice_for("The other player couldn't link up or stopped. Back to the field - try again.", 8000);
+        trade_link_end("they gave up", false, (ldn_trade_state() & 8) != 0);
+    }
+}
+// (role: 1 we host - we answered: we go in at once; 2 we join - we asked: we go in at once too, our looks wait for their
+// room. Before 2026-11-17 the asker went in 6 s later instead)
+static void trade_start(uint32_t code, unsigned wait_ms, int role) {
     snprintf(g_kbd_auto_once, sizeof g_kbd_auto_once, "%08u", code);
     // X (menu), up to Link Play, A; right twice to Link Trade, A; Nearby Players, A; the Link Code entry answers itself
     char m[256];
@@ -1174,13 +1312,16 @@ static void trade_start(uint32_t code, unsigned wait_ms) {
     char t[96];
     snprintf(t, sizeof t, "Trading with the other player (Link Code %04u %04u)", code / 10000, code % 10000);
     menu_notice_for(t, 8000);
-    LOG("[world] trade: Link Code %08u\n", code);
+    LOG("[world] trade: Link Code %08u (%s) t %llu\n", code, role == 1 ? "we host" : "we join", (unsigned long long)(world_now_ns() / 1000000));
+    memset(&g_tl, 0, sizeof g_tl);
+    g_tl.role = role, g_tl.with = g_trade_with, g_tl.code = code, g_tl.start_ns = world_now_ns();
+    ldn_trade_role(role, TRADE_LINK_S + 30 + wait_ms / 1000);
     g_trade = 0;
 }
 static void trade_message(const WorldPkt *k, uint64_t frame) {
     if (k->t.to != g_self || k->t.code >= 100000000u) return;  // (a Link Code has 8 digits)
     if (k->type == 4) {
-        if (g_trade == 1 && k->from == g_trade_with && k->t.code == g_trade_code) trade_start(k->t.code, 6000);
+        if (g_trade == 1 && k->from == g_trade_with && k->t.code == g_trade_code) trade_start(k->t.code, 0, 2);
         return;
     }
     if (g_trade == 2 && k->from == g_trade_with && k->t.code == g_trade_code) return;  // (a repeat)
@@ -1230,7 +1371,7 @@ static void trade_frame(uint64_t me, uint64_t frame) {
     eat = true;
     if (theirs && g_trade == 2) {
         trade_send(1, g_trade_with, g_trade_code);
-        trade_start(g_trade_code, 0);
+        trade_start(g_trade_code, 0, 1);
     } else if (!theirs || g_trade == 0) {
         g_trade_code = 10000000u + (uint32_t)(world_now_ns() / 1000 % 89999999u);
         g_trade = 1, g_trade_with = by->id, g_trade_at = frame;
@@ -2044,6 +2185,7 @@ static void ghost_frame(uint64_t frame) {
         if (in.ver != 1 || in.from == g_self || !in.from) continue;
         Peer *p = peer_from(&in, via);
         if (in.type == 3 || in.type == 4) { if (n >= 28 && p) trade_message(&in, frame); continue; }
+        if (in.type == 9) { if (n >= 29 && p) trade_link_message(&in); continue; }
         if (in.type == 5) { outfit_message(p, &in, (size_t)n); continue; }
         if (in.type == 8) {  // (what they have of ours: ours stop being resent once everyone has them)
             if (p && n >= 32 && (in.a.to == g_self || (g_self_test && in.a.to == (g_self ^ 2))))
@@ -2275,6 +2417,7 @@ static void ghost_frame(uint64_t frame) {
         }
     }
     trade_frame(me, frame);
+    trade_link_frame(frame);
     static uint64_t scanned_at;
     if (want_scan && !g_scanning && me && mn && (!scanned_at || frame - scanned_at > 600 || (g_scan_soon && frame - scanned_at > 60))) {
         pthread_t t;
