@@ -665,6 +665,15 @@ void za_fixes_configure(const char *exefs) {
         if (e) g_stdheap_size = strtoull(e, NULL, 0) << 20;
         else if (sh > 2160) g_stdheap_size = HEAP_MAX;  // (capped to the window by heaps.c)
         else if (sh > 1440) g_stdheap_size = 0x120000000ull;  // 4.5 GB (4K's route ran in 4 GB, not in 2.75)
+        // 1440p and below: 3.5 GB, not the 2.75 GB thought Switch-like. At 720p and Switch settings the game holds 2.58 GB
+        // right after a load and swings between 2.6 and 2.74 GB walking Rouge (LARECOMP_LOG_HEAPUSE=1), so a busier spot
+        // ran it out within minutes (a laptop RX Vega 8, Windows: texture loads failing at 2.75 GB -> the game's abort ->
+        // "svcBreak"). On the Switch the allocator gets 12 GB of address space (Initialize(NULL, 0x300000000)) backed page
+        // by page out of the ~3.2 GB the console gives the game, so it isn't held to 2.75 GB, and a gap between its
+        // blocks costs no memory there - in one fixed block it does (largest free piece 21 MB at 2.75 GB used). Costs
+        // nothing until used where the block is backed / imported as it's touched (integrated GPUs, small heaps, RADV);
+        // a whole import (discrete GPUs with RAM to spare) pins 768 MB more of it.
+        else g_stdheap_size = 0xE0000000ull;
         if (!e && g_settings.shadows > 0)  // (bigger shadow maps come out of it too: 2048 +60 MB, 4096 +240 MB)
             g_stdheap_size += g_settings.shadows == 2 ? 0x10000000ull : 0x4000000ull;
         // (and the characters Draw Distance lets in: Max at 1440p with Ultra shadows ran out opening the menu)

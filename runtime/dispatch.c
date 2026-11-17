@@ -375,6 +375,8 @@ void rt_fatal_trace(void) {
             if (!lr) break;
         }
     }
+    // (the hang watch stays quiet while the message box is up: it logged a "hang" under a crash's dialog)
+    { extern volatile int g_hang_paused; g_hang_paused = 1; }
     plat_fatal_notice();
     // our crash handler also catches SIGABRT: without this abort() re-entered it forever (a 5 GB log)
     signal(SIGABRT, SIG_DFL);

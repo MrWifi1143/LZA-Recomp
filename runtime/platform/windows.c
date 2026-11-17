@@ -219,7 +219,12 @@ void plat_fatal_notice(void) {
             char *end = strchr(line, '\n');
             if (end) *end = 0;
             snprintf(text, sizeof text, RT_APP_NAME " stopped because of an error:\n\n%.600s", line);
-            if (strstr(line, "device lost")) {  // (the GPU stopped mid-game: a driver needing Vulkan 1.3 never got this far)
+            if (strstr(line, "svcBreak") && strstr(tail, "[heaps] standard allocation")) {
+                // (the game's own memory ran out: it aborts on the failed allocation - hle/heaps.c logs it first)
+                size_t l = strlen(text);
+                snprintf(text + l, sizeof text - l, "\n\nThe game ran out of its memory (lower Draw Distance / Shadows "
+                         "settings use less). Please report it with the file below and where it happened.");
+            } else if (strstr(line, "device lost")) {  // (the GPU stopped mid-game: a driver needing Vulkan 1.3 never got this far)
                 size_t l = strlen(text);
                 snprintf(text + l, sizeof text - l, "\n\nThe graphics card stopped (a GPU crash). Please report it with the "
                          "file below and where it happened; updating the graphics driver may help.");

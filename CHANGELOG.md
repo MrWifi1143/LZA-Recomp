@@ -5,6 +5,12 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsZA`)
 
+- The crash after some minutes of play ("svcBreak" in the error box) is fixed: the game ran out of its own memory. It
+  got a fixed 2.75 GB block, and at 720p on Switch settings it already uses 2.6-2.75 GB walking Lumiose, so a busier
+  spot failed a texture load and the game stopped itself. The block is now 3.5 GB (more with higher settings, as
+  before). Where the game's memory runs out anyway, the error box now says so. Reported on Discord by a player on a
+  laptop with RX Vega 8 graphics.
+
 ## 2026-11-17: LegendsZA-v1.2.3
 
 Previous release: LegendsZA-v1.2.2. Game version: Pokemon Legends: Z-A 2.0.2. A hotfix: same game code as 1.2.0, so
