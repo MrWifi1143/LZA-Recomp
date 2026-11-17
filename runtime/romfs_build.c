@@ -8,6 +8,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -263,7 +264,10 @@ static bool copy_file(const char *src, const char *dst, uint64_t size, uint64_t 
 #ifdef _WIN32
     if (CreateHardLinkA(dst, src, NULL)) goto linked;  // (same NTFS volume: a hard link)
 #else
-    if (link(src, dst) == 0) goto linked;  // (same volume: a hard link)
+    // (same volume: a hard link - to the file itself when src is a symbolic link: a link to the link would stay in
+    // extracted/ as a link, which rt_remove_game_files leaves alone, and the next setup's image would be written
+    // through it into the picked file)
+    if (linkat(AT_FDCWD, src, AT_FDCWD, dst, AT_SYMLINK_FOLLOW) == 0) goto linked;
 #endif
     {
         FILE *in = fopen(src, "rb"), *out = in ? fopen(dst, "wb") : NULL;
