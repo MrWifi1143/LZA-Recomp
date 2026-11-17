@@ -339,6 +339,11 @@ typedef struct {
     uint64_t move_node, move_bb, move_at, move_given_at, move_scratch, move_tried;
     uint32_t move_idx;
     int move_ok;
+    // (a stand-in that sat, talked or stood in a loop of its own when picked - its own AI's pose parameters, POSE_N of
+    // them: the ones changed to stand it up, and what they were - given back when it is let go, stand_in_stop)
+    int32_t pose_was[10];
+    uint16_t pose_cleared;
+    uint64_t pose_at;
     // (shown: one of the nearest players - only they get a stand-in, world_choose; since when; how far they were)
     int show, noticed;
     uint64_t shown_at;
@@ -488,17 +493,138 @@ static bool anim_float_index(uint64_t bb, uint64_t hash, uint32_t *idx) {
     }
     return false;
 }
-// (the call, from a guest thread: x0.., v0..: its state, kept; scratch: 8 bytes of guest memory)
-static void anim_set_float(Cpu *c, uint64_t bb, uint32_t idx, float val, uint64_t scratch) {
+// (the call, from a guest thread: x0.., v0..: its state, kept; scratch: 8 bytes of guest memory; fn: one of the
+// blackboard's setters - x2 the int / bool, s0 the float)
+static void anim_set(Cpu *c, uint64_t fn, uint64_t bb, uint32_t idx, int32_t ival, float val, uint64_t scratch) {
     uint64_t sx[32], snzcv = c->nzcv;
     __uint128_t sv[32];
     memcpy(sx, c->x, sizeof sx), memcpy(sv, c->v, sizeof sv);
     uint8_t *s = (uint8_t *)(uintptr_t)scratch;
     memset(s, 0, 8), s[0] = 1, memcpy(s + 4, &idx, 4);
-    c->x[0] = bb, c->x[1] = scratch, c->v[0] = 0;
+    c->x[0] = bb, c->x[1] = scratch, c->x[2] = (uint64_t)(uint32_t)ival, c->v[0] = 0;
     memcpy(&c->v[0], &val, 4);
-    guest_call(c, BB_SET_FLOAT);
+    guest_call(c, fn);
     memcpy(c->x, sx, sizeof sx), memcpy(c->v, sv, sizeof sv), c->nzcv = snzcv;
+}
+static void anim_set_float(Cpu *c, uint64_t bb, uint32_t idx, float val, uint64_t scratch) { anim_set(c, BB_SET_FLOAT, bb, idx, 0, val, scratch); }
+
+// ---- Sitting, talking, standing in a loop of its own (2026-11-17, Lua: testout/za-mp8/tools/sit.lua, stand.lua). A
+// townsperson's pose is its blackboard too, set once from its placement as it is made (0x700010e6ac / 0x700010a814 -> the
+// bool / int setters below): a bench sitter has sit_bool 1 and sit_int 1 or 2 (tr0064 tourist on the Vert Pokemon
+// Center's ledge, women on the benches 40 m on), a group chatting speak_bool 1 + wait_int 2 (or wait_int 2 alone), some
+// loop_action_bool 1; everyone else 0 / 1. In such a pose "move" does nothing - the stand-in that was the tourist stayed
+// seated in mid-air and glided after its player (za-mp7). Setting those back to 0 / 1 (the game's own setters) stands
+// it up at once and it then walks, runs and stops like any other (checked by hand on the tourist, a talking woman and a
+// looping child). So: every set of these parameters is kept per blackboard (the setters hooked from the start - the
+// level's people are made at its load); a plain stand-in is never one in such a pose (scan_bodies passes them over); a
+// dressed one, made from whoever came next, is stood up (stand_in_walk; again if its AI puts it back) and a stand-in let
+// go gets its own values back (stand_in_stop: sits down again where it sat).
+//   LARECOMP_WORLD_POSE=0: as before (neither) - an A/B; =2 (research): a plain stand-in in such a pose PREFERRED (stood
+// up, given back on let-go - the test of that path); =3 (research): preferred and NOT stood up (the old look of that).
+#define BB_SET_INT 0x700010aad4ull
+#define BB_SET_BOOL 0x700010e8b8ull
+#define POSE_N 10
+static const struct { const char *name; char kind; int32_t neutral; } k_pose[POSE_N] = {
+    {"sit_bool", 'b', 0}, {"sit_int", 'i', 0}, {"speak_bool", 'b', 0}, {"wait_int", 'i', 1}, {"idle_int", 'i', 1},
+    {"loop_action_bool", 'b', 0}, {"ev_loop_action_bool", 'b', 0}, {"ev_ex_loop_action_bool", 'b', 0},
+    {"ev_ex_loop_action_act_bool", 'b', 0}, {"ua07_speak_bool", 'b', 0}};
+static uint64_t g_pose_hash[POSE_N];
+#define POSE_BUCKETS 1024  // (x4: blackboards with a pose set - a new character at an old one's address sets its own)
+static struct { uint64_t bb; int32_t v[POSE_N]; } g_pose[POSE_BUCKETS][4];
+static pthread_mutex_t g_pose_lock = PTHREAD_MUTEX_INITIALIZER;
+static int pose_mode(void) {
+    static int m = -1;
+    if (m < 0) m = getenv("LARECOMP_WORLD_POSE") ? atoi(getenv("LARECOMP_WORLD_POSE")) : 1;
+    return m;
+}
+static unsigned pose_bucket(uint64_t bb) { return (unsigned)(((bb >> 9) * 0x9E3779B97F4A7C15ull) >> 54) & (POSE_BUCKETS - 1); }
+static bool pose_neutral(const int32_t *v) {
+    for (int k = 0; k < POSE_N; k++) if (v[k] != k_pose[k].neutral) return false;
+    return true;
+}
+static int pose_hook(Cpu *c, uint64_t addr) {  // (the int and bool setters: x0 the blackboard, x1 -> {u8 1, u32 index at +4}, w2)
+    // (read in place, no copies: called for every int / bool any character's AI sets - the game reads the same right after)
+    bool is_int = addr == BB_SET_INT;
+    uint64_t bb = c->x[0], key = c->x[1];
+    if (bb < HEAP_BASE || bb >= HEAP_BASE + HEAP_MAX || key < 0x7000000000ull || key >= HEAP_BASE + HEAP_MAX) return 0;
+    uint32_t idx;
+    memcpy(&idx, (const void *)(uintptr_t)(key + 4), 4);
+    const uint64_t *tab = (const uint64_t *)(uintptr_t)(bb + (is_int ? 0x68 : 0xa8));
+    uint64_t b = tab[0], e = tab[1];
+    if (e <= b || b < HEAP_BASE || e > HEAP_BASE + HEAP_MAX || idx >= (e - b) / 0x40) return 0;
+    uint64_t h = *(const uint64_t *)(uintptr_t)(b + (uint64_t)idx * 0x40);
+    int k = 0;
+    while (k < POSE_N && (g_pose_hash[k] != h || (k_pose[k].kind == 'i') != is_int)) k++;
+    if (k == POSE_N) return 0;
+    int32_t v = is_int ? (int32_t)(uint32_t)c->x[2] : (int32_t)(c->x[2] & 0xff);
+    unsigned bk = pose_bucket(bb);
+    pthread_mutex_lock(&g_pose_lock);
+    int s = -1;
+    for (int j = 0; j < 4 && s < 0; j++) if (g_pose[bk][j].bb == bb) s = j;
+    if (s < 0 && v != k_pose[k].neutral) {  // (a new one: in a free place, else one with nothing set, else the oldest)
+        for (int j = 0; j < 4 && s < 0; j++) if (!g_pose[bk][j].bb || pose_neutral(g_pose[bk][j].v)) s = j;
+        if (s < 0) s = (int)(bb >> 9) & 3;
+        g_pose[bk][s].bb = bb;
+        for (int j = 0; j < POSE_N; j++) g_pose[bk][s].v[j] = k_pose[j].neutral;
+    }
+    if (s >= 0) g_pose[bk][s].v[k] = v;
+    pthread_mutex_unlock(&g_pose_lock);
+    return 0;
+}
+// a blackboard's pose (false: none - standing - or nothing known; v: its values)
+static bool pose_of(uint64_t bb, int32_t *v) {
+    unsigned bk = pose_bucket(bb);
+    bool posed = false;
+    pthread_mutex_lock(&g_pose_lock);
+    for (int j = 0; j < 4; j++)
+        if (g_pose[bk][j].bb == bb) { memcpy(v, g_pose[bk][j].v, sizeof g_pose[bk][j].v); posed = !pose_neutral(v); break; }
+    pthread_mutex_unlock(&g_pose_lock);
+    return posed;
+}
+static void pose_names(const int32_t *v, char *out, size_t n) {
+    size_t w = 0;
+    out[0] = 0;
+    for (int k = 0; k < POSE_N && w + 1 < n; k++)
+        if (v[k] != k_pose[k].neutral) w += (size_t)snprintf(out + w, n - w, "%s%s %d", w ? ", " : "", k_pose[k].name, v[k]);
+}
+static uint64_t gf_hash(const char *s);
+static bool g_pose_hooked;
+static void pose_hooks_on(void) {
+    if (g_pose_hooked || !pose_mode()) return;
+    g_pose_hooked = true;
+    for (int k = 0; k < POSE_N; k++) g_pose_hash[k] = gf_hash(k_pose[k].name);
+    rt_register_fnhook_at(BB_SET_INT, pose_hook);
+    rt_register_fnhook_at(BB_SET_BOOL, pose_hook);
+}
+// a blackboard parameter's index by its name's hash in one of its tables (+0x68 ints, +0x88 floats, +0xa8 bools)
+static bool anim_index(uint64_t bb, uint64_t tab, uint64_t hash, uint32_t *idx) {
+    uint64_t b = 0, e = 0;
+    if (!heap_read(bb + tab, &b, 8) || !heap_read(bb + tab + 8, &e, 8) || e <= b || e - b > 0x40 * 512) return false;
+    for (uint64_t p = b; p < e; p += 0x40) {
+        uint64_t h = 0;
+        if (!heap_read(p, &h, 8)) return false;
+        if (h == hash) { *idx = (uint32_t)((p - b) / 0x40); return true; }
+    }
+    return false;
+}
+// (stand_in_walk, a guest thread) the stand-in in a pose: each parameter back to its standing value - what it was kept
+// the first time (for its let-go). True: something was changed
+static bool pose_stand_up(Cpu *c, Peer *p, uint64_t bb, uint64_t scratch) {
+    int32_t v[POSE_N];
+    if (!pose_of(bb, v)) return false;
+    char names[200];
+    pose_names(v, names, sizeof names);
+    bool any = false;
+    for (int k = 0; k < POSE_N; k++) {
+        uint32_t idx;
+        if (v[k] == k_pose[k].neutral || !anim_index(bb, k_pose[k].kind == 'i' ? 0x68 : 0xa8, g_pose_hash[k], &idx)) continue;
+        if (!(p->pose_cleared & (1u << k))) p->pose_was[k] = v[k], p->pose_cleared |= (uint16_t)(1u << k);
+        anim_set(c, k_pose[k].kind == 'i' ? BB_SET_INT : BB_SET_BOOL, bb, idx, k_pose[k].neutral, 0, scratch);
+        any = true;
+    }
+    if (any)
+        LOG("[world] player %016llx's stand-in was in a pose of its own (%s): stood up\n", (unsigned long long)p->id, names);
+    return any;
 }
 // our player's value, as its controller sets it (0x700010a6e0 hooked: our blackboard, the "move" index)
 static volatile uint64_t g_me_bb, g_me_bb_node;
@@ -562,29 +688,47 @@ static int interact_hook(Cpu *c, uint64_t addr) {
     }
     return 0;
 }
-// a let-go stand-in back to standing ("move" 0) - from the next update of its node (a guest thread)
-static struct { uint64_t node, bb, scratch, at; uint32_t idx; } g_move_reset[8];
+// a let-go stand-in back to standing ("move" 0) and to its own pose (sitting again, if it sat) - from the next update of
+// its node (a guest thread)
+static struct { uint64_t node, bb, scratch, at; uint32_t idx; int move; uint16_t pose_mask; int32_t pose[POSE_N]; } g_move_reset[8];
 static pthread_mutex_t g_move_lock = PTHREAD_MUTEX_INITIALIZER;
 static void stand_in_stop(Peer *p) {
-    if (!p->move_ok || !p->move_bb || p->move_given <= 0) { p->move_node = 0, p->move_ok = 0; return; }
+    bool move = p->move_given > 0, pose = p->pose_cleared != 0;
+    if (!p->move_ok || !p->move_bb || !p->move_scratch || (!move && !pose)) { p->move_node = 0, p->move_ok = 0, p->pose_cleared = 0; return; }
     pthread_mutex_lock(&g_move_lock);
     for (int i = 0; i < 8; i++)
-        if (!g_move_reset[i].node) { g_move_reset[i].node = p->move_node, g_move_reset[i].bb = p->move_bb, g_move_reset[i].idx = p->move_idx,
-            g_move_reset[i].scratch = p->move_scratch, g_move_reset[i].at = g_frame; break; }
+        if (!g_move_reset[i].node) {
+            g_move_reset[i].node = p->move_node, g_move_reset[i].bb = p->move_bb, g_move_reset[i].idx = p->move_idx,
+            g_move_reset[i].scratch = p->move_scratch, g_move_reset[i].at = g_frame, g_move_reset[i].move = move;
+            g_move_reset[i].pose_mask = p->pose_cleared, memcpy(g_move_reset[i].pose, p->pose_was, sizeof p->pose_was);
+            break;
+        }
     pthread_mutex_unlock(&g_move_lock);
-    p->move_node = 0, p->move_ok = 0, p->move_given = 0, p->move_scratch = 0;  // (the scratch goes with the reset: a new one
-}                                                                                 // for the next stand-in)
+    p->move_node = 0, p->move_ok = 0, p->move_given = 0, p->move_scratch = 0, p->pose_cleared = 0;  // (the scratch goes with
+}                                                                                                      //  the reset: a new one
+                                                                                                       //  for the next stand-in)
 static void move_reset_check(Cpu *c, uint64_t node) {
     for (int i = 0; i < 8; i++) {
         if (g_move_reset[i].node != node) continue;
         pthread_mutex_lock(&g_move_lock);
         uint64_t bb = g_move_reset[i].bb, s = g_move_reset[i].scratch;
         uint32_t idx = g_move_reset[i].idx;
+        int move = g_move_reset[i].move;
+        uint16_t mask = g_move_reset[i].pose_mask;
+        int32_t pose[POSE_N];
+        memcpy(pose, g_move_reset[i].pose, sizeof pose);
         bool mine = g_move_reset[i].node == node;
         if (mine) g_move_reset[i].node = 0;
         pthread_mutex_unlock(&g_move_lock);
         uint64_t v = 0;
-        if (mine && s && heap_read(bb, &v, 8) && v == BB_VTABLE) anim_set_float(c, bb, idx, 0.0f, s);
+        if (!mine || !s || !heap_read(bb, &v, 8) || v != BB_VTABLE) continue;
+        if (move) anim_set_float(c, bb, idx, 0.0f, s);
+        for (int k = 0; k < POSE_N; k++) {
+            uint32_t pi;
+            if ((mask & (1u << k)) && anim_index(bb, k_pose[k].kind == 'i' ? 0x68 : 0xa8, g_pose_hash[k], &pi))
+                anim_set(c, k_pose[k].kind == 'i' ? BB_SET_INT : BB_SET_BOOL, bb, pi, pose[k], 0, s);
+        }
+        if (mask) LOG("[world] a let-go stand-in back in its own pose\n");
     }
 }
 static void move_reset_expire(uint64_t frame) {  // (a node that went with its level isn't updated again)
@@ -595,7 +739,7 @@ static void move_reset_expire(uint64_t frame) {  // (a node that went with its l
 static volatile int g_scan_soon;  // (a stand-in went with its level: the next one looked for at once, not within 10 s)
 static void stand_in_gone(Peer *p) {  // (with its level - its collision too)
     p->pres_body = p->pres_rec = p->pres_id = 0;
-    p->body = p->node = 0, p->move_node = 0, p->move_ok = 0, p->move_scratch = 0, g_scan_soon = 1;
+    p->body = p->node = 0, p->move_node = 0, p->move_ok = 0, p->move_scratch = 0, p->pose_cleared = 0, g_scan_soon = 1;
 }
 // what a stand-in is given: their own value; from an older copy (no value) their speed: walking below ~4 m/s (research
 // LARECOMP_WORLD_MOVE=<v>: always v - a test)
@@ -623,6 +767,11 @@ static void stand_in_walk(Cpu *c, Peer *p, uint64_t node) {
                 (unsigned long long)p->move_bb, p->move_ok ? "walks with them" : "no \"move\" yet");
     }
     if (!p->move_ok || !p->move_scratch) return;
+    if ((pose_mode() == 1 || pose_mode() == 2) && f - p->pose_at >= 10) {  // (in a pose of its own - sitting, talking: stood up; looked at a few times a
+        p->pose_at = f;                         //  second - its AI may put it back)
+        uint64_t v = 0;
+        if (heap_read(p->move_bb, &v, 8) && v == BB_VTABLE && pose_stand_up(c, p, p->move_bb, p->move_scratch)) p->move_given = -2;
+    }                                                                                         // (-2: its "move" given again)
     float want = stand_in_move(p);
     if (want == p->move_given && f - p->move_given_at < 60) return;
     uint64_t v = 0;
@@ -728,17 +877,47 @@ static void *scan_bodies(void *arg) {
         }
     }
     free(buf);
+    // (each one's node, and whether it sits, talks or loops in a pose of its own - those aren't taken: LARECOMP_WORLD_POSE
+    // above; a body whose node isn't known yet can't be told - stood up once it stands in, if it must be)
+    uint64_t cnode[NC];
+    bool cposed[NC];
+    int nposed = 0, mode = pose_mode();
+    char pnames[NC][96];
+    for (int j = 0; j < nc; j++) {
+        cnode[j] = node_of_body(cand[j]), cposed[j] = false, pnames[j][0] = 0;
+        uint64_t bb = mode && cnode[j] ? anim_bb_of_node(cnode[j]) : 0;
+        int32_t v[POSE_N];
+        if (bb && pose_of(bb, v)) cposed[j] = true, nposed++, pose_names(v, pnames[j], sizeof pnames[j]);
+    }
+    if ((mode == 2 || mode == 3) && nposed)  // (research: the ones in a pose first)
+        for (int j = 1; j < nc; j++)
+            for (int m = j; m > 0 && cposed[m] && !cposed[m - 1]; m--) {
+                uint64_t t = cand[m]; cand[m] = cand[m - 1], cand[m - 1] = t;
+                t = cnode[m]; cnode[m] = cnode[m - 1], cnode[m - 1] = t;
+                float d = cd[m]; cd[m] = cd[m - 1], cd[m - 1] = d;
+                bool b = cst[m]; cst[m] = cst[m - 1], cst[m - 1] = b;
+                b = cposed[m]; cposed[m] = cposed[m - 1], cposed[m - 1] = b;
+                char tn[96]; memcpy(tn, pnames[m], 96), memcpy(pnames[m], pnames[m - 1], 96), memcpy(pnames[m - 1], tn, 96);
+            }
     int used = 0;
     for (int i = 0; i < MAXPEER && used < nc; i++)
         if (g_peers[i].id && g_peers[i].show && !g_peers[i].body) {
-            uint64_t node = node_of_body(cand[used]);
             // (LARECOMP_GHOST_CROWD: a walker only if it is a character made - one of the crowd; the plaza's Pokemon are
             // stepped too, 2026-11-16: a Pokemon stood in)
-            while (cst[used] && !node && ++used < nc) node = node_of_body(cand[used]);
+            for (; used < nc; used++) {
+                if (cst[used] && !cnode[used]) continue;
+                if (cposed[used] && mode == 1) {
+                    LOG("[world] (not %llx, %.1f m from us: it sits or talks - %s)\n", (unsigned long long)cand[used], cd[used], pnames[used]);
+                    continue;
+                }
+                break;
+            }
             if (used == nc) break;
+            uint64_t node = cnode[used];
             g_peers[i].node = node, g_peers[i].body = cand[used];  // (no node yet: node_hook finds it at the body's spot)
-            LOG("[world] player %016llx: stand-in %llx, %.1f m from us (%d characters; its node %s)\n", (unsigned long long)g_peers[i].id,
-                (unsigned long long)cand[used], cd[used], count, node ? "from its object" : "at its spot");
+            LOG("[world] player %016llx: stand-in %llx, %.1f m from us (%d characters; its node %s)%s%s\n", (unsigned long long)g_peers[i].id,
+                (unsigned long long)cand[used], cd[used], count, node ? "from its object" : "at its spot", cposed[used] ? " - in a pose: " : "",
+                cposed[used] ? pnames[used] : "");
             used++;
         }
     g_scanning = 0;
@@ -1177,8 +1356,12 @@ void world_self_outfit(void) {
     pthread_mutex_lock(&g_dress_lock);
     Look l;
     if (!look_ours(&l)) { pthread_mutex_unlock(&g_dress_lock); return; }  // (the save's look isn't there yet: as packets)
-    int lbody = 1;  // (its body, as look_check would find it: our upper body's p1_/p2_ name, once the names are known)
-    l.f1 = 1, l.f2 = vset_slot(l.part[12], &lbody) == 12 && (lbody == 1 || lbody == 2) ? (uint8_t)lbody : 1;
+    // (its body, as look_check would find it: our upper body's p1_/p2_ name, once the names are known - at our player's
+    // make they aren't yet: LARECOMP_GHOST_SELF_BODY=2 for a save of the other body, whose look made with body 1 kept the
+    // level from ever finishing loading, 2026-11-17 testroot-mpP2)
+    int lbody = 0, given = getenv("LARECOMP_GHOST_SELF_BODY") ? atoi(getenv("LARECOMP_GHOST_SELF_BODY")) : 1;
+    if (vset_slot(l.part[12], &lbody) != 12 || (lbody != 1 && lbody != 2)) lbody = given;
+    l.f1 = 1, l.f2 = (uint8_t)(lbody == 2 ? 2 : 1);
     g_dress_want.peer = g_self ^ 2, g_dress_want.n = n, g_dress_want.body = body, g_dress_want.look = l, g_dress_want.look_ok = true;
     uint32_t lh = 2166136261u;
     for (size_t b = 0; b < sizeof l; b++) lh = (lh ^ ((const uint8_t *)&l)[b]) * 16777619u;
@@ -1953,7 +2136,17 @@ static int dress_hook(Cpu *c, uint64_t addr) {
     pthread_mutex_lock(&g_dress_lock);
     Look want_look;
     bool want_look_ok = false;
-    if (g_dress_want.peer) {  // (a player of the shared world waiting for a look)
+    // (research LARECOMP_WORLD_DRESS_ONLY=<text>[,<n>]: only a townsperson whose .ccdatam path has <text> - the n-th such
+    // one made, 1 unless given - e.g. tr0064,2: at the Vert Pokemon Center the second tourist made is the one sitting by it)
+    static char only[64];
+    static int only_n = -1, only_seen;
+    if (only_n < 0) {
+        const char *e = getenv("LARECOMP_WORLD_DRESS_ONLY");
+        only_n = 1;
+        if (e) { snprintf(only, sizeof only, "%s", e); char *k = strchr(only, ','); if (k) *k = 0, only_n = atoi(k + 1); }
+    }
+    bool only_ok = !only[0] || (strstr(own.path, only) && ++only_seen >= only_n);
+    if (g_dress_want.peer && only_ok) {  // (a player of the shared world waiting for a look)
         for_peer = g_dress_want.peer, hash = g_dress_want.hash, to_body = g_dress_want.body, want_look = g_dress_want.look;
         want_look_ok = g_dress_want.look_ok, g_dressings++;
         for (int k = 0; k < g_dress_want.n; k++) parts[np++] = g_dress_want.parts[k];
@@ -2034,6 +2227,7 @@ static void dress_hook_on(void) {
     g_dress_hooked = true;
     rt_register_fnhook_at(CC_MAKE, dress_hook);
     rt_register_fnhook_at(PART_BY_INDEX, part_index_hook);
+    pose_hooks_on();  // (every character's pose, as it is made - the level's people at its load)
 }
 __attribute__((constructor)) static void dress_init(void) {
     const char *e = getenv("LARECOMP_DRESS_NPC");
