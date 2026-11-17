@@ -727,7 +727,8 @@ bool input_macro_busy(void) {
     if (g_mq_macro && !g_mq_active && g_mqh == g_mqt) g_mq_macro = false;
     return g_mq_macro;
 }
-volatile uint64_t g_input_swallow;  // buttons kept from the game (the player's own; not the queue's)
+volatile uint64_t g_input_swallow;  // buttons kept from the game (the player's own, and the test queue's - LARECOMP_LIVE
+                                    // presses as a player's would be; never input_macro()'s own)
 
 void input_frame(uint64_t frame) {
     if (g_pad_obj && getenv("LARECOMP_DUMP_PAD") && frame % 600 == 0) {
@@ -1017,7 +1018,8 @@ static void fill_state(Cpu *c) {
     bool input_pad_finger_on(void);
     const uint64_t zr = input_pad_finger_on() ? 1ull << BTN_ZR : 0;  // (with the finger on, the controller's ZR touches)
     if (wheel_until[0] || wheel_until[1]) recompute_keyboard();  // (a wheel notch's binding lets go by time)
-    uint64_t b = menu ? script_buttons & ~zr : ((key_buttons | plugin_buttons | (pad_buttons & ~zr)) & ~g_input_swallow) | (script_buttons & ~zr);
+    uint64_t b = menu ? script_buttons & ~zr : ((key_buttons | plugin_buttons | (pad_buttons & ~zr)) & ~g_input_swallow) |
+                                               (script_buttons & ~zr & (g_mq_macro ? ~0ull : ~g_input_swallow));
     {
         uint64_t menu_mouse_buttons(Cpu *c);  // (runtime/hle/menu_mouse.c: the mouse in the game's menus)
         uint64_t m = menu_mouse_buttons(c);

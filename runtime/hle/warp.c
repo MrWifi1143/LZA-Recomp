@@ -86,15 +86,32 @@ static int body_hook(Cpu *c, uint64_t addr) {
     return 0;
 }
 
-// the player's body now (0 none): the oldest one stepped in the last second
+// the player's body now (0 none): the oldest one stepped in the last second on the Player collision layer (the proxy's
+// +0x40 filter info, low 5 bits: Player 3, NPC 4, SymbolPokemon 5 - below, pres_frame); none such: the oldest of any. (A
+// copy put back in a Pokemon Center - a warp off the loaded level, or a black-out - gets a new body; the Pokemon made with
+// it right after were then older than it and one of them was taken for the player: the world was sent a Pokemon standing
+// in the Center, 2026-11-16)
 static uint64_t player_body(uint64_t frame) {
-    uint64_t best = 0, best_first = ~0ull;
+    uint64_t best = 0, best_first = ~0ull, any = 0, any_first = ~0ull;
     pthread_mutex_lock(&g_body_lock);
     for (int i = 0; i < NBODY; i++) {
         if (!g_bodies[i].o || frame - g_bodies[i].last > 30 || !is_body(g_bodies[i].o)) continue;
-        if (g_bodies[i].first < best_first) best = g_bodies[i].o, best_first = g_bodies[i].first;
+        if (g_bodies[i].first < any_first) any = g_bodies[i].o, any_first = g_bodies[i].first;
+        if ((*(const uint32_t *)(uintptr_t)(g_bodies[i].o + 0x40) & 0x1f) == 3 && g_bodies[i].first < best_first)
+            best = g_bodies[i].o, best_first = g_bodies[i].first;
     }
+    if (!best) best = any;
     pthread_mutex_unlock(&g_body_lock);
+    static int dbg = -1;  // (research LARECOMP_WORLD_LOG_BODIES=1: every 5 s the stepped bodies - the player's candidates)
+    if (dbg < 0) dbg = getenv("LARECOMP_WORLD_LOG_BODIES") != NULL;
+    if (dbg && frame % 300 == 0)
+        for (int i = 0; i < NBODY; i++) {
+            if (!g_bodies[i].o || frame - g_bodies[i].last > 30 || !is_body(g_bodies[i].o)) continue;
+            const float *q = (const float *)(uintptr_t)(g_bodies[i].o + 0x90);
+            LOG("[bodies] frame %llu %llx first %llu last %llu via %u at %.2f %.2f %.2f +40 %08x%s\n", (unsigned long long)frame,
+                (unsigned long long)g_bodies[i].o, (unsigned long long)g_bodies[i].first, (unsigned long long)g_bodies[i].last, g_bodies[i].via,
+                q[0], q[1], q[2], *(const uint32_t *)(uintptr_t)(g_bodies[i].o + 0x40), g_bodies[i].o == best ? " <- ours" : "");
+        }
     return best;
 }
 
@@ -849,20 +866,30 @@ static void trade_message(const WorldPkt *k, uint64_t frame) {
     LOG("[world] trade asked by %016llx (code %08u)\n", (unsigned long long)k->from, k->t.code);
 }
 static void trade_frame(uint64_t me, uint64_t frame) {
+    // (by: the player whose stand-in we are by - the nearest one within reach; the one who asked us, if within reach, before
+    // anyone nearer: with several players standing together, A answers them - 2026-11-16, four players: the last one in
+    // the table won, whoever it was)
     Peer *by = NULL;
+    float best = TRADE_NEAR * TRADE_NEAR;
+    bool by_asker = false;
     if (me)
         for (int i = 0; i < MAXPEER; i++) {
             Peer *p = &g_peers[i];
             if (!p->id || !p->node) continue;
             const float *a = (const float *)(uintptr_t)(me + 0x90);
-            float dx = a[0] - p->shown[0] - g_off, dz = a[2] - p->shown[2];
-            if (dx * dx + dz * dz < TRADE_NEAR * TRADE_NEAR && fabsf(a[1] - p->shown[1]) < 2) by = p;
+            float dx = a[0] - p->shown[0] - g_off, dz = a[2] - p->shown[2], d = dx * dx + dz * dz;
+            if (d >= TRADE_NEAR * TRADE_NEAR || fabsf(a[1] - p->shown[1]) >= 2) continue;
+            bool asker = g_trade == 2 && p->id == g_trade_with;
+            if (by_asker && !asker) continue;
+            if (asker && !by_asker) by = p, best = d, by_asker = true;
+            else if (d < best) by = p, best = d;
         }
     bool busy = input_macro_busy();
-    g_input_swallow = by && !busy ? BTN_A_BIT : 0;  // (the stand-in's own Talk never starts)
-    static bool was;
-    bool a = (input_buttons_now() & BTN_A_BIT) != 0, press = a && !was;
-    was = a;
+    static bool was, eat;  // (eat: the A that asked or answered is kept from the game until it is let go - at 30 fps a
+    bool a = (input_buttons_now() & BTN_A_BIT) != 0, press = a && !was;  // 10-frame press outlasted the trade macro's first
+    was = a;                                                              // 200 ms, the game took it as Talk to someone near
+    if (!a) eat = false;                                                  // and the menu never opened, 2026-11-16)
+    g_input_swallow = (by && !busy) || eat ? BTN_A_BIT : 0;  // (the stand-in's own Talk never starts)
     if (g_trade && frame - g_trade_at > 60 * 120) {  // (two minutes: forgotten)
         if (g_trade == 1) menu_notice_for("No answer to the trade request.", 4000);
         g_trade = 0;
@@ -875,6 +902,7 @@ static void trade_frame(uint64_t me, uint64_t frame) {
                         "A: ask this player to trade", 700);
     }
     if (!by || busy || !press) return;
+    eat = true;
     if (theirs && g_trade == 2) {
         trade_send(1, g_trade_with, g_trade_code);
         trade_start(g_trade_code);
