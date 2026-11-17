@@ -354,6 +354,7 @@ void rt_fatal_trace(void) {
     hhist_dump();
     fprintf(stderr, "host backtrace (guest functions are f_<addr>):\n");
     plat_print_backtrace();
+    { extern void vk_crash_note(void); vk_crash_note(); }  // (a pipeline this thread was building: nvn/vulkan/exec.c)
     Cpu *c = kernel_current_cpu();
     if (c) {
         { extern int kernel_current_thread_info(uint64_t *id, int *core); uint64_t id = 0; int core = -1;
