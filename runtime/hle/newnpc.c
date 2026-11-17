@@ -50,6 +50,16 @@ static volatile int g_pending;          // (a spawn asked for)
 static float g_at[3], g_yaw;
 static int g_count;
 static volatile uint64_t g_player_owner;
+#define MAXNEW 256
+static volatile uint64_t g_node[MAXNEW];  // (our characters' live nodes, by number)
+static volatile uint64_t g_owner[MAXNEW], g_body[MAXNEW], g_away_at[MAXNEW];
+static volatile int g_away[MAXNEW], g_naway;  // (put away: "remove")
+#define NODE_UPDATE 0x7001ccf27cull       // (a node's world matrices from its local transform: x0 the node, many a frame)
+#define AWAY_Y (-500.0f)                  // (where a removed one is put: under the street)
+static float g_tele[3];
+static volatile int g_tele_n;
+static int g_tele_n_any(void) { return g_tele_n > 0; }
+static bool player_pos(float p[3]);
 static FnHook g_prev_make;
 
 static uint64_t fnv(const char *s) {
@@ -112,6 +122,16 @@ static int make_hook(Cpu *c, uint64_t addr) {
     static int n;
     if (n++ < 3) LOG("[newnpc] make: request +0x18 %llx\n", (unsigned long long)(rd(req + 0x18, &len, 8) ? len : 0));
     if (rd(req + 0x18, &len, 8) && len == 6 && rd(req + 0x30, &owner, 8)) g_player_owner = owner, LOG("[newnpc] the player: %llx\n", (unsigned long long)owner);  // ("Player")
+    else if (rd(req + 0x30, &owner, 8)) {  // (ours: its live node kept by number, for "remove")
+        uint64_t cb = 0, n = 0, np = 0;
+        char nm[16] = "";
+        int k;
+        if (rd(owner + 0xc8, &cb, 8) && rd(cb + 0x38, &n, 8) && rd(n + 0x2b8, &np, 8) && rd(np, nm, 15) && sscanf(nm, "newnpc_%d", &k) == 1 &&
+            k > 0 && k < MAXNEW) {
+            g_node[k] = n, g_owner[k] = owner;
+            LOG("[newnpc] newnpc_%03d made: its node %llx, character object %llx\n", k, (unsigned long long)n, (unsigned long long)owner);
+        }
+    }
     return g_prev_make ? g_prev_make(c, addr) : 0;
 }
 static bool player_pos(float p[3]) {
@@ -122,13 +142,28 @@ static bool player_pos(float p[3]) {
 }
 
 // the player's body (vtable 0x7003be6218, position +0x90): its object +0x1a0 -> +0x8 -> +0x138 (warp.c dressed_body_of)
-static uint64_t player_body(void) {
-    uint64_t o = g_player_owner, a = 0, b = 0, body = 0, v = 0;
-    if (!o || !rd(o + 0x1a0, &a, 8) || !rd(a + 8, &b, 8) || !rd(b + 0x138, &body, 8) || !rd(body, &v, 8) || v != 0x7003be6218ull) return 0;
-    return body;
+// (the player's isn't reached that way: the body stepped (0x7000081ce0) within 1.5 m of the player's node, kept)
+static volatile uint64_t g_pbody;
+static FnHook g_prev_step;
+static int step_hook(Cpu *c, uint64_t addr) {
+    uint64_t o = c->x[0], v = 0;
+    if (g_naway)
+        for (int k = 1; k < MAXNEW; k++)
+            if (g_away[k] && g_body[k] == o) {
+                float *t = (float *)(uintptr_t)(o + 0x90);
+                if (t[1] > AWAY_Y + 100.0f) t[1] = AWAY_Y;
+                break;
+            }
+    if (g_tele_n_any() && rd(o, &v, 8) && v == 0x7003be6218ull && o != g_pbody) {
+        float p[3], q[3];
+        if (player_pos(p) && rd(o + 0x90, q, 12) && (p[0] - q[0]) * (p[0] - q[0]) + (p[2] - q[2]) * (p[2] - q[2]) < 2.25f) g_pbody = o;
+    }
+    return g_prev_step ? g_prev_step(c, addr) : 0;
 }
-static float g_tele[3];
-static int g_tele_n;
+static uint64_t player_body(void) {
+    uint64_t b = g_pbody, v = 0;
+    return b && rd(b, &v, 8) && v == 0x7003be6218ull ? b : 0;
+}
 
 static void do_spawn(Cpu *c) {
     int k = ++g_count;
@@ -165,6 +200,22 @@ static void do_spawn(Cpu *c) {
     LOG("[newnpc] spawned %s (NPC data of %s) at %.2f %.2f %.2f yaw %.0f: out %llx\n", name, g_snap.orig, g_at[0], g_at[1], g_at[2],
         g_yaw, (unsigned long long)r);
 }
+// Removing one: put away under the street (node y -500 at each of its updates, its body before each step) - the game
+// then lets it go itself, as with the shared world's let-go dressed characters (warp.c gone_*). Destroying its node
+// directly (0x7001ccef68 release, 0x7001146f10 destroy, the node's virtual destroy 0x70011476cc) crashed or aborted
+// (2026-11-17: something still held it; the virtual one aborts unless node +0x5d9 is set).
+static FnHook g_prev_node;
+static int node_hook(Cpu *c, uint64_t addr) {
+    uint64_t n = c->x[0];
+    if (g_naway)
+        for (int k = 1; k < MAXNEW; k++)
+            if (g_away[k] && g_node[k] == n) {
+                float *t = (float *)(uintptr_t)(n + 0xe0);
+                if (t[1] > AWAY_Y + 100.0f) t[1] = AWAY_Y;
+                break;
+            }
+    return g_prev_node ? g_prev_node(c, addr) : 0;
+}
 static int mgr_hook(Cpu *c, uint64_t addr) {
     if (g_pending && g_snap.ok) {
         g_pending = 0;
@@ -179,8 +230,12 @@ __attribute__((constructor)) static void newnpc_init(void) {
     if (!g_on) return;
     rt_register_fnhook_at(PLACE_SPAWN, spawn_hook);
     rt_register_fnhook_at(CHAR_MGR, mgr_hook);
+    g_prev_node = rt_fnhook_get(NODE_UPDATE);
+    rt_register_fnhook_at(NODE_UPDATE, node_hook);
     g_prev_make = rt_fnhook_get(CC_MAKE);
     rt_register_fnhook_at(CC_MAKE, make_hook);
+    g_prev_step = rt_fnhook_get(0x7000081ce0ull);
+    rt_register_fnhook_at(0x7000081ce0ull, step_hook);
     LOG("[newnpc] on (commands in <live>/newnpc)\n");
 }
 void newnpc_frame(uint64_t frame) {  // (each frame: runtime/hle/input.c; the render thread - no game calls here)
@@ -188,7 +243,31 @@ void newnpc_frame(uint64_t frame) {  // (each frame: runtime/hle/input.c; the re
     if (g_tele_n > 0) {  // (test: the player put somewhere - written for 20 frames, as the game settles it)
         uint64_t b = player_body();
         if (b) memcpy((void *)(uintptr_t)(b + 0x90), g_tele, 12);
+        if (g_tele_n == 20 || g_tele_n == 1) {
+            float p[3] = {0};
+            player_pos(p);
+            LOG("[newnpc] tele: body %llx, the player's node at %.1f %.1f %.1f\n", (unsigned long long)b, p[0], p[1], p[2]);
+        }
         g_tele_n--;
+    }
+    if (g_naway && frame % 10 == 0) {
+        int left = 0;
+        for (int k = 1; k < MAXNEW; k++) {
+            if (!g_away[k]) continue;
+            uint64_t n = g_node[k], v = 0, np = 0, a = 0, b = 0, body = 0;
+            char nm[16] = "";
+            char want[16];
+            snprintf(want, sizeof want, "newnpc_%03d", k);
+            if (!rd(n, &v, 8) || v != NODE_VTABLE || !rd(n + 0x2b8, &np, 8) || !rd(np, nm, 15) || strncmp(nm, want, 10)) {
+                LOG("[newnpc] %s is gone: the game removed it %.1f s after it was put away\n", want, (double)(frame - g_away_at[k]) / 60.0);
+                g_away[k] = 0, g_node[k] = 0, g_body[k] = 0;
+                continue;
+            }
+            uint64_t o = g_owner[k];
+            if (rd(o + 0x1a0, &a, 8) && rd(a + 8, &b, 8) && rd(b + 0x138, &body, 8) && rd(body, &v, 8) && v == 0x7003be6218ull) g_body[k] = body;
+            left++;
+        }
+        g_naway = left > 0;
     }
     if (frame % 15) return;
     static char path[512];
@@ -203,6 +282,7 @@ void newnpc_frame(uint64_t frame) {  // (each frame: runtime/hle/input.c; the re
     fclose(f);
     unlink(path);
     float x, y, zz, yaw = 0, dx, dz;
+    int rk;
     if (sscanf(line, "spawn %f %f %f %f", &x, &y, &zz, &yaw) >= 3) {
         g_at[0] = x, g_at[1] = y, g_at[2] = zz, g_yaw = yaw, g_pending = 1;
     } else if (sscanf(line, "near %f %f %f", &dx, &dz, &yaw) >= 2) {
@@ -214,6 +294,10 @@ void newnpc_frame(uint64_t frame) {  // (each frame: runtime/hle/input.c; the re
         if (!player_pos(p)) { LOG("[newnpc] tele: no player position yet\n"); return; }
         g_tele[0] = p[0] + dx, g_tele[1] = p[1] + 2, g_tele[2] = p[2] + dz, g_tele_n = 20;
         LOG("[newnpc] the player goes to %.1f %.1f %.1f\n", g_tele[0], g_tele[1], g_tele[2]);
+    } else if (sscanf(line, "remove %d", &rk) == 1 && rk > 0 && rk < MAXNEW) {
+        if (!g_node[rk]) { LOG("[newnpc] newnpc_%03d: none made\n", rk); return; }
+        g_away_at[rk] = frame, g_away[rk] = 1, g_naway = 1;
+        LOG("[newnpc] newnpc_%03d put away (node %llx)\n", rk, (unsigned long long)g_node[rk]);
     } else if (sscanf(line, "goto %f %f %f", &x, &y, &zz) == 3) {
         g_tele[0] = x, g_tele[1] = y, g_tele[2] = zz, g_tele_n = 20;
         LOG("[newnpc] the player goes to %.1f %.1f %.1f\n", x, y, zz);
