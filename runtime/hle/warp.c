@@ -119,7 +119,8 @@ void warp_frame(uint64_t frame) {  // (each game frame: runtime/hle/input.c)
     uint64_t b = player_body(frame);
     if (g_log_every > 0 && frame % (uint64_t)g_log_every == 0 && b) {
         const float *p = (const float *)(uintptr_t)(b + 0x90);
-        LOG("[player] frame %llu %.2f %.2f %.2f (body %llx)\n", (unsigned long long)frame, p[0], p[1], p[2], (unsigned long long)b);
+        LOG("[player] frame %llu %.2f %.2f %.2f (body %llx) t %.1f\n", (unsigned long long)frame, p[0], p[1], p[2], (unsigned long long)b,
+            (double)plat_now_ns() / 1e6);  // (t: the monotonic clock in ms - two copies' logs line up)
     }
     if (g_state < 0 || g_state == 3) return;
     static uint64_t body, since, still_since, writes, done_at, redo;
@@ -256,6 +257,25 @@ typedef struct { uint64_t part[13]; uint8_t opt[18], f1, f2; } Look;
 typedef struct {
     uint64_t id;                     // (the player's own random id; 0 a free slot)
     float pos[3], vel[3], yaw;       // (as last heard)
+    // (their packets' order and timing - type 2's sequence and send time: an older one arriving after a newer one is
+    // dropped, not drawn; late = how much longer than their quickest packet lately this one took on the way, seconds -
+    // where they are now is the heard position carried on by that too, so uneven delays don't make the stand-in surge
+    // and drag)
+    uint16_t seq;
+    int seq_ok;
+    uint32_t base, base_win[2];      // (the quickest arrival-minus-sent seen: of the last two 2 s windows)
+    uint64_t base_win_at;
+    float late;
+    uint32_t stale, nseq;            // (packets dropped as out of date / taken, for the log)
+    // (with send times: the stand-in is drawn a little in their past, between the two packets around that moment - it
+    // never runs on past where they stopped or turned, as carrying the newest one on by its speed did. snap: the newest
+    // NSNAP, oldest first; behind: how far behind their clock it is drawn (ms, past the way's quickest time) - eased
+    // toward behind_want (one send gap and the recent lateness) so a change never makes it jump back; base0: the first
+    // base, the origin of those ms)
+    struct { uint32_t t; float p[3], v[3], yaw, move; } snap[8];
+    int nsnap;
+    uint32_t base0;
+    float behind, behind_want, jit, gap;
     float shown[3];                  // (where the stand-in is drawn: smoothed toward pos + vel * age)
     float shown_yaw;                 // (its facing: turned toward theirs - not snapped to each heading heard)
     uint64_t heard_ns;
@@ -278,6 +298,8 @@ typedef struct {
     float col_was[4][3];
     int ncol;
     uint64_t col_seen, col_seen_at;  // (the stand-in, since when: a scan only after 2 s - see col_frame)
+    uint64_t pres_body, pres_rec, pres_id;  // (a walker stand-in's presence body in the physics world: its filter changed -
+    uint32_t pres_was;                      //  pres_frame; pres_was: its own, put back on let-go)
     uint64_t armed_at;               // (when their last dressing was asked for: the next one not within 10 s - unless the last
                                      //  one went away, then at once)
     int refused;                     // (outfit parts refused, logged once)
@@ -321,7 +343,8 @@ static bool g_hooked;
 
 // ---- packets (both ways the same, little-endian): {u8 type, u8 version 1, u8[6], u64 from, ...}
 //   type 2 where:  f32 x y z, f32 yaw, f32 vx vy vz, f32 move (their animation's locomotion value; 48 bytes - copies
-//          before it sent 44)
+//          before it sent 44). Its header's u8[6] = u16 sequence, u32 the sender's clock in ms when sent (0: an older
+//          copy - none): over the internet packets come late, unevenly and out of order (WorldWhere below)
 //   type 3 trade asked, 4 trade answered: u64 to, u32 code
 //   type 5 outfit: u8 part k, u8 parts n, u8 body type, then three strings (NUL-ended): the part's name, its .ccdatam
 //          ("ik_chara/<dir>/<last>.ccdatam" sent as "<dir>"), its variant (the item and colour); 96 bytes at most
@@ -538,7 +561,7 @@ static void move_reset_expire(uint64_t frame) {  // (a node that went with its l
 }
 static volatile int g_scan_soon;  // (a stand-in went with its level: the next one looked for at once, not within 10 s)
 static void stand_in_gone(Peer *p) {  // (with its level - its collision too)
-    p->col_body = 0, p->ncol = 0;
+    p->col_body = 0, p->ncol = 0, p->pres_body = p->pres_rec = p->pres_id = 0;
     p->body = p->node = 0, p->move_node = 0, p->move_ok = 0, p->move_scratch = 0, g_scan_soon = 1;
 }
 // what a stand-in is given: their own value; from an older copy (no value) their speed: walking below ~4 m/s (research
@@ -796,6 +819,63 @@ static void col_frame(uint64_t frame) {
     }
 }
 
+// ---- a walker of the crowd standing in: it blocked and pushed like a person (walked into it: stopped 0.57 m short) - its
+// physics presence isn't at a fixed spot a heap scan finds (col_frame), it's the character proxy's own body in the hknp
+// world (2026-11-16, read-only Lua research, testout/za-mp5/tools/colf*.lua): a character proxy (BODY_VTABLE, as made at
+// 0x700119d2c4 -> 0x700062e0b0 from its description) keeps its body's id at +0x38 (0x8000000001xxxxxx; created there with
+// a body description whose filter is the proxy's +0x40) and the world wrapper at +0x50; [wrapper+0x10] = the hknp world,
+// whose [+0x38] is the body array, 0xc0 each, indexed by id & 0xffffff (the make writes the record's +0xb8). A record:
+// transform (translation +0x30 = the proxy's spot), +0x50 / +0x84 the id's low half, +0x8c the collision filter info
+// (= the proxy's +0x40: the player 3, people 4, Pokemon 5 - the layers of system/physics/CollisionLayer/
+// collision_layer_main.trhcl: Player 3, NPC 4, SymbolPokemon 5 ... None 0x1f), +0xb0 the whole id. Only the layer pairs
+// listed there collide (Player-NPC is, NPC-NPC isn't); None is in no pair. So a walker standing in gets its own presence
+// body's filter set to None while it stands in - checked to be its own record (id at +0xb0, +0x50, +0x84) before each
+// write, and only while the filter is still the one it was made with or ours; its proxy's +0x40 (what its own steps cast
+// with - the ground) is left alone; on let-go the record, if still its own, gets its filter back.
+// LARECOMP_WORLD_WALKER_COL=1: left as it was (an A/B).
+#define PRES_STRIDE 0xc0
+#define LAYER_NONE 0x1fu
+static uint64_t presence_of(uint64_t proxy, uint64_t *idp) {
+    uint64_t id = 0, w = 0, hw = 0, arr = 0, rid = 0;
+    uint32_t i1 = 0, i2 = 0;
+    if (!heap_read(proxy + 0x38, &id, 8) || !(id >> 63) || !heap_read(proxy + 0x50, &w, 8) || !heap_read(w + 0x10, &hw, 8) ||
+        !heap_read(hw + 0x38, &arr, 8) || arr < HEAP_BASE || arr >= HEAP_BASE + HEAP_MAX) return 0;
+    uint64_t r = arr + (id & 0xffffff) * PRES_STRIDE;
+    if (!heap_read(r + 0xb0, &rid, 8) || rid != id || !heap_read(r + 0x50, &i1, 4) || i1 != (uint32_t)id || !heap_read(r + 0x84, &i2, 4) ||
+        i2 != (uint32_t)id) return 0;
+    *idp = id;
+    return r;
+}
+static void pres_restore(Peer *p) {
+    uint64_t rid = 0;
+    if (p->pres_rec && heap_read(p->pres_rec + 0xb0, &rid, 8) && rid == p->pres_id) {
+        volatile uint32_t *f = (volatile uint32_t *)(uintptr_t)(p->pres_rec + 0x8c);
+        if (*f == LAYER_NONE) {
+            *f = p->pres_was;
+            LOG("[world] player %016llx's walker stand-in let go: it blocks again (physics filter %u back)\n", (unsigned long long)p->id, p->pres_was);
+        }
+    }
+    p->pres_body = p->pres_rec = p->pres_id = 0;
+}
+static void pres_frame(Peer *p, uint64_t frame) {  // (each frame, a shown player's stand-in)
+    static int off = -1;
+    if (off < 0) off = getenv("LARECOMP_WORLD_WALKER_COL") != NULL;
+    bool walker = p->body && p->node && is_body(p->body) && body_stepped(p->body, frame);
+    if (p->pres_rec && (!walker || p->pres_body != p->body)) pres_restore(p);
+    if (!walker || off) return;
+    uint64_t id = 0, r = presence_of(p->body, &id);
+    if (!r) return;
+    volatile uint32_t *f = (volatile uint32_t *)(uintptr_t)(r + 0x8c);
+    if (p->pres_rec != r || p->pres_id != id) {
+        uint32_t made_with = *(const volatile uint32_t *)(uintptr_t)(p->body + 0x40);
+        if (*f != made_with || made_with == LAYER_NONE) return;  // (not the filter its proxy made it with: not touched)
+        p->pres_body = p->body, p->pres_rec = r, p->pres_id = id, p->pres_was = made_with;
+        LOG("[world] player %016llx's walker stand-in: its physics presence (body %llx) no longer blocks (filter %u -> none)\n",
+            (unsigned long long)p->id, (unsigned long long)id, made_with);
+    }
+    if (*f == p->pres_was) *f = LAYER_NONE;  // (again if the game set its own back)
+}
+
 // ---- the walk-up trade: A by a player's stand-in (the stand-in's own Talk is kept from the game) asks that player; them
 // doing the same answers. Both games then go to Link Play -> Link Trade -> Nearby Players with the same Link Code
 // (pressed through runtime/hle/input.c's queue; the code typed by menu.mm's name entry; with an online server the relay
@@ -885,9 +965,11 @@ static void trade_frame(uint64_t me, uint64_t frame) {
 // a stand-in let go: its node back where it stood (a station NPC's isn't written again by the game: it stayed where
 // the player was last seen, 2026-11-16) - unless it went with its level
 static void col_restore(Peer *p);
+static void pres_restore(Peer *p);
 static void standin_release(Peer *p) {
     stand_in_stop(p);  // (back to standing, from its node's next update)
     col_restore(p);    // (its collision back where it stands)
+    pres_restore(p);   // (a walker's physics presence: blocking again)
     uint64_t n = p->saved_node, b = p->body;
     p->node = 0, p->saved_node = 0;
     if (!n || !b || !is_body(b) || *(const uint64_t *)(uintptr_t)n != NODE_VTABLE) return;
@@ -1523,6 +1605,9 @@ static void ghost_frame(uint64_t frame) {
         const float *b = (const float *)(uintptr_t)(me + 0x90), *q = (const float *)(uintptr_t)(mn + 0xd0);
         float dt = sent_ns ? (float)(now - sent_ns) / 1e9f : 1;
         WorldPkt k = {.type = 2, .ver = 1, .from = g_self};
+        static uint16_t seq;
+        uint32_t ms = (uint32_t)(now / 1000000ull) | 1;  // (never 0: "none")
+        seq++, memcpy(k.pad, &seq, 2), memcpy(k.pad + 2, &ms, 4);
         for (int i = 0; i < 3; i++) k.w.p[i] = b[i], k.w.v[i] = dt < 0.5f ? (b[i] - last[i]) / dt : 0, last[i] = b[i];
         k.w.yaw = 2.0f * atan2f(q[1], q[3]);
         k.w.move = g_me_move;
@@ -1604,10 +1689,41 @@ static void ghost_frame(uint64_t frame) {
             LOG("[world] player %016llx is here\n", (unsigned long long)in.from);
             g_choose_soon = 1;
         }
+        uint16_t sq;
+        uint32_t sent_ms;
+        memcpy(&sq, in.pad, 2), memcpy(&sent_ms, in.pad + 2, 4);
+        p->late = 0;
+        if (sent_ms) {  // (their sequence and send time: an older copy sends neither)
+            if (p->seq_ok && (int16_t)(sq - p->seq) <= 0) { p->stale++; continue; }  // (overtaken by a newer one: out of date)
+            p->seq = sq, p->seq_ok = 1, p->nseq++;
+            // (arrival minus sending, in our ms - the two clocks' difference plus the time on the way: only differences of it
+            // count. The quickest of the last 2-4 s is the way's own time; anything more is this packet's lateness)
+            uint32_t off = (uint32_t)(now / 1000000ull) - sent_ms;
+            if (!p->base_win_at || now - p->base_win_at > 2000000000ull)
+                p->base_win[1] = p->base_win_at ? p->base_win[0] : off, p->base_win[0] = off, p->base_win_at = now;
+            else if ((int32_t)(off - p->base_win[0]) < 0) p->base_win[0] = off;
+            p->base = (int32_t)(p->base_win[0] - p->base_win[1]) < 0 ? p->base_win[0] : p->base_win[1];
+            int32_t late = (int32_t)(off - p->base);
+            p->late = late <= 0 ? 0 : late > 400 ? 0.4f : (float)late / 1000.0f;
+            if (p->nsnap) {  // (the send gap - 50 ms from a copy at 60 fps, 67 at 30 - and the recent lateness, slowly forgotten)
+                float g = (float)(int32_t)(sent_ms - p->snap[p->nsnap - 1].t);
+                if (g > 0 && g < 500) p->gap = p->gap ? p->gap + (g - p->gap) * 0.1f : g;
+            } else p->base0 = p->base;
+            p->jit = fmaxf(p->jit - 0.5f, p->late * 1000.0f);
+            p->behind_want = fminf(fmaxf((p->gap ? p->gap : 50) * 1.2f + p->jit + 10, 70), 300);
+            if (!p->nsnap) p->behind = p->behind_want;
+            if (p->nsnap == 8) memmove(&p->snap[0], &p->snap[1], sizeof p->snap[0] * 7), p->nsnap = 7;
+            int s = p->nsnap++;
+            p->snap[s].t = sent_ms, memcpy(p->snap[s].p, in.w.p, 12), p->snap[s].yaw = remainderf(in.w.yaw, 6.2831853f);
+            for (int k = 0; k < 3; k++) p->snap[s].v[k] = fminf(fmaxf(in.w.v[k], -60.0f), 60.0f);
+            p->snap[s].move = n >= 16 + 32 && isfinite(in.w.move) ? fminf(fmaxf(in.w.move, 0.0f), 2.0f) : -1;
+        }
         memcpy(p->pos, in.w.p, 12), p->heard_ns = now;
         for (int k = 0; k < 3; k++) p->vel[k] = fminf(fmaxf(in.w.v[k], -60.0f), 60.0f);
-        p->yaw = remainderf(in.w.yaw, 6.2831853f);
-        p->move = n >= 16 + 32 && isfinite(in.w.move) ? fminf(fmaxf(in.w.move, 0.0f), 2.0f) : -1;
+        p->yaw = remainderf(in.w.yaw, 6.2831853f);  // (with send times: the moment drawn's, below)
+        if (!p->nsnap) {  // (an older copy: no send times - drawn from the newest packet, below)
+            p->move = n >= 16 + 32 && isfinite(in.w.move) ? fminf(fmaxf(in.w.move, 0.0f), 2.0f) : -1;
+        }
     }
     static uint64_t chosen_at;
     if (g_choose_soon || frame - chosen_at >= 60) g_choose_soon = 0, chosen_at = frame, world_choose(me, frame), dressed_sweep();
@@ -1637,12 +1753,44 @@ static void ghost_frame(uint64_t frame) {
             stand_in_gone(p);
         }
         if (!p->body) want_scan = true;
-        float age = (float)(now - p->heard_ns) / 1e9f;  // (shown: toward where they should be now, smoothly)
-        if (age > 0.25f) age = 0.25f;
-        for (int k = 0; k < 3; k++) {
-            float target = p->pos[k] + p->vel[k] * age, d = target - p->shown[k];
-            p->shown[k] = fabsf(d) > 8 ? target : p->shown[k] + d * 0.35f;  // (a jump of 8 m - a warp: at once)
+        pres_frame(p, frame);
+        float target[3], pull = 1.0f - expf(-dt * 25.8f);  // (pull: 0.35 of the way a frame at 60 fps - the same at any rate)
+        if (p->nsnap) {
+            // (drawn `behind` ms behind their clock: between the two packets around that moment. Past the newest - lost or
+            // very late packets - carried on by its speed, up to 0.25 s. behind eases toward what's wanted at a tenth of
+            // the time passing: the stand-in moves at 0.9-1.1x their speed meanwhile, never back)
+            float step = dt * 100.0f, w = p->behind_want - (float)(int32_t)(p->base0 - p->base);  // (base0..base: the way's own
+            p->behind = p->behind < w ? fminf(p->behind + step, w) : fmaxf(p->behind - step, w);  //  time changing - eased too)
+            int nw = p->nsnap - 1;
+            float r = (float)(int32_t)((uint32_t)(now / 1000000ull) - p->base0 - p->snap[nw].t) - p->behind;  // (ms from the newest)
+            int a = -1;
+            for (int k = nw; k >= 0; k--) if ((float)(int32_t)(p->snap[k].t - p->snap[nw].t) <= r) { a = k; break; }
+            if (a == nw || a < 0) {
+                int k = a < 0 ? 0 : nw;
+                float e = a < 0 ? 0 : fminf(r, 250.0f) / 1000.0f;
+                for (int i = 0; i < 3; i++) target[i] = p->snap[k].p[i] + p->snap[k].v[i] * e;
+                p->yaw = p->snap[k].yaw, p->move = p->snap[k].move;
+            } else {
+                float ra = (float)(int32_t)(p->snap[a].t - p->snap[nw].t), rb = (float)(int32_t)(p->snap[a + 1].t - p->snap[nw].t);
+                float f = rb > ra ? (r - ra) / (rb - ra) : 1;
+                for (int i = 0; i < 3; i++) target[i] = p->snap[a].p[i] + (p->snap[a + 1].p[i] - p->snap[a].p[i]) * f;
+                p->yaw = remainderf(p->snap[a].yaw + remainderf(p->snap[a + 1].yaw - p->snap[a].yaw, 6.2831853f) * f, 6.2831853f);
+                p->move = p->snap[f < 0.5f ? a : a + 1].move;
+            }
+        } else {  // (an older copy: the newest packet carried on by their speed for the time since it came, up to 0.25 s)
+            float age = (float)(now - p->heard_ns) / 1e9f;
+            if (age > 0.25f) age = 0.25f;
+            for (int k = 0; k < 3; k++) target[k] = p->pos[k] + p->vel[k] * age;
         }
+        for (int k = 0; k < 3; k++) {
+            float d = target[k] - p->shown[k];
+            p->shown[k] = fabsf(d) > 8 ? target[k] : p->shown[k] + d * pull;  // (a jump of 8 m - a warp: at once)
+        }
+        static int net_log = -1;  // (research LARECOMP_WORLD_LOG_NET=1: every 10 s, their packets taken / dropped as out of date)
+        if (net_log < 0) net_log = getenv("LARECOMP_WORLD_LOG_NET") != NULL;
+        if (net_log && frame % 600 == 0)
+            LOG("[world] player %016llx: %u packets in order, %u out of date dropped, this one %.0f ms late; drawn %.0f ms behind (wanted %.0f, gap %.0f)\n",
+                (unsigned long long)p->id, p->nseq, p->stale, p->late * 1000, p->behind, p->behind_want, p->gap);
         // (their facing comes 20 times a second, and their own turn is quick: their stand-in turns toward it - most of the
         // way in a tenth of a second, the short way round - rather than snapping to each heading)
         float dy = remainderf(p->yaw - p->shown_yaw, 6.2831853f);
@@ -1654,8 +1802,9 @@ static void ghost_frame(uint64_t frame) {
         if (where_log < 0) where_log = getenv("LARECOMP_WORLD_LOG_STANDIN") ? atoi(getenv("LARECOMP_WORLD_LOG_STANDIN")) : 0;  // body, us)
         if (where_log > 0 && frame % (uint64_t)where_log == 0 && p->body && is_body(p->body) && me) {
             const float *b = (const float *)(uintptr_t)(p->body + 0x90), *m = (const float *)(uintptr_t)(me + 0x90);
-            LOG("[world] standin frame %llu shown %.2f %.2f %.2f body %.2f %.2f %.2f us %.2f %.2f %.2f%s\n", (unsigned long long)frame,
-                p->shown[0], p->shown[1], p->shown[2], b[0], b[1], b[2], m[0], m[1], m[2], body_stepped(p->body, frame) ? " (stepped)" : "");
+            LOG("[world] standin frame %llu shown %.2f %.2f %.2f body %.2f %.2f %.2f us %.2f %.2f %.2f%s t %.1f\n", (unsigned long long)frame,
+                p->shown[0], p->shown[1], p->shown[2], b[0], b[1], b[2], m[0], m[1], m[2], body_stepped(p->body, frame) ? " (stepped)" : "",
+                (double)now / 1e6);
         }
     }
     trade_frame(me, frame);
