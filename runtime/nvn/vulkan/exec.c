@@ -5917,7 +5917,41 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
 }
 
 // ================================================================== texture copies
-typedef struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; } TexRefRec;
+typedef struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; uint64_t id; } TexRefRec;
+
+// A texture a command list names (its host object and debug_id when recorded: cmdbuf.c): the object itself if it is still
+// that texture, else NULL - a list recorded once and called every frame can outlive a texture it names (objects.c
+// nvnTextureFinalize). LARECOMP_TEXFIN_CHECK=0: not checked (research: the old crash).
+static NvnTexture *rec_tex(uint64_t p, uint64_t id) {
+    NvnTexture *t = (NvnTexture *)(uintptr_t)p;
+    static int check = -1;
+    if (check < 0) check = !ENV("LARECOMP_TEXFIN_CHECK") || atoi(ENV("LARECOMP_TEXFIN_CHECK")) != 0;
+    if (!t || !check || nvn_texture_alive(t, id)) return t;
+    static uint64_t n;
+    n++;
+    if (!(n & (n - 1))) LOG("[vk] a command list names a texture finalized since: left out (%llu)\n", (unsigned long long)n);
+    return NULL;
+}
+static const TexRefRec *rec_ref(const TexRefRec *in, TexRefRec *out) {  // (the same for a copy's texture)
+    *out = *in;
+    out->tex = (uint64_t)(uintptr_t)rec_tex(in->tex, in->id);
+    return out;
+}
+
+// The finalize job (render thread, textures.c backend_texture_destroyed): the running pass and the target state may still
+// name the texture (state lasts from list to list) - the pass ends while it is still there, the state forgets it.
+void vk_exec_texture_gone(NvnTexture *t) {
+    bool hit = false;
+    for (int i = 0; i < 9; i++) hit |= pass_rt[i] == t;
+    for (int i = 0; i < 8; i++) hit |= st.rt.color[i] == t;
+    hit |= st.rt.depth == t;
+    if (!hit) return;
+    vk_end_pass();
+    for (int i = 0; i < 9; i++) if (pass_rt[i] == t) pass_rt[i] = NULL;
+    for (int i = 0; i < 8; i++) if (st.rt.color[i] == t) st.rt.color[i] = NULL;
+    if (st.rt.depth == t) st.rt.depth = NULL;
+    st.rt_dirty = true;
+}
 
 static void copy_region_dims(NvnTexture *t, const TexRefRec *ref, const FormatInfo **fi, int32_t rg[6], int *level,
                              uint64_t *row, uint64_t *img) {
@@ -6566,16 +6600,16 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_SET_SAMPLER_POOL: st.spool = (NvnDescPool *)(uintptr_t)r->x[0]; break;
         case CMD_SET_RENDER_TARGETS: {
             const struct { uint64_t tex[8]; NvnTextureView views[8]; uint8_t has_view[8]; uint64_t depth;
-                           NvnTextureView dview; uint8_t has_dview; } *rt = x;
+                           NvnTextureView dview; uint8_t has_dview; uint64_t id[8], depth_id; } *rt = x;
             RtState prev = st.rt;  // the same targets again: keep the pass (a restart = full barrier + reload)
             memset(&st.rt, 0, sizeof st.rt);
             st.rt.ncolor = (int)r->x[0] > 8 ? 8 : (int)r->x[0];
             for (int i = 0; i < st.rt.ncolor; i++) {
-                st.rt.color[i] = (NvnTexture *)(uintptr_t)rt->tex[i];
+                st.rt.color[i] = rec_tex(rt->tex[i], rt->id[i]);
                 st.rt.cview[i] = rt->views[i];
                 st.rt.has_cview[i] = rt->has_view[i];
             }
-            st.rt.depth = (NvnTexture *)(uintptr_t)rt->depth;
+            st.rt.depth = rec_tex(rt->depth, rt->depth_id);
             st.rt.dview = rt->dview;
             st.rt.has_dview = rt->has_dview;
             static int always = -1;
@@ -6625,8 +6659,8 @@ static void exec_list(uint64_t handle, int depth) {
         }
         case CMD_CLEAR_TEXTURE: {
             // ClearTexture(cmd, texture, view, region, color, mask): a render-target clear of the texture alone (renderer.m)
-            const struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; float color[4]; } *ct = x;
-            NvnTexture *t = (NvnTexture *)(uintptr_t)ct->tex;
+            const struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; float color[4]; uint64_t id; } *ct = x;
+            NvnTexture *t = rec_tex(ct->tex, ct->id);
             if (!t) break;
             snap_reason = "clear-texture"; snapshots_invalidate(NULL);
             RtState saved = st.rt;
@@ -6767,10 +6801,11 @@ static void exec_list(uint64_t handle, int depth) {
                         s_ ? s_->format : 0, t[0].region[0], t[0].region[1], t[0].region[3], t[0].region[4], d_->width, d_->height,
                         d_->format, t[1].region[0], t[1].region[1], t[1].region[3], t[1].region[4]);
             }
-            copy_texture(&t[0], &t[1], r->x[6]);
+            TexRefRec a, b;
+            copy_texture(rec_ref(&t[0], &a), rec_ref(&t[1], &b), r->x[6]);
             break;
         }
-        case CMD_DOWNSAMPLE: { const TexRefRec *t = x; copy_texture(&t[0], &t[1], 1); break; }
+        case CMD_DOWNSAMPLE: { const TexRefRec *t = x; TexRefRec a, b; copy_texture(rec_ref(&t[0], &a), rec_ref(&t[1], &b), 1); break; }
         case CMD_COPY_BUFFER_TO_TEXTURE: {
             if (ENV("LARECOMP_LOG_SMALL_PASSES")) {
                 const TexRefRec *t = x;
@@ -6780,10 +6815,11 @@ static void exec_list(uint64_t handle, int depth) {
                     LOG("[copy] buffer %llx -> tex %ux%u f%#x (%d,%d %dx%d)\n", (unsigned long long)r->x[0], d_->width, d_->height,
                         d_->format, t->region[0], t->region[1], t->region[3], t->region[4]);
             }
-            copy_buffer_to_texture(r->x[0], x);
+            TexRefRec a;
+            copy_buffer_to_texture(r->x[0], rec_ref(x, &a));
             break;
         }
-        case CMD_COPY_TEXTURE_TO_BUFFER: copy_texture_to_buffer(x, r->x[3]); break;
+        case CMD_COPY_TEXTURE_TO_BUFFER: { TexRefRec a; copy_texture_to_buffer(rec_ref(x, &a), r->x[3]); break; }
         case CMD_COPY_BUFFER_TO_BUFFER:
             renderer_flush();
             memmove((void *)(uintptr_t)r->x[1], (void *)(uintptr_t)r->x[0], r->x[2]);

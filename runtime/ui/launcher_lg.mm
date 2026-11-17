@@ -1292,6 +1292,16 @@ extern "C" void launcher_lg_run(const char *root) {
             bool w = g_settings.world_players != 0;
             if (ImGui::Checkbox(T("Show other players walking around (online server)", "Mostrar outros jogadores andando (servidor online)"), &w))
                 g_settings.world_players = w;
+            // (hle/warp.c world_own_npc: each shown player a townsperson made for them - on by default; off: one borrowed
+            // from the street, the older way)
+            bool own = g_settings.world_own_npc != 0;
+            ImGui::Indent();
+            ImGui::BeginDisabled(!w);
+            if (ImGui::Checkbox(T("Each player gets a townsperson of their own (off: a nearby one stands in)",
+                                  "Cada jogador ganha um morador só seu (desligado: um morador próximo o representa)"), &own))
+                g_settings.world_own_npc = own;
+            ImGui::EndDisabled();
+            ImGui::Unindent();
         }
         ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
         ImGui::TextWrapped("%s", T("With the Steam relay plugin on: players who enter the same Link Code meet on that server. "

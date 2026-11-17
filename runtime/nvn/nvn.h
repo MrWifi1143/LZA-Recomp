@@ -33,6 +33,7 @@ typedef struct NvnTexture {
     uint64_t debug_id;
     uint64_t obj;   // the game's NVNtexture object it was initialized in (objects.c: the pool slots index)
     char label[64];
+    bool finalized;  // (objects.c: set by the finalize job on the render thread; textures.c logs a use after it)
 } NvnTexture;
 
 typedef struct {
@@ -149,6 +150,9 @@ void backend_init(void);
 void backend_execute(uint64_t handle);            // run a recorded command list
 void backend_present(NvnTexture *tex);            // show a texture in the window
 void backend_texture_destroyed(NvnTexture *tex);
+// objects.c: is t still the live texture it was when a command list was recorded (its debug_id then)? A list recorded once
+// and called every frame keeps the host objects it named; the game may finalize one and still call the list once more.
+bool nvn_texture_alive(const NvnTexture *t, uint64_t id);
 void backend_pool_written(uint64_t addr, uint64_t size);
 // render thread (vulkan/renderthread.c): with LARECOMP_RENDER_THREAD off these run the backend call on the spot
 bool rt_active(void);
