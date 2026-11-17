@@ -474,9 +474,60 @@ static void pool_reattach(uint64_t guest, NvnTexture *t) {
         }
     });
 }
+// The live host textures: a command list recorded once and called every frame (CallCommands) holds the host objects of its
+// render targets / copies, and the game may finalize such a texture and call the list once more (Z-A: the trade box's
+// 170x190 portrait target as it closes - harmless on the console, whose lists hold GPU addresses). Here the render thread
+// made the freed object a new image and listed it as live (textures.c tex_backend / live_add), and that dead entry crashed
+// it later: SIGSEGV in backend_texture_destroyed (live_remove writing through it). exec.c now checks each texture a list
+// names against this table (pointer + the debug_id it had when recorded) and leaves out the ones gone. Entries go in at
+// Initialize and out in the finalize job, on the render thread, in order with the lists.
+static pthread_mutex_t g_texreg_lk = PTHREAD_MUTEX_INITIALIZER;
+static const NvnTexture **g_texreg;  // open addressing; (void *)1 = a removed entry
+static uint32_t g_texreg_cap, g_texreg_n, g_texreg_used;
+#define TEXREG_GONE ((const NvnTexture *)1)
+static uint32_t texreg_hash(const NvnTexture *t) { return (uint32_t)(((uintptr_t)t >> 4) * 2654435761u); }
+static void texreg_put(const NvnTexture *t) {  // (lock held)
+    if ((g_texreg_used + 1) * 4 >= g_texreg_cap * 3) {  // grow (or clear out removed entries)
+        uint32_t ocap = g_texreg_cap;
+        const NvnTexture **old = g_texreg;
+        g_texreg_cap = ocap ? (g_texreg_n * 4 >= ocap ? ocap * 2 : ocap) : 4096;
+        g_texreg = calloc(g_texreg_cap, sizeof *g_texreg);
+        g_texreg_n = g_texreg_used = 0;
+        for (uint32_t i = 0; i < ocap; i++)
+            if (old[i] && old[i] != TEXREG_GONE) texreg_put(old[i]);
+        free(old);
+    }
+    uint32_t m = g_texreg_cap - 1, i = texreg_hash(t) & m;
+    while (g_texreg[i] && g_texreg[i] != TEXREG_GONE) i = (i + 1) & m;
+    if (!g_texreg[i]) g_texreg_used++;
+    g_texreg[i] = t;
+    g_texreg_n++;
+}
+static int64_t texreg_find(const NvnTexture *t) {  // (lock held) slot or -1
+    if (!g_texreg_cap) return -1;
+    uint32_t m = g_texreg_cap - 1, i = texreg_hash(t) & m;
+    for (uint32_t k = 0; k < g_texreg_cap && g_texreg[i]; k++, i = (i + 1) & m)
+        if (g_texreg[i] == t) return i;
+    return -1;
+}
+static void texreg_add(const NvnTexture *t) { pthread_mutex_lock(&g_texreg_lk); texreg_put(t); pthread_mutex_unlock(&g_texreg_lk); }
+static void texreg_remove(const NvnTexture *t) {
+    pthread_mutex_lock(&g_texreg_lk);
+    int64_t i = texreg_find(t);
+    if (i >= 0) g_texreg[i] = TEXREG_GONE, g_texreg_n--;
+    pthread_mutex_unlock(&g_texreg_lk);
+}
+bool nvn_texture_alive(const NvnTexture *t, uint64_t id) {
+    pthread_mutex_lock(&g_texreg_lk);
+    bool ok = texreg_find(t) >= 0 && t->debug_id == id;
+    pthread_mutex_unlock(&g_texreg_lk);
+    return ok;
+}
+
 NVN(nvnTextureInitialize) {
     NvnTexture *t = texture_from_builder(A(1));
     t->obj = A(0);
+    texreg_add(t);
     if (t->flags & 2)
         LOG("[nvn] video texture %p: %ux%u fmt %#x flags %#x target %u addr %llx stride %llu\n", t, t->width, t->height,
             t->format, t->flags, t->target, t->addr, t->stride);
@@ -500,11 +551,33 @@ NVN(nvnTextureInitialize) {
     pool_reattach(A(0), t);
     RET(1);
 }
-static void texture_destroy_on_render_thread(void *t) { backend_texture_destroyed(t); }
+// Finalize: the pool slots naming the texture are cleared in the same render-thread job that destroys its image (they
+// were cleared on the game thread after it: the lists another game thread queued in between still found the slot naming
+// the texture). Lists queued before the finalize still see the texture; those after, the empty slot.
+// LARECOMP_TEXFIN_ORDER=0: the old order (research); LARECOMP_TEST_TEXFIN_DELAY=<us>: the game thread waits that long after
+// the job (the old order's window, made wide); LARECOMP_TEST_TEXFIN_POISON=1: the host object is filled with 0xA5 and kept
+// instead of freed (a dangling use then crashes at once instead of whenever malloc reuses it); LARECOMP_TEXFIN_CHECK=0:
+// lists' textures not checked (exec.c - the crash above, for A/B tests).
+static void texture_destroy_on_render_thread(void *t) { ((NvnTexture *)t)->finalized = true; texreg_remove(t); backend_texture_destroyed(t); }
+static void texture_finalize_job(void *t) { ((NvnTexture *)t)->finalized = true; texreg_remove(t); pool_forget(t); backend_texture_destroyed(t); }
+static int texfin_env(const char *name, int dflt) { const char *e = getenv(name); return e ? atoi(e) : dflt; }  // (once: below)
 NVN(nvnTextureFinalize) {
     g_nvn_destroyed++;
     NvnTexture *t = HOST(NvnTexture, A(0));
-    if (t) { rt_call(texture_destroy_on_render_thread, t); pool_forget(t); free(t); }
+    if (t) {
+        static int order = -1, delay_us = -1, poison = -1;
+        if (order < 0) {
+            order = texfin_env("LARECOMP_TEXFIN_ORDER", 1), delay_us = texfin_env("LARECOMP_TEST_TEXFIN_DELAY", 0);
+            poison = texfin_env("LARECOMP_TEST_TEXFIN_POISON", 0);
+            if (!order || delay_us || poison)
+                LOG("[nvn] texture finalize: %s order, test delay %d us, poison %d\n", order ? "new" : "old", delay_us, poison);
+        }
+        rt_call(order ? texture_finalize_job : texture_destroy_on_render_thread, t);
+        if (delay_us > 0) plat_sleep_until_ns(plat_now_ns() + (uint64_t)delay_us * 1000);
+        if (!order) pool_forget(t);
+        if (poison) memset(t, 0xA5, sizeof *t);
+        else free(t);
+    }
     SET_HOST(A(0), 0);
 }
 NVN(nvnTextureSetDebugLabel) {
