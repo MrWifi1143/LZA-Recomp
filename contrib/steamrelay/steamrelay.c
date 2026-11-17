@@ -532,7 +532,6 @@ static sock_t g_fake = NO_SOCK;
 static uint16_t g_fake_peer;
 // ---- an online server (contrib/lzaserver): UDP to it, lobbies by Link Code
 static sock_t g_srv = NO_SOCK;
-static struct sockaddr_in g_srv_addr;
 static uint64_t g_srv_id;
 static uint8_t g_srv_game;            // (1 Arceus, 2 Z-A)
 static char g_srv_code[9];            // (the lobby: the Link Code last entered)
@@ -543,29 +542,79 @@ static volatile int g_world_on;
 static struct { uint64_t from; uint8_t n, p[96]; } g_wq[64];
 static int g_wq_head, g_wq_tail;
 static pthread_mutex_t g_wq_lock = PTHREAD_MUTEX_INITIALIZER;
-// (the address is looked up again every 10 s until it is found: a game started before the PC was online - or while the
-// server's name didn't resolve yet - still gets online play once it is, instead of none until the next start)
+// (the address is looked up again every 10 s until it is found - a game started before the PC was online, or while the
+// server's name didn't resolve yet, still gets online play once it is - and then every 60 s (every 10 s while the server
+// doesn't answer): a home server on a dynamic-DNS name that gets a new address is followed. IPv4 only. The look-ups run
+// on a thread of their own - a slow DNS answer never holds up the game's traffic.)
 static char g_srv_host[256];
 static unsigned g_srv_port = 39200;
-static volatile int g_srv_resolved;  // (g_srv_addr known)
+static volatile uint64_t g_srv_ap;   // (the server: IPv4 address << 16 | port, network order inside; 0 not found yet)
+static volatile int g_srv_resolved;  // (g_srv_ap known)
+// Is the server there? Every hello (2 s) is answered with a cookie ('C', lzaserver 2026-11-17); anything heard counts.
+// larecomp_server_state (runtime/hle/warp.c tells the player): 1 not heard yet, 2 answering, 3 never answered (8 s),
+// 4 stopped answering (8 s), 5 the name doesn't resolve.
+static uint64_t now_ms(void);
+static volatile int g_srv_quit;  // (the game is ending: the look-up thread stops)
+static volatile uint64_t g_srv_heard, g_srv_since;  // (ms: the last packet from it; when we started asking)
+static volatile int g_srv_ever;
+// Return routability: the server answers each hello with this address's cookie; ours carries the last one back. Until
+// it does, the server sends us no more than we send it (it can't tell us from someone forging our address) - with it,
+// everything. An older server never sends one (the 8 more bytes of our hello it ignores).
+static uint8_t g_srv_cookie[8];
+static volatile int g_srv_have_cookie, g_srv_hello_now;
+static struct sockaddr_in srv_addr_of(uint64_t ap) {
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET, a.sin_addr.s_addr = (uint32_t)(ap >> 16), a.sin_port = (uint16_t)ap;
+    return a;
+}
 static bool server_resolve(void) {
     struct addrinfo hints = {0}, *res = NULL;
     hints.ai_family = AF_INET, hints.ai_socktype = SOCK_DGRAM;
     if (getaddrinfo(g_srv_host, NULL, &hints, &res) || !res) return false;
-    struct sockaddr_in a = *(struct sockaddr_in *)res->ai_addr;
-    a.sin_port = htons((uint16_t)g_srv_port);
+    uint32_t ip = ((struct sockaddr_in *)res->ai_addr)->sin_addr.s_addr;
     freeaddrinfo(res);
-    g_srv_addr = a, g_srv_resolved = 1;
+    uint64_t ap = (uint64_t)ip << 16 | htons((uint16_t)g_srv_port), was = g_srv_ap;
+    if (ap != was) {
+        g_srv_ap = ap;
+        if (was) {
+            struct in_addr o = {.s_addr = (uint32_t)(was >> 16)}, n = {.s_addr = ip};
+            char ob[32];
+            snprintf(ob, sizeof ob, "%s", inet_ntoa(o));
+            LOG("[steamrelay] online server %s: its address changed (%s -> %s) - following it\n", g_srv_host, ob, inet_ntoa(n));
+            g_srv_have_cookie = 0;  // (another machine: its own cookie)
+        }
+        g_srv_hello_now = 1;
+    }
+    g_srv_resolved = 1;
     return true;
 }
+static void *resolver(void *arg) {
+    (void)arg;
+    uint64_t last = now_ms();
+    while (!g_srv_quit) {
+        nap_ms(500);
+        uint64_t t = now_ms(), heard = g_srv_heard;
+        bool quiet = !heard || t - heard > 8000;
+        if (t - last < (!g_srv_resolved || quiet ? 10000u : 60000u)) continue;
+        last = t;
+        bool had = g_srv_resolved;
+        if (server_resolve()) { if (!had) LOG("[steamrelay] online server %s: address found\n", g_srv_host); }
+        else if (had) LOG("[steamrelay] online server %s: the name didn't resolve this time (the last address kept)\n", g_srv_host);
+    }
+    return NULL;
+}
 static void srv_send(const void *p, size_t n) {
-    if (!g_srv_resolved) return;  // (its address not found yet: server_resolve)
-    sendto(g_srv, (const char *)p, (int)n, 0, (const struct sockaddr *)&g_srv_addr, sizeof g_srv_addr);
+    uint64_t ap = g_srv_ap;
+    if (!ap) return;  // (its address not found yet: server_resolve)
+    struct sockaddr_in a = srv_addr_of(ap);
+    sendto(g_srv, (const char *)p, (int)n, 0, (const struct sockaddr *)&a, sizeof a);
 }
 static void srv_hello(void) {
-    uint8_t b[11] = {'H', 1};
+    uint8_t b[19] = {'H', 1};
     memcpy(b + 2, &g_srv_id, 8), b[10] = g_srv_game;
-    srv_send(b, sizeof b);
+    if (g_srv_have_cookie) memcpy(b + 11, g_srv_cookie, 8);
+    srv_send(b, g_srv_have_cookie ? 19 : 11);
     if (g_srv_code[0]) {
         uint8_t l[17] = {'L'};
         memcpy(l + 1, &g_srv_id, 8), memcpy(l + 9, g_srv_code, 8);
@@ -826,22 +875,26 @@ static volatile int g_quit;
 static void *pump(void *arg) {
     (void)arg;
     static uint8_t m[70000];
-    uint64_t last_hello = 0, last_resolve = now_ms();
+    uint64_t last_hello = 0, last_now = 0;
     while (!g_quit) {
         if (g_srv != NO_SOCK) {
             uint64_t t = now_ms();
-            if (!g_srv_resolved && t - last_resolve >= 10000) {
-                last_resolve = t;
-                if (server_resolve()) LOG("[steamrelay] online server %s: address found\n", g_srv_host), last_hello = 0;
-            }
-            if (t - last_hello >= 2000) last_hello = t, srv_hello();
+            if (g_srv_hello_now && t - last_now >= 250) g_srv_hello_now = 0, last_now = t, last_hello = 0;  // (a new address or cookie:
+            if (t - last_hello >= 2000) last_hello = t, srv_hello();                                         //  hello at once)
             dup_send_due(t);
             struct sockaddr_in a;
             socklen_t al = sizeof a;
             int n;
+            uint64_t ap = g_srv_ap;
             while ((n = (int)recvfrom(g_srv, (char *)m, sizeof m, 0, (struct sockaddr *)&a, &al)) > 0) {
-                if (a.sin_addr.s_addr != g_srv_addr.sin_addr.s_addr || a.sin_port != g_srv_addr.sin_port) continue;
-                if (m[0] == 'X' && n >= 9 && n <= 9 + 96) {
+                if (!ap || a.sin_addr.s_addr != (uint32_t)(ap >> 16) || a.sin_port != (uint16_t)ap) { al = sizeof a; continue; }
+                g_srv_heard = t ? t : 1, g_srv_ever = 1;
+                if (m[0] == 'C' && n >= 9) {  // (our address's cookie: the next hello carries it - a new one at once)
+                    if (!g_srv_have_cookie || memcmp(g_srv_cookie, m + 1, 8)) {
+                        if (!g_srv_have_cookie) LOG("[steamrelay] online server: answering (cookie taken)\n");
+                        memcpy(g_srv_cookie, m + 1, 8), g_srv_have_cookie = 1, g_srv_hello_now = 1;
+                    }
+                } else if (m[0] == 'X' && n >= 9 && n <= 9 + 96) {
                     pthread_mutex_lock(&g_wq_lock);
                     int nt = (g_wq_tail + 1) % 64;
                     if (nt == g_wq_head) g_wq_head = (g_wq_head + 1) % 64;  // (full: the oldest dropped)
@@ -909,11 +962,13 @@ static void *pump(void *arg) {
 }
 
 // At exit: the helper told to stop (its stdin closed: it shuts Steam down and ends), then the pump
-static pthread_t g_pump;
+static pthread_t g_pump, g_resolver;
+static volatile int g_resolver_on;
 static void quit(void) {  // (hooks.shutdown: from exit())
-    g_quit = 1;
+    g_quit = 1, g_srv_quit = 1;
     if (g_fake == NO_SOCK && g_srv == NO_SOCK) helper_stop();
     pthread_join(g_pump, NULL);
+    if (g_resolver_on) pthread_join(g_resolver, NULL);  // (at most a DNS look-up's wait)
 }
 
 // ---- Discord invites (runtime/discord.c finds these by name in the loaded plugins)
@@ -948,6 +1003,19 @@ void larecomp_relay_code(const char *code) {
     memcpy(g_srv_code, code, 9);
     srv_hello();
     LOG("[steamrelay] online server: in the lobby of this Link Code\n");
+}
+
+// The online server's state (runtime/hle/warp.c tells the player when it can't be reached, drops or comes back): 0 no
+// server in use, 1 not heard from yet, 2 answering, 3 never answered in 8 s, 4 stopped answering 8 s ago, 5 its name
+// doesn't resolve (8 s in). `name` gets the server as it was given (host[:port]).
+int larecomp_server_state(char *name, size_t size) {
+    if (g_srv == NO_SOCK) return 0;
+    if (name && size) snprintf(name, size, "%s", g_srv_host);
+    uint64_t t = now_ms(), heard = g_srv_heard, since = g_srv_since;
+    if (!g_srv_resolved) return t - since >= 8000 ? 5 : 1;
+    if (heard && t - heard < 8000) return 2;
+    if (t - since < 8000) return 1;
+    return g_srv_ever ? 4 : 3;
 }
 
 // The shared world (runtime/hle/warp.c): 1 when an online server is in use (the world needs one)
@@ -1046,7 +1114,9 @@ int larecomp_plugin_init(const LarecompPluginApi *api, LarecompPluginHooks *hook
         invite_token();
         g_me = g_srv_id;
         g_srv_game = api->title_id && api->title_id() == 0x01001F5010DFA000ull ? 1 : 2;
+        g_srv_since = now_ms();
         srv_hello();
+        g_resolver_on = !pthread_create(&g_resolver, NULL, resolver, NULL);
         LOG("[steamrelay] online play through the server %s (players with the same Link Code meet there)\n", server);
     } else if (fake && sscanf(fake, "%u,%u", &mine, &peer) == 2) {
         g_fake = socket(AF_INET, SOCK_DGRAM, 0);

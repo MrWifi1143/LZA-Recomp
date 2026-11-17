@@ -2079,7 +2079,39 @@ static void world_transport(uint64_t frame) {
     }
 }
 
+// ---- Is the online server there? (the relay plugin's larecomp_server_state: every hello it sends is answered - lzaserver
+// 2026-11-17 - so it knows within ~8 s). The player is told when it can't be reached, when it drops and when it's back
+// (again every 2 minutes while it stays away) - before, online play just silently did nothing (za-mp12 review).
+void menu_notice_for(const char *text, unsigned ms);
+static void server_notice_frame(uint64_t frame) {
+    static int (*state)(char *, size_t);
+    static uint64_t at, told_at;
+    static int was = -1, tries;
+    if (frame - at < 60) return;
+    at = frame;
+    if (!state) {
+        if (tries > 30) return;  // (no relay plugin with it - an older one, or none: looked for 30 s, then not again)
+        tries++;
+        void *plugins_symbol(const char *name);
+        if (!(state = (int (*)(char *, size_t))plugins_symbol("larecomp_server_state"))) return;
+    }
+    char name[256] = "";
+    int st = state(name, sizeof name);
+    bool away = st == 3 || st == 4 || st == 5;
+    if (st == was && !(away && frame - told_at >= 7200)) return;
+    char t[320];
+    t[0] = 0;
+    if (st == 3) snprintf(t, sizeof t, "Can't reach the online server (%s) - online play waits for it. Is the address right, and the server running?", name);
+    else if (st == 4) snprintf(t, sizeof t, "Lost the connection to the online server (%s) - trying again...", name);
+    else if (st == 5) snprintf(t, sizeof t, "The online server's name (%s) can't be found - check the address (Mods page) and your connection.", name);
+    else if (st == 2 && (was == 3 || was == 4 || was == 5)) snprintf(t, sizeof t, was == 4 ? "Connected to the online server again." : "Online server reached (%s).", name);
+    if (t[0]) menu_notice_for(t, st == 2 ? 5000 : 10000), told_at = frame, LOG("[online] told: %s\n", t);
+    else if (st != was) LOG("[online] the server (%s): %s\n", name, st == 1 ? "asked, no answer yet" : st == 2 ? "answering" : "not in use");
+    was = st;
+}
+
 static void ghost_frame(uint64_t frame) {
+    server_notice_frame(frame);
     world_transport(frame);
     gone_frame(frame);
     if (!g_world) {
