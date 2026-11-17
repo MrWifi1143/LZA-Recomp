@@ -870,10 +870,12 @@ static bool bsd_trace(void) {  // (research LARECOMP_BSD_TRACE=1: every packet t
 }
 static void trace_pkt(const char *dir, const struct sockaddr_in *a, const void *p, ssize_t n) {
     const uint8_t *b = (const uint8_t *)p;
-    char sb[16];
-    LOG("[bsd] %s %s:%u %zd bytes %02x%02x%02x%02x%02x%02x%02x%02x t %llu\n", dir, ip_str(ntohl(a->sin_addr.s_addr), sb), ntohs(a->sin_port),
-        n, n > 0 ? b[0] : 0, n > 1 ? b[1] : 0, n > 2 ? b[2] : 0, n > 3 ? b[3] : 0, n > 4 ? b[4] : 0, n > 5 ? b[5] : 0, n > 6 ? b[6] : 0,
-        n > 7 ? b[7] : 0, (unsigned long long)(plat_now_ns() / 1000000));
+    char sb[16], hx[2 * 24 + 1] = "";
+    uint32_t h = 2166136261u;  // (FNV-1a of the whole packet: the same packet on both sides)
+    for (ssize_t i = 0; i < n; i++) h = (h ^ b[i]) * 16777619u;
+    for (ssize_t i = 0; i < n && i < 24; i++) snprintf(hx + 2 * i, 3, "%02x", b[i]);
+    LOG("[bsd] %s %s:%u %zd bytes #%08x %s t %llu\n", dir, ip_str(ntohl(a->sin_addr.s_addr), sb), ntohs(a->sin_port), n, h, hx,
+        (unsigned long long)(plat_now_ns() / 1000000));
 }
 static void traffic_log(void) {
     static uint64_t last;

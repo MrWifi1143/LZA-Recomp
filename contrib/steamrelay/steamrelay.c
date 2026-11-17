@@ -543,7 +543,23 @@ static volatile int g_world_on;
 static struct { uint64_t from; uint8_t n, p[96]; } g_wq[64];
 static int g_wq_head, g_wq_tail;
 static pthread_mutex_t g_wq_lock = PTHREAD_MUTEX_INITIALIZER;
+// (the address is looked up again every 10 s until it is found: a game started before the PC was online - or while the
+// server's name didn't resolve yet - still gets online play once it is, instead of none until the next start)
+static char g_srv_host[256];
+static unsigned g_srv_port = 39200;
+static volatile int g_srv_resolved;  // (g_srv_addr known)
+static bool server_resolve(void) {
+    struct addrinfo hints = {0}, *res = NULL;
+    hints.ai_family = AF_INET, hints.ai_socktype = SOCK_DGRAM;
+    if (getaddrinfo(g_srv_host, NULL, &hints, &res) || !res) return false;
+    struct sockaddr_in a = *(struct sockaddr_in *)res->ai_addr;
+    a.sin_port = htons((uint16_t)g_srv_port);
+    freeaddrinfo(res);
+    g_srv_addr = a, g_srv_resolved = 1;
+    return true;
+}
 static void srv_send(const void *p, size_t n) {
+    if (!g_srv_resolved) return;  // (its address not found yet: server_resolve)
     sendto(g_srv, (const char *)p, (int)n, 0, (const struct sockaddr *)&g_srv_addr, sizeof g_srv_addr);
 }
 static void srv_hello(void) {
@@ -676,6 +692,58 @@ static struct { uint64_t id; char name[64]; } g_hosts[64];
 static int g_nhosts;
 static pthread_mutex_t g_hosts_lock = PTHREAD_MUTEX_INITIALIZER;
 
+// ---- Each game packet twice, over an online server (2026-11-17). Over the internet some packets are lost, and the game's
+// Link Play session (Pia) joins in a handshake of several steps, each one resent only after 0.5-1 s when lost: through a
+// lagged server with a few % loss per leg the join took 3-4 s, and the joining game gives up on a session that isn't up
+// in about that time ("No one could be found!" - its LeaveSession right after Pia's JoinSession completed, traced with
+// testout/za-mp12/tools/pia.lua). A second copy of every game packet DUP_MS later (not of ldn.c's control messages: they
+// ask again themselves) makes a loss need both copies lost - a few % becomes a few per thousand. The receiving copy drops
+// the second one it gets (same bytes from the same player within DUP_KEEP_MS: Pia's packets carry a counter and a nonce,
+// so two real ones are never the same). An older copy without this gets both - Pia takes a duplicate like any UDP one.
+// LARECOMP_RELAY_DUP=0: off (tests).
+#define LDN_CTRL_PORT 39100
+#define DUP_MS 25
+#define DUP_KEEP_MS 400
+static int dup_on(void) {
+    static int on = -1;
+    if (on < 0) on = !(getenv("LARECOMP_RELAY_DUP") && atoi(getenv("LARECOMP_RELAY_DUP")) == 0);
+    return on;
+}
+static struct { uint64_t due; uint16_t n; uint8_t p[1600]; } g_dup[128];  // (waiting second copies, sent by the pump)
+static int g_dup_head, g_dup_tail;
+static pthread_mutex_t g_dup_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t now_ms(void);
+static void dup_later(const uint8_t *p, size_t n) {
+    if (n > sizeof g_dup[0].p) return;  // (a big one: once - none this big in Link Play)
+    pthread_mutex_lock(&g_dup_lock);
+    int nt = (g_dup_tail + 1) % 128;
+    if (nt != g_dup_head) {  // (full: this one goes once)
+        g_dup[g_dup_tail].due = now_ms() + DUP_MS, g_dup[g_dup_tail].n = (uint16_t)n;
+        memcpy(g_dup[g_dup_tail].p, p, n);
+        g_dup_tail = nt;
+    }
+    pthread_mutex_unlock(&g_dup_lock);
+}
+static void dup_send_due(uint64_t now) {  // (the pump)
+    pthread_mutex_lock(&g_dup_lock);
+    while (g_dup_head != g_dup_tail && g_dup[g_dup_head].due <= now) {
+        srv_send(g_dup[g_dup_head].p, g_dup[g_dup_head].n);
+        g_dup_head = (g_dup_head + 1) % 128;
+    }
+    pthread_mutex_unlock(&g_dup_lock);
+}
+static bool dup_seen(int k, const uint8_t *m, size_t n) {  // (deliver: a copy of one already delivered)
+    static struct { uint64_t h, at; } ring[256];
+    static int pos;
+    uint64_t h = 1469598103934665603ull ^ (uint64_t)k;
+    for (size_t i = 0; i < n; i++) h = (h ^ m[i]) * 1099511628211ull;
+    uint64_t now = now_ms();
+    for (int i = 0; i < 256; i++)
+        if (ring[i].h == h && now - ring[i].at < DUP_KEEP_MS) return true;
+    ring[pos].h = h, ring[pos].at = now, pos = (pos + 1) % 256;
+    return false;
+}
+
 // ---- the relay
 static void relay_send(uint32_t to, uint16_t from_port, uint16_t to_port, const void *p, size_t n) {
     int k = peer_k(to);
@@ -692,6 +760,7 @@ static void relay_send(uint32_t to, uint16_t from_port, uint16_t to_port, const 
             d[0] = 'D';
             memcpy(d + 1, &g_srv_id, 8), memcpy(d + 9, &id, 8), memcpy(d + 17, m, n + 4);
             srv_send(d, n + 4 + 17);
+            if (to_port != LDN_CTRL_PORT && dup_on()) dup_later(d, n + 4 + 17);
             free(d);
         }
     } else if (g_fake != NO_SOCK) {
@@ -748,6 +817,8 @@ static const LdnRelay k_relay = {relay_send, relay_targets, relay_hosting, relay
 static void deliver(uint64_t from, const uint8_t *m, size_t n) {
     if (n < 4) return;
     int k = peer_of(from);
+    if (k && g_srv != NO_SOCK && (uint16_t)(m[2] << 8 | m[3]) != LDN_CTRL_PORT && dup_seen(k, m, n)) return;  // (the second copy: above;
+    // ldn.c's control messages aren't sent twice - and their own repeats, a scan or a join asked again, are meant)
     if (k) replay(k, (uint16_t)(m[0] << 8 | m[1]), (uint16_t)(m[2] << 8 | m[3]), m + 4, n - 4);
 }
 
@@ -755,11 +826,16 @@ static volatile int g_quit;
 static void *pump(void *arg) {
     (void)arg;
     static uint8_t m[70000];
-    uint64_t last_hello = 0;
+    uint64_t last_hello = 0, last_resolve = now_ms();
     while (!g_quit) {
         if (g_srv != NO_SOCK) {
             uint64_t t = now_ms();
+            if (!g_srv_resolved && t - last_resolve >= 10000) {
+                last_resolve = t;
+                if (server_resolve()) LOG("[steamrelay] online server %s: address found\n", g_srv_host), last_hello = 0;
+            }
             if (t - last_hello >= 2000) last_hello = t, srv_hello();
+            dup_send_due(t);
             struct sockaddr_in a;
             socklen_t al = sizeof a;
             int n;
@@ -917,20 +993,13 @@ static bool server_config(char *out, size_t size) {
     return ok;
 }
 static bool server_start(const char *spec) {
-    char host[256];
-    unsigned port = 39200;
-    snprintf(host, sizeof host, "%s", spec);
-    char *c = strrchr(host, ':');
-    if (c) port = (unsigned)atoi(c + 1), *c = 0;
-    struct addrinfo hints = {0}, *res = NULL;
-    hints.ai_family = AF_INET, hints.ai_socktype = SOCK_DGRAM;
-    if (getaddrinfo(host, NULL, &hints, &res) || !res) { LOG("[steamrelay] online server %s: address not found\n", spec); return false; }
-    g_srv_addr = *(struct sockaddr_in *)res->ai_addr;
-    g_srv_addr.sin_port = htons((uint16_t)port);
-    freeaddrinfo(res);
+    snprintf(g_srv_host, sizeof g_srv_host, "%s", spec);
+    char *c = strrchr(g_srv_host, ':');
+    if (c) g_srv_port = (unsigned)atoi(c + 1), *c = 0;
     g_srv = socket(AF_INET, SOCK_DGRAM, 0);
     if (g_srv == NO_SOCK) return false;
     nonblocking(g_srv);
+    if (!server_resolve()) LOG("[steamrelay] online server %s: address not found (yet) - trying again every 10 s\n", spec);
     return true;
 }
 

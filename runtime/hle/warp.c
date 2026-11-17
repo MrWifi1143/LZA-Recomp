@@ -1260,7 +1260,9 @@ static void trade_link_frame(uint64_t frame) {
     // in: "No one could be found!", and back to Nearby / Faraway Players once that is dismissed. The one who joins goes
     // again - A past the message, A for Nearby Players, the Link Code answers itself - while the other keeps its room up.
     // One A every 3 s until the game is looking again: the message can take a while to come up, and an A before it went
-    // nowhere - a fixed A, A then left the game on Nearby / Faraway, 2026-11-17)
+    // nowhere - a fixed A, A then left the game on Nearby / Faraway, 2026-11-17. Why it failed: lost packets - Pia's mesh
+    // join resends each lost step only after 0.5-1 s, the joining game leaves a session that took ~3.5 s or more to come
+    // up; the relay plugin now sends every game packet twice over a server, so this is a rare fallback)
     if (g_tl.again_ns) {
         if (st & 8) {
             g_tl.again_ns = 0, g_tl.active = 1, g_tl.inactive_ns = 0;
