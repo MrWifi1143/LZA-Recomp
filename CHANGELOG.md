@@ -9,7 +9,8 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
   got a fixed 2.75 GB block, and at 720p on Switch settings it already uses 2.6-2.75 GB walking Lumiose, so a busier
   spot failed a texture load and the game stopped itself. The block is now 3.5 GB (more with higher settings, as
   before). Where the game's memory runs out anyway, the error box now says so. Reported on Discord by a player on a
-  laptop with RX Vega 8 graphics.
+  laptop with RX Vega 8 graphics, and on a Steam Deck after 3.5 hours of play (the block's free space gets cut into
+  pieces over a long session until a load can't find room - not the Deck's sleep, and not a leak).
 
 ## 2026-11-17: LegendsZA-v1.2.3
 
