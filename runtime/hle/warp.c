@@ -859,6 +859,26 @@ static uint64_t node_of_body(uint64_t body) {
     return 0;
 }
 static uint64_t g_scan_me;
+#define LAYER_NPC 4u
+static bool layer_any(void) {
+    static int any = -1;
+    if (any < 0) any = getenv("LARECOMP_WORLD_LAYER_ANY") && atoi(getenv("LARECOMP_WORLD_LAYER_ANY")) == 1;
+    return any;
+}
+// (a body passed over as no person - logged once each: its layer by the names of system/physics/CollisionLayer/
+// collision_layer_main.trhcl)
+static void not_person_log(uint64_t o, uint32_t layer, float d, const float *at) {
+    static const char *const names[32] = {"0", "Ground", "Water", "Player", "NPC", "SymbolPokemon", "FieldGimmick", "Event",
+        "ViolentPokemon", "Sound", "Area", "HighHit", "HidingPlace", "EventWall", "InlandOnlySymbolPokemon", "Unused15", "Unused16",
+        "BattleWall", "Unstable", "Unused19", "Unused20", "Unused21", "Spawner", "Attack", "Defence", "PlayerNpcWall",
+        "ClimbableWall", "FieldTriggerGimmick", "NonPhysicalAttack", "Unused29", "Unused30", "None"};
+    static uint64_t seen[64];
+    static unsigned nseen;
+    for (unsigned i = 0; i < 64 && i < nseen; i++) if (seen[i] == o) return;
+    seen[nseen++ % 64] = o;
+    LOG("[world] (not %llx, %.1f m from us at %.2f %.2f %.2f: physics layer %u %s - no townsperson)\n", (unsigned long long)o, d,
+        at[0], at[1], at[2], layer, names[layer & 31]);
+}
 static void *scan_bodies(void *arg) {
     (void)arg;
     uint64_t me = g_scan_me;
@@ -888,6 +908,14 @@ static void *scan_bodies(void *arg) {
             pthread_mutex_unlock(&g_body_lock);
             for (int i = 0; i < MAXPEER; i++) if (g_peers[i].body == o) skip = true;
             if (skip || gone_body(o)) continue;  // (a let-go dressed character isn't anyone's stand-in again)
+            // (a person only: its proxy's collision layer NPC (4). Not stepped is not enough - by the Vert Pokemon Center a
+            // body on layer 14, InlandOnlySymbolPokemon (a Pokemon of the town, not made as a character), was taken and
+            // walked about as a player, 2026-11-17. Research LARECOMP_WORLD_LAYER_ANY=1: any layer, the old way)
+            uint32_t layer = *(const uint32_t *)((const char *)buf + k * 8 + 0x40) & 0x1f;
+            if (layer != LAYER_NPC && !layer_any()) {
+                not_person_log(o, layer, d, q);
+                continue;
+            }
             if (nc == NC && d >= cd[NC - 1]) continue;  // (kept sorted, nearest first)
             int j = nc < NC ? nc++ : NC - 1;
             while (j > 0 && cd[j - 1] > d) cand[j] = cand[j - 1], cd[j] = cd[j - 1], cst[j] = cst[j - 1], j--;
