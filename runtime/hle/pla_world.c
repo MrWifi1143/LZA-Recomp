@@ -205,7 +205,7 @@ typedef struct {
     uint64_t id, heard_ns, first_ns;
     int have, gender, own, n_snap, borrowed, own_up;
     uint64_t retry_ns;     // (no new person asked for before then: the last never came up)
-    float jump_at[3];
+    float jump_at[3];      // (where they were drawn the tick before)
     uint64_t sk;           // (its person's skeleton, once seen)
     int ov;                // (its g_ov entry while drawn from its body: -1 walked by its navigator)
     uint64_t far_ns;       // (since when its person is over 2 m from where they are)
@@ -271,7 +271,7 @@ static void peer_let_go(Peer *p, const char *why) {
         extern void pla_npc_free(int);
         // (it walks off away from us, the way they were, and is kept for whoever comes next)
         float dx = p->tgt[0] - g_me[0], dz = p->tgt[2] - g_me[2], d = sqrtf(dx * dx + dz * dz);
-        float to[3] = {p->tgt[0] + (d > 0.1f ? dx / d : 1) * 25, p->tgt[1], p->tgt[2] + (d > 0.1f ? dz / d : 0) * 25};
+        float to[3] = {p->tgt[0] + (d > 0.1f ? dx / d : 1) * 10, p->tgt[1], p->tgt[2] + (d > 0.1f ? dz / d : 0) * 10};
         pla_npc_order(p->own, to, 0);
         pla_npc_free(p->own);
         if (p->ov >= 0) g_ov[p->ov].draw[1] = -1000;  // (drawn from its body: put out of sight instead)
@@ -370,6 +370,17 @@ static void world_tick(uint64_t frame) {
             peer_take(p, (uint32_t)ms, v, my_speed, sg >= 0 ? sg : gender > 0);
         }
     }
+    // (people are made only once we have stood in the world a while: not mid-load, not right after a warp - a jump is
+    // over 3 m in one tick, walking or running moves well under that)
+    static float jump_at[3];
+    static uint64_t jump_ns, valid_ns;
+    if (!me_ok) valid_ns = 0;
+    else if (!valid_ns) valid_ns = now;
+    if (me_ok) {
+        if (fabsf(g_me[0] - jump_at[0]) + fabsf(g_me[2] - jump_at[2]) > 3.0f) jump_ns = now;
+        jump_at[0] = g_me[0], jump_at[2] = g_me[2];
+    }
+    bool settled = valid_ns && now - valid_ns > 8000000000ull && now - jump_ns > 3000000000ull;
     // research LARECOMP_WORLD_FAKE=<n>: n made-up players around where we stood when they began - #0 walks a 6 m circle,
     // #1 goes quiet after 40 s, #2 runs back and forth over 20 m, the rest stand 5..60 m out (bodies alternate)
     static int nfake = -1;
@@ -378,10 +389,12 @@ static void world_tick(uint64_t frame) {
     if (nfake < 0) nfake = getenv("LARECOMP_WORLD_FAKE") ? atoi(getenv("LARECOMP_WORLD_FAKE")) : 0;
     if (nfake > MAXPEER) nfake = MAXPEER;
     static uint64_t fsent;
-    if (nfake > 0 && me_ok && now_ms() - fsent >= 50) {
+    static uint64_t fjump;  // (they begin around where we stand once settled, and again after each warp of ours)
+    if (fstart && jump_ns != fjump) fstart = 0;
+    if (nfake > 0 && me_ok && (settled || fstart) && now_ms() - fsent >= 50) {
         uint64_t ms = now_ms();
         fsent = ms;
-        if (!fstart) fstart = ms, fbase[0] = g_me[0], fbase[1] = g_me[1], fbase[2] = g_me[2], fbase[3] = g_me[3];
+        if (!fstart) fstart = ms, fjump = jump_ns, fbase[0] = g_me[0], fbase[1] = g_me[1], fbase[2] = g_me[2], fbase[3] = g_me[3];
         float t = (float)(ms - fstart) * 1e-3f;
         static const float dist[] = {0, 7, 8, 10, 14, 22, 35, 60}, ang[] = {0, 40, -40, 20, -60, 70, -15, 5};
         for (int i = 0; i < nfake; i++) {
@@ -405,13 +418,6 @@ static void world_tick(uint64_t frame) {
             peer_take(p, (uint32_t)ms, v, spd, i & 1);
         }
     }
-    // (people are made only once we have stood in the world a while: not mid-load, not right after a warp)
-    static float jump_at[3];
-    static uint64_t jump_ns, valid_ns;
-    if (!me_ok) valid_ns = 0;
-    else if (!valid_ns) valid_ns = now;
-    if (me_ok && fabsf(g_me[0] - jump_at[0]) + fabsf(g_me[2] - jump_at[2]) > 8.0f) jump_at[0] = g_me[0], jump_at[2] = g_me[2], jump_ns = now;
-    bool settled = valid_ns && now - valid_ns > 8000000000ull && now - jump_ns > 3000000000ull;
     // who is shown: the nearest SHOW within OWN_RANGE
     int order[MAXPEER], no = 0;
     for (int i = 0; i < MAXPEER; i++) {
@@ -434,11 +440,22 @@ static void world_tick(uint64_t frame) {
             float db = (b->tgt[0] - g_me[0]) * (b->tgt[0] - g_me[0]) + (b->tgt[2] - g_me[2]) * (b->tgt[2] - g_me[2]);
             if (db < da) { int t = order[j]; order[j] = order[j - 1], order[j - 1] = t; }
         }
+    // (SHOW of them: those with a person keep it while among the nearest SHOW+2 and within OWN_RANGE+5, then the nearest
+    // others within OWN_RANGE - no person handed back and forth when two are about as near)
+    bool wantv[MAXPEER] = {0};
+    int nw = 0;
+    for (int pass = 0; pass < 2 && me_ok; pass++)
+        for (int r = 0; r < no && nw < SHOW; r++) {
+            Peer *p = &g_peers[order[r]];
+            float dx = p->tgt[0] - g_me[0], dy = p->tgt[1] - g_me[1], dz = p->tgt[2] - g_me[2], d = sqrtf(dx * dx + dy * dy + dz * dz);
+            if (wantv[r] || (pass == 0 && (p->own < 0 || r >= SHOW + 2 || d >= OWN_RANGE + 5)) || (pass == 1 && d >= OWN_RANGE)) continue;
+            wantv[r] = true, nw++;
+        }
     Peer *borrow = NULL;
     for (int r = 0; r < no; r++) {
         Peer *p = &g_peers[order[r]];
         float dx = p->tgt[0] - g_me[0], dy = p->tgt[1] - g_me[1], dz = p->tgt[2] - g_me[2], d = sqrtf(dx * dx + dy * dy + dz * dz);
-        bool want = r < SHOW && d < OWN_RANGE && me_ok;
+        bool want = wantv[r];
         if (!want) { if (p->own >= 0) peer_let_go(p, d >= OWN_RANGE ? "is far" : "isn't among the nearest"); continue; }
         if (p->own >= 0 && !pla_npc_state(p->own)) {  // (gone with a level, or never made)
             LOG("[world] player %016llx's person is gone%s\n", (unsigned long long)p->id, p->own_up ? ": another" : " before it came up: another in 10 s");
@@ -446,8 +463,10 @@ static void world_tick(uint64_t frame) {
             p->own = -1, p->own_up = 0, p->ov = -1, p->sk = 0, p->far_ns = 0;
         }
         if (p->own >= 0 && pla_npc_state(p->own) == 3) p->own_up = 1;
-        if (fabsf(p->tgt[0] - p->jump_at[0]) + fabsf(p->tgt[2] - p->jump_at[2]) > 8.0f) {
-            memcpy(p->jump_at, p->tgt, 12), p->jump_ns = now;
+        bool jumped = fabsf(p->tgt[0] - p->jump_at[0]) + fabsf(p->tgt[2] - p->jump_at[2]) > 3.0f;  // (in one tick: a warp, not a run)
+        memcpy(p->jump_at, p->tgt, 12);
+        if (jumped) {
+            p->jump_ns = now;
             if (p->own >= 0 && pla_npc_state(p->own) != 3) {  // (asked for where they were before the jump: start over)
                 extern void pla_npc_free(int);
                 pla_npc_free(p->own), p->own = -1;
@@ -469,9 +488,15 @@ static void world_tick(uint64_t frame) {
             if (!p->sk) {  // (its skeleton: a person posed where it was made)
                 float at[3];
                 pla_npc_at(p->own, at);
-                for (int i = 0; i < NSK; i++)
-                    if (g_sk[i].sk && g_sk[i].sk != g_player_sk && frame - g_sk[i].frame < 5 && g_sk[i].bones >= 150 &&
-                        fabsf(g_sk[i].p[0] - at[0]) < 1.2f && fabsf(g_sk[i].p[2] - at[2]) < 1.2f) p->sk = g_sk[i].sk;
+                float bd = 1.2f * 1.2f;  // (the nearest person-sized skeleton within 1.2 m that no other player's person has)
+                for (int i = 0; i < NSK; i++) {
+                    if (!g_sk[i].sk || g_sk[i].sk == g_player_sk || frame - g_sk[i].frame >= 5 || g_sk[i].bones < 150) continue;
+                    float ex = g_sk[i].p[0] - at[0], ez = g_sk[i].p[2] - at[2];
+                    if (ex * ex + ez * ez >= bd) continue;
+                    bool taken = false;
+                    for (int j = 0; j < MAXPEER && !taken; j++) taken = &g_peers[j] != p && g_peers[j].have && g_peers[j].sk == g_sk[i].sk;
+                    if (!taken) bd = ex * ex + ez * ez, p->sk = g_sk[i].sk;
+                }
                 if (p->sk) LOG("[world] player %016llx's person: skeleton %llx\n", (unsigned long long)p->id, (unsigned long long)p->sk);
             }
             float sp[3] = {0};
@@ -526,7 +551,8 @@ static void world_tick(uint64_t frame) {
             }
         }
         // (a level without placements to copy: a townsperson borrowed for the nearest such player - the old way)
-        if (p->own < 0 && !borrow && now - p->first_ns > 3000000000ull) borrow = p;
+        { extern int pla_npc_can_make(void);
+          if (p->own < 0 && !borrow && now - p->first_ns > 3000000000ull && !pla_npc_can_make()) borrow = p; }
     }
     // the borrowed stand-in (fallback): as before, for one player
     for (int i = 0; i < MAXPEER; i++) g_peers[i].borrowed = &g_peers[i] == borrow;
@@ -554,10 +580,10 @@ static void world_tick(uint64_t frame) {
         last_log = frame;
         for (int r = 0; r < no; r++) {
             Peer *p = &g_peers[order[r]];
-            // (the senior-looking skeleton nearest where they are: 231 bones)
+            // (the person-sized skeleton nearest where they are: the seniors have 194)
             float best = 1e9f;
             for (int i = 0; i < NSK; i++) {
-                if (!g_sk[i].sk || frame - g_sk[i].frame > 10 || g_sk[i].bones < 200 || g_sk[i].sk == g_player_sk) continue;
+                if (!g_sk[i].sk || frame - g_sk[i].frame > 10 || g_sk[i].bones < 150 || g_sk[i].sk == g_player_sk) continue;
                 float ex = g_sk[i].p[0] - p->tgt[0], ez = g_sk[i].p[2] - p->tgt[2], e = sqrtf(ex * ex + ez * ez);
                 best = e < best ? e : best;
             }
