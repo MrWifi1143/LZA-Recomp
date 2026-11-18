@@ -199,12 +199,12 @@ static void pick_standin(void) {
 // ---- the other players: heard positions, drawn a little in their past, each walked by a person of our own
 // (hle/pla_npc.c: made by the game, the survey corps senior of their gender, its navigator sent where they are)
 #define MAXPEER 8
-#define MAXMIR 32
+#define MAXMIR 64
 #define NSNAP 24
 #define SHOW 4            // (the nearest SHOW players within OWN_RANGE get a person)
 #define OWN_RANGE 50.0f
 #define ASK_RANGE 30.0f   // (a new person is asked for only this near: the game makes people far from us late, if at all)
-typedef struct { uint32_t ms; float p[3], yaw, speed; } Snap;
+typedef struct { uint32_t ms; float p[3], yaw, speed, ax[6]; int has_ax; } Snap;  // (ax: their ride's up and forward, riding a climber / swimmer)
 typedef struct {
     uint64_t id, heard_ns, first_ns;
     int have, gender, own, n_snap, borrowed, own_up;
@@ -227,6 +227,8 @@ typedef struct {
     int nlat;
     float behind;          // (ms drawn in their past)
     float tgt[5];          // (x y z yaw speed, drawn now)
+    float tax[6];          // (their ride's up and forward then, if sent: tax_ok)
+    int tax_ok;
     uint64_t order_frame;
     float ordered[3];
     unsigned heard;
@@ -234,7 +236,7 @@ typedef struct {
     int has_outfit;
     // their state ('S1': a roll, crouching, swimming, riding...: hle/pla_npc.c pla_npc_mirror) - heard values queued
     // at their moment and set on their person when it is drawn there
-    struct { uint32_t ms; uint8_t k; char type; uint32_t val; } sq[32];
+    struct { uint32_t ms; uint8_t k; char type; uint32_t val; } sq[128];
     int nsq;
     uint32_t st_val[MAXMIR];  // (as set on their person so far)
     char st_type[MAXMIR];
@@ -247,7 +249,7 @@ static Peer g_peers[MAXPEER];
 
 static uint64_t now_ms(void) { return plat_now_ns() / 1000000ull; }
 
-static void peer_take(Peer *p, uint32_t ms, const float v[4], float speed, int gender) {
+static void peer_take(Peer *p, uint32_t ms, const float v[4], float speed, int gender, const float *ax) {
     uint64_t now = now_ms();
     int64_t off = (int64_t)now - (int64_t)ms;
     if (!p->n_snap || off < p->off_min) p->off_min = off;
@@ -255,7 +257,8 @@ static void peer_take(Peer *p, uint32_t ms, const float v[4], float speed, int g
     if (p->n_snap && (int32_t)(ms - p->snap[p->n_snap - 1].ms) > 1000) p->n_snap = 0, p->off_min = off;  // (a gap: menus, a load)
     if (p->n_snap == NSNAP) memmove(p->snap, p->snap + 1, sizeof(Snap) * (NSNAP - 1)), p->n_snap--;
     Snap *s = &p->snap[p->n_snap++];
-    s->ms = ms, memcpy(s->p, v, 12), s->yaw = v[3], s->speed = speed;
+    s->ms = ms, memcpy(s->p, v, 12), s->yaw = v[3], s->speed = speed, s->has_ax = ax != NULL;
+    if (ax) memcpy(s->ax, ax, 24);
     p->gender = gender;
 }
 
@@ -279,9 +282,14 @@ static void peer_draw(Peer *p) {
     if (!b || (int64_t)a->ms > t) {  // (before the first or past the newest: there)
         const Snap *s = b && (int64_t)a->ms > t ? a : &p->snap[p->n_snap - 1];
         memcpy(p->tgt, s->p, 12), p->tgt[3] = s->yaw, p->tgt[4] = s->speed;
+        p->tax_ok = s->has_ax;
+        if (s->has_ax) memcpy(p->tax, s->ax, 24);
         return;
     }
     float k = (float)(t - (int64_t)a->ms) / (float)(b->ms - a->ms ? b->ms - a->ms : 1);
+    const Snap *nr = k < 0.5f ? a : b;  // (their ride's axes: the nearer one's)
+    p->tax_ok = nr->has_ax;
+    if (nr->has_ax) memcpy(p->tax, nr->ax, 24);
     for (int j = 0; j < 3; j++) p->tgt[j] = a->p[j] + (b->p[j] - a->p[j]) * k;
     p->tgt[3] = a->yaw + remainderf(b->yaw - a->yaw, 6.2831853f) * k, p->tgt[4] = a->speed + (b->speed - a->speed) * k;
 }
@@ -292,7 +300,7 @@ static void state_heard(Peer *p, uint32_t ms, int n, const uint8_t *k, const cha
         if (k[j] >= MAXMIR || (type[j] != 'F' && type[j] != 'I' && type[j] != 'B' && type[j] != 'T')) continue;
         if (p->heard_type[k[j]] == type[j] && p->heard_val[k[j]] == val[j]) continue;
         p->heard_type[k[j]] = type[j], p->heard_val[k[j]] = val[j];
-        if (p->nsq == 32) memmove(p->sq, p->sq + 1, sizeof p->sq[0] * 31), p->nsq--;
+        if (p->nsq == 128) memmove(p->sq, p->sq + 1, sizeof p->sq[0] * 127), p->nsq--;
         p->sq[p->nsq].ms = ms, p->sq[p->nsq].k = k[j], p->sq[p->nsq].type = type[j], p->sq[p->nsq].val = val[j], p->nsq++;
     }
 }
@@ -340,6 +348,8 @@ static void peer_let_go(Peer *p, const char *why) {
     p->own = -1, p->own_up = 0, p->ov = -1, p->sk = 0, p->far_ns = 0;
 }
 
+static float g_ghost_ax[6];
+static bool g_ghost_ax_ok;
 static void world_tick(uint64_t frame) {
     static bool init;
     extern int pla_npc_gender(void), pla_npc_new(const float *, int, const uint64_t *), pla_npc_state(int), pla_npc_take(int, const uint64_t *, const float *);
@@ -392,7 +402,7 @@ static void world_tick(uint64_t frame) {
         uint64_t ms = now_ms();
         if (me_ok && ms - sent_ms >= 50) {  // (on a 50 ms beat)
             sent_ms = ms;
-            uint8_t b[40] = {'P', '2'};
+            uint8_t b[64] = {'P', '2'};
             uint32_t m32 = (uint32_t)ms;
             float v[5] = {g_me[0], g_me[1], g_me[2], g_me[3], my_speed};
             seq++;
@@ -401,7 +411,15 @@ static void world_tick(uint64_t frame) {
             extern uint32_t pla_npc_area_tag(void);
             uint32_t tag = pla_npc_area_tag();
             memcpy(b + 29, &tag, 4);
-            w_send(b, 33);
+            // (riding a climber / swimmer: its up and forward axes too - on a wall it isn't upright - 57 B)
+            extern int pla_npc_my_axes(float *);
+            float ax[6];
+            bool has_ax = pla_npc_my_axes(ax);
+            if (has_ax) memcpy(b + 33, ax, 24);
+            uint8_t bb[64];
+            memcpy(bb, b, 33);
+            if (has_ax) memcpy(bb + 33, ax, 24);
+            w_send(bb, has_ax ? 57 : 33);
         }
         // our outfit (the save's 12 dress-up item slots): when it changes, and every 3 s for who joined since - 'O' '1'
         // u8 body, u16 the slots worn, an u64 item hash each (the server passes on up to 96 B: 11 slots at most)
@@ -433,6 +451,20 @@ static void world_tick(uint64_t frame) {
                 for (int i = 0; i < ns; i++) o[7 + i * 6] = ki[i], o[8 + i * 6] = (uint8_t)kt[i], memcpy(o + 9 + i * 6, &kv[i], 4);
                 w_send(o, (size_t)(7 + ns * 6));
                 sent_seq = sq, st_ms = ms;
+            }
+            // (our ride Pokémon's net parameters - hle/pla_npc.c k_rmirror - in 'S1' packets too, indices past ours: what
+            // changed at once, the rest in turn every 0.5 s)
+            extern int pla_npc_my_rstate(uint8_t *, char *, uint32_t *, int, int);
+            static uint64_t rs_ms;
+            bool full = ms - rs_ms >= 500;
+            int nr = me_ok ? pla_npc_my_rstate(ki, kt, kv, 14, full) : 0;
+            if (full) rs_ms = ms;
+            if (nr > 0) {
+                uint8_t o[96] = {'S', '1'};
+                uint32_t m32 = (uint32_t)ms;
+                memcpy(o + 2, &m32, 4), o[6] = (uint8_t)nr;
+                for (int i = 0; i < nr; i++) o[7 + i * 6] = ki[i], o[8 + i * 6] = (uint8_t)kt[i], memcpy(o + 9 + i * 6, &kv[i], 4);
+                w_send(o, (size_t)(7 + nr * 6));
             }
         }
         uint8_t b[128];
@@ -498,7 +530,11 @@ static void world_tick(uint64_t frame) {
                 LOG("[world] hearing player %016llx at %.2f %.2f %.2f (%s body)\n", (unsigned long long)from, v[0], v[1], v[2], b[28] ? "p2" : "p1");
             } else if ((int16_t)(s - p->seq) <= 0) continue;  // (an older one, overtaken)
             p->seq = s, p->heard_ns = now, p->heard++;
-            peer_take(p, sm, v, v[4], b[28] != 0);
+            float ax[6];
+            bool has_ax = n >= 57;
+            if (has_ax) memcpy(ax, b + 33, 24);
+            for (int j = 0; has_ax && j < 6; j++) has_ax = isfinite(ax[j]) && fabsf(ax[j]) <= 1.5f;
+            peer_take(p, sm, v, v[4], b[28] != 0, has_ax ? ax : NULL);
         }
     } else if (g_self_ahead && me_ok) {  // (the single-copy test: ourselves, g_self_ahead m ahead, on the same beat)
         static uint64_t sent_ms;
@@ -513,14 +549,18 @@ static void world_tick(uint64_t frame) {
             static float gdelay = -1;
             if (gdelay < 0) gdelay = getenv("LARECOMP_GHOST_DELAY") ? (float)atof(getenv("LARECOMP_GHOST_DELAY")) : 0;
             if (gdelay > 0) {
-                static struct { uint64_t ms; float v[4], spd; } hist[512];
+                static struct { uint64_t ms; float v[4], spd, ax[6]; int has_ax; } hist[512];
                 static unsigned nh;
-                hist[nh % 512].ms = ms, memcpy(hist[nh % 512].v, (const float *)g_me, 16), hist[nh % 512].spd = my_speed, nh++;
+                extern int pla_npc_my_axes(float *);
+                hist[nh % 512].ms = ms, memcpy(hist[nh % 512].v, (const float *)g_me, 16), hist[nh % 512].spd = my_speed;
+                hist[nh % 512].has_ax = pla_npc_my_axes(hist[nh % 512].ax), nh++;
                 unsigned k = nh - 1;
                 while (k > 0 && nh - 1 - k < 510 && hist[k % 512].ms + (uint64_t)(gdelay * 1000) > ms) k--;
                 if (hist[k % 512].ms + (uint64_t)(gdelay * 1000) > ms) k = nh;  // (not that long yet: not there)
                 if (k == nh) goto ghost_skip;
                 memcpy(v, hist[k % 512].v, 16), spd = hist[k % 512].spd, at_ms = (uint32_t)(hist[k % 512].ms + (uint64_t)(gdelay * 1000));
+                g_ghost_ax_ok = hist[k % 512].has_ax;
+                memcpy(g_ghost_ax, hist[k % 512].ax, 24);
                 // (not on top of us: kept 3 m off, behind us - a person asked for within 1.5 m of the player never came up)
                 float ex = v[0] - g_me[0], ez = v[2] - g_me[2], e = sqrtf(ex * ex + ez * ez);
                 if (e < 3.0f) {
@@ -536,11 +576,20 @@ static void world_tick(uint64_t frame) {
                 uint32_t kv[14];
                 int ns = pla_npc_my_state(ki, kt, kv, 14, NULL);
                 if (ns) state_heard(p, (uint32_t)(ms + (uint64_t)(gdelay * 1000)), ns, ki, kt, kv);
+                extern int pla_npc_my_rstate(uint8_t *, char *, uint32_t *, int, int);
+                ns = pla_npc_my_rstate(ki, kt, kv, 14, 1);
+                if (ns) state_heard(p, (uint32_t)(ms + (uint64_t)(gdelay * 1000)), ns, ki, kt, kv);
             }
             static int sg = -2;
             if (sg == -2) sg = getenv("LARECOMP_GHOST_GENDER") ? atoi(getenv("LARECOMP_GHOST_GENDER")) : -1;
             p->heard_ns = now, p->heard++;
-            peer_take(p, at_ms, v, spd, sg >= 0 ? sg : gender > 0);
+            {
+                extern int pla_npc_my_axes(float *);
+                float ax[6];
+                bool ok = gdelay > 0 ? g_ghost_ax_ok : pla_npc_my_axes(ax);
+                if (gdelay > 0) memcpy(ax, g_ghost_ax, 24);
+                peer_take(p, at_ms, v, spd, sg >= 0 ? sg : gender > 0, ok ? ax : NULL);
+            }
             static int so = -1;  // (LARECOMP_GHOST_OUTFIT=0: no outfit - the senior's look)
             if (so < 0) so = !(getenv("LARECOMP_GHOST_OUTFIT") && atoi(getenv("LARECOMP_GHOST_OUTFIT")) == 0);
             uint64_t mine[12];
@@ -596,7 +645,7 @@ static void world_tick(uint64_t frame) {
             v[1] = fbase[1];
             if (!p->have) memset(p, 0, sizeof *p), p->have = 1, p->id = 0xfa0e000000000001ull + i, p->own = -1, p->ov = -1, p->first_ns = now;
             p->heard_ns = now, p->heard++;
-            peer_take(p, (uint32_t)ms, v, spd, i & 1);
+            peer_take(p, (uint32_t)ms, v, spd, i & 1, NULL);
             static int fo = -1;  // (LARECOMP_WORLD_FAKE_OUTFIT=1: they wear our outfit - the p1 ones; dressed persons)
             if (fo < 0) fo = getenv("LARECOMP_WORLD_FAKE_OUTFIT") && atoi(getenv("LARECOMP_WORLD_FAKE_OUTFIT"));
             extern int pla_npc_my_outfit(uint64_t *);
@@ -694,6 +743,8 @@ static void world_tick(uint64_t frame) {
             // (dressed: walked like a player toward where they are drawn, every tick - hle/pla_npc.c, which puts it
             // where they are when it falls far behind; still over 30 m behind 6 s on, it is let go and another asked for)
             pla_npc_follow(p->own, p->tgt);
+            extern void pla_npc_follow_axes(int, const float *, int);
+            pla_npc_follow_axes(p->own, p->tax, p->tax_ok);
             state_apply(p);
             float q[3];
             if (pla_npc_pos(p->own, q)) {

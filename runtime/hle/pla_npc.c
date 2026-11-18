@@ -155,6 +155,13 @@ typedef struct {
     int swimming, swam; // (their swim_bool; swam: swimming mode last frame)
     int mnt_fail;       // (mounts asked for that never came up)
     uint64_t mnt_retry;
+    // their ride Pokémon's net parameters (k_rmirror), heard: set on our mount of that ride model (ride_step)
+    char rp_type[64];
+    uint32_t rp_val[64];
+    uint64_t rp_dirty, rp_fire;
+    float ax[6];        // (their ride's up and forward axes, riding a climber / swimmer: ax_ok)
+    int ax_ok;
+    float rlq[4];       // (the rider's local rotation written last frame)
 } Own;
 // research knobs, <live>/npc "knob <i> <value>" (puppet_step): 0 up/down (1 down only, 0 also lifted as before, 2 none),
 // 1 a mount's "move" per m/s (ride_step), 2 the rider's seat higher by, 4 the rider's turn about x (radians, added), 5 the
@@ -301,6 +308,13 @@ typedef struct {
     char joint[16];
     int hidden;         // (put away: its meshes' LOD masks kept in lods)
     uint64_t lods[16];
+    int t;              // (the ride type it is made for: its model is that ride Pokémon's - see ride_model)
+    int remodel;        // (1: made with the ride model, saddle and riding net)
+    uint64_t chr_pre;   // (its model component, seen while poke_make asked for it)
+    uint64_t used_ns;   // (last ridden: one unused a while is removed - mount_term)
+    int term;           // (to be removed: its rider let go)
+    int research;       // (made by the live "poke" line: no rider rules)
+    float lq[4];        // (its local rotation written last frame: tilted onto a wall / the water)
 } Mnt;
 static Mnt g_mnt[NMNT];
 static int g_poke_n;
@@ -340,8 +354,9 @@ static void nav_match(void) {
         }
         for (int i = 0; i < NMNT; i++) {  // (a mount of ours)
             Mnt *m = &g_mnt[i];
-            if (m->state != 2 || fabsf(p[0] - m->at[0]) > 1.0f || fabsf(p[2] - m->at[2]) > 1.0f) continue;
-            m->nav = nav, m->state = 3, m->up_frame = g_frame, m->ctrl = ctrl_of(nav);
+            // (within 4 m: the game puts one asked for off the navigation mesh - on a rock, in water - on the nearest walkable spot)
+            if (m->state != 2 || fabsf(p[0] - m->at[0]) > 4.0f || fabsf(p[2] - m->at[2]) > 4.0f) continue;
+            m->nav = nav, m->state = 3, m->up_frame = g_frame, m->ctrl = ctrl_of(nav), m->used_ns = plat_now_ns();
             { uint64_t e = *(const uint64_t *)(uintptr_t)(nav + 0x1f0), q2 = in_heap(e) ? *(const uint64_t *)(uintptr_t)(e + 0x18) : 0;
               m->cc = in_heap(q2 - 0x50) ? q2 - 0x50 : 0; }
             m->actl = in_heap(g_navactl[q]) && *(const uint64_t *)(uintptr_t)g_navactl[q] == POKE_ANIM_VTABLE ? g_navactl[q] : 0;
@@ -598,8 +613,92 @@ static int job_hook(Cpu *c, uint64_t addr) {
 #define PLAYER_MAKER_LR 0x7001c68634ull
 static volatile uint64_t g_player_loader;
 
+// ---- our mounts wear the game's ride gear: the player's ride Pokémon are their own models (bin/archive/field/
+// ride_pokemon.gfpak, bin/chara/data/pm/<m>/: the Galaxy saddle is part of the mesh) with their own control nets
+// (<m>_rd.tracn: walking / running, swimming, climbing, gliding), made by the ride object's loader (0x70025d4248, its
+// ride index at [+0x128]+0xd0: 0 Wyrdeer, 1 Sneasler, 2 Basculegion, 3 Braviary, 4 Ursaluna) through the model maker
+// with a desc of kind 3 (+0xe0): explicit files - model (+0 list), net (+0x38), locator skeletons (+0x70) - each made
+// from its path by 0x70008f1b84(&char *, x8 = 0x30 B handle) and added by 0x7002601ad8 (model / net lists) /
+// 0x7002601a84 (skeletons); its pack object (+0x1e8) +0x68 = 2 (Lua-traced 2026-11-18, testout/pla-mp9). The game makes
+// all opened rides at load and shows the one ridden. Ours: a Pokémon of ours (poke_make) whose model job's desc (a
+// Pokémon's: kind 0, its monsno) is turned into that one before the maker runs - ride_model below.
+#define POKE_MODEL_JOB 0x7001b20ed8ull  // (vfunc +0x138 of a Pokémon's model component: x0 that component)
+#define POKE_MAKER_LR 0x7001b210c0ull
+#define RES_PATH 0x70008f1b84ull
+#define DESC_ADD_FILE 0x7002601ad8ull
+#define DESC_ADD_SKEL 0x7002601a84ull
+#define DESC_CTOR 0x7001252fe4ull  // (desc, allocator)
+#define DESC_DTOR 0x7000a17558ull
+#define EMPTY_STR 0x7003896322ull  // (the game's "")
+static const char *const k_ride_mdl[8] = {NULL, "pm1001_00_00", "pm1006_11_41", "pm1007_00_00", "pm0628_00_41", "pm1003_00_41", NULL, NULL};
+static __thread uint64_t t_pjob;
+static Mnt *volatile g_making;  // (the mount poke_make is asking for: its model component noted if made at once)
+static int pjob_hook(Cpu *c, uint64_t addr) {
+    uint64_t prev = t_pjob;
+    t_pjob = c->x[0];
+    rt_call_original(c, addr);
+    t_pjob = prev;
+    return 1;
+}
+static int poke_ctor_hook(Cpu *c, uint64_t addr) {
+    t_chr = c->x[0];
+    Mnt *m = g_making;
+    if (m && !m->chr_pre) m->chr_pre = c->x[0];
+    (void)addr;
+    return 0;
+}
+static void res_release(Cpu *c, uint64_t obj) {
+    if (in_heap(obj)) gcall(c, *(const uint64_t *)(uintptr_t)(*(const uint64_t *)(uintptr_t)obj + 0x20), obj, 0, 0, 0);
+}
+static int ride_model(Cpu *c, uint64_t addr) {  // (the maker's call from a Pokémon's model job: ours made a ride model)
+    if (!t_pjob) return 0;
+    Mnt *m = NULL;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < NMNT && !m; i++)
+        if (g_mnt[i].state >= 2 && !g_mnt[i].remodel && g_mnt[i].t > 0 && g_mnt[i].t < 8 && k_ride_mdl[g_mnt[i].t] && (g_mnt[i].chr == t_pjob || g_mnt[i].chr_pre == t_pjob))
+            m = &g_mnt[i], m->remodel = 1;
+    pthread_mutex_unlock(&g_lock);
+    if (!m) return 0;
+    static __thread char *str;
+    static __thread uint64_t *h;
+    static __thread uint8_t *desc;  // (a fresh desc, as the ride object's loader makes one: the maker copies it)
+    if (!str) str = hle_alloc(0x200), h = hle_alloc(0x100), desc = hle_alloc(0x300);
+    memset(desc, 0, 0x300);
+    uint64_t d = (uint64_t)(uintptr_t)desc;
+    gcall(c, DESC_CTOR, d, c->x[1], 0, 0);
+    const char *b = k_ride_mdl[m->t];
+    struct { const char *fmt; uint32_t off; uint64_t add; } f[4] = {
+        {"bin/chara/data/pm/%s/mdl/%s.trmdl", 0, DESC_ADD_FILE}, {"bin/chara/data/pm/%s/anm/%s_rd.tracn", 0x38, DESC_ADD_FILE},
+        {"bin/chara/data/pm/%s/locators/%s_loc.trskl", 0x70, DESC_ADD_SKEL}, {"bin/chara/data/pm/%s/locators/%s_eff.trskl", 0x70, DESC_ADD_SKEL}};
+    // (a model / net entry is 0x70 B: the file's handle (0x30 B, from RES_PATH) then two more unnamed - the empty FNV
+    // and an empty string each - as the loader sets them up)
+    for (int i = 0; i < 4; i++) {
+        if (i == 2 && strcmp(b, "pm1003_00_41")) continue;  // (Sneasler's has a second locator skeleton)
+        snprintf(str, 0x100, f[i].fmt, b, b);
+        h[0] = (uint64_t)(uintptr_t)str;
+        uint64_t *e = &h[2];
+        memset(e, 0, 0x70);
+        e[1] = EMPTY_HASH, e[2] = EMPTY_STR, e[6] = EMPTY_HASH, e[7] = EMPTY_STR, e[10] = EMPTY_HASH, e[11] = EMPTY_STR;
+        gcall(c, RES_PATH, (uint64_t)(uintptr_t)&h[0], 0, 0, (uint64_t)(uintptr_t)&h[0x10]);
+        memcpy(e, &h[0x10], 0x30);
+        gcall(c, f[i].add, d + f[i].off, (uint64_t)(uintptr_t)e, 0, 0);
+        res_release(c, e[4]), res_release(c, e[0]);
+    }
+    *(uint32_t *)(uintptr_t)(d + 0xe0) = 3;  // (kind: the files listed)
+    uint64_t pk = *(const uint64_t *)(uintptr_t)(d + 0x1e8);
+    if (in_heap(pk)) *(uint32_t *)(uintptr_t)(pk + 0x68) = 2;
+    c->x[3] = d;
+    rt_call_original(c, addr);
+    uint64_t r = c->x[0];
+    gcall(c, DESC_DTOR, d, 0, 0, 0);
+    c->x[0] = r;
+    LOG("[npc] %s made as the ride Pokemon %s (saddle, riding net): model %llx\n", m->name, b, (unsigned long long)r);
+    return 1;
+}
+
 static int g_dress = -1;  // (ours wear their player's outfit; research LARECOMP_NPC_DRESS=0: never)
 static int create_hook(Cpu *c, uint64_t addr) {
+    if (c->x[30] == POKE_MAKER_LR) return ride_model(c, addr);
     if (c->x[30] == PLAYER_MAKER_LR) {
         if (g_player_loader != c->x[1]) LOG("[npc] the player's model loader %llx (desc %llx)\n", (unsigned long long)c->x[1], (unsigned long long)c->x[3]);
         g_player_loader = c->x[1];
@@ -820,8 +919,50 @@ static int mirror_index(uint64_t h) {
         if (g_mirror_hash[k] == h) return k;
     return -1;
 }
+// ... and our ride Pokémon's: its net (bin/chara/data/pm/<m>/anm/<m>_rd.tracn) runs on an animation component of its own
+// (vtable 0x7004165430), set by the game next to the player's - move_front for its gait, swim_bool, the climbing
+// parameters (Sneasler), aerial / ride_fly_away_bool / ride_dive_bool (Braviary), ride_found_* (Ursaluna)... Sent in
+// 'S1' packets too (indices from NMIRROR on), set on our mount of the same model (ride_step). Lua-traced 2026-11-18.
+// (each ride Pokémon's component is a class of its own: Wyrdeer 0x7004165430, Ursaluna 0x7004166848, Braviary 0x70041679c8,
+// Sneasler 0x7004163af0; Basculegion one of the two other siblings sharing their slots)
+static bool ride_anim_vt(uint64_t vt) {
+    return vt == 0x7004165430ull || vt == 0x7004166848ull || vt == 0x70041679c8ull || vt == 0x7004163af0ull || vt == 0x7004161cd8ull || vt == 0x70041621f0ull;
+}
+static const char *const k_rmirror[] = {
+    "move_front", "move_left", "set_ride_bool", "ride_type_int", "swim_bool", "set_climb_bool", "is_clime_bool",
+    "is_clime_jump_bool", "climb_move_speed", "movec_climb_left", "movec_climb_up", "climb_aerial", "climb_aerial_type",
+    "climb_start_end_int", "aerial", "aerial_type_int", "landing_type_int", "ride_dash_bool", "ride_fly_away_bool",
+    "ride_dive_bool", "ride_found_bool", "ride_found_int", "ride_action_bool", "ride_action_int", "ride_halfway_down_bool",
+    "ride_move_stop_int", "slipdown_bool", "slipdown_int", "down_bool", "set_squat_bool", "slope", "direction",
+    "move_stop_trigger", "ride_one_action_trigger", "double_jump_trigger", "turn_trigger", "rolling_triger",
+    "ride_addturn_trigger", "ride_addturn_int",
+};
+#define NRMIRROR ((int)(sizeof k_rmirror / sizeof k_rmirror[0]))
+static uint64_t g_rmirror_hash[NRMIRROR];
+static volatile uint32_t g_my_rstate[NRMIRROR];
+static volatile char g_my_rtype[NRMIRROR];
+static volatile uint64_t g_my_rdirty;  // (changed since sent: bit per entry)
+static int rmirror_index(uint64_t h) {
+    for (int k = 0; k < NRMIRROR; k++)
+        if (g_rmirror_hash[k] == h) return k;
+    return -1;
+}
+static void my_rset(Cpu *c, char type) {
+    int k = rmirror_index(*(const uint64_t *)(uintptr_t)c->x[1]);
+    if (k < 0) return;
+    uint32_t v;
+    if (type == 'T') v = g_my_rstate[k] + 1;
+    else if (type == 'F') memcpy(&v, &c->v[0], 4);
+    else v = (uint32_t)c->x[2];
+    if (type == 'B') v &= 1;
+    if (g_my_rtype[k] == type && g_my_rstate[k] == v) return;
+    g_my_rstate[k] = v, g_my_rtype[k] = type, g_my_rdirty |= 1ull << k;
+}
+// ours, for 'S1' packets: the entries changed since last asked (then, with full, the rest in turn) - indices + NMIRROR
+int pla_npc_my_rstate(uint8_t *idx, char *type, uint32_t *val, int max, int full);
 static void my_set(Cpu *c, char type) {
     uint64_t a = c->x[0];
+    if (in_heap(a) && ride_anim_vt(*(const uint64_t *)(uintptr_t)a) && in_heap(c->x[1])) { my_rset(c, type); return; }
     if (!in_heap(a) || *(const uint64_t *)(uintptr_t)a != PLAYER_ANIM_VTABLE || !in_heap(c->x[1])) return;
     int k = mirror_index(*(const uint64_t *)(uintptr_t)c->x[1]);
     if (k < 0) return;
@@ -869,12 +1010,54 @@ int pla_npc_my_state(uint8_t *idx, char *type, uint32_t *val, int max, uint32_t 
     if (seq) *seq = g_my_state_seq;
     return n;
 }
+int pla_npc_my_rstate(uint8_t *idx, char *type, uint32_t *val, int max, int full) {
+    static int next;
+    int n = 0;
+    uint64_t d = g_my_rdirty, took = 0;
+    for (int k = 0; k < NRMIRROR && n < max; k++)
+        if ((d >> k & 1) && g_my_rtype[k]) idx[n] = (uint8_t)(NMIRROR + k), type[n] = g_my_rtype[k], val[n] = g_my_rstate[k], n++, took |= 1ull << k;
+    __atomic_and_fetch(&g_my_rdirty, ~took, __ATOMIC_RELAXED);
+    for (int j = 0; full && j < NRMIRROR && n < max; j++) {
+        int k = (next + j) % NRMIRROR;
+        if (!g_my_rtype[k] || (took >> k & 1)) continue;
+        idx[n] = (uint8_t)(NMIRROR + k), type[n] = g_my_rtype[k], val[n] = g_my_rstate[k], n++, next = k + 1;
+    }
+    return n;
+}
+// riding Sneasler (5) or Basculegion (2) - attached at their "origin": our model owner's world axes are theirs - our
+// ride's up (owner +0x80) and forward (+0x90), for the packet (on a wall Sneasler isn't upright)
+int pla_npc_my_axes(float ax[6]) {
+    int kr = mirror_index(fnv("set_ride_bool")), kt = mirror_index(fnv("ride_type_int"));
+    if (kr < 0 || kt < 0 || !g_my_state[kr] || (g_my_state[kt] != 2 && g_my_state[kt] != 5)) return 0;
+    uint64_t ow = g_player_owner;
+    if (!in_heap(ow) || *(const uint64_t *)(uintptr_t)ow != MODEL_OBJ_VTABLE) return 0;
+    memcpy(ax, (const float *)(uintptr_t)(ow + 0x80), 12), memcpy(ax + 3, (const float *)(uintptr_t)(ow + 0x90), 12);
+    for (int j = 0; j < 6; j++)
+        if (!isfinite(ax[j]) || fabsf(ax[j]) > 1.01f) return 0;
+    return 1;
+}
+void pla_npc_follow_axes(int i, const float ax[6], int ok) {
+    if (i < 0 || i >= NOWN) return;
+    pthread_mutex_lock(&g_lock);
+    g_own[i].ax_ok = ok;
+    if (ok) memcpy(g_own[i].ax, ax, 24);
+    pthread_mutex_unlock(&g_lock);
+}
 int pla_npc_my_riding(void) {  // (we ride now: our set_ride_bool)
     int k = mirror_index(fnv("set_ride_bool"));
     return k >= 0 && g_my_type[k] == 'B' && g_my_state[k];
 }
 // theirs, on their person i (a trigger: fired; the rest: set)
 void pla_npc_mirror(int i, int k, char type, uint32_t val) {
+    if (i >= 0 && i < NOWN && k >= NMIRROR && k < NMIRROR + NRMIRROR) {  // (their ride Pokémon's: for our mount - ride_step)
+        Own *o = &g_own[i];
+        int r = k - NMIRROR;
+        pthread_mutex_lock(&g_lock);
+        if (type == 'T') o->rp_fire |= 1ull << r;
+        o->rp_type[r] = type, o->rp_val[r] = val, o->rp_dirty |= 1ull << r;
+        pthread_mutex_unlock(&g_lock);
+        return;
+    }
     if (i < 0 || i >= NOWN || k < 0 || k >= NMIRROR || !g_own[i].has_outfit) return;  // (the senior's net has none of these)
     // (riding: noted, set on the person by ride_step once its mount is there - without one, the riding pose has it lying
     // on the ground)
@@ -890,8 +1073,8 @@ void pla_npc_mirror(int i, int k, char type, uint32_t val) {
     }
     pthread_mutex_unlock(&g_lock);
 }
-const char *pla_npc_mirror_name(int k) { return k >= 0 && k < NMIRROR ? k_mirror[k] : "?"; }
-int pla_npc_mirror_count(void) { return NMIRROR; }
+const char *pla_npc_mirror_name(int k) { return k >= 0 && k < NMIRROR ? k_mirror[k] : k >= NMIRROR && k < NMIRROR + NRMIRROR ? k_rmirror[k - NMIRROR] : "?"; }
+int pla_npc_mirror_count(void) { return NMIRROR + NRMIRROR; }
 
 // ---- a dressed person walked like a player: its forward direction and its stick (move_front) set every frame
 // It is steered as the player is: its forward direction and how far the stick is pushed (move_front 0..1 - the net
@@ -942,8 +1125,49 @@ static void cc_warp(Cpu *c, uint64_t cc, const float at[3], float yaw) {
 // swimming), 5 Sneasler (joint "origin" = its model's root: upright, at its feet - the player rides on its back);
 // measured riding (LARECOMP_NPC_RIDELOG, Lua plpar, "near") 2026-11-18. 3 / 4 (Ursaluna "parts_01", Braviary
 // "parts_03") not seen yet: no mount - the person runs where they are.
+// quaternions (x y z w) for the tilt of a climber / swimmer: from a frame's axes (world x, y, z of its local axes)
+static void q_from_axes(float q[4], const float *x, const float *y, const float *z) {
+    float tr = x[0] + y[1] + z[2];
+    if (tr > 0) { float s = sqrtf(tr + 1) * 2; q[3] = 0.25f * s, q[0] = (y[2] - z[1]) / s, q[1] = (z[0] - x[2]) / s, q[2] = (x[1] - y[0]) / s; }
+    else if (x[0] > y[1] && x[0] > z[2]) { float s = sqrtf(1 + x[0] - y[1] - z[2]) * 2; q[3] = (y[2] - z[1]) / s, q[0] = 0.25f * s, q[1] = (y[0] + x[1]) / s, q[2] = (z[0] + x[2]) / s; }
+    else if (y[1] > z[2]) { float s = sqrtf(1 + y[1] - x[0] - z[2]) * 2; q[3] = (z[0] - x[2]) / s, q[0] = (y[0] + x[1]) / s, q[1] = 0.25f * s, q[2] = (z[1] + y[2]) / s; }
+    else { float s = sqrtf(1 + z[2] - x[0] - y[1]) * 2; q[3] = (x[1] - y[0]) / s, q[0] = (z[0] + x[2]) / s, q[1] = (z[1] + y[2]) / s, q[2] = 0.25f * s; }
+    float n = sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    for (int i = 0; i < 4; i++) q[i] = n > 1e-6f ? q[i] / n : (i == 3);
+}
+static void q_mul(float r[4], const float a[4], const float b[4]) {
+    float t[4] = {a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1], a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+                  a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3], a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]};
+    memcpy(r, t, 16);
+}
+static void q_conj(float r[4], const float a[4]) { r[0] = -a[0], r[1] = -a[1], r[2] = -a[2], r[3] = a[3]; }
+static void q_rot(float r[3], const float q[4], const float v[3]) {  // (v turned by q)
+    float p[4] = {v[0], v[1], v[2], 0}, c[4], t[4];
+    q_conj(c, q), q_mul(t, q, p), q_mul(t, t, c);
+    r[0] = t[0], r[1] = t[1], r[2] = t[2];
+}
+// a frame from an up and a forward (forward made square to up)
+static void q_from_upfwd(float q[4], const float up[3], const float fw[3]) {
+    float y[3] = {up[0], up[1], up[2]}, z[3], x[3];
+    float n = sqrtf(y[0] * y[0] + y[1] * y[1] + y[2] * y[2]);
+    for (int i = 0; i < 3; i++) y[i] /= n > 1e-6f ? n : 1;
+    x[0] = y[1] * fw[2] - y[2] * fw[1], x[1] = y[2] * fw[0] - y[0] * fw[2], x[2] = y[0] * fw[1] - y[1] * fw[0];
+    n = sqrtf(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
+    if (n < 1e-6f) { q[0] = q[1] = q[2] = 0, q[3] = 1; return; }
+    for (int i = 0; i < 3; i++) x[i] /= n;
+    z[0] = x[1] * y[2] - x[2] * y[1], z[1] = x[2] * y[0] - x[0] * y[2], z[2] = x[0] * y[1] - x[1] * y[0];
+    q_from_axes(q, x, y, z);
+}
+// the character's own rotation under an owner: its world rotation less the local one written last frame
+static void q_char(float r[4], uint64_t owner, const float last[4]) {
+    float w[4], c[4], l[4] = {last[0], last[1], last[2], last[3]};
+    if (l[0] == 0 && l[1] == 0 && l[2] == 0 && l[3] == 0) l[3] = 1;
+    q_from_axes(w, (const float *)(uintptr_t)(owner + 0x70), (const float *)(uintptr_t)(owner + 0x80), (const float *)(uintptr_t)(owner + 0x90));
+    q_conj(c, l), q_mul(r, w, c);
+}
+
 static struct { int mons; float seat_y, seat_z, turn_x, mount_y; } k_ride[8] = {  // (research: live "seat <type> <mons> <y> <z> <turn> [mount y]")
-    {0, 0, 0, 0, 0}, {899, 1.20f, -0.15f, 1.5707963f, 0}, {902, 0, 0, 0, 0}, {0, 0, 0, 0, 0}, {0, 0, 0, 0, 0}, {903, 0, 0, 0, 0}, {0, 0, 0, 0, 0}, {0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0}, {899, 1.20f, -0.15f, 1.5707963f, 0}, {902, 0, 0, 0, 0}, {901, 1.20f, 0, 1.5707963f, 0}, {628, 1.20f, 0, 1.5707963f, 0}, {903, 0, 0, 0, 0}, {0, 0, 0, 0, 0}, {0, 0, 0, 0, 0},
 };
 #define POKE_MOVE 0xd5eb2f99669eefd4ull  // (FNV-1a "move": a Pokémon's walk / run blend, 0 .. ~2)
 static Mnt *ride_mount(Own *o) {
@@ -996,7 +1220,7 @@ static int ride_step(Cpu *c, Own *o, float dt) {
                     m->at[0] = me[0] + dx * k + (dd <= 3.0f ? 2.0f : 0), m->at[1] = me[1], m->at[2] = me[2] + dz * k;
                 }
                 o->mnt_retry = g_frame + 300;
-                m->k = ++g_poke_n, m->state = 1, m->level = g_level, m->rider = (int)(o - g_own) + 1, m->attached = 0;
+                m->k = ++g_poke_n, m->state = 1, m->level = g_level, m->rider = (int)(o - g_own) + 1, m->attached = 0, m->t = t;
                 snprintf(m->name, sizeof m->name, "mpride_%d", m->k);
                 o->mnt[t] = i + 1;
                 LOG("[npc] mpplayer_%d rides (type %d): %s asked for\n", o->k, t, m->name);
@@ -1006,12 +1230,19 @@ static int ride_step(Cpu *c, Own *o, float dt) {
         m = NULL;
     }
     bool on = want && m && m->state == 3 && m->cc && m->owner;
+    if (!on && want && o->rode && o->rode != t) {  // (another ride, not up yet: kept on the one before till then - getting
+        // off and on again in a moment left the rider's net in a pose that draws nothing, 2026-11-18 two copies)
+        int pi = o->mnt[o->rode & 7] - 1;
+        Mnt *pm = pi >= 0 && pi < NMNT && g_mnt[pi].state == 3 && g_mnt[pi].cc && g_mnt[pi].owner ? &g_mnt[pi] : NULL;
+        if (pm) m = pm, t = o->rode, on = true;
+    }
     float *loc = (float *)(uintptr_t)(o->owner + 0xd0), *lq = (float *)(uintptr_t)(o->owner + 0xc0);
     if (!on) {
         if (o->rode) {  // (off: back on its feet where its mount stands, the mount put away)
             o->rode = 0;
             anim_set(c, o->actl, ANIM_SET_BOOL, fnv("set_ride_bool"), 0, 0);
             loc[0] = loc[1] = loc[2] = 0, lq[0] = lq[1] = lq[2] = 0, lq[3] = 1, o->lyaw = 0, o->fa_set = 0;
+            memset(o->rlq, 0, sizeof o->rlq);
             for (int j = 0; j < 8; j++) {
                 int i = o->mnt[j] - 1;
                 if (i >= 0 && i < NMNT && g_mnt[i].state == 3) mount_park(c, &g_mnt[i], o->fo);
@@ -1027,6 +1258,13 @@ static int ride_step(Cpu *c, Own *o, float dt) {
         if (i >= 0 && i < NMNT && g_mnt[i].state == 3) mount_park(c, &g_mnt[i], o->fo);
         o->rode = t;
         mount_show(m, 1);
+        pthread_mutex_lock(&g_lock);  // (the ride's net parameters heard so far, all set on this one)
+        for (int r = 0; r < NRMIRROR; r++)
+            if (o->rp_type[r] && o->rp_type[r] != 'T') o->rp_dirty |= 1ull << r;
+        pthread_mutex_unlock(&g_lock);
+        // (as the game switches its player's ride: in one frame set_ride_bool 0, the new ride_type_int, set_ride_bool 1 -
+        // the net enters the riding pose of the new ride afresh; only the type changed left the rider drawn as nothing)
+        anim_set(c, o->actl, ANIM_SET_BOOL, fnv("set_ride_bool"), 0, 0);
         anim_set(c, o->actl, ANIM_SET_INT, fnv("ride_type_int"), 0, (uint32_t)t);
         anim_set(c, o->actl, ANIM_SET_BOOL, fnv("set_ride_bool"), 0, 1);
         LOG("[npc] mpplayer_%d on %s\n", o->k, m->name);
@@ -1045,13 +1283,45 @@ static int ride_step(Cpu *c, Own *o, float dt) {
     // (its net's root motion lands in its model owner's local transform, as a dressed person's does: taken out - it is
     // put where they are; left there, its model walked off on its own and the rider sat on air)
     float *ml = (float *)(uintptr_t)(m->owner + 0xd0), *mq = (float *)(uintptr_t)(m->owner + 0xc0);
-    ml[0] = ml[1] = ml[2] = 0, mq[0] = mq[1] = mq[2] = 0, mq[3] = 1;
+    ml[0] = ml[1] = ml[2] = 0;
+    // (Sneasler on a wall, Basculegion in the water: turned as theirs is - their ride's axes, sent - on top of its
+    // character's own way (only ever upright): owner local rotation)
+    bool tilt = o->ax_ok && (t == 2 || t == 5);
+    float qt[4] = {0, 0, 0, 1}, tq[4] = {0, 0, 0, 1};
+    if (tilt) {
+        float qc[4], ic[4];
+        q_char(qc, m->owner, m->lq);
+        q_from_upfwd(qt, o->ax, o->ax + 3);
+        q_conj(ic, qc), q_mul(tq, ic, qt);
+    }
+    memcpy(mq, tq, 16), memcpy(m->lq, tq, 16);
     float mat[3] = {o->fo[0], o->fo[1] + k_ride[t].mount_y, o->fo[2]};
     cc_warp(c, m->cc, mat, yaw);
     if (!g_fwd_vec) g_fwd_vec = hle_alloc(16);  // (its facing: the warp's rotation isn't taken - its forward direction is)
     g_fwd_vec[0] = sinf(yaw), g_fwd_vec[1] = 0, g_fwd_vec[2] = cosf(yaw), g_fwd_vec[3] = 0;
     guest_call_saved(c, CC_SET_FORWARD, m->cc, (uint64_t)(uintptr_t)g_fwd_vec, 0, 0, 0);
-    if (m->actl && *(const uint64_t *)(uintptr_t)m->actl == POKE_ANIM_VTABLE) {
+    if (m->actl && *(const uint64_t *)(uintptr_t)m->actl == POKE_ANIM_VTABLE && m->remodel) {
+        // (a ride model: their ride Pokémon's net parameters as heard - its gait, swimming, climbing, gliding; from an
+        // older copy that sends none, the gait from their speed)
+        uint64_t d, f;
+        char ty[NRMIRROR];
+        uint32_t va[NRMIRROR];
+        pthread_mutex_lock(&g_lock);
+        d = o->rp_dirty, f = o->rp_fire, o->rp_dirty = o->rp_fire = 0;
+        memcpy(ty, o->rp_type, sizeof ty), memcpy(va, o->rp_val, sizeof va);
+        pthread_mutex_unlock(&g_lock);
+        for (int r = 0; r < NRMIRROR; r++) {
+            if (!(d >> r & 1) || !ty[r]) continue;
+            if (ty[r] == 'T') { if (f >> r & 1) anim_set(c, m->actl, ANIM_SET_TRIGGER, g_rmirror_hash[r], 0, 0); continue; }
+            float fv;
+            memcpy(&fv, &va[r], 4);
+            anim_set(c, m->actl, ty[r] == 'F' ? ANIM_SET_FLOAT : ty[r] == 'I' ? ANIM_SET_INT : ANIM_SET_BOOL, g_rmirror_hash[r], fv, va[r]);
+        }
+        if (ty[0] != 'F') {
+            float mv = o->fo[4] / 8.0f;
+            anim_set(c, m->actl, ANIM_SET_FLOAT, g_rmirror_hash[0], mv > 1 ? 1 : mv < 0.05f ? 0 : mv, 0);
+        }
+    } else if (m->actl && *(const uint64_t *)(uintptr_t)m->actl == POKE_ANIM_VTABLE) {
         float mv = o->fo[4] * g_knob[1];
         mv = mv > 2.0f ? 2.0f : mv < 0.05f ? 0 : mv;
         anim_set(c, m->actl, ANIM_SET_FLOAT, POKE_MOVE, mv, 0);
@@ -1065,8 +1335,16 @@ static int ride_step(Cpu *c, Own *o, float dt) {
     loc[0] = 0, loc[1] = park + k_ride[t].mount_y + k_ride[t].seat_y + g_knob[2], loc[2] = k_ride[t].seat_z;
     float qa = (k_ride[t].turn_x + g_knob[4]) * 0.5f;  // (into the joint's frame: Wyrdeer's about x +90 degrees, y forward, z down)
     lq[0] = sinf(qa), lq[1] = 0, lq[2] = 0, lq[3] = cosf(qa);
+    if (tilt) {  // (turned with its mount: the seat in the mount's tilted frame)
+        float qc[4], ic[4], rel[4], seat[4] = {lq[0], lq[1], lq[2], lq[3]}, sl[3] = {loc[0], loc[1], loc[2]};
+        q_char(qc, o->owner, o->rlq);
+        q_conj(ic, qc), q_mul(rel, ic, qt);
+        q_mul(lq, rel, seat), q_rot(loc, rel, sl);
+    }
+    memcpy(o->rlq, lq, 16);
     // (their speed to the rider's net: the riding pose moves with it)
     float mf = mf_for(o->fo[4]);
+    if (o->rp_type[0] == 'F') memcpy(&mf, &o->rp_val[0], 4);  // (the ride's own move_front, as the game sets both)
     if (fabsf(mf - o->mf) > 0.01f || g_frame - o->mf_frame >= 30) anim_set(c, o->actl, ANIM_SET_FLOAT, MOVE_FRONT, mf, 0), o->mf = mf, o->mf_frame = g_frame;
     (void)dt;
     static int wlog = -1;
@@ -1239,7 +1517,7 @@ static void puppet_step(Cpu *c, Own *o) {
 // w7 monsno, stack: u16 form, u32 sex, u8 rare, u32 height, u8 alpha, u8 p11, u8 p12 - 8-byte slots) -> 0x7001e9b53c)
 #define FO_GET 0x7000d91c8cull
 #define FO_POKE_DIRECT 0x70020bf6fcull
-static uint64_t poke_make(Cpu *c, int mons, const float at[3], float yaw_deg, const char *name) {
+static uint64_t poke_make(Cpu *c, int mons, int form, const float at[3], float yaw_deg, const char *name) {
     static uint8_t *m;
     if (!m) m = hle_alloc(0x100);
     memset(m, 0, 0x100);
@@ -1254,7 +1532,7 @@ static uint64_t poke_make(Cpu *c, int mons, const float at[3], float yaw_deg, co
     uint64_t sp = (c->sp - 0x800) & ~0xfull;
     uint64_t *st = (uint64_t *)(uintptr_t)sp;
     memset(st, 0, 0x40);
-    st[0] = 0, st[1] = 0, st[2] = 0, st[3] = 128, st[4] = 0, st[5] = 1, st[6] = 1;  // (form, sex, rare, height, alpha, p11, p12)
+    st[0] = (uint64_t)form, st[1] = 0, st[2] = 0, st[3] = 128, st[4] = 0, st[5] = 1, st[6] = 1;  // (form, sex, rare, height, alpha, p11, p12)
     c->sp = sp;
     c->x[0] = fo, c->x[1] = (uint64_t)(uintptr_t)pos, c->x[2] = (uint64_t)(uintptr_t)rot, c->x[3] = (uint64_t)(uintptr_t)scale;
     c->x[4] = (uint64_t)(uintptr_t)(m + 0x30), c->x[5] = (uint64_t)(uintptr_t)(m + 0x40), c->x[6] = (uint64_t)(uintptr_t)(m + 0x38), c->x[7] = (uint64_t)mons;
@@ -1262,6 +1540,28 @@ static uint64_t poke_make(Cpu *c, int mons, const float at[3], float yaw_deg, co
     *c = saved;
     LOG("[npc] Pokemon %d asked for as %s at %.2f %.2f %.2f (FieldObjectForHaxe %llx)\n", mons, name, at[0], at[1], at[2], (unsigned long long)fo);
     return 1;
+}
+
+// A Pokémon of ours removed as event scripts remove theirs: FieldObjectCommand.TerminateObject(name) -> the binding's
+// 0x7001e9e274(FieldObjectForHaxe, &FNV-1a(name)) (finds the object by name, ends its character / Pokémon components).
+// Ours go when unused for MOUNT_IDLE_S, when their rider is let go, or when given up before they came up.
+#define FO_TERMINATE 0x7001e9e274ull
+#define MOUNT_IDLE_S 45
+static void mount_term(Cpu *c, Mnt *m, const char *why) {
+    static uint64_t *h;
+    if (!h) h = hle_alloc(16);
+    uint64_t fo = gcall(c, FO_GET, 0, 0, 0, 0);
+    if (in_heap(fo)) h[0] = fnv(m->name), gcall(c, FO_TERMINATE, fo, (uint64_t)(uintptr_t)h, 0, 0);
+    int idx = (int)(m - g_mnt);
+    pthread_mutex_lock(&g_lock);
+    if (m->rider > 0 && m->rider <= NOWN) {
+        for (int j = 0; j < 8; j++)
+            if (g_own[m->rider - 1].mnt[j] == idx + 1) g_own[m->rider - 1].mnt[j] = 0;
+        if (m->state == 2) g_own[m->rider - 1].mnt_fail++;  // (never came up: the next one asked for near us)
+    }
+    LOG("[npc] %s removed (%s)\n", m->name, why);
+    memset(m, 0, sizeof *m);
+    pthread_mutex_unlock(&g_lock);
 }
 
 // A rider put on its mount the way the game mounts the player (traced 2026-11-18: on mounting, 0x7002570a8c gets the
@@ -1316,9 +1616,25 @@ void pla_npc_cam(Cpu *c) {  // (the camera update, the game's thread: hle/warp.c
     }
     for (int i = 0; i < NMNT; i++) {  // (mounts: asked for, their owner, their rider)
         Mnt *m = &g_mnt[i];
-        if (m->state == 1) { m->state = poke_make(c, m->mons, m->at, m->yaw, m->name) ? 2 : 0, m->asked = g_frame; continue; }
-        if (m->state == 2 && g_frame - m->asked > 900) { LOG("[npc] %s: not up 30 s after asking - given up\n", m->name); m->state = 0; continue; }
+        if (m->state == 1) {
+            g_making = m;
+            m->state = poke_make(c, m->mons, m->t == 4 ? 1 : 0, m->at, m->yaw, m->name) ? 2 : 0, m->asked = g_frame;
+            g_making = NULL;
+            if (m->chr_pre) LOG("[npc] %s: its model component %llx made at once\n", m->name, (unsigned long long)m->chr_pre);
+            continue;
+        }
+        if (m->state && m->level != g_level) { memset(m, 0, sizeof *m); continue; }  // (went with its level)
+        if (m->state == 2 && g_frame - m->asked > 900) { mount_term(c, m, "not up 30 s after asking"); continue; }
         if (m->state != 3) continue;
+        if (m->research && m->term) { mount_term(c, m, "asked"); continue; }
+        if (m->t && !m->research) {   // (in use: ridden now by its rider - else removed after a while, or at once when its rider was let go)
+            Own *ro = m->rider > 0 && m->rider <= NOWN ? &g_own[m->rider - 1] : NULL;
+            bool ridden = ro && ro->rode && ro->mnt[ro->rode & 7] == i + 1;
+            uint64_t now = plat_now_ns();
+            if (ridden) m->used_ns = now;
+            if (m->term || !ro || (ro->state != 3 && ro->state != 2)) { mount_term(c, m, m->term ? "its rider let go" : "no rider"); continue; }
+            if (now - m->used_ns > (uint64_t)MOUNT_IDLE_S * 1000000000ull) { mount_term(c, m, "unused"); continue; }
+        }
         if (!m->owner) {
             pthread_mutex_lock(&g_lock);
             m->owner = poke_owner(m->chr);
@@ -1459,6 +1775,8 @@ void pla_npc_free(int i) {  // (it walks off where it was sent last: the caller 
     if (i < 0 || i >= NOWN) return;
     pthread_mutex_lock(&g_lock);
     g_own[i].riding = g_own[i].swimming = 0;  // (nobody's now: off its mount, out of the water)
+    for (int j = 0; j < 8; j++)  // (its mounts removed)
+        if (g_own[i].mnt[j] > 0 && g_own[i].mnt[j] <= NMNT) g_mnt[g_own[i].mnt[j] - 1].term = 1;
     if (g_own[i].state == 1) g_own[i].state = 0;  // (not asked yet: forgotten)
     else if (g_own[i].state == 2) g_own[i].state = 5;  // (made, not up yet: kept for later once up)
     else if (g_own[i].state == 3) g_own[i].state = 4;  // (4: up, nobody's)
@@ -1582,13 +1900,16 @@ static void live_poll(void) {
             k_ride[k].mons = run, k_ride[k].seat_y = at[0], k_ride[k].seat_z = at[1], k_ride[k].turn_x = at[2], k_ride[k].mount_y = yw,
             LOG("[npc] ride type %d: Pokemon %d seat %g %g turn %g, mount %g\n", k, run, at[0], at[1], at[2], yw);
         else if (sscanf(l, "ride %d %d %d", &k, &run, &used) == 3 && k >= 0 && k < NOWN) g_own[k].ride_type = run, g_own[k].riding = used;  // (research: riding as type t)
-        else if (sscanf(l, "poke %d %f %f %f %f", &k, &at[0], &at[1], &at[2], &yw) >= 4) {  // (research: a Pokémon of ours there)
+        else if (sscanf(l, "pterm %d", &k) == 1 && k >= 0 && k < NMNT) g_mnt[k].term = 1;  // (research: mount / Pokémon k removed)
+        else if (sscanf(l, "poke %d %f %f %f %f", &k, &at[0], &at[1], &at[2], &yw) >= 4) {  // (research: a Pokémon of ours there; [ride type]: its ride model)
+            int rt = 0;
+            sscanf(l, "poke %*d %*f %*f %*f %*f %d", &rt);
             pthread_mutex_lock(&g_lock);
             for (int i = 0; i < NMNT; i++)
                 if (!g_mnt[i].state) {
                     Mnt *m = &g_mnt[i];
                     memset(m, 0, sizeof *m);
-                    m->mons = k, memcpy(m->at, at, 12), m->yaw = yw, m->k = ++g_poke_n, m->state = 1, m->level = g_level;
+                    m->mons = k, memcpy(m->at, at, 12), m->yaw = yw, m->k = ++g_poke_n, m->state = 1, m->level = g_level, m->research = 1, m->t = rt & 7;
                     snprintf(m->name, sizeof m->name, "mppoke_%d", m->k), snprintf(m->joint, sizeof m->joint, "parts");
                     break;
                 }
@@ -1636,13 +1957,15 @@ __attribute__((constructor)) static void pla_npc_init(void) {
     g_dress = !getenv("LARECOMP_NPC_DRESS") || atoi(getenv("LARECOMP_NPC_DRESS"));  // (research LARECOMP_NPC_DRESS=0: everyone the senior)
     rt_register_fnhook_at(DRESS_MAKE, dressmake_hook);  // (the player's own, for the log)
     for (int k = 0; k < NMIRROR; k++) g_mirror_hash[k] = fnv(k_mirror[k]);  // (our own state, sent: pla_npc_my_state)
+    for (int k = 0; k < NRMIRROR; k++) g_rmirror_hash[k] = fnv(k_rmirror[k]);
     rt_register_fnhook_at(ANIM_SET_FLOAT, myset_f), rt_register_fnhook_at(ANIM_SET_INT, myset_i);
     rt_register_fnhook_at(ANIM_SET_BOOL, myset_b), rt_register_fnhook_at(ANIM_SET_TRIGGER, myset_t);
     rt_register_fnhook_at(PLAYER_CC_CROUCH, crouch_hook), rt_register_fnhook_at(PLAYER_CC_SWIM, swim_hook);
     rt_register_fnhook_at(SAVE_DRESS_SLOT, saveslot_hook);
     try_parse();  // (our outfit is read from the save's dress-up data)
     rt_register_fnhook_at(CHAR_BUILD, build_hook), rt_register_fnhook_at(ANIM_CTOR, actor_hook), rt_register_fnhook_at(NPC_MODEL_CTOR, chr_ctor_hook);
-    rt_register_fnhook_at(POKE_ANIM_CTOR, actor_hook), rt_register_fnhook_at(POKE_MODEL_CTOR, chr_ctor_hook);  // (our mounts' parts)
+    rt_register_fnhook_at(POKE_ANIM_CTOR, actor_hook), rt_register_fnhook_at(POKE_MODEL_CTOR, poke_ctor_hook);  // (our mounts' parts)
     rt_register_fnhook_at(NPC_ENTITY_CB, entity_hook);
-    if (g_dress) rt_register_fnhook_at(CREATE_MODEL, create_hook), rt_register_fnhook_at(NPC_MODEL_JOB, job_hook);
+    rt_register_fnhook_at(CREATE_MODEL, create_hook), rt_register_fnhook_at(POKE_MODEL_JOB, pjob_hook);
+    if (g_dress) rt_register_fnhook_at(NPC_MODEL_JOB, job_hook);
 }
