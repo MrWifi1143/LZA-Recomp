@@ -938,11 +938,12 @@ static void cc_warp(Cpu *c, uint64_t cc, const float at[3], float yaw) {
 // they are each frame, its own navigator kept still, its root motion taken out, its "move" set from their speed so
 // its legs walk / run. Verified 2026-11-18, two copies through lzaserver: testout/pla-mp8 x4b-*.
 // ride_type_int: 1 Wyrdeer (joint "parts": its frame y forward, z down; the player's owner 1.2 m over the ground, 0.15 m
-// back), 2 Basculegion (joint "origin"; on water - ours put 0.8 m down into it), 5 Sneasler (joint "origin" = its
-// model's root: upright, at its feet - the player rides on its back); measured riding (LARECOMP_NPC_RIDELOG, Lua plpar)
-// 2026-11-18. 3 / 4 (Ursaluna "parts_01", Braviary "parts_03") not seen yet: no mount - the person runs where they are.
+// back), 2 Basculegion (joint "origin", its body at the water's surface - ours stands there in its on-land idle, not
+// swimming), 5 Sneasler (joint "origin" = its model's root: upright, at its feet - the player rides on its back);
+// measured riding (LARECOMP_NPC_RIDELOG, Lua plpar, "near") 2026-11-18. 3 / 4 (Ursaluna "parts_01", Braviary
+// "parts_03") not seen yet: no mount - the person runs where they are.
 static struct { int mons; float seat_y, seat_z, turn_x, mount_y; } k_ride[8] = {  // (research: live "seat <type> <mons> <y> <z> <turn> [mount y]")
-    {0, 0, 0, 0, 0}, {899, 1.20f, -0.15f, 1.5707963f, 0}, {902, 0, 0, 0, -0.8f}, {0, 0, 0, 0, 0}, {0, 0, 0, 0, 0}, {903, 0, 0, 0, 0}, {0, 0, 0, 0, 0}, {0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0}, {899, 1.20f, -0.15f, 1.5707963f, 0}, {902, 0, 0, 0, 0}, {0, 0, 0, 0, 0}, {0, 0, 0, 0, 0}, {903, 0, 0, 0, 0}, {0, 0, 0, 0, 0}, {0, 0, 0, 0, 0},
 };
 #define POKE_MOVE 0xd5eb2f99669eefd4ull  // (FNV-1a "move": a Pokémon's walk / run blend, 0 .. ~2)
 static Mnt *ride_mount(Own *o) {
@@ -1045,7 +1046,7 @@ static int ride_step(Cpu *c, Own *o, float dt) {
     // put where they are; left there, its model walked off on its own and the rider sat on air)
     float *ml = (float *)(uintptr_t)(m->owner + 0xd0), *mq = (float *)(uintptr_t)(m->owner + 0xc0);
     ml[0] = ml[1] = ml[2] = 0, mq[0] = mq[1] = mq[2] = 0, mq[3] = 1;
-    float mat[3] = {o->fo[0], o->fo[1] + k_ride[t].mount_y, o->fo[2]};  // (Basculegion: down in the water, as the game's own)
+    float mat[3] = {o->fo[0], o->fo[1] + k_ride[t].mount_y, o->fo[2]};
     cc_warp(c, m->cc, mat, yaw);
     if (!g_fwd_vec) g_fwd_vec = hle_alloc(16);  // (its facing: the warp's rotation isn't taken - its forward direction is)
     g_fwd_vec[0] = sinf(yaw), g_fwd_vec[1] = 0, g_fwd_vec[2] = cosf(yaw), g_fwd_vec[3] = 0;
