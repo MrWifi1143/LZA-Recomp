@@ -143,7 +143,13 @@ typedef struct {
     uint64_t far_frame, stuck_frame;
     float stuck_at[3];
     int warp_now;       // (research: <live>/npc "pwarp <slot>")
+    float want_v;       // (the speed it should go: steered last frame)
+    int turn_sign;      // (the way it is turning round: 1 left, -1 right, 0 not)
 } Own;
+// research knobs, <live>/npc "knob <i> <value>" (puppet_step): 0 up/down (1 down only, 0 also lifted as before, 2 none),
+// 3 the run's step stretch at most (1.12), 6 = 1 turning round without keeping its way, 7 the walk log (1 every second,
+// 2 every frame - LARECOMP_NPC_WALKLOG the same)
+static float g_knob[8] = {1, 0, 0, 1.12f, 0, 0, 0, 0};
 static Own g_own[NOWN];
 static volatile uint64_t g_frame;
 static int g_count;
@@ -692,8 +698,9 @@ static void anim_set(Cpu *c, uint64_t actl, uint64_t fn, uint64_t hash, float f,
     memcpy(c->x, sx, sizeof sx), memcpy(c->v, sv, sizeof sv), c->nzcv = snzcv;
 }
 // research: <live>/npc "par <slot> <F|I|B|T> <name> <value>" - a parameter of that person's animation set once
-#define NPAR 8
-static struct { int slot; char type; uint64_t hash; float f; uint32_t i; } g_par[NPAR];
+// (also the other player's own state, mirrored: pla_npc_mirror below)
+#define NPAR 32
+static struct { int slot; char type; uint64_t hash; float f; uint32_t i; int quiet; } g_par[NPAR];
 static volatile int g_npar;
 static void par_run(Cpu *c) {
     pthread_mutex_lock(&g_lock);
@@ -702,12 +709,76 @@ static void par_run(Cpu *c) {
         uint64_t a = g_own[g_par[k].slot].actl;
         uint64_t fn = g_par[k].type == 'F' ? ANIM_SET_FLOAT : g_par[k].type == 'I' ? ANIM_SET_INT : g_par[k].type == 'B' ? ANIM_SET_BOOL : ANIM_SET_TRIGGER;
         anim_set(c, a, fn, g_par[k].hash, g_par[k].f, g_par[k].i);
-        LOG("[npc] mpplayer_%d: parameter %c %016llx = %g / %u (animation %llx)\n", g_own[g_par[k].slot].k, g_par[k].type, (unsigned long long)g_par[k].hash,
-            g_par[k].f, g_par[k].i, (unsigned long long)a);
+        static int nl;
+        if (!g_par[k].quiet || nl++ < 300)
+            LOG("[npc] mpplayer_%d: parameter %c %016llx = %g / %u (animation %llx)\n", g_own[g_par[k].slot].k, g_par[k].type, (unsigned long long)g_par[k].hash,
+                g_par[k].f, g_par[k].i, (unsigned long long)a);
     }
     g_npar = 0;
     pthread_mutex_unlock(&g_lock);
 }
+
+// ---- the other player's state on theirs: a roll (dodge - the field player has no jump of its own), crouching,
+// swimming, riding, falling and landing. Those are parameters of the field player's animation (its component, vtable
+// 0x7004147468, set through the same setters as the people's: Lua-traced 2026-11-18 - a dodge sets rolling_direction_int,
+// then rolling_triger and upperbody_one_action_trigger), and the person runs the same net (pc0002_00.tracn): ours are
+// watched as the game sets them (k_mirror) and sent ('S1', hle/pla_world.c); theirs are set on their person, at the
+// moment they are drawn. A trigger travels as a count (one more each time it fires).
+#define PLAYER_ANIM_VTABLE 0x7004147468ull
+static const char *const k_mirror[] = {
+    "rolling_direction_int", "set_squat_bool", "swim_bool", "swim_action_int", "dive_bool", "set_ride_bool", "ride_type_int",
+    "ride_action_bool", "ride_action_int", "ride_dive_bool", "aerial", "aerial_type_int", "landing_type_int", "down_bool",
+    "slipdown_bool", "slipdown_int", "rolling_triger", "upperbody_one_action_trigger", "double_jump_trigger",
+};
+#define NMIRROR ((int)(sizeof k_mirror / sizeof k_mirror[0]))
+static uint64_t g_mirror_hash[NMIRROR];
+static volatile uint32_t g_my_state[NMIRROR];
+static volatile char g_my_type[NMIRROR];  // (0: never set)
+static volatile uint32_t g_my_state_seq;   // (one more on each change)
+static int mirror_index(uint64_t h) {
+    for (int k = 0; k < NMIRROR; k++)
+        if (g_mirror_hash[k] == h) return k;
+    return -1;
+}
+static void my_set(Cpu *c, char type) {
+    uint64_t a = c->x[0];
+    if (!in_heap(a) || *(const uint64_t *)(uintptr_t)a != PLAYER_ANIM_VTABLE || !in_heap(c->x[1])) return;
+    int k = mirror_index(*(const uint64_t *)(uintptr_t)c->x[1]);
+    if (k < 0) return;
+    uint32_t v;
+    if (type == 'T') v = g_my_state[k] + 1;
+    else if (type == 'F') memcpy(&v, &c->v[0], 4);
+    else v = (uint32_t)c->x[2];
+    if (type == 'B') v &= 1;
+    if (g_my_type[k] == type && g_my_state[k] == v) return;
+    g_my_state[k] = v, g_my_type[k] = type, g_my_state_seq++;
+}
+static int myset_f(Cpu *c, uint64_t addr) { (void)addr; my_set(c, 'F'); return 0; }
+static int myset_i(Cpu *c, uint64_t addr) { (void)addr; my_set(c, 'I'); return 0; }
+static int myset_b(Cpu *c, uint64_t addr) { (void)addr; my_set(c, 'B'); return 0; }
+static int myset_t(Cpu *c, uint64_t addr) { (void)addr; my_set(c, 'T'); return 0; }
+// ours, for the packet: the entries set so far (index, type, value); answers the count, *seq the change count
+int pla_npc_my_state(uint8_t *idx, char *type, uint32_t *val, int max, uint32_t *seq) {
+    int n = 0;
+    for (int k = 0; k < NMIRROR && n < max; k++)
+        if (g_my_type[k]) idx[n] = (uint8_t)k, type[n] = g_my_type[k], val[n] = g_my_state[k], n++;  // (once set: a value back to 0 is sent too)
+    if (seq) *seq = g_my_state_seq;
+    return n;
+}
+// theirs, on their person i (a trigger: fired; the rest: set)
+void pla_npc_mirror(int i, int k, char type, uint32_t val) {
+    if (i < 0 || i >= NOWN || k < 0 || k >= NMIRROR || !g_own[i].has_outfit) return;  // (the senior's net has none of these)
+    pthread_mutex_lock(&g_lock);
+    if (g_npar < NPAR) {
+        g_par[g_npar].slot = i, g_par[g_npar].type = type, g_par[g_npar].hash = g_mirror_hash[k], g_par[g_npar].i = val, g_par[g_npar].quiet = 1;
+        if (type == 'F') memcpy(&g_par[g_npar].f, &val, 4);
+        else g_par[g_npar].f = (float)val;
+        g_npar++;
+    }
+    pthread_mutex_unlock(&g_lock);
+}
+const char *pla_npc_mirror_name(int k) { return k >= 0 && k < NMIRROR ? k_mirror[k] : "?"; }
+int pla_npc_mirror_count(void) { return NMIRROR; }
 
 // ---- a dressed person walked like a player: its forward direction and its stick (move_front) set every frame
 // It is steered as the player is: its forward direction and how far the stick is pushed (move_front 0..1 - the net
@@ -755,11 +826,19 @@ static void puppet_step(Cpu *c, Own *o) {
     if (!g_vel_vec) g_vel_vec = hle_alloc(16);
     float inv = dt > 0.005f ? 1.0f / dt : 30.0f;
     const float *pos = (const float *)(uintptr_t)(o->owner + 0xa0);
-    // (standing: none - the idle's own drift would walk it off its spot; up or down to them (stairs, a ledge, a
-    // slope): lifted up to 2.5 m/s, lowered up to 4 - given flat, the physics character ran into the first step)
-    float up = o->fo[1] - pos[1], vy = o->moving && fabsf(up) > 0.15f ? fmaxf(fminf(up * 4.0f, 2.5f), -4.0f) : 0;
+    // (standing: none - the idle's own drift would walk it off its spot; down to them: lowered up to 4 m/s. Never
+    // lifted (knob 0 = 0: up to 2.5 m/s as before): lifted, it left the ground - in the air its facing froze and it
+    // drifted off the stairs it was on, then got stuck and was put there; on the ground the physics character climbs
+    // steps itself, as the player's does (Jubilife Galaxy hall steps 485.4 446 -> 487.5 443.6, 1.6 m up, 2026-11-18))
+    float up = o->fo[1] - pos[1], vy = 0;
+    int vym = (int)g_knob[0];
+    if (o->moving && fabsf(up) > 0.15f && vym != 2 && !(vym == 1 && up > 0)) vy = fmaxf(fminf(up * 4.0f, 2.5f), -4.0f);
     if (!o->moving) rx = rz = 0;
-    g_vel_vec[0] = (rx * ax[0] + rz * az[0]) * inv, g_vel_vec[1] = vy, g_vel_vec[2] = (rx * ax[2] + rz * az[2]) * inv, g_vel_vec[3] = 0;
+    // (running flat out and still behind: the net's fastest run is 4.84 m/s, a player runs 5.0 - its steps taken a
+    // little longer, up to knob 3 (1.12x: no sliding to be seen), so it keeps up)
+    float kspd = 1;
+    if (o->mf >= 0.999f && o->want_v > 4.84f) kspd = fminf(o->want_v / 4.84f, g_knob[3]);
+    g_vel_vec[0] = (rx * ax[0] + rz * az[0]) * inv * kspd, g_vel_vec[1] = vy, g_vel_vec[2] = (rx * ax[2] + rz * az[2]) * inv * kspd, g_vel_vec[3] = 0;
     guest_call_saved(c, CC_SET_VELOCITY, o->cc, (uint64_t)(uintptr_t)g_vel_vec, 0, 0, 0);
     // (walking but not getting anywhere for 1.5 s while over 2 m off: stuck - put where they are, below)
     if (o->moving && o->mf > 0.2f) {
@@ -791,7 +870,7 @@ static void puppet_step(Cpu *c, Own *o) {
     if (s < 0) v = d > (o->moving ? 0.3f : 0.5f) ? fminf(-s, 0.3f + 1.0f * d) : 0, s = 0;
     else if (s > 0.2f) v = fminf(s + 0.8f * d, 6.0f);
     else if (d > (o->moving ? 0.5f : 1.0f)) v = fminf(0.4f + 0.9f * d, 4.8f);
-    o->moving = v > 0;
+    o->moving = v > 0, o->want_v = v;
     // which way: toward the spot when off it, else their way (moving) / their facing (standing) - turned at most 12 rad/s
     float wx, wz;
     if (o->moving && d > 0.4f) wx = ex / d, wz = ez / d;
@@ -799,6 +878,12 @@ static void puppet_step(Cpu *c, Own *o) {
     // (from the way it faces now - its owner's z axis: the net's own turns rotate it too)
     const float *zx = (const float *)(uintptr_t)(o->owner + 0x90);
     float a = atan2f(zx[0], zx[2]), b = atan2f(wx, wz), da = remainderf(b - a, 6.2831853f), lim = 12.0f * dt;
+    // (turning round: the way it began, kept - near 180 degrees off, the nearer way flips from frame to frame and it
+    // turned back and forth)
+    if (g_knob[6] == 0) {
+        if (fabsf(da) > 2.4f && o->turn_sign && (da > 0 ? 1 : -1) != o->turn_sign) da += o->turn_sign * 6.2831853f;
+        o->turn_sign = fabsf(da) > 0.3f ? (da > 0 ? 1 : -1) : fabsf(da) < 0.1f ? 0 : o->turn_sign;
+    }
     float off = fabsf(da);
     if (da > lim) da = lim; else if (da < -lim) da = -lim;
     a += da;
@@ -821,11 +906,15 @@ static void puppet_step(Cpu *c, Own *o) {
         o->mf = mf, o->mf_frame = g_frame;
     }
     static int wlog = -1;  // (research LARECOMP_NPC_WALKLOG=1: each one's steering logged every second)
-    if (wlog < 0) wlog = getenv("LARECOMP_NPC_WALKLOG") && atoi(getenv("LARECOMP_NPC_WALKLOG"));
+    if (wlog < 0) wlog = getenv("LARECOMP_NPC_WALKLOG") ? atoi(getenv("LARECOMP_NPC_WALKLOG")) : 0;
     static int nlog;
-    if (wlog && nlog < 3000 && (g_frame % 30 == 0))
-        nlog++, LOG("[npc] mpplayer_%d walked (frame %llu): at %.2f %.2f, %.2f m off, their speed %.1f -> %.2f m/s (move_front %.2f), facing %.0f want %.0f\n", o->k,
-                    (unsigned long long)g_frame, pos[0], pos[2], d, s, v, mf, atan2f(zx[0], zx[2]) * 57.3f, b * 57.3f);
+    int wl = wlog > (int)g_knob[7] ? wlog : (int)g_knob[7];  // (knob 7: the same, live)
+    if (wl && nlog < 20000 && (wl > 1 || g_frame % 30 == 0)) {
+        const float *lq = (const float *)(uintptr_t)(o->owner + 0xc0);
+        nlog++, LOG("[npc] mpplayer_%d walked (frame %llu): at %.2f %.2f %.2f, %.2f m off (dy %.2f), their speed %.1f -> %.2f m/s (move_front %.2f, root %.3f %.3f), facing %.0f want %.0f set %.0f | local q %.2f %.2f %.2f %.2f\n", o->k,
+                    (unsigned long long)g_frame, pos[0], pos[1], pos[2], d, o->fo[1] - pos[1], s, v, mf, rx, rz, atan2f(zx[0], zx[2]) * 57.3f, b * 57.3f, a * 57.3f,
+                    lq[0], lq[1], lq[2], lq[3]);
+    }
 }
 
 // orders need a vec3 in guest memory: one per person, written just before the call
@@ -1019,6 +1108,31 @@ void pla_npc_unstick(int i, const float at[3]) {  // (drawn from its body a whil
     pthread_mutex_unlock(&g_lock);
 }
 uint64_t pla_npc_level(void) { return g_level; }
+// which area we are in, for the world packets (players in another area aren't shown): the "areaNN" most of the level's
+// placements are named after (area00_npc_guard_005, ha_area01_...), FNV-1a 32; 0 not known (no placements yet)
+uint32_t pla_npc_area_tag(void) {
+    static uint64_t at_level = ~0ull;
+    static uint32_t tag;
+    static int at_n;
+    pthread_mutex_lock(&g_lock);
+    if (at_level != g_level || at_n != g_nent) {
+        at_level = g_level, at_n = g_nent, tag = 0;
+        int best = 0;
+        for (int i = 0; i < g_nent && i < 64; i++) {
+            const char *a = strstr(g_ent[i].name, "area");
+            if (!a || a[4] < '0' || a[4] > '9' || a[5] < '0' || a[5] > '9') continue;
+            int cnt = 0;
+            for (int j = 0; j < g_nent && j < 64; j++) { const char *b = strstr(g_ent[j].name, "area"); cnt += b && !strncmp(a, b, 6); }
+            if (cnt > best) {
+                best = cnt, tag = 2166136261u;
+                for (int q = 0; q < 6; q++) tag = (tag ^ (uint8_t)a[q]) * 16777619u;
+            }
+        }
+    }
+    uint32_t r = tag;
+    pthread_mutex_unlock(&g_lock);
+    return r;
+}
 int pla_npc_can_make(void) { return g_mgr && g_nent > 0; }  // (the level has placements to copy)
 
 // research: <live>/npc "make <x> <y> <z> [f]" (one of ours there), "list" (the level's entries)
@@ -1049,11 +1163,12 @@ static void live_poll(void) {
         else if (sscanf(l, "go %d %f %f %f %d", &k, &at[0], &at[1], &at[2], &run) >= 4) pla_npc_order(k, at, run);
         else if (sscanf(l, "par %d %c %95s %f", &k, &o, item_name, &at[0]) == 4 && g_npar < NPAR) {
             pthread_mutex_lock(&g_lock);
-            g_par[g_npar].slot = k, g_par[g_npar].type = o, g_par[g_npar].hash = fnv(item_name), g_par[g_npar].f = at[0], g_par[g_npar].i = (uint32_t)at[0];
+            g_par[g_npar].slot = k, g_par[g_npar].type = o, g_par[g_npar].hash = fnv(item_name), g_par[g_npar].f = at[0], g_par[g_npar].i = (uint32_t)at[0], g_par[g_npar].quiet = 0;
             g_npar++;
             pthread_mutex_unlock(&g_lock);
         }
         else if (sscanf(l, "pwarp %d", &k) == 1 && k >= 0 && k < NOWN) g_own[k].warp_now = 1;
+        else if (sscanf(l, "knob %d %f", &k, &at[0]) == 2 && k >= 0 && k < 8) g_knob[k] = at[0], LOG("[npc] knob %d = %g\n", k, at[0]);
         else if (!strncmp(l, "near", 4)) { extern void pla_world_list_near(float); pla_world_list_near(25); }
         else if (!strncmp(l, "list", 4)) {
             pthread_mutex_lock(&g_lock);
@@ -1090,6 +1205,9 @@ __attribute__((constructor)) static void pla_npc_init(void) {
     if (!(no & 4)) rt_register_fnhook_at(MODEL_BUILD, model_hook);
     g_dress = !getenv("LARECOMP_NPC_DRESS") || atoi(getenv("LARECOMP_NPC_DRESS"));  // (research LARECOMP_NPC_DRESS=0: everyone the senior)
     rt_register_fnhook_at(DRESS_MAKE, dressmake_hook);  // (the player's own, for the log)
+    for (int k = 0; k < NMIRROR; k++) g_mirror_hash[k] = fnv(k_mirror[k]);  // (our own state, sent: pla_npc_my_state)
+    rt_register_fnhook_at(ANIM_SET_FLOAT, myset_f), rt_register_fnhook_at(ANIM_SET_INT, myset_i);
+    rt_register_fnhook_at(ANIM_SET_BOOL, myset_b), rt_register_fnhook_at(ANIM_SET_TRIGGER, myset_t);
     rt_register_fnhook_at(SAVE_DRESS_SLOT, saveslot_hook);
     try_parse();  // (our outfit is read from the save's dress-up data)
     rt_register_fnhook_at(CHAR_BUILD, build_hook), rt_register_fnhook_at(ANIM_CTOR, actor_hook), rt_register_fnhook_at(NPC_MODEL_CTOR, chr_ctor_hook);
