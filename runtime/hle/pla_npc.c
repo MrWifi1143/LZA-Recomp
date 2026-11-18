@@ -2130,8 +2130,16 @@ int pla_npc_enabled(void) {
     return g_on;
 }
 
+static void npc_hooks(void);
 __attribute__((constructor)) static void pla_npc_init(void) {
-    if (!pla_npc_enabled()) return;
+    if (pla_npc_enabled()) npc_hooks();
+}
+void pla_npc_start(void) {  // (the shared world switched on by the setting: hle/pla_world.c pla_world_settings)
+    if (pla_npc_enabled()) return;
+    g_on = 1;
+    npc_hooks();
+}
+static void npc_hooks(void) {
     rt_register_fnhook_at(PLACE_NPC, place_hook);
     int no = getenv("LARECOMP_NPC_NOHOOK") ? atoi(getenv("LARECOMP_NPC_NOHOOK")) : 0;
     if (!(no & 2)) rt_register_fnhook_at(FACTORY_CREATE, fcreate_hook);

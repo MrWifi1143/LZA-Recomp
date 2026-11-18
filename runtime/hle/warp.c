@@ -290,6 +290,16 @@ __attribute__((constructor)) static void warp_init(void) {
     rt_register_fnhook_at(0x7002fee4e0ull, body_hook);
 }
 
+// The shared world switched on by the launcher's Online tab (hle/pla_world.c pla_world_settings, after the settings are
+// read): the player followed all the time, as LARECOMP_WORLD=1 does from the start
+void warp_world_start(void) {
+    if (g_world) return;
+    g_world = 1;
+    if (g_state < 0) g_state = 3;
+    rt_register_fnhook_at(0x7002994b70ull, cam_hook);
+    rt_register_fnhook_at(0x7002fee4e0ull, body_hook);
+}
+
 // where the player is (LARECOMP_LIVE's state file): false before the body is found
 bool warp_player_pos(float out[3]) {
     uint64_t b = g_seen_body;
@@ -303,8 +313,43 @@ uint64_t warp_player_body(void) {  // (the player's body object, 0 before it is 
     return b && *(const uint64_t *)(uintptr_t)b == BODY_VTABLE ? b : 0;
 }
 
+// ---- Is the online server there? (the relay plugin's larecomp_server_state: every hello it sends is answered -
+// lzaserver - so it knows within ~8 s). The player is told when it can't be reached, when it drops, when this copy has
+// to sign in to play there (an lzaserver lets only signed-in players in: runtime/acct.c) and when it's back.
+void menu_notice_for(const char *text, unsigned ms);
+static void server_notice_frame(uint64_t frame) {
+    static int (*state)(char *, size_t);
+    static uint64_t at, told_at;
+    static int was = -1, tries;
+    if (frame - at < 60) return;
+    at = frame;
+    if (!state) {
+        if (tries > 30) return;  // (no relay plugin with it - an older one, or none: looked for 30 s, then not again)
+        tries++;
+        void *plugins_symbol(const char *name);
+        if (!(state = (int (*)(char *, size_t))plugins_symbol("larecomp_server_state"))) return;
+    }
+    char name[256] = "";
+    int st = state(name, sizeof name);
+    bool away = st == 3 || st == 4 || st == 5;
+    if (st == was && !(away && frame - told_at >= 7200)) return;
+    char t[400];
+    const char *lt = "";  // (the log's words: never the server's address)
+    t[0] = 0;
+    if (st == 3) snprintf(t, sizeof t, "Can't reach the online server (%s) - online play waits for it. Is the address right, and the server running?", name), lt = "can't reach the server";
+    else if (st == 4) snprintf(t, sizeof t, "Lost the connection to the online server (%s) - trying again...", name), lt = "lost the server";
+    else if (st == 5) snprintf(t, sizeof t, "The online server's name (%s) can't be found - check the address (launcher > Options > Online) and your connection.", name), lt = "the server's name doesn't resolve";
+    else if (st == 6) snprintf(t, sizeof t, "Sign in to %s to play online there: launcher > Options > Online. (Playing offline needs no account.)", name), lt = "sign in to play on that server";
+    else if (st == 2 && was == 6) snprintf(t, sizeof t, "Signed in on %s: online play is on.", name), lt = "signed in: online play on";
+    // (back after it couldn't be reached: online play just carries on - nothing to tell, the notice said it waits for it)
+    if (t[0]) menu_notice_for(t, st == 2 ? 5000 : st == 6 ? 12000 : 10000), told_at = frame, LOG("[online] told: %s\n", lt);
+    else if (st != was) LOG("[online] the server: %s\n", st == 1 ? "asked, no answer yet" : st != 2 ? "not in use" : was == 4 ? "answering again (not told)" : was == 3 || was == 5 ? "reached (not told)" : "answering");
+    was = st;
+}
+
 void warp_frame(uint64_t frame) {  // (each game frame: runtime/hle/input.c)
     g_frame_now = frame;
+    server_notice_frame(frame);
     { extern void pla_slot_watch(uint64_t); pla_slot_watch(frame); }  // (research: hle/pla_drawdist.c)
     {   // (research) LARECOMP_LOG_PLAYER=<n>: the player's position every n frames ("[player] frame f x y z")
         static long every = -2;

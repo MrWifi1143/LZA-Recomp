@@ -12,7 +12,9 @@
 // from that folder at once; LARECOMP_MOD_INSTALL=<file or folder> installs a translation at once;
 // LARECOMP_LAUNCHER_KEYS=1 opens the keyboard section, =<slot> also waits for a new key for that input
 // (runtime/input_bind.h BIND_*), and <slot>:<key name> presses that key for it; LARECOMP_LAUNCHER_PAGE=options|
-// controls|files|mods opens that launcher page; LARECOMP_LAUNCHER_SIZE=<w>x<h> makes the launcher's window that size.
+// controls|files|mods|online opens that launcher page (online: Options > Online; classic: its Online section open);
+// LARECOMP_LAUNCHER_ACCT=login|create|sync|logout presses that Online tab button (name LARECOMP_ACCT_USER, password from
+// the file LARECOMP_ACCT_PASSWORD_FILE); LARECOMP_LAUNCHER_SIZE=<w>x<h> makes the launcher's window that size.
 // Any window size: drawn for 1280x720 and scaled to the window (ui_scale_*: a window the desktop stretched, F11 /
 // Alt+Enter fullscreen, a TV). A controller drives all of it: A selects, B goes back, L / R change tabs (the game's
 // own A and B: bindings.c), and the Controller tab's button test is a mode of its own (pad_nav_update).
@@ -34,6 +36,8 @@
 
 extern "C" void vk_describe_gpu(char *name, size_t n, int *vram_gb, bool *integrated);  // nvn/vulkan/device.c
 extern "C" {
+#include "acct.h"
+#include "acct_proto.h"
 #include "gamesetup.h"
 #include "input_bind.h"
 #include "mods.h"
@@ -1083,9 +1087,11 @@ extern "C" void launcher_lg_run(const char *root) {
     bool skipstart = g_settings.skip_start, shift_seen = false;
     uint64_t opened = SDL_GetTicks();
     int page = PAGE_HOME;
+    int start_tab = -1;  // (the Options tab shown first: LARECOMP_LAUNCHER_PAGE=online)
     if (const char *pg = getenv("LARECOMP_LAUNCHER_PAGE"))
-        page = !strcmp(pg, "options") ? PAGE_OPTIONS : !strcmp(pg, "controls") ? PAGE_CONTROLS : !strcmp(pg, "files") ? PAGE_FILES
-             : !strcmp(pg, "mods") ? PAGE_MODS : PAGE_HOME;
+        page = !strcmp(pg, "options") ? PAGE_OPTIONS : !strcmp(pg, "online") ? (start_tab = 3, PAGE_OPTIONS) : !strcmp(pg, "controls") ? PAGE_CONTROLS
+             : !strcmp(pg, "files") ? PAGE_FILES : !strcmp(pg, "mods") ? PAGE_MODS : PAGE_HOME;
+    acct_set_game_root(root);
     if (getenv("LARECOMP_LAUNCHER_PAD") || getenv("LARECOMP_LAUNCHER_KEYS")) page = PAGE_CONTROLS;
     // The launcher is a small fixed window; the game gets its own size (or fullscreen) after Play (below). (Made at
     // that size; resized here when the window was there already - back from the game)
@@ -1265,6 +1271,118 @@ extern "C" void launcher_lg_run(const char *root) {
             ImGui::EndCombo();
         }
     };
+    // The Online tab (Options > Online; the classic start screen's Online section): the online server, the account there,
+    // the save sync and the shared world. Playing needs no account; playing ON a server does (an lzaserver lets only
+    // signed-in players in - contrib/lzaserver, runtime/acct.c). Nearby play and Steam friends (no server) need none.
+    auto online_section = [&]() {
+        static char acct_name[64], acct_pass[128];
+        char signed_name[64];
+        bool busy = acct_ui_busy(), in = acct_signed_in(signed_name, sizeof signed_name), have_srv = g_settings.online_server[0] != 0;
+        auto note = [](const char *text) {  // (a wrapped grey line)
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("%s", text);
+            ImGui::PopStyleColor();
+        };
+        // -- the server
+        ImGui::SeparatorText(T("Online server", "Servidor online"));
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(T("Address", "Endereço"));
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-1);
+        focus_first();
+        ImGui::InputTextWithHint("##server", T("address:port - empty: no server (nearby play and Steam friends)",
+                                                "endereço:porta - vazio: sem servidor (jogo local e amigos da Steam)"),
+                                 g_settings.online_server, sizeof g_settings.online_server, ImGuiInputTextFlags_CharsNoBlank);
+        {   // (online play's transport is the relay plugin: the same tick box as on the Mods page)
+            int ri = -1;
+            for (int i = 0; i < nplugs && ri < 0; i++) if (strstr(plugs[i], "steamrelay")) ri = i;
+            if (ri >= 0) ImGui::Checkbox(T("Online play (Link Play through the server, or with Steam friends without one)",
+                                           "Jogo online (Link Play pelo servidor, ou com amigos da Steam sem servidor)"), &plug_on[ri]);
+            else note(T("Online play needs the Steam relay plugin in plugins/ (it comes with the game).",
+                        "O jogo online precisa do plugin Steam relay em plugins/ (vem com o jogo)."));
+        }
+        if (!have_srv) note(T("No server: Link Play is nearby (same network) or with Steam friends - no account needed.",
+                              "Sem servidor: o Link Play é local (mesma rede) ou com amigos da Steam - sem conta."));
+        else if (in) ImGui::TextColored(k_green, g_pt ? "Você pode jogar online neste servidor (conectado como %s)." : "You can play online on this server (signed in as %s).", signed_name);
+        else ImGui::TextColored(k_yellow, g_pt ? "Entre na sua conta de %s para jogar online nele. Jogar offline não precisa de conta."
+                                              : "Sign in to %s to play online there. Playing offline needs no account.", g_settings.online_server);
+        // -- the account on it
+        ImGui::SeparatorText(T("Account", "Conta"));
+        ImGui::BeginDisabled(!have_srv);
+        if (in) {
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text(g_pt ? "Conectado como %s" : "Signed in as %s", signed_name);
+            ImGui::SameLine();
+            ImGui::BeginDisabled(busy);
+            if (ImGui::Button(T("Sign out", "Sair"))) acct_ui_start(ACCT_OP_LOGOUT, NULL, NULL);
+            ImGui::EndDisabled();
+            ImGui::Checkbox(T("Keep my save synced with this account", "Manter meu save sincronizado com esta conta"), &g_settings.sync_saves);
+            ImGui::BeginDisabled(busy || !g_settings.sync_saves);
+            if (ImGui::Button(T("Sync now", "Sincronizar agora"))) acct_ui_start(ACCT_OP_SYNC, NULL, NULL);
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            const char *last = acct_last_sync();
+            ImGui::PushStyleColor(ImGuiCol_Text, strstr(last, "CONFLICT") ? k_yellow : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("%s %s", T("Last sync:", "Última sincronização:"), last[0] ? last : T("not yet", "ainda não"));
+            ImGui::PopStyleColor();
+        } else {
+            if (acct_session_ended() && have_srv)
+                ImGui::TextColored(k_yellow, "%s", T("The server ended this PC's sign-in: sign in again (your save here is untouched).",
+                                                     "O servidor encerrou o login deste PC: entre de novo (o seu save aqui não foi alterado)."));
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(T("Name", "Nome"));
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(190);
+            ImGui::InputTextWithHint("##acct_name", T("name", "nome"), acct_name, sizeof acct_name, ImGuiInputTextFlags_CharsNoBlank);
+            ImGui::SameLine();
+            ImGui::TextUnformatted(T("Password", "Senha"));
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(190);
+            bool enter = ImGui::InputTextWithHint("##acct_pass", T("password", "senha"), acct_pass, sizeof acct_pass,
+                                                  ImGuiInputTextFlags_Password | ImGuiInputTextFlags_EnterReturnsTrue);
+            ImGui::BeginDisabled(busy || !acct_name[0] || !acct_pass[0]);
+            int op = ACCT_OP_NONE;
+            if (ImGui::Button(T("Sign in", "Entrar")) || (enter && acct_name[0] && acct_pass[0] && !busy)) op = ACCT_OP_LOGIN;
+            ImGui::SameLine();
+            if (ImGui::Button(T("Create account", "Criar conta"))) op = ACCT_OP_CREATE;
+            ImGui::EndDisabled();
+            if (op) {
+                acct_ui_start(op, acct_name, acct_pass);
+                memset(acct_pass, 0, sizeof acct_pass);  // (never kept: the server hands out a sign-in token)
+            }
+        }
+        ImGui::EndDisabled();
+        bool err = false;
+        const char *m = acct_ui_message(&err);
+        if (busy) ImGui::TextDisabled("%s", T("Talking to the server...", "Falando com o servidor..."));
+        else if (m[0]) {
+            ImGui::PushStyleColor(ImGuiCol_Text, err ? k_red : strstr(m, "CONFLICT") || strstr(m, "first time") ? k_yellow : k_green);
+            ImGui::TextWrapped("%s", m);
+            ImGui::PopStyleColor();
+            if (err && acct_ui_key_changed() && ImGui::SmallButton(T("Forget the server's key", "Esquecer a chave do servidor")))
+                acct_ui_start(ACCT_OP_FORGET_KEY, NULL, NULL);
+        }
+        // -- the shared world
+        ImGui::SeparatorText(T("Shared world", "Mundo compartilhado"));
+        {
+            bool w = g_settings.world_players != 0;
+            if (ImGui::Checkbox(T("Show other players walking around (online server)", "Mostrar outros jogadores andando (servidor online)"), &w))
+                g_settings.world_players = w;
+        }
+        ImGui::Spacing();
+        note(T("No account is needed to play: offline, the game uses the save on this PC as always. An account lives on one "
+               "server and is what playing on it needs (Link Play by Link Code, the shared world). Signed in, your save here "
+               "is linked to it: it goes up when the game saves and at quit, and comes down when you start on another PC or "
+               "the PS5 version - offline in between is fine, it catches up when the server answers. If both changed, nothing "
+               "is overwritten: the newer is used and the other kept (save/sync-backups). Your password goes encrypted and "
+               "isn't stored on this PC. Server changes apply the next time the game starts.",
+               "Não é preciso conta para jogar: offline, o jogo usa o save deste PC como sempre. Uma conta vale num servidor "
+               "e é o que jogar nele exige (Link Play por Código de Conexão, o mundo compartilhado). Conectado, o seu save daqui "
+               "fica ligado a ela: sobe quando o jogo salva e ao sair, e desce quando você joga em outro PC ou na versão de PS5 - "
+               "offline no meio tudo bem, ele sincroniza quando o servidor responder. Se os dois mudaram, nada é sobrescrito: o "
+               "mais novo é usado e o outro guardado (save/sync-backups). A senha vai criptografada e não fica salva neste PC. "
+               "Mudanças de servidor valem a partir da próxima vez que o jogo iniciar."));
+    };
     // The launcher's Mods page: Add / Remove / the folder at the top, then every mod - translations (mods/, one at a
     // time) and plugins (plugins/) - with a tick box each
     auto mods_page = [&]() {
@@ -1351,20 +1469,7 @@ extern "C" void launcher_lg_run(const char *root) {
                                     "Mods ligados carregam na ordem (as setas): onde dois mudam o mesmo arquivo ou textura, o de cima vence. "
                                     "Plugins carregam ao iniciar: uma mudança reinicia o jogo uma vez ao apertar Jogar."));
         ImGui::PopStyleColor();
-        // (contrib/steamrelay + contrib/lzaserver: Link Play through a server someone runs, in place of Steam friends)
-        ImGui::Spacing();
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted(T("Online server", "Servidor online"));
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(-1);
-        ImGui::InputTextWithHint("##server", T("address:port - empty: Steam friends", "endereço:porta - vazio: amigos da Steam"),
-                                 g_settings.online_server, sizeof g_settings.online_server);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-        ImGui::TextWrapped("%s", T("With the Steam relay plugin on: players who enter the same Link Code meet on that server. "
-                                    "Applies the next time the game starts.",
-                                    "Com o plugin Steam relay ligado: quem digitar o mesmo Código de Conexão se encontra nesse servidor. "
-                                    "Vale a partir da próxima vez que o jogo iniciar."));
-        ImGui::PopStyleColor();
+        // (the online server: Options > Online - it isn't a mod)
         if (ImGui::BeginPopupModal("##remove", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
             bool tr = mod_sel < nmods;
             int i = tr ? mod_sel : mod_sel - nmods;
@@ -1439,6 +1544,13 @@ extern "C" void launcher_lg_run(const char *root) {
         if (pad_open) controller_section();
         if (keys_test) ImGui::SetNextItemOpen(true, ImGuiCond_Once);
         if (ImGui::CollapsingHeader(T("Keyboard", "Teclado"))) keys_section();
+        if (start_tab == 3) ImGui::SetNextItemOpen(true, ImGuiCond_Once);  // (LARECOMP_LAUNCHER_PAGE=online)
+        if (ImGui::CollapsingHeader(T("Online", "Online"))) {  // (the launcher's Online tab)
+            if (start_tab == 3 && frame < 90) ImGui::SetScrollHereY(0.0f);  // (LARECOMP_LAUNCHER_PAGE=online: scrolled to it)
+            ImGui::PushItemWidth(420);
+            online_section();
+            ImGui::PopItemWidth();
+        }
         ImGui::Spacing();
         recommended_row();  // (above, where the Play button keeps the view)
         ImGui::BeginDisabled(!ready);
@@ -1574,19 +1686,25 @@ extern "C" void launcher_lg_run(const char *root) {
             ImGui::BeginChild("##page", ImVec2(W - 72, H - bar - 36));
             ImGui::PushItemWidth(420);
             if (page == PAGE_OPTIONS) {
-                tab_begin(3);
+                tab_begin(4);
+                if (start_tab >= 0) g_tab_want = start_tab, start_tab = -1;  // (LARECOMP_LAUNCHER_PAGE=online)
+                bool online_tab = false;
                 if (ImGui::BeginTabBar("##opt")) {
                     if (ImGui::BeginTabItem(T("Display", "Tela"), NULL, tab_flags(0))) { tab_shown(0); ImGui::Spacing(); focus_first(); settings_display(); ImGui::EndTabItem(); }
                     if (ImGui::BeginTabItem(T("Graphics", "Gráficos"), NULL, tab_flags(1))) { tab_shown(1); ImGui::Spacing(); focus_first(); settings_graphics(); ImGui::EndTabItem(); }
                     if (ImGui::BeginTabItem(T("Game", "Jogo"), NULL, tab_flags(2))) { tab_shown(2); ImGui::Spacing(); focus_first(); settings_game(); ImGui::EndTabItem(); }
+                    // (the online server, its account and the save sync: not a mod - a tab of its own)
+                    if (ImGui::BeginTabItem(T("Online", "Online"), NULL, tab_flags(3))) { tab_shown(3); online_tab = true; online_section(); ImGui::EndTabItem(); }
                     ImGui::EndTabBar();
                 }
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Spacing();
-                recommended_row();
-                ImGui::TextDisabled("%s", T("These settings are also in the game: Menu > Help > Settings.",
-                                            "Estas configurações também estão no jogo: Menu > Help > Settings."));
+                if (!online_tab) {
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+                    recommended_row();
+                    ImGui::TextDisabled("%s", T("These settings are also in the game: Menu > Help > Settings.",
+                                                "Estas configurações também estão no jogo: Menu > Help > Settings."));
+                }
             } else if (page == PAGE_CONTROLS) {
                 tab_begin(2);
                 if (ImGui::BeginTabBar("##ctl")) {
@@ -1678,6 +1796,19 @@ extern "C" void launcher_lg_run(const char *root) {
             k.key.scancode = SDL_GetScancodeFromName(strchr(keys_test, ':') + 1);
             k.key.down = true;
             SDL_PushEvent(&k);
+        }
+        if (frame == 3) {  // (tests: LARECOMP_LAUNCHER_ACCT=login|create|sync|logout - the Online tab's buttons, as if clicked;
+                           // name LARECOMP_ACCT_USER, password from the file LARECOMP_ACCT_PASSWORD_FILE)
+            const char *a = getenv("LARECOMP_LAUNCHER_ACCT");
+            if (a && a[0]) {
+                char pw[ACCT_PASS_MAX + 4] = "";
+                FILE *pf = getenv("LARECOMP_ACCT_PASSWORD_FILE") ? fopen(getenv("LARECOMP_ACCT_PASSWORD_FILE"), "r") : NULL;
+                if (pf) { if (!fgets(pw, sizeof pw, pf)) pw[0] = 0; fclose(pf); }
+                pw[strcspn(pw, "\r\n")] = 0;
+                acct_ui_start(!strcmp(a, "create") ? ACCT_OP_CREATE : !strcmp(a, "sync") ? ACCT_OP_SYNC : !strcmp(a, "logout") ? ACCT_OP_LOGOUT
+                              : ACCT_OP_LOGIN, getenv("LARECOMP_ACCT_USER"), pw);
+                memset(pw, 0, sizeof pw);
+            }
         }
         ui_scale_begin(win, classic ? 1920.0f : (float)k_launcher_w, classic ? 1080.0f : (float)k_launcher_h, classic);
         ImGui_ImplVulkan_NewFrame();

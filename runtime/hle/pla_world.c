@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "../hle.h"
+#include "../settings.h"
 
 void rt_register_fnhook_at(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
 void rt_call_original(Cpu *c, uint64_t addr);
@@ -917,8 +918,22 @@ int pla_world_enabled(void) {
     return g_on;
 }
 
+static void world_hooks(void);
 __attribute__((constructor)) static void pla_world_init(void) {
-    if (!pla_world_enabled()) return;
+    if (pla_world_enabled()) world_hooks();
+}
+// The launcher's Online tab: "Show other players walking around" (larecomp.ini world_players = 1) - read once the
+// settings are (runtime/main.c boot, before the game runs; LARECOMP_WORLD=1 turned it on already at load)
+void pla_world_settings(void) {
+    if (pla_world_enabled() || !g_settings.world_players || getenv("LARECOMP_HIDE_PLAYER")) return;
+    LOG("[world] shared world on (Online tab)\n");
+    g_on = 1;
+    world_hooks();
+    extern void pla_npc_start(void), warp_world_start(void);
+    pla_npc_start();
+    warp_world_start();
+}
+static void world_hooks(void) {
     if (getenv("LARECOMP_HIDE_PLAYER")) { g_on = 0; return; }  // (that research hooks the same posing)
     if (getenv("LARECOMP_NPC_NOHOOK") && (atoi(getenv("LARECOMP_NPC_NOHOOK")) & 8)) return;
     rt_register_fnhook_at(POSE_FN, pose_hook);
