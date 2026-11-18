@@ -289,7 +289,7 @@ static void peer_let_go(Peer *p, const char *why) {
 
 static void world_tick(uint64_t frame) {
     static bool init;
-    extern int pla_npc_gender(void), pla_npc_new(const float *, int, const uint64_t *), pla_npc_state(int), pla_npc_take(int, const uint64_t *);
+    extern int pla_npc_gender(void), pla_npc_new(const float *, int, const uint64_t *), pla_npc_state(int), pla_npc_take(int, const uint64_t *, const float *);
     extern int pla_npc_my_outfit(uint64_t *), pla_npc_outfit(int, const uint64_t *);
     extern void pla_npc_order(int, const float *, int);
     if (!init) {
@@ -463,6 +463,10 @@ static void world_tick(uint64_t frame) {
             if (!p->have) memset(p, 0, sizeof *p), p->have = 1, p->id = 0xfa0e000000000001ull + i, p->own = -1, p->ov = -1, p->first_ns = now;
             p->heard_ns = now, p->heard++;
             peer_take(p, (uint32_t)ms, v, spd, i & 1);
+            static int fo = -1;  // (LARECOMP_WORLD_FAKE_OUTFIT=1: they wear our outfit - the p1 ones; dressed persons)
+            if (fo < 0) fo = getenv("LARECOMP_WORLD_FAKE_OUTFIT") && atoi(getenv("LARECOMP_WORLD_FAKE_OUTFIT"));
+            extern int pla_npc_my_outfit(uint64_t *);
+            if (fo && !(i & 1) && !p->has_outfit && pla_npc_my_outfit(p->outfit)) p->has_outfit = 1;
         }
     }
     // who is shown: the nearest SHOW within OWN_RANGE
@@ -512,7 +516,7 @@ static void world_tick(uint64_t frame) {
         if (p->own >= 0 && pla_npc_state(p->own) == 3) p->own_up = 1;
         if (p->own >= 0 && pla_npc_state(p->own) <= 2 && frame % 15 == 0) {  // (still waiting for theirs: a free one up already is taken instead)
             extern void pla_npc_free(int);
-            int t = pla_npc_take(p->gender, p->has_outfit ? p->outfit : NULL);
+            int t = pla_npc_take(p->gender, p->has_outfit ? p->outfit : NULL, p->tgt);
             if (t >= 0) {
                 LOG("[world] player %016llx: person %d still not up - the free person %d instead\n", (unsigned long long)p->id, p->own, t);
                 pla_npc_free(p->own);
@@ -533,7 +537,7 @@ static void world_tick(uint64_t frame) {
         bool peer_settled = now - p->jump_ns > 3000000000ull && now - p->first_ns > 3000000000ull;
         if (p->own < 0 && settled && peer_settled && now >= p->retry_ns) {
             const uint64_t *fit = p->has_outfit ? p->outfit : NULL;
-            int t = pla_npc_take(p->gender, fit);
+            int t = pla_npc_take(p->gender, fit, p->tgt);
             p->own = t >= 0 ? t : d < ASK_RANGE ? pla_npc_new(p->tgt, p->gender, fit) : -1;
             p->ov = -1, p->sk = 0, p->far_ns = 0;
             for (int k = 0; t >= 0 && k < NOV; k++)
@@ -541,6 +545,26 @@ static void world_tick(uint64_t frame) {
             if (p->own >= 0) LOG("[world] player %016llx gets %s person %d (%s, %s body) at %.2f %.2f %.2f, %.1f m from us\n", (unsigned long long)p->id,
                                  t >= 0 ? "the free" : "a new", p->own, fit ? "outfit heard" : "no outfit heard", p->gender ? "p2" : "p1", p->tgt[0], p->tgt[1], p->tgt[2], d);
             p->order_frame = 0;
+        }
+        extern int pla_npc_puppet(int), pla_npc_pos(int, float *);
+        extern void pla_npc_follow(int, const float *);
+        if (p->own >= 0 && pla_npc_state(p->own) == 3 && pla_npc_puppet(p->own)) {
+            // (dressed: walked like a player toward where they are drawn, every tick - hle/pla_npc.c, which puts it
+            // where they are when it falls far behind; still over 30 m behind 6 s on, it is let go and another asked for)
+            pla_npc_follow(p->own, p->tgt);
+            float q[3];
+            if (pla_npc_pos(p->own, q)) {
+                float ex = q[0] - p->tgt[0], ez = q[2] - p->tgt[2];
+                if (ex * ex + ez * ez > 900.0f) { if (!p->far_ns) p->far_ns = now; }
+                else p->far_ns = 0;
+                if (p->far_ns && now - p->far_ns > 6000000000ull) {
+                    LOG("[world] player %016llx's person is %.1f m behind them: another asked for\n", (unsigned long long)p->id, sqrtf(ex * ex + ez * ez));
+                    int k = p->own;
+                    peer_let_go(p, "left its person behind");
+                    pla_npc_order(k, q, 0);  // (it stands where it is)
+                }
+            }
+            continue;
         }
         if (p->own >= 0 && pla_npc_state(p->own) == 3) {
             extern void pla_npc_at(int, float *);
