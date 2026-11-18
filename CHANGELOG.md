@@ -6,6 +6,29 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsA`)
 
+## 2026-11-17: LegendsA-v1.3.4
+
+Previous release: LegendsA-v1.3.3. Game version: Pokemon Legends: Arceus 1.1.1. A hotfix: same game code as 1.3.0, so
+nothing is rebuilt on start (the hotfix zip is enough on Windows).
+
+- A crash right after the shader warm-up ("exception c0000005 accessing 0") with game files that set up fine: the
+  1.1.1 update takes parts of the RomFS tables from the base game, so a base game dump other than the one the update
+  was made for (a repack, say) gave an image whose files the game couldn't find by name. Setup now checks the files it
+  reads: each .nsp / .xci's game data against its own checksums, the image against its hash tree and the game's file
+  table, in the same pass (about a second more). A damaged or altered base game or update file is named ("dump it
+  again"); a base game the update doesn't fit is refused with what to do; files that are fine but don't fit together
+  log the details for a bug report. An install set up before with such files opens the start screen with the message
+  instead of the game. New --prepare exit codes 31-34 for launchers (30-34 listed in recomplauncher.json). Reported on
+  Discord by a player on an RTX 4050 Laptop GPU.
+- A picked romfs.bin that's a symbolic link is linked as its file: a later setup can no longer write through it.
+- A render-thread crash when the game frees a texture that a command list recorded once and replayed every frame
+  still names (found in Z-A's Link trades; the same code here): such a texture is now left out of the list.
+- At 72 fps (Real Time), a spot that can't hold 72 now steps down to 48 fps instead of straight to 36 (Jubilife at
+  Very High Draw Distance sat at 36 on an RX 6600 XT; now about 60 there).
+- NVIDIA crash reports: the game's indirect draws and gathers now ask for the two Vulkan features they use
+  (drawIndirectFirstInstance, shaderImageGatherExtended - undefined behaviour without them); a crash inside the driver
+  while building a shader names the shader and logs its code; the log shows each GPU's driver version.
+
 ## 2026-11-17: LegendsA-v1.3.3
 
 Previous release: LegendsA-v1.3.2. Game version: Pokemon Legends: Arceus 1.1.1. A hotfix: same game code as 1.3.0, so
