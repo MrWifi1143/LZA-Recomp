@@ -1284,6 +1284,53 @@ static bool mount_joint(Mnt *m, int t, float out_q[4], float out_p[3]) {
     return isfinite(out_p[0]) && isfinite(out_p[1]) && isfinite(out_p[2]) && isfinite(out_q[3]);
 }
 
+// The rider's world, as drawn. Writing its owner's local each frame left it trailing its mount by up to ~0.5 m at a
+// gallop (measured 2026-11-18 from the drawn instances: the net's root motion lands in that local after we write it,
+// and the owner's world is computed again mid-frame). So its owner's world matrix is answered directly: the owner
+// world getter (vt 0x700417dc80 +0x40 = 0x7002952bd8, x0 owner, returns the matrix in q0..q3 - columns x y z axes and
+// position, cached at +0x70..+0xa0) gives, for a seated rider, its mount's world (that getter, called now) x the seat
+// joint - what the mesh update draws, the same moment its mount is drawn.
+#define OWNER_WORLD_FN 0x7002952bd8ull
+typedef struct { volatile uint64_t owner; uint64_t mowner, sk; int jidx; } Seat;
+static Seat g_seat[NOWN];
+static void seat_set(int i, uint64_t owner, const Mnt *m) {
+    if (owner && m && m->owner && m->jsk && m->jidx > 0) {
+        if (g_seat[i].owner == owner && g_seat[i].mowner == m->owner && g_seat[i].sk == m->jsk && g_seat[i].jidx == m->jidx) return;
+        __atomic_store_n(&g_seat[i].owner, 0, __ATOMIC_RELEASE);
+        g_seat[i].mowner = m->owner, g_seat[i].sk = m->jsk, g_seat[i].jidx = m->jidx;
+        __atomic_store_n(&g_seat[i].owner, owner, __ATOMIC_RELEASE);
+    } else if (g_seat[i].owner) __atomic_store_n(&g_seat[i].owner, 0, __ATOMIC_RELEASE);
+}
+static int world_hook(Cpu *c, uint64_t addr) {
+    uint64_t ow = c->x[0];
+    int i = 0;
+    for (; i < NOWN; i++)
+        if (__atomic_load_n(&g_seat[i].owner, __ATOMIC_ACQUIRE) == ow) break;
+    if (i == NOWN || !ow) return 0;
+    uint64_t mo = g_seat[i].mowner, sk = g_seat[i].sk;
+    int ji = g_seat[i].jidx;
+    rt_call_original(c, addr);  // (its own, as the game has it: dirty flags cleared, its cache filled)
+    if (!in_heap(mo) || *(const uint64_t *)(uintptr_t)mo != MODEL_OBJ_VTABLE || !in_heap(sk) || *(const uint64_t *)(uintptr_t)sk != SKEL_VTABLE || ji <= 0) return 1;
+    uint64_t jm = *(const uint64_t *)(uintptr_t)(sk + 0x2a8);
+    if (!in_heap(jm)) return 1;
+    uint64_t sx[32], snzcv = c->nzcv;
+    __uint128_t sv[32];
+    memcpy(sx, c->x, sizeof sx), memcpy(sv, c->v, sizeof sv);
+    c->x[0] = mo;
+    guest_call(c, addr);  // (its mount's world now)
+    float m[4][4], j[4][4], r[4][4];
+    for (int k = 0; k < 4; k++) memcpy(m[k], &c->v[k], 16);
+    memcpy(c->x, sx, sizeof sx), memcpy(c->v, sv, sizeof sv), c->nzcv = snzcv;
+    memcpy(j, (const void *)(uintptr_t)(jm + 64 * (uint64_t)(ji - 1)), 64);
+    for (int k = 0; k < 4; k++) {
+        memcpy(r[k], &c->v[k], 16);  // (w lanes as its own)
+        for (int a = 0; a < 3; a++) r[k][a] = m[0][a] * j[k][0] + m[1][a] * j[k][1] + m[2][a] * j[k][2] + (k == 3 ? m[3][a] : 0);
+    }
+    if (!isfinite(r[3][0]) || !isfinite(r[3][1]) || !isfinite(r[3][2])) return 1;
+    for (int k = 0; k < 4; k++) memcpy(&c->v[k], r[k], 16), memcpy((void *)(uintptr_t)(ow + 0x70 + 16 * (uint64_t)k), r[k], 16);
+    return 1;
+}
+
 // The rider drawn or not: the game hides its own player while it rides Sneasler (in the basket - its meshes' LOD
 // controller +0x180 off from getting on till off, measured 2026-11-18; Wyrdeer / Braviary / Ursaluna on). Ours the
 // same, by its meshes' LOD masks (see lod_show / mount_show).
@@ -1345,6 +1392,7 @@ static int ride_step(Cpu *c, Own *o, float dt) {
     }
     float *loc = (float *)(uintptr_t)(o->owner + 0xd0), *lq = (float *)(uintptr_t)(o->owner + 0xc0);
     if (!on) {
+        seat_set((int)(o - g_own), 0, NULL);
         if (o->rode) {  // (off: back on its feet where its mount stands, the mount put away)
             o->rode = 0;
             anim_set(c, o->actl, ANIM_SET_BOOL, fnv("set_ride_bool"), 0, 0);
@@ -1444,7 +1492,9 @@ static int ride_step(Cpu *c, Own *o, float dt) {
     // on top of its character's turn - one left facing elsewhere sat its model on the ride sideways a frame)
     if (!o->rl_set) memcpy(o->rlq, lq, 16), memcpy(o->rlt, loc, 12), o->rl_set = 1;  // (what its owner has now)
     float sq[4], sp[3];
-    if (!((int)g_knob[6] & 8) && mount_joint(m, m->t ? m->t : t, sq, sp)) {
+    bool seated = !((int)g_knob[6] & 8) && mount_joint(m, m->t ? m->t : t, sq, sp);
+    seat_set((int)(o - g_own), seated && !((int)g_knob[6] & 16) ? o->owner : 0, m);  // (knob 6 bit 16: its local only)
+    if (seated) {
         // (on the seat joint, as the game's own rider: its world = the joint's; its character (under it) taken out - its
         // turn and place measured from its world less the local written last frame)
         float qc[4], ic[4], lt[3], d[3];
@@ -1678,6 +1728,8 @@ static void mount_term(Cpu *c, Mnt *m, const char *why) {
     uint64_t fo = gcall(c, FO_GET, 0, 0, 0, 0);
     if (in_heap(fo)) h[0] = fnv(m->name), gcall(c, FO_TERMINATE, fo, (uint64_t)(uintptr_t)h, 0, 0);
     int idx = (int)(m - g_mnt);
+    for (int i = 0; i < NOWN; i++)
+        if (g_seat[i].owner && g_seat[i].mowner == m->owner) seat_set(i, 0, NULL);
     pthread_mutex_lock(&g_lock);
     if (m->rider > 0 && m->rider <= NOWN) {
         for (int j = 0; j < 8; j++)
@@ -1748,7 +1800,12 @@ void pla_npc_cam(Cpu *c) {  // (the camera update, the game's thread: hle/warp.c
             if (m->chr_pre) LOG("[npc] %s: its model component %llx made at once\n", m->name, (unsigned long long)m->chr_pre);
             continue;
         }
-        if (m->state && m->level != g_level) { memset(m, 0, sizeof *m); continue; }  // (went with its level)
+        if (m->state && m->level != g_level) {  // (went with its level)
+            for (int k = 0; k < NOWN; k++)
+                if (g_seat[k].owner && g_seat[k].mowner == m->owner) seat_set(k, 0, NULL);
+            memset(m, 0, sizeof *m);
+            continue;
+        }
         if (m->state == 2 && g_frame - m->asked > 900) { mount_term(c, m, "not up 30 s after asking"); continue; }
         if (m->state != 3) continue;
         if (m->owner) unfreeze(m->owner);
@@ -1787,6 +1844,7 @@ void pla_npc_cam(Cpu *c) {  // (the camera update, the game's thread: hle/warp.c
         }
         if (o->comp && in_heap(o->owner) && *(const uint64_t *)(uintptr_t)o->owner == MODEL_OBJ_VTABLE && g_frame % 10 == 0) lod_show(o);
         if (o->owner && (o->state == 3 || o->state == 4)) unfreeze(o->owner);
+        if (g_seat[i].owner && (!(o->state == 3 || o->state == 4) || !o->rode || g_seat[i].owner != o->owner)) seat_set(i, 0, NULL);
         if (o->comp && o->settled < 2 && in_heap(o->comp) && g_frame % 15 == 0) {  // (log: its items loaded and worn)
             uint32_t st = *(const uint32_t *)(uintptr_t)(o->comp + 0x27b8);
             if ((st == 1) != o->settled) o->settled = st == 1 ? 2 : 0, LOG("[npc] mpplayer_%d's dress-up: state %u\n", o->k, st);
@@ -2093,6 +2151,7 @@ __attribute__((constructor)) static void pla_npc_init(void) {
     rt_register_fnhook_at(CHAR_BUILD, build_hook), rt_register_fnhook_at(ANIM_CTOR, actor_hook), rt_register_fnhook_at(NPC_MODEL_CTOR, chr_ctor_hook);
     rt_register_fnhook_at(POKE_ANIM_CTOR, actor_hook), rt_register_fnhook_at(POKE_MODEL_CTOR, poke_ctor_hook);  // (our mounts' parts)
     rt_register_fnhook_at(NPC_ENTITY_CB, entity_hook);
+    rt_register_fnhook_at(OWNER_WORLD_FN, world_hook);  // (seated riders drawn on their mount's joint)
     rt_register_fnhook_at(CREATE_MODEL, create_hook), rt_register_fnhook_at(POKE_MODEL_JOB, pjob_hook);
     if (g_dress) rt_register_fnhook_at(NPC_MODEL_JOB, job_hook);
 }
