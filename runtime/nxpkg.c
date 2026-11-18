@@ -9,10 +9,16 @@
 //   AesCtrEx table per range. Both tables are bucket trees (16 KiB nodes) in plain AES-CTR at the section's end.
 //   The RomFS image is the IVFC data level (the last of the hash tree) of that section.
 // Layouts this doesn't read (sparse and compressed sections, NCZ) are refused with a message.
+// Checked while the image is written (nxpkg_check): each NCA used is hashed whole, as stored (SHA-256: its first 16
+// bytes are the content id, the file's name - a damaged or altered file doesn't match), on a second thread, from the
+// same reads as the extraction where it reads in order (the rest is read for the hash alone); and the image against
+// the section's hash tree (IVFC: the master hash in the FS header, then each level's blocks against the level above,
+// the data level - the image - block by block as it's written), on a third.
 #include "nxpkg.h"
 
 #include <ctype.h>
 #include <dirent.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -119,7 +125,7 @@ static void ecb_dec(const uint8_t key[16], const uint8_t *in, uint8_t *out, size
 }
 
 #ifdef HAVE_AESNI
-__attribute__((target("aes,sse2"))) static void ctr_ni(const Aes *a, uint64_t hi, uint64_t ctr, uint8_t *buf, size_t nb) {
+__attribute__((target("aes,sse2"))) static void ctr_ni(const Aes *a, uint64_t hi, uint64_t ctr, const uint8_t *src, uint8_t *buf, size_t nb) {
     __m128i k[11];
     for (int i = 0; i < 11; i++) k[i] = _mm_loadu_si128((const __m128i *)(a->rk + 16 * i));
     size_t b = 0;
@@ -128,23 +134,22 @@ __attribute__((target("aes,sse2"))) static void ctr_ni(const Aes *a, uint64_t hi
         for (int j = 0; j < 8; j++) x[j] = _mm_xor_si128(_mm_set_epi64x((long long)__builtin_bswap64(ctr + j), (long long)hi), k[0]);
         for (int r = 1; r < 10; r++)
             for (int j = 0; j < 8; j++) x[j] = _mm_aesenc_si128(x[j], k[r]);
-        for (int j = 0; j < 8; j++) {
-            __m128i *p = (__m128i *)(buf + 16 * (b + j));
-            _mm_storeu_si128(p, _mm_xor_si128(_mm_loadu_si128(p), _mm_aesenclast_si128(x[j], k[10])));
-        }
+        for (int j = 0; j < 8; j++)
+            _mm_storeu_si128((__m128i *)(buf + 16 * (b + j)),
+                             _mm_xor_si128(_mm_loadu_si128((const __m128i *)(src + 16 * (b + j))), _mm_aesenclast_si128(x[j], k[10])));
         ctr += 8;
     }
     for (; b < nb; b++, ctr++) {
         __m128i x = _mm_xor_si128(_mm_set_epi64x((long long)__builtin_bswap64(ctr), (long long)hi), k[0]);
         for (int r = 1; r < 10; r++) x = _mm_aesenc_si128(x, k[r]);
-        __m128i *p = (__m128i *)(buf + 16 * b);
-        _mm_storeu_si128(p, _mm_xor_si128(_mm_loadu_si128(p), _mm_aesenclast_si128(x, k[10])));
+        _mm_storeu_si128((__m128i *)(buf + 16 * b), _mm_xor_si128(_mm_loadu_si128((const __m128i *)(src + 16 * b)), _mm_aesenclast_si128(x, k[10])));
     }
 }
 #endif
 
-// AES-CTR over buf (whole blocks), the counter: upper (big-endian) | block index (big-endian).
-static void ctr_xor(const Aes *a, uint64_t upper, uint64_t block, uint8_t *buf, size_t nb) {
+// AES-CTR over src into buf (whole blocks; the same buffer or apart), the counter: upper (big-endian) | block index
+// (big-endian).
+static void ctr_xor(const Aes *a, uint64_t upper, uint64_t block, const uint8_t *src, uint8_t *buf, size_t nb) {
     uint8_t iv[16];
     for (int i = 0; i < 8; i++) iv[i] = (uint8_t)(upper >> (56 - 8 * i));
 #ifdef HAVE_AESNI
@@ -157,7 +162,7 @@ static void ctr_xor(const Aes *a, uint64_t upper, uint64_t block, uint8_t *buf, 
     if (ni) {
         uint64_t hi;
         memcpy(&hi, iv, 8);
-        ctr_ni(a, hi, block, buf, nb);
+        ctr_ni(a, hi, block, src, buf, nb);
         return;
     }
 #endif
@@ -165,7 +170,7 @@ static void ctr_xor(const Aes *a, uint64_t upper, uint64_t block, uint8_t *buf, 
         uint8_t ks[16];
         for (int i = 0; i < 8; i++) iv[8 + i] = (uint8_t)(block >> (56 - 8 * i));
         aes_enc(a, iv, ks);
-        for (int i = 0; i < 16; i++) buf[16 * b + i] ^= ks[i];
+        for (int i = 0; i < 16; i++) buf[16 * b + i] = src[16 * b + i] ^ ks[i];
     }
 }
 
@@ -187,6 +192,182 @@ static void xts_dec(const uint8_t key[32], uint8_t *buf, size_t n) {
             t[0] = (uint8_t)(t[0] << 1 ^ (carry ? 0x87 : 0));
         }
     }
+}
+
+// ------------------------------------------------------------------ SHA-256
+static const uint32_t K256[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be,
+    0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa,
+    0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85,
+    0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f,
+    0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+
+#define SROR(x, n) ((x) >> (n) | (x) << (32 - (n)))
+static void sha_blocks_c(uint32_t s[8], const uint8_t *p, size_t nb) {
+    for (; nb; nb--, p += 64) {
+        uint32_t w[64], a = s[0], b = s[1], c = s[2], d = s[3], e = s[4], f = s[5], g = s[6], h = s[7];
+        for (int i = 0; i < 16; i++) w[i] = (uint32_t)p[4 * i] << 24 | (uint32_t)p[4 * i + 1] << 16 | (uint32_t)p[4 * i + 2] << 8 | p[4 * i + 3];
+        for (int i = 16; i < 64; i++)
+            w[i] = w[i - 16] + (SROR(w[i - 15], 7) ^ SROR(w[i - 15], 18) ^ w[i - 15] >> 3) + w[i - 7] +
+                   (SROR(w[i - 2], 17) ^ SROR(w[i - 2], 19) ^ w[i - 2] >> 10);
+        for (int i = 0; i < 64; i++) {
+            uint32_t t1 = h + (SROR(e, 6) ^ SROR(e, 11) ^ SROR(e, 25)) + ((e & f) ^ (~e & g)) + K256[i] + w[i];
+            uint32_t t2 = (SROR(a, 2) ^ SROR(a, 13) ^ SROR(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
+            h = g, g = f, f = e, e = d + t1, d = c, c = b, b = a, a = t1 + t2;
+        }
+        s[0] += a, s[1] += b, s[2] += c, s[3] += d, s[4] += e, s[5] += f, s[6] += g, s[7] += h;
+    }
+}
+
+#ifdef HAVE_AESNI
+// The SHA extensions (Intel since Goldmont / Ice Lake, AMD since Zen): ~2 GB/s against ~0.4 in C.
+__attribute__((target("sha,sse4.1"))) static void sha_blocks_ni(uint32_t s[8], const uint8_t *p, size_t nb) {
+    const __m128i bswap = _mm_set_epi64x(0x0c0d0e0f08090a0bll, 0x0405060700010203ll);
+    __m128i t = _mm_shuffle_epi32(_mm_loadu_si128((const __m128i *)s), 0xB1);         // CDAB
+    __m128i s1 = _mm_shuffle_epi32(_mm_loadu_si128((const __m128i *)(s + 4)), 0x1B);  // EFGH
+    __m128i s0 = _mm_alignr_epi8(t, s1, 8);                                           // ABEF
+    s1 = _mm_blend_epi16(s1, t, 0xF0);                                                // CDGH
+    for (; nb; nb--, p += 64) {
+        __m128i a0 = s0, c0 = s1, w[4];
+        for (int g = 0; g < 16; g++) {  // (4 rounds each; w: the last 16 schedule words)
+            __m128i m;
+            if (g < 4) m = w[g] = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)(p + 16 * g)), bswap);
+            else {
+                m = _mm_add_epi32(_mm_sha256msg1_epu32(w[g & 3], w[(g + 1) & 3]), _mm_alignr_epi8(w[(g + 3) & 3], w[(g + 2) & 3], 4));
+                m = w[g & 3] = _mm_sha256msg2_epu32(m, w[(g + 3) & 3]);
+            }
+            m = _mm_add_epi32(m, _mm_loadu_si128((const __m128i *)(K256 + 4 * g)));
+            s1 = _mm_sha256rnds2_epu32(s1, s0, m);
+            s0 = _mm_sha256rnds2_epu32(s0, s1, _mm_shuffle_epi32(m, 0x0E));
+        }
+        s0 = _mm_add_epi32(s0, a0), s1 = _mm_add_epi32(s1, c0);
+    }
+    t = _mm_shuffle_epi32(s0, 0x1B);                                   // FEBA
+    s1 = _mm_shuffle_epi32(s1, 0xB1);                                  // DCHG
+    _mm_storeu_si128((__m128i *)s, _mm_blend_epi16(t, s1, 0xF0));     // DCBA
+    _mm_storeu_si128((__m128i *)(s + 4), _mm_alignr_epi8(s1, t, 8));  // HGFE
+}
+#endif
+
+typedef struct { uint32_t s[8]; uint64_t len; uint8_t buf[64]; size_t nb; } Sha;
+static void (*g_sha_blocks)(uint32_t *, const uint8_t *, size_t);
+
+static void sha_init(Sha *c) {
+    static const uint32_t iv[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+    if (!g_sha_blocks) {
+        void (*f)(uint32_t *, const uint8_t *, size_t) = sha_blocks_c;
+#ifdef HAVE_AESNI
+        unsigned a, b, c1, d;  // (CPUID 7: EBX bit 29 SHA; 1: ECX bits 9 SSSE3, 19 SSE4.1)
+        if (__get_cpuid_count(7, 0, &a, &b, &c1, &d) && (b >> 29 & 1) && __get_cpuid(1, &a, &b, &c1, &d) && (c1 >> 9 & 1) && (c1 >> 19 & 1))
+            f = sha_blocks_ni;
+#endif
+        g_sha_blocks = f;
+    }
+    memcpy(c->s, iv, sizeof iv), c->len = 0, c->nb = 0;
+}
+static void sha_update(Sha *c, const uint8_t *p, size_t n) {
+    c->len += n;
+    if (c->nb) {
+        size_t k = 64 - c->nb < n ? 64 - c->nb : n;
+        memcpy(c->buf + c->nb, p, k), c->nb += k, p += k, n -= k;
+        if (c->nb < 64) return;
+        g_sha_blocks(c->s, c->buf, 1), c->nb = 0;
+    }
+    if (n >= 64) g_sha_blocks(c->s, p, n / 64), p += n & ~(size_t)63, n &= 63;
+    memcpy(c->buf, p, n), c->nb = n;
+}
+static void sha_final(Sha *c, uint8_t out[32]) {
+    uint64_t bits = c->len * 8;
+    uint8_t pad[128] = {0x80};
+    sha_update(c, pad, (c->nb < 56 ? 56 : 120) - c->nb);
+    for (int i = 0; i < 8; i++) pad[i] = (uint8_t)(bits >> (56 - 8 * i));
+    sha_update(c, pad, 8);
+    for (int i = 0; i < 32; i++) out[i] = (uint8_t)(c->s[i / 4] >> (24 - 8 * (i % 4)));
+}
+
+static void hex(const uint8_t *b, size_t n, char *out) {
+    for (size_t i = 0; i < n; i++) out[2 * i] = "0123456789abcdef"[b[i] >> 4], out[2 * i + 1] = "0123456789abcdef"[b[i] & 15];
+    out[2 * n] = 0;
+}
+
+// ------------------------------------------------------------------ hashing threads
+// A worker with a few buffers: the reading thread fills one (pipe_slot), hands it over (pipe_push) and goes on while
+// the worker runs fn over it. No thread (pthread_create failed): fn runs at once, on the reading thread.
+#define NSLOT 3
+typedef void (*PipeFn)(void *ctx, const uint8_t *b, size_t n);
+typedef struct {
+    pthread_t th;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    uint8_t *slot[NSLOT];
+    size_t len[NSLOT];
+    PipeFn fn[NSLOT];
+    void *ctx[NSLOT];
+    int head, count;
+    bool on, quit;
+} Pipe;
+
+static void *pipe_main(void *arg) {
+    Pipe *q = arg;
+    pthread_mutex_lock(&q->mu);
+    for (;;) {
+        while (!q->count && !q->quit) pthread_cond_wait(&q->cv, &q->mu);
+        if (!q->count) break;
+        int h = q->head;
+        pthread_mutex_unlock(&q->mu);
+        q->fn[h](q->ctx[h], q->slot[h], q->len[h]);
+        pthread_mutex_lock(&q->mu);
+        q->head = (h + 1) % NSLOT, q->count--;
+        pthread_cond_broadcast(&q->cv);
+    }
+    pthread_mutex_unlock(&q->mu);
+    return NULL;
+}
+static bool pipe_start(Pipe *q) {
+    if (q->slot[0]) return true;
+    for (int i = 0; i < NSLOT; i++)
+        if (!(q->slot[i] = malloc(CHUNK + 32))) {
+            for (int j = 0; j <= i; j++) free(q->slot[j]), q->slot[j] = NULL;
+            return false;
+        }
+    pthread_mutex_init(&q->mu, NULL), pthread_cond_init(&q->cv, NULL);
+    q->on = pthread_create(&q->th, NULL, pipe_main, q) == 0;
+    return true;
+}
+static uint8_t *pipe_slot(Pipe *q) {  // (a free buffer, CHUNK + 32 bytes)
+    if (!q->on) return q->slot[0];
+    pthread_mutex_lock(&q->mu);
+    while (q->count == NSLOT) pthread_cond_wait(&q->cv, &q->mu);
+    uint8_t *s = q->slot[(q->head + q->count) % NSLOT];
+    pthread_mutex_unlock(&q->mu);
+    return s;
+}
+static void pipe_push(Pipe *q, size_t n, PipeFn fn, void *ctx) {  // (the buffer pipe_slot gave)
+    if (!q->on) { fn(ctx, q->slot[0], n); return; }
+    pthread_mutex_lock(&q->mu);
+    int t = (q->head + q->count) % NSLOT;
+    q->len[t] = n, q->fn[t] = fn, q->ctx[t] = ctx, q->count++;
+    pthread_cond_broadcast(&q->cv);
+    pthread_mutex_unlock(&q->mu);
+}
+static void pipe_wait(Pipe *q) {
+    if (!q->on) return;
+    pthread_mutex_lock(&q->mu);
+    while (q->count) pthread_cond_wait(&q->cv, &q->mu);
+    pthread_mutex_unlock(&q->mu);
+}
+static void pipe_stop(Pipe *q) {
+    if (q->on) {
+        pthread_mutex_lock(&q->mu);
+        q->quit = true;
+        pthread_cond_broadcast(&q->cv);
+        pthread_mutex_unlock(&q->mu);
+        pthread_join(q->th, NULL);
+    }
+    if (q->slot[0]) pthread_mutex_destroy(&q->mu), pthread_cond_destroy(&q->cv);
+    for (int i = 0; i < NSLOT; i++) free(q->slot[i]), q->slot[i] = NULL;
+    q->on = false;
 }
 
 // ------------------------------------------------------------------ keys
@@ -351,7 +532,15 @@ static bool keys_find(Keys *k, const char *folder) {
 }
 
 // ------------------------------------------------------------------ packages
-typedef struct { char path[1024]; FILE *f; } Pkg;
+typedef struct { char name[128]; uint64_t off, size; int nca; } Ent;  // a file in a package (nca: its Nca, -1 other)
+typedef struct {
+    char path[1024];
+    FILE *f;
+    uint64_t size, hdr;  // (the file's size; its PFS0 / secure HFS0 header's)
+    const char *kind;    // "PFS0" (.nsp), "HFS0" (.xci's secure partition)
+    Ent *ents;
+    int nent;
+} Pkg;
 
 typedef struct {
     int pkg;
@@ -365,6 +554,17 @@ typedef struct {
     bool has_cid;
     Aes key;
     int key_state;  // 0 not looked up, 1 ok, -1 missing
+    int ent;        // its Ent in the package
+    int meta;       // the meta NCA whose content records name it (-1 none)
+    int ctype;      // its content type in that record (-1 not named): 0 meta, 1 program, 2 data, 3 control, 4 html document...
+    uint8_t rec_hash[32];  // that record's SHA-256 of it
+    // the SHA-256 of the whole NCA as stored, while it's read: hon = being hashed, hpos = bytes handed to the hasher
+    // (in order; reads behind it were hashed already, reads ahead of it first hash what's between), hres NXPKG_CHECK_*
+    Sha sha;
+    bool hon;
+    int hres;
+    uint64_t hpos;
+    uint8_t digest[32];
 } Nca;
 
 struct NxPkg {
@@ -382,6 +582,10 @@ struct NxPkg {
     int dlc;        // nca index of the add-on content (-1 none)
     bool compressed;
     uint8_t *scratch, *buf;  // (CHUNK + 32 each: raw blocks being decrypted, data being written)
+    Pipe hp, vp;             // hashing threads: the NCAs' SHA-256 (stored bytes), the image's hash tree (written bytes)
+    bool checking;           // (the pipes started: checks on)
+    uint64_t hash_extra;     // bytes read for the NCA hashes alone (what the extraction didn't read in order)
+    NxCheck chk;
 };
 
 static bool rd(NxPkg *P, int pkg, uint64_t off, void *buf, size_t n) {
@@ -429,19 +633,30 @@ static void title_keys_file(NxPkg *P, const char *path) {
     fclose(f);
 }
 
-static void add_nca(NxPkg *P, int pkg, const char *name, uint64_t off, uint64_t size) {
-    if (size < 0xC00) return;
+// A file of a package, listed (the log's list of what each package holds)
+static void add_ent(NxPkg *P, int pkg, const char *name, uint64_t off, uint64_t size, int nca) {
+    Pkg *k = &P->pkgs[pkg];
+    if (k->nent >= 256) return;
+    k->ents = realloc(k->ents, (size_t)(k->nent + 1) * sizeof *k->ents);
+    Ent *e = &k->ents[k->nent++];
+    snprintf(e->name, sizeof e->name, "%s", name), e->off = off, e->size = size, e->nca = nca;
+    if (nca >= 0) P->ncas[nca].ent = k->nent - 1;
+}
+
+static int add_nca(NxPkg *P, int pkg, const char *name, uint64_t off, uint64_t size) {
+    if (size < 0xC00) return -1;
     Nca n;
     memset(&n, 0, sizeof n);
-    n.pkg = pkg, n.off = off, n.size = size;
+    n.pkg = pkg, n.off = off, n.size = size, n.meta = n.ctype = -1;
     n.has_cid = strlen(name) >= 36 && name[32] == '.' && parse_hex(name, n.cid, 16) == 16;
-    if (!rd(P, pkg, off, n.h, sizeof n.h)) return;
+    if (!rd(P, pkg, off, n.h, sizeof n.h)) return -1;
     xts_dec(P->keys.header_key, n.h, sizeof n.h);
-    if (memcmp(n.h + 0x200, "NCA3", 4)) return;  // (NCA2 / NCA0: titles from before 1.0, not these games)
+    if (memcmp(n.h + 0x200, "NCA3", 4)) return -1;  // (NCA2 / NCA0: titles from before 1.0, not these games)
     n.type = n.h[0x205];
     n.id = u64(n.h + 0x210);
     P->ncas = realloc(P->ncas, (size_t)(P->nnca + 1) * sizeof *P->ncas);
     P->ncas[P->nnca++] = n;
+    return P->nnca - 1;
 }
 
 // PFS0 (.nsp) at `off` of the package
@@ -461,13 +676,16 @@ static void read_pfs0(NxPkg *P, int pkg, uint64_t off) {
         if (no >= strsz) continue;
         char name[256];
         snprintf(name, sizeof name, "%.*s", (int)(strsz - no), str + no);
-        if (ext_is(name, ".nca")) add_nca(P, pkg, name, fo, fs);
+        int nca = -1;
+        if (ext_is(name, ".nca")) nca = add_nca(P, pkg, name, fo, fs);
         else if (ext_is(name, ".ncz")) P->compressed = true;
         else if (ext_is(name, ".tik") && fs <= 0x1000) {
             uint8_t tik[0x1000];
             if (rd(P, pkg, fo, tik, (size_t)fs)) add_ticket(P, tik, (size_t)fs);
         }
+        add_ent(P, pkg, name, fo, fs, nca);
     }
+    P->pkgs[pkg].kind = "PFS0", P->pkgs[pkg].hdr = tsz;
     free(t);
 }
 
@@ -488,10 +706,13 @@ static void read_hfs0(NxPkg *P, int pkg, uint64_t off, bool root) {
         if (no >= strsz) continue;
         char name[256];
         snprintf(name, sizeof name, "%.*s", (int)(strsz - no), str + no);
-        if (root) { if (!strcmp(name, "secure")) read_hfs0(P, pkg, fo, false); }
-        else if (ext_is(name, ".nca")) add_nca(P, pkg, name, fo, fs);
+        if (root) { if (!strcmp(name, "secure")) read_hfs0(P, pkg, fo, false); continue; }
+        int nca = -1;
+        if (ext_is(name, ".nca")) nca = add_nca(P, pkg, name, fo, fs);
         else if (ext_is(name, ".ncz")) P->compressed = true;
+        add_ent(P, pkg, name, fo, fs, nca);
     }
+    if (!root) P->pkgs[pkg].kind = "HFS0", P->pkgs[pkg].hdr = tsz;
     free(t);
 }
 
@@ -502,8 +723,10 @@ static void add_package(NxPkg *P, const char *path) {
     if (!f) return;
     P->pkgs = realloc(P->pkgs, (size_t)(P->npkg + 1) * sizeof *P->pkgs);
     Pkg *k = &P->pkgs[P->npkg];
+    memset(k, 0, sizeof *k);
     snprintf(k->path, sizeof k->path, "%s", path);
-    k->f = f;
+    k->f = f, k->kind = "?";
+    k->size = xsize(f);
     int i = P->npkg++;
     if (nsp) read_pfs0(P, i, 0);
     else {
@@ -594,16 +817,55 @@ static bool nca_key(NxPkg *P, Nca *n, char *why, size_t wn) {
 
 
 // Bytes [abs, abs+len) of the NCA (abs: the offset in the NCA), AES-CTR with that upper IV (enc false: as stored).
+static void sha_job(void *ctx, const uint8_t *b, size_t n) { sha_update(&((Nca *)ctx)->sha, b, n); }
+#define GAP_MAX (64ull << 20)
+
+// The NCA's bytes up to `end` (as stored) into its hash: read for it alone (hash_extra) - the extraction reads ahead.
+static void hash_upto(NxPkg *P, Nca *n, uint64_t end) {
+    while (n->hon && n->hpos < end) {
+        size_t k = end - n->hpos < CHUNK ? (size_t)(end - n->hpos) : CHUNK;
+        uint8_t *s = pipe_slot(&P->hp);
+        if (!rd(P, n->pkg, n->off + n->hpos, s, k)) { n->hon = false, n->hres = NXPKG_CHECK_UNREAD; return; }
+        pipe_push(&P->hp, k, sha_job, n);
+        n->hpos += k, P->hash_extra += k;
+    }
+}
+
 static bool nca_read(NxPkg *P, Nca *n, uint64_t abs, uint8_t *buf, size_t len, bool enc, uint64_t upper, char *why,
                      size_t wn) {
     while (len) {
         uint64_t a0 = abs & ~15ull;
         size_t lead = (size_t)(abs - a0), take = len < CHUNK ? len : CHUNK, raw = (lead + take + 15) & ~(size_t)15;
+        // (a small gap: hashed first, in order; a read far ahead isn't hashed now - the hash gets there in order later,
+        // or reads what's left at the end - so nothing is read twice when the extraction jumps ahead and comes back)
+        if (n->hon && a0 > n->hpos && a0 - n->hpos <= GAP_MAX && a0 + raw <= n->size) hash_upto(P, n, a0);
+        if (n->hon && a0 == n->hpos && a0 + raw <= n->size) {  // (in order: read into the hasher's buffer, no copy)
+            uint8_t *s = pipe_slot(&P->hp);
+            if (!rd(P, n->pkg, n->off + a0, s, raw)) {
+                snprintf(why, wn, "read error: %s", P->pkgs[n->pkg].path);
+                return false;
+            }
+            if (!lead && take == raw) enc ? ctr_xor(&n->key, upper, a0 >> 4, s, buf, raw / 16) : (void)memcpy(buf, s, take);
+            else {
+                if (enc) ctr_xor(&n->key, upper, a0 >> 4, s, P->scratch, raw / 16);
+                memcpy(buf, (enc ? P->scratch : s) + lead, take);
+            }
+            pipe_push(&P->hp, raw, sha_job, n);
+            n->hpos = a0 + raw;
+            buf += take, abs += take, len -= take;
+            continue;
+        }
         if (a0 + raw > n->size || !rd(P, n->pkg, n->off + a0, P->scratch, raw)) {
             snprintf(why, wn, "read error: %s", P->pkgs[n->pkg].path);
             return false;
         }
-        if (enc) ctr_xor(&n->key, upper, a0 >> 4, P->scratch, raw / 16);
+        if (n->hon && a0 < n->hpos && a0 + raw > n->hpos) {  // (the part not hashed yet, as stored: before decrypting)
+            size_t skip = (size_t)(n->hpos - a0);
+            memcpy(pipe_slot(&P->hp), P->scratch + skip, raw - skip);
+            pipe_push(&P->hp, raw - skip, sha_job, n);
+            n->hpos = a0 + raw;
+        }
+        if (enc) ctr_xor(&n->key, upper, a0 >> 4, P->scratch, P->scratch, raw / 16);
         memcpy(buf, P->scratch + lead, take);
         buf += take, abs += take, len -= take;
     }
@@ -756,26 +1018,185 @@ static bool bucket_tree(NxPkg *P, Nca *n, int s, uint64_t toff, uint64_t tsize, 
     return true;
 }
 
+// Where a RomFS section's bytes come from: a plain section (b, bs), or an update's patched one (u, us): its indirect
+// table over the base game's section (b, bs) and the update's own data, whose counters are in the AesCtrEx table.
 typedef struct {
+    Nca *b, *u;
+    int bs, us;
+    Ind *ind;
+    Ctx *cx;
+    int ni, nc;
+    uint64_t iend, cend, ustart, usz, sv;
+} Src;
+// Where src_copy's pieces go: buf gives the buffer for the next (CHUNK + 32 bytes), put takes it filled.
+typedef struct Sink {
+    uint8_t *(*buf)(struct Sink *);
+    bool (*put)(struct Sink *, const uint8_t *b, size_t n, char *why, size_t wn);
+} Sink;
+
+static bool src_open(NxPkg *P, Src *S, Nca *b, int bs, Nca *u, int us, char *why, size_t wn) {
+    memset(S, 0, sizeof *S);
+    S->b = b, S->bs = bs;
+    if (!u) return true;
+    S->u = u, S->us = us;
+    const uint8_t *uf = fs_header(u, us);
+    uint8_t *ie = NULL, *ce = NULL;
+    bool ok = sec_range(u, us, &S->ustart, &S->usz) && nca_key(P, u, why, wn) &&
+              bucket_tree(P, u, us, u64(uf + 0x100), u64(uf + 0x108), uf + 0x110, 0x14, &ie, &S->ni, &S->iend, why, wn) &&
+              bucket_tree(P, u, us, u64(uf + 0x120), u64(uf + 0x128), uf + 0x130, 0x10, &ce, &S->nc, &S->cend, why, wn);
+    S->ind = ok ? calloc((size_t)S->ni + 1, sizeof *S->ind) : NULL;
+    S->cx = ok ? calloc((size_t)S->nc + 1, sizeof *S->cx) : NULL;
+    if (ok && (!S->ind || !S->cx)) snprintf(why, wn, "out of memory"), ok = false;
+    for (int i = 0; ok && i < S->ni; i++) {
+        const uint8_t *e = ie + 0x14 * i;
+        S->ind[i] = (Ind){u64(e), u64(e + 8), (int)u32(e + 16)};
+        if (S->ind[i].idx > 1 || (i && S->ind[i].virt <= S->ind[i - 1].virt)) snprintf(why, wn, "bad patch table"), ok = false;
+    }
+    for (int i = 0; ok && i < S->nc; i++) {
+        const uint8_t *e = ce + 0x10 * i;
+        S->cx[i] = (Ctx){u64(e), u32(e + 12), e[8] == 1};
+    }
+    S->sv = upper_iv(u, us) & ~0xFFFFFFFFull;
+    free(ie), free(ce);
+    return ok;
+}
+static void src_close(Src *S) { free(S->ind), free(S->cx), S->ind = NULL, S->cx = NULL; }
+
+// The section's bytes [a, z) into sk, in order, CHUNK at most at a time.
+static bool src_copy(NxPkg *P, Src *S, uint64_t a, uint64_t z, Sink *sk, char *why, size_t wn) {
+    if (!S->u) {
+        while (a < z) {
+            size_t k = z - a < CHUNK ? (size_t)(z - a) : CHUNK;
+            uint8_t *b = sk->buf(sk);
+            if (!sec_read(P, S->b, S->bs, a, b, k, why, wn) || !sk->put(sk, b, k, why, wn)) return false;
+            a += k;
+        }
+        return true;
+    }
+    if (!S->ni || S->ind[0].virt > a || S->iend < z) { snprintf(why, wn, "the patch doesn't cover the RomFS"); return false; }
+    int lo = 0, hi = S->ni - 1, ci = 0;
+    while (lo < hi) {  // (the entry holding a)
+        int mid = (lo + hi + 1) / 2;
+        if (S->ind[mid].virt <= a) lo = mid; else hi = mid - 1;
+    }
+    for (int i = lo; i < S->ni && S->ind[i].virt < z; i++) {
+        uint64_t v0 = S->ind[i].virt, v1 = i + 1 < S->ni ? S->ind[i + 1].virt : S->iend;
+        uint64_t x = v0 > a ? v0 : a, y = v1 < z ? v1 : z;
+        if (x >= y) continue;
+        uint64_t p = S->ind[i].phys + (x - v0), len = y - x;
+        while (len) {
+            size_t k;
+            uint8_t *b = sk->buf(sk);
+            if (S->ind[i].idx == 0) {  // the base game's section
+                k = len < CHUNK ? (size_t)len : CHUNK;
+                if (!sec_read(P, S->b, S->bs, p, b, k, why, wn)) return false;
+            } else {  // patch data: split where the counter generation changes
+                if (ci >= S->nc || S->cx[ci].off > p) ci = 0;
+                while (ci + 1 < S->nc && S->cx[ci + 1].off <= p) ci++;
+                if (!S->nc || S->cx[ci].off > p || p >= S->cend) { snprintf(why, wn, "patch data outside its counter table"); return false; }
+                uint64_t lim = ci + 1 < S->nc ? S->cx[ci + 1].off : S->cend;
+                k = (size_t)(len < lim - p ? len : lim - p);
+                if (k > CHUNK) k = CHUNK;
+                if (p + k > S->usz) { snprintf(why, wn, "patch data past its section's end"); return false; }
+                if (!nca_read(P, S->u, S->ustart + p, b, k, !S->cx[ci].plain, S->sv | S->cx[ci].gen, why, wn)) return false;
+            }
+            if (!sk->put(sk, b, k, why, wn)) return false;
+            p += k, len -= k;
+        }
+    }
+    return true;
+}
+
+// The hash tree (IVFC, in the section's FS header): the master hash, then levels whose 32-byte entries are the
+// SHA-256 of the next level's blocks (2^bs bytes, the last one zero-padded); the last level is the data, the image.
+typedef struct {
+    int n;  // levels, the data's included
+    uint64_t off[6], size[6];
+    uint32_t bs[6];
+    uint8_t master[32];
+} Ivfc;
+static bool ivfc_info(const uint8_t *fsh, Ivfc *v) {
+    const uint8_t *h = fsh + 8;
+    uint32_t cnt = u32(h + 0xC);
+    if (memcmp(h, "IVFC", 4) || u32(h + 8) != 0x20 || cnt < 3 || cnt > 7) return false;
+    v->n = (int)cnt - 1;
+    for (int i = 0; i < v->n; i++) {
+        const uint8_t *l = h + 0x10 + 0x18 * i;
+        v->off[i] = u64(l), v->size[i] = u64(l + 8), v->bs[i] = u32(l + 0x10);
+        if (v->bs[i] < 5 || v->bs[i] > 24) return false;
+    }
+    memcpy(v->master, h + 0xC0, 32);
+    return true;
+}
+static void sha_zeros(Sha *c, uint64_t n) {
+    static const uint8_t z[4096];
+    for (size_t k; n; n -= k) k = n < sizeof z ? (size_t)n : sizeof z, sha_update(c, z, k);
+}
+// A level in memory against the hashes above it: false and *bad = the first block that doesn't match.
+static bool level_ok(const uint8_t *d, uint64_t size, uint32_t bs, const uint8_t *h, uint64_t hsize, uint64_t *bad) {
+    uint64_t bsz = 1ull << bs, nb = (size + bsz - 1) >> bs;
+    *bad = 0;
+    if (nb * 32 > hsize) return false;
+    for (uint64_t j = 0; j < nb; j++) {
+        Sha c;
+        uint8_t dg[32];
+        uint64_t k = size - j * bsz < bsz ? size - j * bsz : bsz;
+        sha_init(&c), sha_update(&c, d + j * bsz, (size_t)k), sha_zeros(&c, bsz - k), sha_final(&c, dg);
+        if (memcmp(dg, h + 32 * j, 32)) { *bad = j; return false; }
+    }
+    return true;
+}
+// The data level as it's written (on the hash tree's thread): each block against its hash
+typedef struct {
+    const uint8_t *h;
+    uint64_t nh, blk, fill, nbad, first_bad;
+    uint32_t bs;
+    Sha c;
+} Iv;
+static void iv_block(Iv *v) {
+    uint8_t dg[32];
+    sha_zeros(&v->c, (1ull << v->bs) - v->fill), sha_final(&v->c, dg);
+    if (v->blk >= v->nh || memcmp(dg, v->h + 32 * v->blk, 32))
+        if (!v->nbad++) v->first_bad = v->blk;
+    v->blk++, v->fill = 0;
+}
+static void iv_job(void *ctx, const uint8_t *b, size_t n) {
+    Iv *v = ctx;
+    uint64_t bsz = 1ull << v->bs;
+    while (n) {
+        if (!v->fill) sha_init(&v->c);
+        size_t k = bsz - v->fill < n ? (size_t)(bsz - v->fill) : n;
+        sha_update(&v->c, b, k), v->fill += k, b += k, n -= k;
+        if (v->fill == bsz) iv_block(v);
+    }
+}
+
+typedef struct {  // the image file (and the data blocks' check: the pieces are read into its thread's buffers)
+    Sink sk;
+    NxPkg *P;
     FILE *o;
     uint64_t done, total;
     void (*progress)(uint64_t, uint64_t);
+    Iv *iv;
 } Out;
-
-static bool out_write(Out *w, const uint8_t *b, size_t n, char *why, size_t wn) {
+static uint8_t *out_buf(Sink *s) {
+    Out *w = (Out *)s;
+    return w->iv ? pipe_slot(&w->P->vp) : w->P->buf;
+}
+static bool out_put(Sink *s, const uint8_t *b, size_t n, char *why, size_t wn) {
+    Out *w = (Out *)s;
     if (fwrite(b, 1, n, w->o) != n) { snprintf(why, wn, "can't write the RomFS image (disk full?)"); return false; }
+    if (w->iv) pipe_push(&w->P->vp, n, iv_job, w->iv);
     w->done += n;
     if (w->progress) w->progress(w->done, w->total);
     return true;
 }
-
-// Section bytes [off, off+len) of a plain section into the output.
-static bool copy_sec(NxPkg *P, Nca *n, int s, uint64_t off, uint64_t len, Out *w, char *why, size_t wn) {
-    while (len) {
-        size_t k = len < CHUNK ? (size_t)len : CHUNK;
-        if (!sec_read(P, n, s, off, P->buf, k, why, wn) || !out_write(w, P->buf, k, why, wn)) return false;
-        off += k, len -= k;
-    }
+typedef struct { Sink sk; NxPkg *P; uint8_t *p; size_t at; } Mem;  // (into memory)
+static uint8_t *mem_buf(Sink *s) { return ((Mem *)s)->P->buf; }
+static bool mem_put(Sink *s, const uint8_t *b, size_t n, char *why, size_t wn) {
+    Mem *m = (Mem *)s;
+    (void)why, (void)wn;
+    memcpy(m->p + m->at, b, n), m->at += n;
     return true;
 }
 
@@ -791,61 +1212,177 @@ static bool close_out(FILE *o, bool ok, const char *path, char *why, size_t wn) 
     return ok;
 }
 
+// The image (the data level of S's section, fsh its FS header) into path. With the checks on, the hash tree's levels
+// are read and checked first (small: 32 bytes per 16 KiB block), the data blocks as they're written: *image
+// NXPKG_CHECK_*, detail what didn't match.
+static bool write_image(NxPkg *P, Src *S, const uint8_t *fsh, uint64_t doff, uint64_t dsize, const char *path,
+                        void (*progress)(uint64_t, uint64_t), int *image, char *detail, size_t dn, char *why, size_t wn) {
+    Ivfc v;
+    *image = NXPKG_CHECK_NONE;
+    bool check = P->checking && ivfc_info(fsh, &v) && v.off[v.n - 1] == doff && v.size[v.n - 1] == dsize, ok = true;
+    uint64_t hsz = 0;
+    for (int i = 0; check && i < v.n - 1; i++) hsz += v.size[i];
+    if (check && hsz >= (256u << 20)) check = false;
+    if (!check && P->checking) snprintf(detail, dn, "a hash tree this doesn't read");
+    uint8_t *lv[6] = {0};
+    for (int i = 0; check && ok && i < v.n - 1; i++) {
+        Mem m = {{mem_buf, mem_put}, P, lv[i] = malloc(v.size[i] + 1), 0};
+        if (!lv[i]) check = false;
+        else ok = src_copy(P, S, v.off[i], v.off[i] + v.size[i], &m.sk, why, wn);
+    }
+    Iv iv;
+    memset(&iv, 0, sizeof iv);
+    if (check && ok) {
+        uint64_t bad;
+        *image = NXPKG_CHECK_OK;
+        for (int i = 0; i < v.n - 1 && *image == NXPKG_CHECK_OK; i++)
+            if (!level_ok(lv[i], v.size[i], v.bs[i], i ? lv[i - 1] : v.master, i ? v.size[i - 1] : 32, &bad))
+                *image = NXPKG_CHECK_BAD, snprintf(detail, dn, "hash level %d (block %llu) doesn't match the %s", i + 1, (unsigned long long)bad,
+                                                   i ? "level above" : "master hash");
+        iv.h = lv[v.n - 2], iv.nh = v.size[v.n - 2] / 32, iv.bs = v.bs[v.n - 1];
+    }
+    FILE *o = ok ? open_out(path, why, wn) : NULL;
+    if (o) {
+        Out w = {{out_buf, out_put}, P, o, 0, dsize, progress, check ? &iv : NULL};
+        ok = src_copy(P, S, doff, doff + dsize, &w.sk, why, wn);
+        if (ok && w.done != dsize) snprintf(why, wn, "RomFS size mismatch"), ok = false;
+        pipe_wait(&P->vp);  // (iv is here)
+        ok = close_out(o, ok, path, why, wn);
+    } else ok = false;
+    if (check && ok) {
+        if (iv.fill) iv_block(&iv);
+        if (iv.nbad && *image == NXPKG_CHECK_OK)
+            *image = NXPKG_CHECK_BAD, snprintf(detail, dn, "%llu of its %llu blocks (%u KiB) don't match the hash tree, the first at image offset 0x%llx",
+                                               (unsigned long long)iv.nbad, (unsigned long long)iv.blk, 1u << iv.bs >> 10,
+                                               (unsigned long long)(iv.first_bad << iv.bs));
+        else if (*image == NXPKG_CHECK_OK) snprintf(detail, dn, "%llu blocks of %u KiB match the hash tree", (unsigned long long)iv.blk, 1u << iv.bs >> 10);
+    }
+    if (!ok) *image = NXPKG_CHECK_NONE;
+    for (int i = 0; i < 6; i++) free(lv[i]);
+    return ok;
+}
+
+// ------------------------------------------------------------------ checks
+static const char *nca_kind(const Nca *n) {
+    static const char *const ct[] = {"meta", "program", "data", "control", "html document", "legal information", "delta fragment"};
+    static const char *const nt[] = {"program", "meta", "control", "manual", "data", "public data"};
+    return n->ctype >= 0 && n->ctype < 7 ? ct[n->ctype] : n->type < 6 ? nt[n->type] : "?";
+}
+static int nca_keygen(const Nca *n) { return n->h[0x206] > n->h[0x220] ? n->h[0x206] : n->h[0x220]; }
+static const char *base_name(const char *p) {
+    const char *s = strrchr(p, '/'), *b = strrchr(p, '\\');
+    if (b > s) s = b;
+    return s ? s + 1 : p;
+}
+
+static void check_start(NxPkg *P) {
+    if (!P->checking) P->checking = pipe_start(&P->hp) && pipe_start(&P->vp);
+}
+static void hash_start(NxPkg *P, Nca *n) {
+    if (!P->checking || n->hon || n->hres != NXPKG_CHECK_NONE) return;
+    sha_init(&n->sha), n->hpos = 0, n->hon = true;
+}
+// The rest of the NCA, then its SHA-256 against its name (the content id: the first 16 bytes) and its meta's record
+static void hash_end(NxPkg *P, Nca *n) {
+    if (!n->hon) return;
+    hash_upto(P, n, n->size);
+    pipe_wait(&P->hp);
+    if (!n->hon) return;  // (unreadable: hres says so)
+    n->hon = false;
+    sha_final(&n->sha, n->digest);
+    bool named = n->has_cid || n->ctype >= 0;
+    bool bad = (n->has_cid && memcmp(n->digest, n->cid, 16)) || (n->ctype >= 0 && memcmp(n->digest, n->rec_hash, 32));
+    n->hres = bad ? NXPKG_CHECK_BAD : named ? NXPKG_CHECK_OK : NXPKG_CHECK_UNNAMED;
+}
+// A side (the base game, the update): its program NCA and the meta naming it
+static int side_result(const NxPkg *P, const Nca *n) {
+    if (!n) return NXPKG_CHECK_NONE;
+    int r = n->hres, m = n->meta >= 0 ? P->ncas[n->meta].hres : NXPKG_CHECK_NONE;
+    if (r == NXPKG_CHECK_BAD || m == NXPKG_CHECK_BAD) return NXPKG_CHECK_BAD;
+    if (r == NXPKG_CHECK_UNREAD || m == NXPKG_CHECK_UNREAD) return NXPKG_CHECK_UNREAD;
+    return r;
+}
+static const char *check_text(int r) {
+    return r == NXPKG_CHECK_OK ? "ok" : r == NXPKG_CHECK_BAD ? "DAMAGED OR ALTERED" : r == NXPKG_CHECK_UNNAMED ? "not checked (not named by its content id)"
+         : r == NXPKG_CHECK_UNREAD ? "unreadable" : "not checked";
+}
+
+// Every package and what it holds (name, size, kind; for the NCAs used, the hash result)
+static void log_packages(NxPkg *P) {
+    for (int i = 0; i < P->npkg; i++) {
+        Pkg *k = &P->pkgs[i];
+        LOG("[nxpkg] %s: %llu bytes, %s with %d files (header 0x%llx)\n", k->path, (unsigned long long)k->size, k->kind, k->nent,
+            (unsigned long long)k->hdr);
+        for (int j = 0; j < k->nent; j++) {
+            Ent *e = &k->ents[j];
+            if (e->nca < 0) {
+                LOG("[nxpkg]   %s %llu bytes%s\n", e->name, (unsigned long long)e->size,
+                    ext_is(e->name, ".ncz") ? ": compressed (NSZ), not read" : ext_is(e->name, ".nca") ? ": not an NCA3 these keys open" : "");
+                continue;
+            }
+            Nca *n = &P->ncas[e->nca];
+            char dg[65] = "";
+            if (n->hres != NXPKG_CHECK_NONE && n->hres != NXPKG_CHECK_UNREAD) hex(n->digest, 32, dg);
+            LOG("[nxpkg]   %s %llu bytes: %s %016llx v%u, key generation %d - %s%s%s%s\n", e->name, (unsigned long long)e->size, nca_kind(n),
+                (unsigned long long)n->id, n->version, nca_keygen(n), n->hres == NXPKG_CHECK_NONE ? "not used" : "used, SHA-256 ",
+                n->hres == NXPKG_CHECK_NONE ? "" : dg, n->hres == NXPKG_CHECK_NONE ? "" : ": ", n->hres == NXPKG_CHECK_NONE ? "" : check_text(n->hres));
+        }
+    }
+}
+
+// What a check found, for the log: a side's program NCA
+static void log_side(NxPkg *P, const char *what, const Nca *n, int r) {
+    if (!n) return;
+    const Pkg *k = &P->pkgs[n->pkg];
+    const char *name = n->ent < k->nent ? k->ents[n->ent].name : "?";
+    if (r == NXPKG_CHECK_BAD)
+        LOG("[nxpkg] the %s (%s in %s) is DAMAGED OR ALTERED: its SHA-256 doesn't match its content id%s\n", what, name, k->path,
+            n->meta >= 0 && P->ncas[n->meta].hres == NXPKG_CHECK_BAD ? " (or its meta's doesn't)" : "");
+    else LOG("[nxpkg] the %s (%s in %s): %s\n", what, name, k->path, check_text(r));
+}
+
+const NxCheck *nxpkg_check(const NxPkg *P) { return &P->chk; }
+
+// ------------------------------------------------------------------ writing
 bool nxpkg_write_romfs(NxPkg *P, int upd, const char *path, void (*progress)(uint64_t, uint64_t), char *why, size_t wn) {
     Nca *b = &P->ncas[P->base], *u = upd > 0 && upd <= P->nupd ? &P->ncas[P->upd[upd - 1]] : NULL;
     uint64_t boff, bsize, uoff = 0, usize = 0;
     int bs = find_romfs(b, &boff, &bsize), us = u ? find_romfs(u, &uoff, &usize) : -1;
     if (bs < 0 || !sec_ok(b, bs, why, wn)) { if (!why[0]) snprintf(why, wn, "no RomFS in the base game"); return false; }
     const uint8_t *uf = us >= 0 ? fs_header(u, us) : NULL;
-    if (uf && uf[4] != 4 && !u64(uf + 0x108)) b = u, bs = us, boff = uoff, bsize = usize, uf = NULL;  // (a whole RomFS)
-    FILE *o = open_out(path, why, wn);
-    if (!o) return false;
-    Out w = {o, 0, uf ? usize : bsize, progress};
-    if (!uf) return close_out(o, copy_sec(P, b, bs, boff, bsize, &w, why, wn), path, why, wn);
-
-    // the update's patch: the indirect table over (base section, patch data) and the patch data's counters
-    uint8_t *ie = NULL, *ce = NULL;
-    int ni = 0, nc = 0;
-    uint64_t iend, cend, ustart, usz;
-    bool ok = sec_range(u, us, &ustart, &usz) && nca_key(P, u, why, wn) &&
-              bucket_tree(P, u, us, u64(uf + 0x100), u64(uf + 0x108), uf + 0x110, 0x14, &ie, &ni, &iend, why, wn) &&
-              bucket_tree(P, u, us, u64(uf + 0x120), u64(uf + 0x128), uf + 0x130, 0x10, &ce, &nc, &cend, why, wn);
-    Ind *ind = ok ? calloc((size_t)ni + 1, sizeof *ind) : NULL;
-    Ctx *cx = ok ? calloc((size_t)nc + 1, sizeof *cx) : NULL;
-    if (ok && (!ind || !cx)) snprintf(why, wn, "out of memory"), ok = false;
-    for (int i = 0; ok && i < ni; i++) {
-        const uint8_t *e = ie + 0x14 * i;
-        ind[i] = (Ind){u64(e), u64(e + 8), (int)u32(e + 16)};
-        if (ind[i].idx > 1 || (i && ind[i].virt <= ind[i - 1].virt)) snprintf(why, wn, "bad patch table"), ok = false;
-    }
-    for (int i = 0; ok && i < nc; i++) {
-        const uint8_t *e = ce + 0x10 * i;
-        cx[i] = (Ctx){u64(e), u32(e + 12), e[8] == 1};
-    }
-    if (ok && (!ni || ind[0].virt > uoff || iend < uoff + usize)) snprintf(why, wn, "the patch doesn't cover the RomFS"), ok = false;
-    uint64_t sv = upper_iv(u, us) & ~0xFFFFFFFFull;
-    int ci = 0;
-    for (int i = 0; ok && i < ni; i++) {
-        uint64_t v0 = ind[i].virt, v1 = i + 1 < ni ? ind[i + 1].virt : iend;
-        uint64_t a = v0 > uoff ? v0 : uoff, z = v1 < uoff + usize ? v1 : uoff + usize;
-        if (a >= z) continue;
-        uint64_t p = ind[i].phys + (a - v0), len = z - a;
-        if (ind[i].idx == 0) { ok = copy_sec(P, b, bs, p, len, &w, why, wn); continue; }
-        while (ok && len) {  // patch data: split where the counter generation changes
-            if (ci >= nc || cx[ci].off > p) ci = 0;
-            while (ci + 1 < nc && cx[ci + 1].off <= p) ci++;
-            if (!nc || cx[ci].off > p || p >= cend) { snprintf(why, wn, "patch data outside its counter table"); ok = false; break; }
-            uint64_t lim = ci + 1 < nc ? cx[ci + 1].off : cend;
-            size_t k = (size_t)(len < lim - p ? len : lim - p);
-            if (k > CHUNK) k = CHUNK;
-            ok = p + k <= usz && nca_read(P, u, ustart + p, P->buf, k, !cx[ci].plain, sv | cx[ci].gen, why, wn) &&
-                 out_write(&w, P->buf, k, why, wn);
-            p += k, len -= k;
+    bool whole = uf && uf[4] != 4 && !u64(uf + 0x108);  // (the update's RomFS whole, not a patch: the base game's not used)
+    Nca *nb = whole ? NULL : b, *nu = uf ? u : NULL;     // (the base game's / the update's NCA the image comes from)
+    if (whole) b = u, bs = us, uf = NULL;
+    memset(&P->chk, 0, sizeof P->chk);
+    check_start(P);
+    Nca *used[2] = {nb, nu};
+    for (int i = 0; i < 2; i++)
+        if (used[i]) hash_start(P, used[i]);
+    Src S;
+    int image = NXPKG_CHECK_NONE;
+    char detail[256] = "";
+    bool ok = src_open(P, &S, b, bs, uf ? u : NULL, us, why, wn) &&
+              write_image(P, &S, uf ? uf : fs_header(b, bs), uf || whole ? uoff : boff, uf || whole ? usize : bsize, path, progress, &image,
+                          detail, sizeof detail, why, wn);
+    src_close(&S);
+    for (int i = 0; i < 2; i++)
+        if (used[i]) {
+            hash_end(P, used[i]);
+            if (used[i]->meta >= 0) hash_start(P, &P->ncas[used[i]->meta]), hash_end(P, &P->ncas[used[i]->meta]);
         }
+    NxCheck *c = &P->chk;
+    c->base = side_result(P, nb), c->update = side_result(P, nu), c->image = image;
+    if (nb) snprintf(c->base_file, sizeof c->base_file, "%s", base_name(P->pkgs[nb->pkg].path));
+    if (nu) snprintf(c->update_file, sizeof c->update_file, "%s", base_name(P->pkgs[nu->pkg].path));
+    snprintf(c->detail, sizeof c->detail, "%s", detail);
+    if (P->checking) {
+        log_packages(P);
+        log_side(P, "base game", nb, c->base);
+        log_side(P, "update", nu, c->update);
+        if (ok) LOG("[nxpkg] the image against its hash tree: %s (%s)\n", image == NXPKG_CHECK_BAD ? "DOESN'T MATCH" : check_text(image), detail[0] ? detail : "-");
+        LOG("[nxpkg] the hashes read %.1f MB the extraction didn't read in order\n", (double)P->hash_extra / 1e6);
     }
-    if (ok && w.done != usize) snprintf(why, wn, "patched RomFS size mismatch"), ok = false;
-    free(ie), free(ce), free(ind), free(cx);
-    return close_out(o, ok, path, why, wn);
+    return ok;
 }
 
 bool nxpkg_write_dlc(NxPkg *P, const char *path, char *why, size_t wn) {
@@ -854,10 +1391,117 @@ bool nxpkg_write_dlc(NxPkg *P, const char *path, char *why, size_t wn) {
     uint64_t off, size;
     int s = find_romfs(n, &off, &size);
     if (s < 0 || !sec_ok(n, s, why, wn) || fs_header(n, s)[4] == 4) { if (!why[0]) snprintf(why, wn, "no RomFS in the add-on content"); return false; }
-    FILE *o = open_out(path, why, wn);
-    if (!o) return false;
-    Out w = {o, 0, size, NULL};
-    return close_out(o, copy_sec(P, n, s, off, size, &w, why, wn), path, why, wn);
+    check_start(P);
+    hash_start(P, n);
+    Src S;
+    int image = NXPKG_CHECK_NONE;
+    char detail[256] = "";
+    bool ok = src_open(P, &S, n, s, NULL, -1, why, wn) &&
+              write_image(P, &S, fs_header(n, s), off, size, path, NULL, &image, detail, sizeof detail, why, wn);
+    hash_end(P, n);
+    if (n->meta >= 0) hash_start(P, &P->ncas[n->meta]), hash_end(P, &P->ncas[n->meta]);
+    int r = side_result(P, n);
+    if (P->checking)
+        log_side(P, "add-on content", n, r),
+            LOG("[nxpkg] the add-on content's image: %s (%s)\n", image == NXPKG_CHECK_BAD ? "DOESN'T MATCH" : check_text(image), detail);
+    if (ok && (r == NXPKG_CHECK_BAD || image == NXPKG_CHECK_BAD)) {
+        snprintf(why, wn, "the add-on content's file (%s) is damaged or altered", base_name(P->pkgs[n->pkg].path));
+        remove(path), ok = false;
+    }
+    return ok;
+}
+
+void nxpkg_log_details(NxPkg *P, int upd, const char *romfs) {
+    Nca *list[2] = {&P->ncas[P->base], upd > 0 && upd <= P->nupd ? &P->ncas[P->upd[upd - 1]] : NULL};
+    static const char *const what[2] = {"base game", "update"};
+    for (int k = 0; k < 2; k++) {
+        Nca *n = list[k];
+        if (!n) continue;
+        const Pkg *pk = &P->pkgs[n->pkg];
+        const uint8_t *h = n->h;
+        char rights[33], cid[33];
+        hex(h + 0x230, 16, rights), hex(n->cid, 16, cid);
+        LOG("[nxpkg] details, the %s: %s in %s at 0x%llx, %llu bytes (content id %s%s); header %.4s, distribution %d, content type %d, key "
+            "generation %d / %d, key area %d, size 0x%llx, id %016llx, sdk %08x, rights id %s\n",
+            what[k], n->ent < pk->nent ? pk->ents[n->ent].name : "?", pk->path, (unsigned long long)n->off, (unsigned long long)n->size,
+            n->has_cid ? cid : "-", n->ctype >= 0 ? ", named by its meta" : "", (const char *)h + 0x200, h[0x204], h[0x205], h[0x206], h[0x220],
+            h[0x207], (unsigned long long)u64(h + 0x208), (unsigned long long)n->id, u32(h + 0x21C), rights);
+        for (int s = 0; s < 4; s++) {
+            const uint8_t *e = h + 0x240 + 0x10 * s, *f = fs_header(n, s);
+            if (!u32(e) && !u32(e + 4)) continue;
+            Sha c;
+            uint8_t dg[32];
+            sha_init(&c), sha_update(&c, f, 0x200), sha_final(&c, dg);
+            LOG("[nxpkg]   section %d: 0x%llx..0x%llx; FS header version %u, fs type %d, hash type %d, encryption %d, upper IV %016llx, its "
+                "hash %s\n",
+                s, (unsigned long long)u32(e) * 0x200, (unsigned long long)u32(e + 4) * 0x200, f[0] | f[1] << 8, f[2], f[3], f[4],
+                (unsigned long long)upper_iv(n, s), memcmp(dg, h + 0x280 + 0x20 * s, 32) ? "DOESN'T MATCH the header's" : "matches the header's");
+            Ivfc v;
+            if (f[3] == 3 && ivfc_info(f, &v)) {
+                char m[65];
+                hex(v.master, 32, m);
+                for (int i = 0; i < v.n; i++)
+                    LOG("[nxpkg]     IVFC level %d: 0x%llx + 0x%llx, blocks of 2^%u\n", i + 1, (unsigned long long)v.off[i], (unsigned long long)v.size[i],
+                        v.bs[i]);
+                LOG("[nxpkg]     IVFC master hash %s\n", m);
+            } else if (f[3] == 2)
+                LOG("[nxpkg]     hash table: block 0x%x, layers %u, hashes 0x%llx + 0x%llx, data 0x%llx + 0x%llx\n", u32(f + 8 + 0x20),
+                    u32(f + 8 + 0x24), (unsigned long long)u64(f + 8 + 0x28), (unsigned long long)u64(f + 8 + 0x30),
+                    (unsigned long long)u64(f + 8 + 0x38), (unsigned long long)u64(f + 8 + 0x40));
+            if (u64(f + 0x108) || u64(f + 0x128))
+                LOG("[nxpkg]     patch: indirect table 0x%llx + 0x%llx (%.4s, %u entries), counter table 0x%llx + 0x%llx (%.4s, %u entries)\n",
+                    (unsigned long long)u64(f + 0x100), (unsigned long long)u64(f + 0x108), (const char *)f + 0x110, u32(f + 0x118),
+                    (unsigned long long)u64(f + 0x120), (unsigned long long)u64(f + 0x128), (const char *)f + 0x130, u32(f + 0x138));
+            if (u64(f + 0x150) || u64(f + 0x180))
+                LOG("[nxpkg]     sparse info at 0x%llx, compression info at 0x%llx\n", (unsigned long long)u64(f + 0x148),
+                    (unsigned long long)u64(f + 0x178));
+        }
+    }
+    // the image's RomFS header, and which bytes of the update's patched section its tables came from
+    FILE *fi = romfs ? fopen(romfs, "rb") : NULL;
+    uint8_t rh[0x50];
+    bool got = fi && fread(rh, 1, sizeof rh, fi) == sizeof rh;
+    if (fi) fclose(fi);
+    if (!got) return;
+    static const char *const tn[4] = {"directory hash", "directories", "file hash", "files"};
+    LOG("[nxpkg] image %s: RomFS header 0x%llx bytes, directory hash 0x%llx + 0x%llx, directories 0x%llx + 0x%llx, file hash 0x%llx + "
+        "0x%llx, files 0x%llx + 0x%llx, file data at 0x%llx\n",
+        romfs, (unsigned long long)u64(rh), (unsigned long long)u64(rh + 8), (unsigned long long)u64(rh + 16), (unsigned long long)u64(rh + 24),
+        (unsigned long long)u64(rh + 32), (unsigned long long)u64(rh + 40), (unsigned long long)u64(rh + 48), (unsigned long long)u64(rh + 56),
+        (unsigned long long)u64(rh + 64), (unsigned long long)u64(rh + 72));
+    Nca *u = list[1];
+    uint64_t uoff, usize;
+    int us = u ? find_romfs(u, &uoff, &usize) : -1;
+    if (us < 0 || !u64(fs_header(u, us) + 0x108)) return;
+    char why[256] = "";
+    Src S;
+    if (!src_open(P, &S, list[0], find_romfs(list[0], &(uint64_t){0}, &(uint64_t){0}), u, us, why, sizeof why)) {
+        LOG("[nxpkg] patch tables: %s\n", why);
+        src_close(&S);
+        return;
+    }
+    uint64_t from[2] = {0, 0};
+    for (int i = 0; i < S.ni; i++) {
+        uint64_t v0 = S.ind[i].virt, v1 = i + 1 < S.ni ? S.ind[i + 1].virt : S.iend;
+        uint64_t x = v0 > uoff ? v0 : uoff, y = v1 < uoff + usize ? v1 : uoff + usize;
+        if (x < y) from[S.ind[i].idx & 1] += y - x;
+    }
+    LOG("[nxpkg] patch: %d indirect entries (to 0x%llx), %d counter entries (to 0x%llx); the image: 0x%llx bytes from the base game, 0x%llx from "
+        "the update\n",
+        S.ni, (unsigned long long)S.iend, S.nc, (unsigned long long)S.cend, (unsigned long long)from[0], (unsigned long long)from[1]);
+    for (int t = -1; t < 4; t++) {  // (-1: the header)
+        uint64_t a = uoff + (t < 0 ? 0 : u64(rh + 8 + 16 * t)), z = t < 0 ? uoff + 0x50 : a + u64(rh + 16 + 16 * t);
+        int shown = 0;
+        for (int i = 0; i < S.ni && shown < 12; i++) {
+            uint64_t v0 = S.ind[i].virt, v1 = i + 1 < S.ni ? S.ind[i + 1].virt : S.iend;
+            if (v1 <= a || v0 >= z) continue;
+            LOG("[nxpkg]   %s: image 0x%llx..0x%llx <- %s 0x%llx\n", t < 0 ? "header" : tn[t], (unsigned long long)((v0 > a ? v0 : a) - uoff),
+                (unsigned long long)((v1 < z ? v1 : z) - uoff), S.ind[i].idx ? "update" : "base game",
+                (unsigned long long)(S.ind[i].phys + ((v0 > a ? v0 : a) - v0)));
+            shown++;
+        }
+    }
+    src_close(&S);
 }
 
 // ------------------------------------------------------------------ opening
@@ -867,7 +1511,8 @@ uint32_t nxpkg_update_version(const NxPkg *P, int upd) { return upd > 0 && upd <
 
 void nxpkg_close(NxPkg *P) {
     if (!P) return;
-    for (int i = 0; i < P->npkg; i++) fclose(P->pkgs[i].f);
+    pipe_stop(&P->hp), pipe_stop(&P->vp);
+    for (int i = 0; i < P->npkg; i++) fclose(P->pkgs[i].f), free(P->pkgs[i].ents);
     free(P->pkgs), free(P->ncas), free(P->tks), free(P->scratch), free(P->buf), free(P);
 }
 
@@ -900,17 +1545,17 @@ static void read_versions(NxPkg *P) {
                 int named = 0, nrec = h[0x10] | h[0x11] << 8;
                 for (int r = 0; r < nrec && rec + 0x38 * (size_t)(r + 1) <= sz; r++) {
                     const uint8_t *c = h + rec + 0x38 * r;
-                    if (c[0x36] != 1) continue;  // (program content)
                     for (int j = 0; j < P->nnca; j++) {
                         Nca *n = &P->ncas[j];
-                        if (n->type == 0 && n->has_cid && !memcmp(n->cid, c + 0x20, 16))
-                            n->version = u32(h + 8), n->patch = h[12] == 0x81, named++;
+                        if (!n->has_cid || memcmp(n->cid, c + 0x20, 16)) continue;
+                        n->meta = i, n->ctype = c[0x36], memcpy(n->rec_hash, c, 32);  // (its record: kind, SHA-256)
+                        if (n->type == 0 && c[0x36] == 1) n->version = u32(h + 8), n->patch = h[12] == 0x81, named++;  // (program content)
                     }
                 }
                 int same = 0, last = -1;
                 for (int j = 0; !named && j < P->nnca; j++)
                     if (P->ncas[j].pkg == m->pkg && P->ncas[j].type == 0 && P->ncas[j].id == (u64(h) & ~0x800ull)) same++, last = j;
-                if (same == 1) P->ncas[last].version = u32(h + 8), P->ncas[last].patch = h[12] == 0x81;
+                if (same == 1) P->ncas[last].version = u32(h + 8), P->ncas[last].patch = h[12] == 0x81, P->ncas[last].meta = i;
             }
         }
         free(t);
@@ -966,6 +1611,7 @@ NxPkg *nxpkg_open(const char *path, const uint64_t *titles, int *err, char *why,
         *err = P->compressed && !upd_only ? NXPKG_COMPRESSED : upd_only ? NXPKG_ONLY_UPDATE : NXPKG_NO_GAME;
         snprintf(why, wn, P->compressed ? "compressed packages (.nsz / .xcz) aren't read" : upd_only ? "only the update found, not the base game"
                           : P->npkg ? "the base game isn't in those packages" : "no packages found");
+        log_packages(P);
         nxpkg_close(P);
         return NULL;
     }
@@ -981,6 +1627,7 @@ NxPkg *nxpkg_open(const char *path, const uint64_t *titles, int *err, char *why,
     for (int i = -1; i < P->nupd; i++)
         if (!nca_key(P, &P->ncas[i < 0 ? P->base : P->upd[i]], why, wn)) {
             *err = NXPKG_KEY_MISSING;
+            log_packages(P);
             nxpkg_close(P);
             return NULL;
         }

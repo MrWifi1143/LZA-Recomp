@@ -540,14 +540,20 @@ static void game_files_section(SDL_Window *win) {
                                          "This needs Pokémon Legends: Z-A version 2.0.2; those files are another version.",
                                          "No keys found for those game files (prod.keys).", "Your keys can't open those game files.",
                                          "Only the update was found, not the base game.", "Those game files couldn't be read.",
-                                         "The game can't find its own files in those: the base game doesn't fit the update."};
+                                         "The game can't find its own files in those: the base game doesn't fit the update.",
+                                         "Your base game file is damaged or altered: what's in it doesn't match its own checksum.",
+                                         "Your 2.0.2 update file is damaged or altered: what's in it doesn't match its own checksum.",
+                                         "Your game files are intact, but the base game and the update don't fit together (or they're packed in a way the setup doesn't expect)."};
         static const char *const pt[] = {"Nenhum arquivo do jogo nessa pasta.", "Esses são arquivos do jogo comprimidos (.nsz / .xcz).",
                                          "Esse não é um jogo suportado (Pokémon Legends: Z-A).", "Os arquivos não puderam ser copiados.",
                                          "O código do jogo não compilou.", "O compilador do código do jogo não está nesta cópia.",
                                          "É preciso o Pokémon Legends: Z-A versão 2.0.2; esses arquivos são de outra versão.",
                                          "Nenhuma chave encontrada para esses arquivos (prod.keys).", "As suas chaves não abrem esses arquivos.",
                                          "Só a atualização foi encontrada, não o jogo base.", "Esses arquivos do jogo não puderam ser lidos.",
-                                         "O jogo não encontra os próprios arquivos neles: o jogo base não combina com a atualização."};
+                                         "O jogo não encontra os próprios arquivos neles: o jogo base não combina com a atualização.",
+                                         "O arquivo do seu jogo base está danificado ou alterado: o conteúdo não bate com o próprio checksum.",
+                                         "O arquivo da sua atualização 2.0.2 está danificado ou alterado: o conteúdo não bate com o próprio checksum.",
+                                         "Os arquivos do seu jogo estão intactos, mas o jogo base e a atualização não se encaixam (ou estão empacotados de um jeito que a instalação não espera)."};
         static const char *const en_h[] = {"Choose the folder with your .nsp / .xci files, or the one that holds exefs and romfs.",
                                            "Decompress them first (nsz -D), or dump them as .nsp / .xci.",
                                            "Pick the folder of your own Pokémon Legends: Z-A.", "Check there are about 6 GB free and try again.",
@@ -557,7 +563,10 @@ static void game_files_section(SDL_Window *win) {
                                            "Dump prod.keys again from your Switch on its current system version; details in lasrecomp.log.",
                                            "Put the base game's .nsp / .xci in the same folder as the update.",
                                            "The dump may be damaged; details in lasrecomp.log.",
-                                           "Dump the base game again from your own Switch (cartridge or installed game), put it in one folder with the 2.0.2 update and pick that folder; details in lasrecomp.log."};
+                                           "Dump the base game again from your own Switch (cartridge or installed game), put it in one folder with the 2.0.2 update and pick that folder; details in lasrecomp.log.",
+                                           "Dump the base game again from your own Switch (cartridge or installed game), put it in one folder with the 2.0.2 update and pick that folder.",
+                                           "Dump the 2.0.2 update again from your own Switch, put it in one folder with the base game and pick that folder.",
+                                           "Please send lasrecomp.log (in the recomp's folder) in a bug report on Discord so we can fix it. A fresh dump of the base game from your own Switch may also help."};
         static const char *const pt_h[] = {"Escolha a pasta com os seus arquivos .nsp / .xci, ou a que tem exefs e romfs.",
                                            "Descomprima antes (nsz -D), ou faça o dump como .nsp / .xci.",
                                            "Escolha a pasta do seu Pokémon Legends: Z-A.", "Confira se há uns 6 GB livres e tente de novo.",
@@ -567,10 +576,15 @@ static void game_files_section(SDL_Window *win) {
                                            "Faça o dump do prod.keys de novo no Switch com a versão atual do sistema; detalhes no lasrecomp.log.",
                                            "Coloque o .nsp / .xci do jogo base na mesma pasta da atualização.",
                                            "O dump pode estar danificado; detalhes no lasrecomp.log.",
-                                           "Faça o dump do jogo base de novo no seu próprio Switch (cartucho ou jogo instalado), coloque numa pasta com a atualização 2.0.2 e escolha essa pasta; detalhes no lasrecomp.log."};
+                                           "Faça o dump do jogo base de novo no seu próprio Switch (cartucho ou jogo instalado), coloque numa pasta com a atualização 2.0.2 e escolha essa pasta; detalhes no lasrecomp.log.",
+                                           "Faça o dump do jogo base de novo no seu próprio Switch (cartucho ou jogo instalado), coloque numa pasta com a atualização 2.0.2 e escolha essa pasta.",
+                                           "Faça o dump da atualização 2.0.2 de novo no seu próprio Switch, coloque numa pasta com o jogo base e escolha essa pasta.",
+                                           "Envie o lasrecomp.log (na pasta do recomp) num relatório de bug no Discord para a gente corrigir. Um dump novo do jogo base do seu próprio Switch também pode ajudar."};
         int k = st - SETUP_FAIL_NOT_FOUND;
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 900);
         ImGui::TextColored(k_red, "%s", T(en[k], pt[k]));
+        if ((st == SETUP_FAIL_DAMAGED_BASE || st == SETUP_FAIL_DAMAGED_UPDATE) && setup_fail_file()[0])
+            ImGui::Text(g_pt ? "Arquivo: %s" : "File: %s", setup_fail_file());
         ImGui::TextDisabled("%s", T(en_h[k], pt_h[k]));
         if (ImGui::SmallButton(T("Get help on Discord", "Pedir ajuda no Discord"))) SDL_OpenURL(k_discord_url);  // (always: a failed setup is when it's needed)
         ImGui::PopTextWrapPos();
@@ -1494,6 +1508,14 @@ extern "C" void launcher_lg_run(const char *root) {
             } else if (st == SETUP_FAIL_ROMFS || (st < SETUP_FAIL_NOT_FOUND && game_romfs_broken())) {
                 ImGui::TextColored(k_red, "%s", T("The game can't find its own files: the base game doesn't fit the update.",
                                                   "O jogo não encontra os próprios arquivos: o jogo base não combina com a atualização."));
+                ImGui::TextDisabled("%s", T("Open Game Files for what to do.", "Abra Arquivos do jogo para ver o que fazer."));
+            } else if (st == SETUP_FAIL_DAMAGED_BASE || st == SETUP_FAIL_DAMAGED_UPDATE) {
+                ImGui::TextColored(k_red, "%s", st == SETUP_FAIL_DAMAGED_BASE ? T("Your base game file is damaged or altered.", "O arquivo do seu jogo base está danificado ou alterado.")
+                                                                             : T("Your 2.0.2 update file is damaged or altered.", "O arquivo da sua atualização 2.0.2 está danificado ou alterado."));
+                ImGui::TextDisabled("%s", T("Open Game Files for what to do.", "Abra Arquivos do jogo para ver o que fazer."));
+            } else if (st == SETUP_FAIL_MISMATCH) {
+                ImGui::TextColored(k_red, "%s", T("Your game files are intact, but the base game and the update don't fit together.",
+                                                  "Os arquivos do seu jogo estão intactos, mas o jogo base e a atualização não se encaixam."));
                 ImGui::TextDisabled("%s", T("Open Game Files for what to do.", "Abra Arquivos do jogo para ver o que fazer."));
             } else if (st >= SETUP_FAIL_NOT_FOUND) {
                 ImGui::TextColored(k_red, "%s", T("The game files couldn't be set up.", "Os arquivos do jogo não puderam ser preparados."));
