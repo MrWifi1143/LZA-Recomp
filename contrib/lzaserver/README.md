@@ -71,6 +71,13 @@ Accounts and saves live in `--data` (default `./lzaserver-data`): back that fold
 | `--cert FILE --key FILE` | | your own certificate (PEM, e.g. Let's Encrypt for your domain) instead of the server's own |
 | `--open-play` | | accounts and save sync kept, but anyone may play here without signing in |
 | `--no-accounts` | | no accounts at all: anyone may play here (the old open server, e.g. on a LAN) |
+| `--world-crowd N` | 16 | shared world: with more players than this in one game's world, each player's position (~20 a second) goes at full rate only to players near them; farther ones get it every 2 s (up to N: everything to everyone, as before) |
+| `--world-near M` | 120 | how near "near" is, in metres (the game shows other players within 55 m) |
+
+A big shared world: every player's position goes to every other player, so the traffic grows with the square of the
+player count. Above `--world-crowd` players the server sends far players' positions only every 2 s: measured with
+fake players in groups 400 m apart, 24 players 11,600 -> 3,200 packets a second out of the server (671 -> 202 KB/s),
+48 players 47,400 -> 8,000 (2.7 MB/s -> 550 KB/s; per player 57 -> 11.5 KB/s in).
 
 By default playing here needs an account here: a game's hello must carry a play ticket (asked for over TLS with the
 player's session, kept in memory 24 hours, ended with the session; the UDP hello carries only its id and a SipHash MAC

@@ -5,6 +5,7 @@
 // address and a random id, forgotten 15 s after its last packet. No Nintendo service is involved or imitated.
 //
 //   lzaserver [--port 39200] [--max-clients 256] [--bind ADDR]      (UDP; open / forward that port)
+//             [--world-crowd 16] [--world-near 120]                 (shared world: interest management, below)
 //
 // Accounts and save sync (lzaserver_accounts.c, protocol in runtime/acct_proto.h): TCP + TLS on the same port number -
 // open / forward TCP too. Playing HERE needs an account here (Link Play by Link Code, the shared world): a client whose
@@ -59,6 +60,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <time.h>
 #ifndef LZA_NO_ACCOUNTS
 #include "acct_proto.h"
@@ -91,6 +93,18 @@ static uint64_t now_ms(void) {
 #define MAX_PER_SEC 3000  // (packets a client may send per second; more are dropped)
 #define BUDGET_MAX 65536  // (bytes an unverified address may have in hand: what it sent, not yet answered)
 #define OLD_CLIENT_MS 10000  // (no cookie echoed this long after its first hello: logged once as an older client)
+// Interest management (2026-11-17): every shared-world packet went to every other player of the same game - fine for a
+// handful, O(N^2) for a public server (50 players: ~49k packets a second out, ~1000 a second into each player, who keeps
+// 32 heard and shows the 8 nearest within 55 m). With more than --world-crowd players (default 16) in one game's world, a
+// player's position packets (~20 a second) go at full rate only to players within --world-near metres (default 120) of
+// them; players farther away get one every 2 s (they still know where everyone is, and someone coming closer is at full
+// rate well before the 55 m where the game shows them). Everything else (outfits, looks, acknowledgements, trade asks)
+// goes to everyone as before. Up to the crowd size nothing changes. A player whose position isn't known (none sent in
+// 10 s: in a menu, a loading screen) gets everything.
+#define WORLD_CROWD 16
+#define WORLD_NEAR_M 120.0f
+#define WORLD_FAR_MS 2000
+#define WORLD_POS_MS 10000
 
 typedef struct {
     bool used;
@@ -107,12 +121,21 @@ typedef struct {
     bool in;                    // (signed in: its hello carried a play ticket's MAC - or the server needs no account)
     uint8_t auth_said;          // (the last 'A' status sent, + 1: logged on change)
     char user[32];              // (the ticket's account)
+    float pos[3];               // (shared world: where its player was, from its last position packet - interest management)
+    uint64_t pos_at, far_next;  // (when that came; when its next position packet may go to players far from it)
 } Client;
 
 static Client *g_c;
 static int g_max = 256;
 static sock_t g_s;
-static uint64_t g_fwd_packets, g_fwd_bytes, g_world_packets, g_trimmed;
+static uint64_t g_fwd_packets, g_fwd_bytes, g_world_packets, g_trimmed, g_world_held;
+static int g_world_crowd = WORLD_CROWD, g_world_n[4];  // (players in each game's shared world, counted every second)
+static float g_world_near = WORLD_NEAR_M;
+static bool world_far(const Client *a, const Client *b, uint64_t now) {  // (both placed lately, and farther apart than near)
+    if (!a->pos_at || !b->pos_at || now - a->pos_at > WORLD_POS_MS || now - b->pos_at > WORLD_POS_MS) return false;
+    float dx = a->pos[0] - b->pos[0], dy = a->pos[1] - b->pos[1], dz = a->pos[2] - b->pos[2];
+    return dx * dx + dy * dy + dz * dz > g_world_near * g_world_near;
+}
 // Accounts required to play here (the default with accounts; --no-accounts / --open-play: anyone) - acct_proto.h
 static bool g_need_auth;
 #define PLAYS(c) (!g_need_auth || (c)->in)
@@ -271,6 +294,8 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--max-clients") && i + 1 < argc) g_max = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bind") && i + 1 < argc) bind_addr = argv[++i];
+        else if (!strcmp(argv[i], "--world-crowd") && i + 1 < argc) g_world_crowd = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--world-near") && i + 1 < argc) g_world_near = (float)atof(argv[++i]);
 #ifndef LZA_NO_ACCOUNTS
         else if (ARG("--data")) snprintf(ao.data, sizeof ao.data, "%s", argv[++i]);
         else if (ARG("--cert")) snprintf(ao.cert, sizeof ao.cert, "%s", argv[++i]);
@@ -285,7 +310,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--open-play")) open_play = true;
 #endif
         else {
-            fprintf(stderr, "lzaserver [--port 39200] [--max-clients 256] [--bind ADDR]\n"
+            fprintf(stderr, "lzaserver [--port 39200] [--max-clients 256] [--bind ADDR] [--world-crowd 16] [--world-near 120]\n"
 #ifndef LZA_NO_ACCOUNTS
                             "          [--data DIR] [--cert FILE --key FILE] [--signup open|closed] [--save-max-mb 32]\n"
                             "          [--save-versions 10] [--quota-mb 256] [--max-accounts 1000] [--no-accounts | --open-play]\n"
@@ -418,12 +443,26 @@ int main(int argc, char **argv) {
                     out[0] = 'X';
                     memcpy(out + 1, &id, 8);
                     memcpy(out + 9, buf + 9, (size_t)n - 9);
+                    // (a position packet: type 2, its x y z at payload +16 - runtime/hle/warp.c WorldPkt)
+                    bool is_pos = n - 9 >= 28 && buf[9] == 2;
+                    if (is_pos) {
+                        float p[3];
+                        memcpy(p, buf + 9 + 16, sizeof p);
+                        if (p[0] == p[0] && p[1] == p[1] && p[2] == p[2] && fabsf(p[0]) < 1e6f && fabsf(p[1]) < 1e6f && fabsf(p[2]) < 1e6f)
+                            memcpy(c->pos, p, sizeof p), c->pos_at = now ? now : 1;
+                    }
+                    bool crowd = is_pos && c->game < 4 && g_world_n[c->game] > g_world_crowd, far_due = now >= c->far_next, far_sent = false;
                     for (int i = 0; i < g_max; i++) {
                         Client *t = &g_c[i];
                         if (t == c || !t->used || !PLAYS(t) || !t->world || t->game != c->game) continue;
+                        if (crowd && world_far(c, t, now)) {
+                            if (!far_due) { g_world_held++; continue; }
+                            far_sent = true;
+                        }
                         send_to(t, out, (size_t)n);
                         g_world_packets++;
                     }
+                    if (far_sent) c->far_next = now + WORLD_FAR_MS;
                 } else if (buf[0] == 'D' && n >= 17) {
                     uint64_t to;
                     memcpy(&to, buf + 9, 8);
@@ -452,6 +491,9 @@ int main(int argc, char **argv) {
                 }
             }
             members();
+            memset(g_world_n, 0, sizeof g_world_n);
+            for (int i = 0; i < g_max; i++)
+                if (g_c[i].used && g_c[i].world && PLAYS(&g_c[i]) && g_c[i].game < 4) g_world_n[g_c[i].game]++;
         }
         if (now - last_stats >= 60000) {
             int nc = 0;
@@ -461,7 +503,9 @@ int main(int argc, char **argv) {
                        nc, (unsigned long long)g_fwd_packets, (unsigned long long)g_fwd_bytes, (unsigned long long)g_world_packets,
                        g_trimmed ? " (some kept from unverified addresses)" : "");
             if (g_trimmed) printf("  %llu bytes not sent to unverified addresses (over what they sent)\n", (unsigned long long)g_trimmed);
-            g_fwd_packets = g_fwd_bytes = g_world_packets = g_trimmed = 0, last_stats = now;
+            if (g_world_held) printf("  %llu shared-world position packets not sent to players far away (a crowd: --world-crowd)\n",
+                                     (unsigned long long)g_world_held);
+            g_fwd_packets = g_fwd_bytes = g_world_packets = g_trimmed = g_world_held = 0, last_stats = now;
         }
     }
 }
