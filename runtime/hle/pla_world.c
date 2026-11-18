@@ -209,6 +209,7 @@ typedef struct {
     uint64_t id, heard_ns, first_ns;
     int have, gender, own, n_snap, borrowed, own_up;
     uint64_t retry_ns;     // (no new person asked for before then: the last never came up)
+    int ask_fail;          // (persons asked for that never came up since one did)
     float jump_at[3];      // (where they were drawn the tick before)
     uint64_t sk;           // (its person's skeleton, once seen)
     int ov;                // (its g_ov entry while drawn from its body: -1 walked by its navigator)
@@ -643,10 +644,10 @@ static void world_tick(uint64_t frame) {
         if (!want) { if (p->own >= 0) peer_let_go(p, d >= OWN_RANGE ? "is far" : "isn't among the nearest"); continue; }
         if (p->own >= 0 && !pla_npc_state(p->own)) {  // (gone with a level, or never made)
             LOG("[world] player %016llx's person is gone%s\n", (unsigned long long)p->id, p->own_up ? ": another" : " before it came up: another in 10 s");
-            if (!p->own_up) p->retry_ns = now + 10000000000ull;
+            if (!p->own_up) p->retry_ns = now + 10000000000ull, p->ask_fail++;
             p->own = -1, p->own_up = 0, p->ov = -1, p->sk = 0, p->far_ns = 0;
         }
-        if (p->own >= 0 && pla_npc_state(p->own) == 3) p->own_up = 1;
+        if (p->own >= 0 && pla_npc_state(p->own) == 3) p->own_up = 1, p->ask_fail = 0;
         if (p->own >= 0 && pla_npc_state(p->own) <= 2 && frame % 15 == 0) {  // (still waiting for theirs: a free one up already is taken instead)
             extern void pla_npc_free(int);
             int t = pla_npc_take(p->gender, p->has_outfit ? p->outfit : NULL, p->tgt);
@@ -671,12 +672,20 @@ static void world_tick(uint64_t frame) {
         if (p->own < 0 && settled && peer_settled && now >= p->retry_ns) {
             const uint64_t *fit = p->has_outfit ? p->outfit : NULL;
             int t = pla_npc_take(p->gender, fit, p->tgt);
-            p->own = t >= 0 ? t : d < ASK_RANGE ? pla_npc_new(p->tgt, p->gender, fit) : -1;
+            // (where they are, unless one asked for there never came up - in water, off the ground people stand on:
+            // then nearer us, 4 m more each time; ours runs to them / is put there as soon as it is up)
+            float at[3] = {p->tgt[0], p->tgt[1], p->tgt[2]};
+            if (p->ask_fail && d > 0.5f) {
+                float k = fminf(4.0f * p->ask_fail / d, 1.0f);
+                for (int j = 0; j < 3; j++) at[j] = p->tgt[j] + (g_me[j] - p->tgt[j]) * k;
+                if (k >= 1.0f) at[0] += 2.0f;  // (not on top of us: one asked within 1.5 m of the player never came up)
+            }
+            p->own = t >= 0 ? t : d < ASK_RANGE ? pla_npc_new(at, p->gender, fit) : -1;
             p->ov = -1, p->sk = 0, p->far_ns = 0;
             for (int k = 0; t >= 0 && k < NOV; k++)
                 if (g_ov[k].on && g_ov_own[k] == t) p->ov = k, p->sk = g_ov[k].sk, g_ov[k].hidden = 0, p->walk_again_ns = now + 4000000000ull, memcpy(p->draw, p->tgt, 16);
             if (p->own >= 0) LOG("[world] player %016llx gets %s person %d (%s, %s body) at %.2f %.2f %.2f, %.1f m from us\n", (unsigned long long)p->id,
-                                 t >= 0 ? "the free" : "a new", p->own, fit ? "outfit heard" : "no outfit heard", p->gender ? "p2" : "p1", p->tgt[0], p->tgt[1], p->tgt[2], d);
+                                 t >= 0 ? "the free" : "a new", p->own, fit ? "outfit heard" : "no outfit heard", p->gender ? "p2" : "p1", at[0], at[1], at[2], d);
             p->order_frame = 0;
         }
         extern int pla_npc_puppet(int), pla_npc_pos(int, float *);

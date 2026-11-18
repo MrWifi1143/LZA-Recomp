@@ -146,14 +146,21 @@ typedef struct {
     int warp_now;       // (research: <live>/npc "pwarp <slot>")
     float want_v;       // (the speed it should go: steered last frame)
     int turn_sign;      // (the way it is turning round: 1 left, -1 right, 0 not)
+    float lyaw;         // (its model turned about y on top of its character's facing: owner local rotation)
+    float fa;           // (the way it was drawn facing last frame)
+    int fa_set;
     // riding (their set_ride_bool / ride_type_int, mirrored): a Pokémon of ours carries it - see ride_step
     int riding, ride_type, rode;  // (rode: the ride type it sat on last frame, 0 none)
     int mnt[8];         // (its mounts by ride type: index + 1 into g_mnt, 0 none)
+    int swimming, swam; // (their swim_bool; swam: swimming mode last frame)
+    int mnt_fail;       // (mounts asked for that never came up)
+    uint64_t mnt_retry;
 } Own;
 // research knobs, <live>/npc "knob <i> <value>" (puppet_step): 0 up/down (1 down only, 0 also lifted as before, 2 none),
 // 1 a mount's "move" per m/s (ride_step), 2 the rider's seat higher by, 4 the rider's turn about x (radians, added), 5 the
 // rider's character under its mount by (m),
-// 3 the run's step stretch at most (1.12), 6 = 1 turning round without keeping its way, 7 the walk log (1 every second,
+// 3 the run's step stretch at most (1.12), 6 bits: 1 turning round without keeping its way, 2 no their-way blend close
+// behind, 4 no model turn on top (facing stalls back), 7 the walk log (1 every second,
 // 2 every frame - LARECOMP_NPC_WALKLOG the same)
 static float g_knob[8] = {1, 0.25f, 0, 1.12f, 0, 0, 0, 0};
 static Own g_own[NOWN];
@@ -873,6 +880,7 @@ void pla_npc_mirror(int i, int k, char type, uint32_t val) {
     // on the ground)
     if (!strcmp(k_mirror[k], "set_ride_bool")) { g_own[i].riding = val != 0; return; }
     if (!strcmp(k_mirror[k], "ride_type_int")) { g_own[i].ride_type = (int)val; return; }
+    if (!strcmp(k_mirror[k], "swim_bool")) g_own[i].swimming = val != 0;  // (and set: the net's swimming)
     pthread_mutex_lock(&g_lock);
     if (g_npar < NPAR) {
         g_par[g_npar].slot = i, g_par[g_npar].type = type, g_par[g_npar].hash = g_mirror_hash[k], g_par[g_npar].i = val, g_par[g_npar].quiet = 1;
@@ -930,11 +938,11 @@ static void cc_warp(Cpu *c, uint64_t cc, const float at[3], float yaw) {
 // they are each frame, its own navigator kept still, its root motion taken out, its "move" set from their speed so
 // its legs walk / run. Verified 2026-11-18, two copies through lzaserver: testout/pla-mp8 x4b-*.
 // ride_type_int: 1 Wyrdeer (joint "parts": its frame y forward, z down; the player's owner 1.2 m over the ground, 0.15 m
-// back), 5 Sneasler (joint "origin" = its model's root: upright, at its feet - the player rides on its back); measured
-// riding (LARECOMP_NPC_RIDELOG) 2026-11-18. The others (2-4: Ursaluna "parts_01", Basculegion "origin", Braviary
-// "parts_03") not seen yet: no mount - the person runs where they are.
-static const struct { int mons; float seat_y, seat_z, turn_x; } k_ride[8] = {
-    {0, 0, 0, 0}, {899, 1.20f, -0.15f, 1.5707963f}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {903, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0},
+// back), 2 Basculegion (joint "origin"; on water - ours put 0.8 m down into it), 5 Sneasler (joint "origin" = its
+// model's root: upright, at its feet - the player rides on its back); measured riding (LARECOMP_NPC_RIDELOG, Lua plpar)
+// 2026-11-18. 3 / 4 (Ursaluna "parts_01", Braviary "parts_03") not seen yet: no mount - the person runs where they are.
+static struct { int mons; float seat_y, seat_z, turn_x, mount_y; } k_ride[8] = {  // (research: live "seat <type> <mons> <y> <z> <turn> [mount y]")
+    {0, 0, 0, 0, 0}, {899, 1.20f, -0.15f, 1.5707963f, 0}, {902, 0, 0, 0, -0.8f}, {0, 0, 0, 0, 0}, {0, 0, 0, 0, 0}, {903, 0, 0, 0, 0}, {0, 0, 0, 0, 0}, {0, 0, 0, 0, 0},
 };
 #define POKE_MOVE 0xd5eb2f99669eefd4ull  // (FNV-1a "move": a Pokémon's walk / run blend, 0 .. ~2)
 static Mnt *ride_mount(Own *o) {
@@ -971,13 +979,22 @@ static int ride_step(Cpu *c, Own *o, float dt) {
     int t = o->ride_type & 7;
     bool want = o->riding && t && k_ride[t].mons;
     Mnt *m = want ? ride_mount(o) : NULL;
-    if (want && !m && !o->mnt[t]) {  // (its mount asked for, where it is)
+    if (want && !m && o->mnt[t] && !g_mnt[o->mnt[t] - 1].state) o->mnt[t] = 0, o->mnt_fail++;  // (never came up: again)
+    if (want && !m && !o->mnt[t] && g_frame >= o->mnt_retry) {  // (its mount asked for, where it is - or, after one that
+        // never came up (asked in water, say), near us: it is put where they are once it is up)
         pthread_mutex_lock(&g_lock);
         for (int i = 0; i < NMNT; i++)
             if (!g_mnt[i].state) {
                 m = &g_mnt[i];
                 memset(m, 0, sizeof *m);
                 m->mons = k_ride[t].mons, memcpy(m->at, (const float *)(uintptr_t)(o->owner + 0xa0), 12), m->yaw = o->fo[3] * 57.29578f;
+                extern bool warp_player_pos(float out[3]);
+                float me[3];
+                if (o->mnt_fail && warp_player_pos(me)) {
+                    float dx = m->at[0] - me[0], dz = m->at[2] - me[2], dd = sqrtf(dx * dx + dz * dz), k = dd > 3.0f ? 3.0f / dd : 1.0f;
+                    m->at[0] = me[0] + dx * k + (dd <= 3.0f ? 2.0f : 0), m->at[1] = me[1], m->at[2] = me[2] + dz * k;
+                }
+                o->mnt_retry = g_frame + 300;
                 m->k = ++g_poke_n, m->state = 1, m->level = g_level, m->rider = (int)(o - g_own) + 1, m->attached = 0;
                 snprintf(m->name, sizeof m->name, "mpride_%d", m->k);
                 o->mnt[t] = i + 1;
@@ -993,7 +1010,7 @@ static int ride_step(Cpu *c, Own *o, float dt) {
         if (o->rode) {  // (off: back on its feet where its mount stands, the mount put away)
             o->rode = 0;
             anim_set(c, o->actl, ANIM_SET_BOOL, fnv("set_ride_bool"), 0, 0);
-            loc[0] = loc[1] = loc[2] = 0, lq[0] = lq[1] = lq[2] = 0, lq[3] = 1;
+            loc[0] = loc[1] = loc[2] = 0, lq[0] = lq[1] = lq[2] = 0, lq[3] = 1, o->lyaw = 0, o->fa_set = 0;
             for (int j = 0; j < 8; j++) {
                 int i = o->mnt[j] - 1;
                 if (i >= 0 && i < NMNT && g_mnt[i].state == 3) mount_park(c, &g_mnt[i], o->fo);
@@ -1004,6 +1021,7 @@ static int ride_step(Cpu *c, Own *o, float dt) {
         return 0;
     }
     if (o->rode != t) {  // (on it now - or another ride: the one before put away)
+        o->mnt_fail = 0;
         int was = o->rode, i = was ? o->mnt[was & 7] - 1 : -1;
         if (i >= 0 && i < NMNT && g_mnt[i].state == 3) mount_park(c, &g_mnt[i], o->fo);
         o->rode = t;
@@ -1027,7 +1045,8 @@ static int ride_step(Cpu *c, Own *o, float dt) {
     // put where they are; left there, its model walked off on its own and the rider sat on air)
     float *ml = (float *)(uintptr_t)(m->owner + 0xd0), *mq = (float *)(uintptr_t)(m->owner + 0xc0);
     ml[0] = ml[1] = ml[2] = 0, mq[0] = mq[1] = mq[2] = 0, mq[3] = 1;
-    cc_warp(c, m->cc, o->fo, yaw);
+    float mat[3] = {o->fo[0], o->fo[1] + k_ride[t].mount_y, o->fo[2]};  // (Basculegion: down in the water, as the game's own)
+    cc_warp(c, m->cc, mat, yaw);
     if (!g_fwd_vec) g_fwd_vec = hle_alloc(16);  // (its facing: the warp's rotation isn't taken - its forward direction is)
     g_fwd_vec[0] = sinf(yaw), g_fwd_vec[1] = 0, g_fwd_vec[2] = cosf(yaw), g_fwd_vec[3] = 0;
     guest_call_saved(c, CC_SET_FORWARD, m->cc, (uint64_t)(uintptr_t)g_fwd_vec, 0, 0, 0);
@@ -1042,7 +1061,7 @@ static int ride_step(Cpu *c, Own *o, float dt) {
     float park = g_knob[5];
     float under[3] = {o->fo[0], o->fo[1] - park, o->fo[2]};
     cc_warp(c, o->cc, under, yaw);
-    loc[0] = 0, loc[1] = park + k_ride[t].seat_y + g_knob[2], loc[2] = k_ride[t].seat_z;
+    loc[0] = 0, loc[1] = park + k_ride[t].mount_y + k_ride[t].seat_y + g_knob[2], loc[2] = k_ride[t].seat_z;
     float qa = (k_ride[t].turn_x + g_knob[4]) * 0.5f;  // (into the joint's frame: Wyrdeer's about x +90 degrees, y forward, z down)
     lq[0] = sinf(qa), lq[1] = 0, lq[2] = 0, lq[3] = cosf(qa);
     // (their speed to the rider's net: the riding pose moves with it)
@@ -1069,6 +1088,25 @@ static void puppet_step(Cpu *c, Own *o) {
     o->step_ns = now;
     if (dt > 0.2f) dt = 0.2f;
     if (ride_step(c, o, dt)) return;
+    // swimming: a person's character has no swimming of its own (the base Swim is nothing) - it walked the riverbed.
+    // Held where they are instead (at the water, their way), the net's swimming stroke going by their speed
+    if (o->swimming || o->swam) {
+        float *loc = (float *)(uintptr_t)(o->owner + 0xd0);
+        loc[0] = loc[1] = loc[2] = 0;
+        if (!o->swimming) { o->swam = 0; LOG("[npc] mpplayer_%d out of the water\n", o->k); return; }
+        if (!o->swam) {
+            float *lq = (float *)(uintptr_t)(o->owner + 0xc0);
+            lq[0] = lq[1] = lq[2] = 0, lq[3] = 1, o->lyaw = 0, o->fa_set = 0, o->swam = 1;
+            LOG("[npc] mpplayer_%d swims\n", o->k);
+        }
+        cc_warp(c, o->cc, o->fo, o->fo[3]);
+        if (!g_fwd_vec) g_fwd_vec = hle_alloc(16);
+        g_fwd_vec[0] = sinf(o->fo[3]), g_fwd_vec[1] = 0, g_fwd_vec[2] = cosf(o->fo[3]), g_fwd_vec[3] = 0;
+        guest_call_saved(c, CC_SET_FORWARD, o->cc, (uint64_t)(uintptr_t)g_fwd_vec, 0, 0, 0);
+        float mf = mf_for(o->fo[4]);
+        if (fabsf(mf - o->mf) > 0.01f || g_frame - o->mf_frame >= 30) anim_set(c, o->actl, ANIM_SET_FLOAT, MOVE_FRONT, mf, 0), o->mf = mf, o->mf_frame = g_frame;
+        return;
+    }
     // (the root motion: the player's net leaves it in its model's local translation (owner +0xd0) - where the field
     // player's own code takes it. Taken here: zeroed, and its physics character given that velocity - so it walks as
     // far as its feet say, against the world's collision)
@@ -1128,14 +1166,26 @@ static void puppet_step(Cpu *c, Own *o) {
     o->moving = v > 0, o->want_v = v;
     // which way: toward the spot when off it, else their way (moving) / their facing (standing) - turned at most 12 rad/s
     float wx, wz;
-    if (o->moving && d > 0.4f) wx = ex / d, wz = ez / d;
-    else wx = yx, wz = yz;
-    // (from the way it faces now - its owner's z axis: the net's own turns rotate it too)
+    if (o->moving && d > 0.4f) {
+        wx = ex / d, wz = ez / d;
+        // (close behind someone walking: mostly their own way - the way to a spot under a metre off swung 10 degrees
+        // from frame to frame as their drawn spot moved on in steps)
+        if (s > 0.2f && d < 1.5f && !((int)g_knob[6] & 2)) {
+            float k = d / 1.5f, bx = yx * (1 - k) + wx * k, bz = yz * (1 - k) + wz * k, n = sqrtf(bx * bx + bz * bz);
+            if (n > 0.1f) wx = bx / n, wz = bz / n;
+        }
+    } else wx = yx, wz = yz;
+    // (from the way it faces now - its owner's z axis: the net's own turns rotate it too; less our own turn of its model
+    // (lyaw, below) - the way its character faces)
     const float *zx = (const float *)(uintptr_t)(o->owner + 0x90);
-    float a = atan2f(zx[0], zx[2]), b = atan2f(wx, wz), da = remainderf(b - a, 6.2831853f), lim = 12.0f * dt;
+    float cy = atan2f(zx[0], zx[2]) - o->lyaw;  // (its character's)
+    // (turned on from the way it was drawn last frame (fa), not from its character's: that one stands still every 2nd
+    // frame and the turn with it)
+    if (!o->fa_set || ((int)g_knob[6] & 4)) o->fa = cy, o->fa_set = 1;
+    float a = o->fa, b = atan2f(wx, wz), da = remainderf(b - a, 6.2831853f), lim = 12.0f * dt;
     // (turning round: the way it began, kept - near 180 degrees off, the nearer way flips from frame to frame and it
     // turned back and forth)
-    if (g_knob[6] == 0) {
+    if (!((int)g_knob[6] & 1)) {
         if (fabsf(da) > 2.4f && o->turn_sign && (da > 0 ? 1 : -1) != o->turn_sign) da += o->turn_sign * 6.2831853f;
         o->turn_sign = fabsf(da) > 0.3f ? (da > 0 ? 1 : -1) : fabsf(da) < 0.1f ? 0 : o->turn_sign;
     }
@@ -1147,6 +1197,15 @@ static void puppet_step(Cpu *c, Own *o) {
         g_fwd_vec[0] = sinf(a), g_fwd_vec[1] = 0, g_fwd_vec[2] = cosf(a), g_fwd_vec[3] = 0;
         guest_call_saved(c, CC_SET_FORWARD, o->cc, (uint64_t)(uintptr_t)g_fwd_vec, 0, 0, 0);
         o->face[0] = g_fwd_vec[0], o->face[1] = g_fwd_vec[2];
+    }
+    // (its character takes a new forward direction only on its own update - every 2nd frame for people, a call that
+    // came in between overwritten: its turn stood still for a frame, then caught up. Its model is turned the rest of
+    // the way itself - its owner's local rotation about y - so it is drawn facing the way given every frame)
+    {
+        float *lq = (float *)(uintptr_t)(o->owner + 0xc0), l = remainderf(a - cy, 6.2831853f);
+        if ((int)g_knob[6] & 4) l = 0;
+        if (l > 0.6f) l = 0.6f, a = cy + l; else if (l < -0.6f) l = -0.6f, a = cy + l;  // (its character far behind: no further)
+        o->fa = a, o->lyaw = l, lq[0] = 0, lq[1] = sinf(l * 0.5f), lq[2] = 0, lq[3] = cosf(l * 0.5f);
     }
     // (the spot behind it and near: it turns on the spot first, as a player does - no circling round it; turning
     // hard: slower)
@@ -1398,6 +1457,7 @@ void pla_npc_order(int i, const float to[3], int run) {
 void pla_npc_free(int i) {  // (it walks off where it was sent last: the caller sends it away first)
     if (i < 0 || i >= NOWN) return;
     pthread_mutex_lock(&g_lock);
+    g_own[i].riding = g_own[i].swimming = 0;  // (nobody's now: off its mount, out of the water)
     if (g_own[i].state == 1) g_own[i].state = 0;  // (not asked yet: forgotten)
     else if (g_own[i].state == 2) g_own[i].state = 5;  // (made, not up yet: kept for later once up)
     else if (g_own[i].state == 3) g_own[i].state = 4;  // (4: up, nobody's)
@@ -1517,6 +1577,9 @@ static void live_poll(void) {
             pthread_mutex_unlock(&g_lock);
         }
         else if (sscanf(l, "pwarp %d", &k) == 1 && k >= 0 && k < NOWN) g_own[k].warp_now = 1;
+        else if (sscanf(l, "seat %d %d %f %f %f %f", &k, &run, &at[0], &at[1], &at[2], &yw) >= 5 && k > 0 && k < 8)
+            k_ride[k].mons = run, k_ride[k].seat_y = at[0], k_ride[k].seat_z = at[1], k_ride[k].turn_x = at[2], k_ride[k].mount_y = yw,
+            LOG("[npc] ride type %d: Pokemon %d seat %g %g turn %g, mount %g\n", k, run, at[0], at[1], at[2], yw);
         else if (sscanf(l, "ride %d %d %d", &k, &run, &used) == 3 && k >= 0 && k < NOWN) g_own[k].ride_type = run, g_own[k].riding = used;  // (research: riding as type t)
         else if (sscanf(l, "poke %d %f %f %f %f", &k, &at[0], &at[1], &at[2], &yw) >= 4) {  // (research: a Pokémon of ours there)
             pthread_mutex_lock(&g_lock);
