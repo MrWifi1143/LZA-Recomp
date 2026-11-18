@@ -5,12 +5,32 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsZA`)
 
+## 2026-11-17: LegendsZA-v1.2.4
+
+Previous release: LegendsZA-v1.2.3. Game version: Pokemon Legends: Z-A 2.0.2. A hotfix: same game code as 1.2.0, so
+nothing is rebuilt on start (the hotfix zip is enough on Windows).
+
 - The crash after some minutes of play ("svcBreak" in the error box) is fixed: the game ran out of its own memory. It
   got a fixed 2.75 GB block, and at 720p on Switch settings it already uses 2.6-2.75 GB walking Lumiose, so a busier
   spot failed a texture load and the game stopped itself. The block is now 3.5 GB (more with higher settings, as
   before). Where the game's memory runs out anyway, the error box now says so. Reported on Discord by a player on a
   laptop with RX Vega 8 graphics, and on a Steam Deck after 3.5 hours of play (the block's free space gets cut into
   pieces over a long session until a load can't find room - not the Deck's sleep, and not a leak).
+- A crash on the render thread as a Link trade's box closed (found in two-player testing): a command list the game
+  recorded once and replays every frame could still name the trade portrait's texture after the game freed it. Such a
+  texture is now left out of the list ("[vk] a command list names a texture finalized since: left out" in the log).
+- At 72 fps (Real Time), a spot that can't hold 72 now steps down to 48 fps instead of straight to 36.
+- Setup checks the game files it reads: each .nsp / .xci's game data is checked against its own checksums and the
+  game's file table against the update, in the same pass (a few seconds more). A damaged or altered base game or update
+  file is named ("dump it again"), a base game the update doesn't fit is refused with what to do, instead of crashing
+  in game later. An install set up before with such files opens the start screen with the message instead of the game.
+  New --prepare exit codes 31-34 for launchers. (Port of the Arceus 1.3.4 check.)
+- A picked romfs.bin that's a symbolic link is linked as its file: a later setup can no longer write through it.
+- NVIDIA crash reports: the game's indirect draws and gathers now ask for the two Vulkan features they use
+  (drawIndirectFirstInstance, shaderImageGatherExtended - undefined behaviour without them); a crash inside the driver
+  while building a shader names the shader and logs its code; the log shows each GPU's driver version; and
+  LARECOMP_VK_DEVLOST_TRACE=1 makes a device-lost crash log the draws the GPU was on. Two crash reports (an RTX 4060 Ti,
+  an RTX 5060 Laptop GPU) are not reproduced yet - these are for the next logs.
 
 ## 2026-11-17: LegendsZA-v1.2.3
 
