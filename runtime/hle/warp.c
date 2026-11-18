@@ -1160,10 +1160,59 @@ static uint64_t g_trade_with;  // (that player)
 static uint64_t g_trade_via;   // (that player as the server knows them - see the world's receive loop)
 static uint32_t g_trade_code;
 static uint64_t g_trade_at;
-static void trade_send(int accept, uint64_t to, uint32_t code) {
+// (an ask or an answer goes out three times: at once, 0.5 s and 1.5 s later - not three copies in the same instant, which a
+// stall or a burst of loss on the way takes together: 2026-11-18, 1 lossy trade in 32 the asker never heard the answer and
+// never started. The Link Code is the trade's id - a copy of one already taken is a repeat. Besides: the asker asks again
+// every 2 s until the trade starts, the answerer answers such a repeat again (it didn't get there), the answerer's word that
+// its room is up (type 9) starts the asker too, and two players who asked each other at once trade on the lower Link Code
+// - its asker joins, the other hosts. Research LARECOMP_TRADE_ASK_OLD=1: three copies at once and none of the rest)
+static int trade_old(void) {
+    static int o = -1;
+    if (o < 0) o = getenv("LARECOMP_TRADE_ASK_OLD") && atoi(getenv("LARECOMP_TRADE_ASK_OLD")) > 0;
+    return o;
+}
+static struct { WorldPkt k; uint64_t due; } g_tq[8];  // (the later copies waiting: trade_send_due, each frame)
+static int g_tqn;
+static uint64_t g_trade_ask_ns;  // (when our ask last went out)
+static void trade_send_one(int accept, uint64_t to, uint32_t code) {
     WorldPkt k = {.type = (uint8_t)(accept ? 4 : 3), .ver = 1, .from = g_self};
     k.t.to = to, k.t.code = code;
-    for (int i = 0; i < 3; i++) world_send(&k, 16 + 12);
+    world_send(&k, 16 + 12);
+    if (!accept) g_trade_ask_ns = world_now_ns();
+}
+static void trade_send(int accept, uint64_t to, uint32_t code) {
+    if (trade_old()) {
+        for (int i = 0; i < 3; i++) trade_send_one(accept, to, code);
+        return;
+    }
+    trade_send_one(accept, to, code);
+    static const unsigned later_ms[2] = {500, 1500};
+    uint64_t now = world_now_ns();
+    for (int i = 0; i < 2; i++) {
+        if (g_tqn == 8) memmove(g_tq, g_tq + 1, 7 * sizeof g_tq[0]), g_tqn = 7;  // (full: the oldest goes)
+        WorldPkt k = {.type = (uint8_t)(accept ? 4 : 3), .ver = 1, .from = g_self};
+        k.t.to = to, k.t.code = code;
+        g_tq[g_tqn].k = k, g_tq[g_tqn++].due = now + later_ms[i] * 1000000ull;
+    }
+}
+static void trade_send_due(uint64_t now, int drop_asks) {  // (drop_asks: we aren't asking any more - its copies stay home)
+    int j = 0;
+    for (int i = 0; i < g_tqn; i++) {
+        if (drop_asks && g_tq[i].k.type == 3) continue;
+        if (g_tq[i].due <= now) world_send(&g_tq[i].k, 16 + 12);
+        else g_tq[j++] = g_tq[i];
+    }
+    g_tqn = j;
+}
+static struct { uint64_t from; uint32_t code; } g_asks_seen[8];  // (asks we had - their repeats aren't new asks)
+static int g_asks_seen_pos;
+static bool ask_seen(uint64_t from, uint32_t code) {
+    for (int i = 0; i < 8; i++) if (g_asks_seen[i].from == from && g_asks_seen[i].code == code) return true;
+    return false;
+}
+static void ask_note(uint64_t from, uint32_t code) {
+    if (ask_seen(from, code)) return;
+    g_asks_seen[g_asks_seen_pos].from = from, g_asks_seen[g_asks_seen_pos].code = code, g_asks_seen_pos = (g_asks_seen_pos + 1) % 8;
 }
 // ---- the link of a walk-up trade. Each game, left alone, looks for a room a few times and then opens one for a few
 // seconds, over and over; two copies going in at once both opened rooms and waited for each other (2026-11-16), and the
@@ -1237,9 +1286,10 @@ static void trade_link_frame(uint64_t frame) {
     if (!g_tl.role) return;
     if (st & 8) g_tl.active = 1, g_tl.inactive_ns = 0;
     else if (g_tl.active && !g_tl.inactive_ns) g_tl.inactive_ns = now;
-    if (g_tl.role == 1) {  // (our room: the other is told when it is up, again every 0.5 s - a lost one - and when it closes)
-        int up = st & 1;
-        if (up != g_tl.up_sent || (up && now - g_tl.up_sent_ns >= 500000000ull)) {
+    if (g_tl.role == 1) {  // (our room: the other is told when it is up, again every 0.5 s - a lost one - and when it closes;
+        int up = st & 1;    //  closed: again every second until linked - it is also our answer, should that be lost)
+        bool again = up ? now - g_tl.up_sent_ns >= 500000000ull : !trade_old() && !g_tl.matched && now - g_tl.up_sent_ns >= 1000000000ull;
+        if (up != g_tl.up_sent || again) {
             trade_link_send((uint8_t)up);
             if (up != g_tl.up_sent) LOG("[world] trade: our room is %s t %llu\n", up ? "up" : "closed", (unsigned long long)(now / 1000000));
             g_tl.up_sent = up, g_tl.up_sent_ns = now;
@@ -1301,7 +1351,19 @@ static void trade_link_frame(uint64_t frame) {
         trade_link_end("not linked in time", true, (st & 8) != 0);
     }
 }
+static void trade_start(uint32_t code, unsigned wait_ms, int role);
 static void trade_link_message(const WorldPkt *k) {  // (type 9)
+    if (!trade_old() && g_trade == 1 && k->from == g_trade_with && k->t.to == g_self && k->t.code == g_trade_code) {
+        if (k->t.state <= 1) {  // (they host our trade - their answer itself didn't get here)
+            LOG("[world] trade: their room's word came, their answer didn't - we join\n");
+            trade_start(k->t.code, 0, 2);
+        } else if (k->t.state == 3) {
+            g_trade = 0;
+            menu_notice_for("The other player couldn't link up or stopped. Try again.", 6000);
+            LOG("[world] trade: they gave up before we heard their answer\n");
+            return;
+        }
+    }
     if (!g_tl.role || k->from != g_tl.with || k->t.to != g_self || k->t.code != g_tl.code) return;
     if (k->t.state <= 1 && g_tl.role == 2) {
         static int was;
@@ -1330,6 +1392,7 @@ static void trade_start(uint32_t code, unsigned wait_ms, int role) {
     g_tl.role = role, g_tl.with = g_trade_with, g_tl.code = code, g_tl.start_ns = world_now_ns();
     ldn_trade_role(role, TRADE_LINK_S + 30 + wait_ms / 1000);
     g_trade = 0;
+    trade_send_due(0, 1);  // (our ask's later copies: not needed now)
 }
 static void trade_message(const WorldPkt *k, uint64_t frame, uint64_t via) {
     if (k->t.to != g_self || k->t.code >= 100000000u) return;  // (a Link Code has 8 digits)
@@ -1337,10 +1400,38 @@ static void trade_message(const WorldPkt *k, uint64_t frame, uint64_t via) {
         if (g_trade == 1 && k->from == g_trade_with && k->t.code == g_trade_code) trade_start(k->t.code, 0, 2);
         return;
     }
+    if (!trade_old()) {
+        if (g_tl.role && k->from == g_tl.with && k->t.code == g_tl.code) {  // (the trade we're in: they ask again - our answer
+            static uint64_t at;                                                //  didn't get there; once a second)
+            uint64_t now = world_now_ns();
+            if (g_tl.role == 1 && now - at >= 1000000000ull) {
+                at = now;
+                trade_send_one(1, k->from, k->t.code);
+                LOG("[world] trade: they asked again - our answer again\n");
+            }
+            return;
+        }
+        if (g_trade == 1 && k->from == g_trade_with && k->t.code != g_trade_code) {  // (we asked each other at once: the
+            ask_note(k->from, k->t.code);                                            //  lower Link Code - its asker joins)
+            if (k->t.code < g_trade_code) {
+                LOG("[world] trade: we asked each other - theirs (code %08u) stands, we answer it\n", k->t.code);
+                g_trade_code = k->t.code, g_trade_via = via;
+                trade_send(1, g_trade_with, g_trade_code);
+                trade_start(g_trade_code, 0, 1);
+            } else if (g_tqn == 0) {
+                LOG("[world] trade: we asked each other - ours (code %08u) stands, asked again\n", g_trade_code);
+                trade_send(0, g_trade_with, g_trade_code);
+            }
+            return;
+        }
+        if (g_trade == 2 && k->from == g_trade_with && k->t.code == g_trade_code) return;  // (a repeat)
+        if (ask_seen(k->from, k->t.code)) return;  // (an ask we had and moved on from: a repeat, not a new ask)
+    }
     if (g_trade == 2 && k->from == g_trade_with && k->t.code == g_trade_code) return;  // (a repeat)
     if (g_trade == 2 && frame - g_trade_at < 600) return;  // (a newer ask within 10 s: the first one stands - no notice spam)
     if (g_trade == 1 && k->from == g_trade_with && k->t.code > g_trade_code) return;  // (both asked at once: the lower code)
     g_trade = 2, g_trade_with = k->from, g_trade_via = via, g_trade_code = k->t.code, g_trade_at = frame;
+    ask_note(k->from, k->t.code);
     menu_notice_for("Another player wants to trade! Walk up to them and press A.", 8000);
     LOG("[world] trade asked by %016llx (code %08u)\n", (unsigned long long)k->from, k->t.code);
 }
@@ -1373,6 +1464,10 @@ static void trade_frame(uint64_t me, uint64_t frame) {
         if (g_trade == 1) menu_notice_for("No answer to the trade request.", 4000);
         g_trade = 0;
     }
+    uint64_t now = world_now_ns();
+    trade_send_due(now, g_trade != 1);
+    if (g_trade == 1 && !trade_old() && now - g_trade_ask_ns >= 2000000000ull) trade_send_one(0, g_trade_with, g_trade_code);  // (again
+    // every 2 s until they answer: a lost ask, or their answer lost - see trade_send)
     bool theirs = by && g_trade && by->id == g_trade_with;
     static uint64_t hint_at;  // (by a stand-in: what A does there, in the corner while by)
     if (by && !busy && frame - hint_at >= 30) {
