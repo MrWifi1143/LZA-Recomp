@@ -117,15 +117,18 @@ typedef struct {
     int shrink;         // (a let-go person's walk-off orders refused so far: each retry half as far)
     uint64_t asked;     // (frame asked)
     uint64_t outfit[12];  // (their dress-up items; none heard: the senior's look)
-    int has_outfit, dressed, redress;
+    int has_outfit;
+    int dressed;        // (1 made with the player's body - its entity not ready yet, 2 its entity seen (dressed when comp))
+    int redress;        // (their changed items to put on)
     int modeled;        // (its model made: the NPC model job came for it - dressed or not)
     uint64_t worn[12];  // (the items put on it so far)
     uint64_t comp;      // (its dress-up component, once dressed)
-    uint64_t ent;       // (its scene object (vtable 0x700417dc80): the dress-up goes on it)
-    uint64_t ctx;       // (its model's context, from the model job)
-    uint64_t modeled_frame;
-    int dress_steps, seen_taken;
-    uint64_t model;     // (its model handle, from the maker)  // (dressed in the camera update a few frames after its model was made)
+    uint64_t owner;     // (its entity's owner: the dress-up and its own components are on it)
+    uint64_t alloc;     // (the allocator its model was made with)
+    uint64_t model;     // (its model, from the maker: its entity's +0x90)
+    int settled;        // (its dress-up seen settled - logged once)
+    uint64_t chr;       // (its NPC character: the model job's, the entity callback's x0)
+    int lod_set;
 } Own;
 static Own g_own[NOWN];
 static volatile uint64_t g_frame;
@@ -260,45 +263,52 @@ static void nav_match(void) {
     pthread_mutex_unlock(&g_lock);
 }
 
-// ---- the other player's own look (their clothes, hair, eyes - the dress-up), worn by ours
-// How the game dresses its player (Lua-traced 2026-11-18): the field player's model is made from a desc (0x700125eb8c:
-// the shared body bin/chara/data/pc/p2/model/base/p2_base0001_00_default.trmdl, the player's motion pc0002_00.tracn,
-// its locators) by the model-object maker 0x700142b4a4(out, ctx, x2, desc) - the same maker the NPC model job
-// 0x7001ae417c calls with the character's desc (lr 0x7001ae48bc). Then its dress-up component is made by
-// 0x7001253354(model object, ctx, params 0x68 B: three resource handles at +0/+0x10/+0x40, +0x50 the save's dress
-// slot 11, +0x58 the body (0 p1, 1 p2)) and each worn item loaded onto it by 0x7001a2b778(component, &{u64 item hash,
-// ..}, 0) - the item = FNV-1a of its dress-up table name ("p1_hrs0001_00_default_black", bin/chara/table/
-// dressup_table_p1.bin / _p2.bin); only the hash is read. The save keeps the 12 worn items as hashes at +0x68 of its
-// dress-up data (the empty hash = none). The cutscene player (0x700142c940) does the same.
-// Each player sends their 12 items (hle/pla_world.c 'O1'); ours keep the outfit of whom they stand for.
-// UNFINISHED (research LARECOMP_NPC_DRESS=1, off): when the NPC model job makes one of ours that has an outfit (its
-// desc's model = a senior's), the desc is swapped for the player's and, once its scene object has a model, a dress-up
-// component is put on it and the items loaded (its update - vfunc 17 0x7001a26068, state +0x27b8, 1 = settled - run
-// from the camera update). Found 2026-11-18: (1) the player's desc on an NPC gives an invisible person that walks (the
-// shared body has no meshes; the parts never come); (2) the component's state 0 needs a model component (vtable
-// 0x70040d4ac0, looked up by 0x7000a12644(owner+0xf0)) on its owner - the scene object at the person's spot
-// (vtable 0x700417dc80, translation +0xa0) never gets one, and no new scene object with one shows up for ours; (3) the
-// player's params handles shared with ours turned the player's own face and hair white (they're written to). Next:
-// the cutscene player (0x700142c0b4 / 0x700142c940: desc 0x700125efcc, maker, then the component) makes a dressed
-// player-like person from scratch - follow how its owner gets that model component.
-// Without an outfit (or with this off) ours are the senior of their body: the default player look.
+// ---- the other player's own look (their clothes, hair, eyes, skin - the dress-up), worn by ours
+// How the game dresses a player-like person (Lua-traced + read 2026-11-18; the field player 0x7001c682f0/0x7001c862fc/
+// 0x7001c56008 and the cutscene player 0x700142c0b4/0x700142ea9c/0x700142c940 do the same):
+// (1) its model is made from the player desc 0x700125eb8c(alloc, body) (the shared body bin/chara/data/pc/p<n>/model/
+//     base/p<n>_base0001_00_default.trmdl - no meshes of its own - the player's motion and locators) by the model maker
+//     0x700142b4a4(out, alloc, x2, desc); 0x7001252900(world, 0, &model, callbacks, 0) then makes an entity for it
+//     (entity +0x90 the model, +0x68 its owner - a scene object, vtable 0x700417dc80 - +0xb0 the dress-up context) and
+//     calls back once it is set up (the owner then has its model component, vtable 0x70040d4ac0). An NPC goes the same
+//     way: its model job 0x7001ae417c (vfunc +0x138 of the NPC character) calls the maker, 0x70018fd3dc makes the
+//     entity, and its callback 0x70018fd9ec(character, &entity) runs when it is ready.
+// (2) in the callback three components are made on the owner - 0x700125be64(owner, alloc) (vtable 0x7004145c70),
+//     0x700125c050(owner, alloc), 0x700142f590(owner, alloc) - and the first two linked to the entity's resources
+//     (entity +0x70 / +0x78 handles -> 0x70007802f0 -> 0x70009b3c84 / 0x70009a03f0 -> comp+0x1f0 setters, vfunc +0xf0,
+//     then 0x700125c614 / 0x700125cd08 on comp+0x200). They are the person's own (face, eye, skin materials: written to -
+//     sharing the player's turned the player's face white).
+// (3) the dress-up component 0x7001253354(owner, context, params 0x68: +0 / +0x10 / +0x40 handles taken from those three
+//     components, +0x50 worn item 11, +0x58 the body (0 p1, 1 p2)) and each worn item put on by 0x7001a2b778(component,
+//     &{u64 item, ..}, 0) - the item = FNV-1a of its name in bin/chara/table/dressup_table_p1.bin / _p2.bin (e.g.
+//     "p1_hrs0001_00_default_black"); the save keeps the 12 worn items at +0x68 of its dress-up data (none = the empty
+//     hash). The owner updates the component itself (its state +0x27b8: 1 = settled).
+// (4) its parts are drawn only while their LOD controller has a LOD (lod_show below).
+// Ours (research LARECOMP_NPC_DRESS=1, off): an NPC whose player has sent an outfit ('O1', hle/pla_world.c) has its
+// model job's desc swapped for the player desc (create_hook), and in its entity callback (entity_hook) gets (2) and (3)
+// with that outfit; (4) is put right in the camera update. Verified 2026-11-18 (self test, testout/pla-mp5 e35/e37):
+// the person stands there wearing the outfit, the real player untouched. NOT DONE: it isn't animated - the NPC's
+// animation runs the desc's control net (pc0002_00.tracn: the player's state machine, driven by the player's parameters
+// move_front/move_left/..., where an NPC's (tr*_base.tracn) take move_speed), the skeleton stays in its bind pose and,
+// without root motion, its navigator never walks it. The senior's net on the player skeleton crashes (std::out_of_range:
+// its IK/spring bones index another skeleton). Without an outfit (or with this off) ours are the senior of their body
+// (the default player look), which walks.
+// A changed outfit is put on item by item; one with an item taken off (the game has no call for that) or another item 11
+// (it's in the params) is made again from scratch (pla_npc_outfit answers 1: hle/pla_world.c lets the person go).
 #define CREATE_MODEL 0x700142b4a4ull
 #define NPC_MODEL_LR 0x7001ae48bcull
 #define PLAYER_DESC 0x700125eb8cull
+#define NPC_ENTITY_CB 0x70018fd9ecull
 #define DRESS_MAKE 0x7001253354ull
-#define DRESS_UPDATE 0x7001a26068ull
-#define MODEL_OBJ_VTABLE 0x700417dc80ull  // (the object a model handle stands for: what components are put on)
 #define DRESS_MAKE_PLAYER_LR 0x7001c5a284ull
 #define SAVE_DRESS_SLOT 0x700101b7c0ull  // (x0 the save's dress-up data, w1 a slot: the field player asks for 11)
 #define SAVE_DRESS_SLOT_LR 0x7001c5a268ull
 #define EMPTY_HASH 0xcbf29ce484222645ull
-static uint8_t g_pparams[0x68];
-static volatile int g_have_pparams;
+#define MODEL_OBJ_VTABLE 0x700417dc80ull  // (an entity's owner: the scene object components are put on)
 static volatile uint64_t g_player_comp, g_save_dress;
 
 static int dressmake_hook(Cpu *c, uint64_t addr) {
-    if (c->x[30] != DRESS_MAKE_PLAYER_LR || !guest_ptr(c->x[2])) return 0;
-    memcpy(g_pparams, (const void *)(uintptr_t)c->x[2], sizeof g_pparams), g_have_pparams = 1;
+    if (c->x[30] != DRESS_MAKE_PLAYER_LR) return 0;
     rt_call_original(c, addr);
     g_player_comp = c->x[0];
     LOG("[npc] the player's dress-up component %llx\n", (unsigned long long)c->x[0]);
@@ -444,17 +454,35 @@ static int dress_next(void) {
     return best;
 }
 
-static int g_dress = -1;  // (research LARECOMP_NPC_DRESS=1: ours dressed as the player - unfinished, see below)
+// the NPC model job (vfunc +0x138 of an NPC character: x0 the character) - its character noted for the maker's call
+#define NPC_MODEL_JOB 0x7001ae417cull
+static __thread uint64_t t_job_chr;
+static int job_hook(Cpu *c, uint64_t addr) {
+    uint64_t prev = t_job_chr;
+    t_job_chr = c->x[0];
+    rt_call_original(c, addr);
+    t_job_chr = prev;
+    return 1;
+}
+
+// the field player's model maker call (lr 0x7001c68634): its x1 (the loader its files are found with) kept
+#define PLAYER_MAKER_LR 0x7001c68634ull
+static volatile uint64_t g_player_loader;
+
+static int g_dress = -1;  // (research LARECOMP_NPC_DRESS=1: ours wear their player's outfit - drawn, not animated yet)
 static int create_hook(Cpu *c, uint64_t addr) {
-    if (c->x[30] != NPC_MODEL_LR || !g_dress || !g_have_pparams) return 0;
+    if (c->x[30] == PLAYER_MAKER_LR) {
+        if (g_player_loader != c->x[1]) LOG("[npc] the player's model loader %llx (desc %llx)\n", (unsigned long long)c->x[1], (unsigned long long)c->x[3]);
+        g_player_loader = c->x[1];
+        return 0;
+    }
+    if (c->x[30] != NPC_MODEL_LR || g_dress <= 0) return 0;
     uint64_t d = c->x[3];
     if (!guest_ptr(d)) return 0;
     uint64_t v0 = *(const uint64_t *)(uintptr_t)d, v1 = *(const uint64_t *)(uintptr_t)(d + 8);
     if (!guest_ptr(v0) || v1 <= v0) return 0;
     uint64_t sp = *(const uint64_t *)(uintptr_t)(v0 + 0x10);
     const char *path = guest_ptr(sp) ? (const char *)(uintptr_t)sp : "";
-    static int nlog;
-    if (nlog < 60 && getenv("LARECOMP_NPC_DRESSLOG")) nlog++, LOG("[npc] model job: %s\n", path);
     if (!strstr(path, "tr0036_00_senpai_m.trmdl") && !strstr(path, "tr0037_00_senpai_f.trmdl")) return 0;
     pthread_mutex_lock(&g_lock);
     int k = dress_next();
@@ -463,81 +491,127 @@ static int create_hook(Cpu *c, uint64_t addr) {
     if (o) gender = o->gender, o->dressed = 1, o->modeled = 1;
     pthread_mutex_unlock(&g_lock);
     if (!o) return 0;
-    uint64_t ctx = c->x[1];
-    uint8_t *desc = hle_alloc(0x200);  // (the player's desc: the shared body, the player's motion and locators)
-    gcall(c, PLAYER_DESC, ctx, (uint64_t)gender, 0, (uint64_t)(uintptr_t)desc);
-    static int keepmo = -1;  // (research LARECOMP_NPC_DRESSMO=1: the senior's motion kept - the player's swapped out)
-    if (keepmo < 0) keepmo = getenv("LARECOMP_NPC_DRESSMO") ? atoi(getenv("LARECOMP_NPC_DRESSMO")) : 0;
-    if (keepmo) {
-        uint8_t t[0x38];
-        memcpy(t, desc + 0x38, 0x38), memcpy(desc + 0x38, (const void *)(uintptr_t)(d + 0x38), 0x38), memcpy((void *)(uintptr_t)(d + 0x38), t, 0x38);
-    }
-    c->x[3] = (uint64_t)(uintptr_t)desc;
+    uint64_t alloc = c->x[1];
+    static int ldr = -1;  // (research LARECOMP_NPC_DRESSLDR=1: made with the player's loader)
+    if (ldr < 0) ldr = getenv("LARECOMP_NPC_DRESSLDR") && atoi(getenv("LARECOMP_NPC_DRESSLDR"));
+    if (ldr && g_player_loader) alloc = g_player_loader, c->x[1] = alloc;
+    static __thread uint8_t *desc;  // (the player desc: the shared body, the player's motion and locators)
+    if (!desc) desc = hle_alloc(0x200);
+    memset(desc, 0, 0x200);
+    gcall(c, PLAYER_DESC, alloc, (uint64_t)gender, 0, (uint64_t)(uintptr_t)desc);
+    static int keep = -1;  // (research LARECOMP_NPC_DRESSKEEP=1: the senior's own model kept, dressed over)
+    if (keep < 0) keep = getenv("LARECOMP_NPC_DRESSKEEP") && atoi(getenv("LARECOMP_NPC_DRESSKEEP"));
+    if (!keep) c->x[3] = (uint64_t)(uintptr_t)desc;
     rt_call_original(c, addr);
     pthread_mutex_lock(&g_lock);
-    o->ctx = ctx, o->modeled_frame = g_frame, o->model = c->x[0];
+    o->alloc = alloc, o->model = c->x[0], o->chr = t_job_chr;
     pthread_mutex_unlock(&g_lock);
-    LOG("[npc] mpplayer_%d made as a player: model %llx (%s body)\n", o->k, (unsigned long long)c->x[0], gender ? "p2" : "p1");
+    LOG("[npc] mpplayer_%d made with the player's body: model %llx (%s)\n", o->k, (unsigned long long)c->x[0], gender ? "p2" : "p1");
     return 1;
 }
 
-// its dress-up component on its game object, their items loaded onto it (the camera update: the game's thread)
-// the dress-up's first update looks up its owner's model component (0x7000a12644(owner+0xf0, &ref): vtable
-// 0x70040d4ac0) - our person's scene object gets it a while after its model is made (once loaded): asked until then
-#define FIND_MODEL_COMP 0x7000a12644ull
-static bool has_model_comp(Cpu *c, uint64_t ent) {
-    static uint64_t *ref;
-    if (!ref) ref = hle_alloc(0x20);
-    ref[0] = ref[1] = 0;
-    return in_heap(gcall(c, FIND_MODEL_COMP, ent + 0xf0, (uint64_t)(uintptr_t)ref, 0, 0));
-}
-
-// the scene objects of a context with a model component: our person's is the one new since its model was asked for
-#define NSEEN 256
-static int with_model(Cpu *c, uint64_t ctx, uint64_t *out, int max) {
-    extern uint64_t kernel_heap_size(void), g_stdheap_used;
-    uint64_t top = g_stdheap_used ? STDHEAP_BASE + g_stdheap_used : 0, heap = HEAP_BASE + kernel_heap_size();
-    uint64_t hi = top > heap ? top : heap;
-    int n = 0;
-    for (const uint64_t *q = (const uint64_t *)(uintptr_t)HEAP_BASE, *e = (const uint64_t *)(uintptr_t)(hi - 0x400); q < e && n < max; q += 2)
-        if (*q == MODEL_OBJ_VTABLE && q[1] == ctx && q[2] == (uint64_t)(uintptr_t)q && has_model_comp(c, (uint64_t)(uintptr_t)q)) out[n++] = (uint64_t)(uintptr_t)q;
-    return n;
-}
-static uint64_t g_seen[NSEEN];
-static int g_nseen;
-
-static void dress_up(Cpu *c, Own *o) {
-    uint64_t obj = o->ent;
-    if (!in_heap(obj) || *(const uint64_t *)(uintptr_t)obj != MODEL_OBJ_VTABLE) {
-        LOG("[npc] mpplayer_%d: its game object %llx is gone (vtable %llx) - not dressed\n", o->k, (unsigned long long)obj,
-            (unsigned long long)(in_heap(obj) ? *(const uint64_t *)(uintptr_t)obj : 0));
+// (2) + (3) on our person's owner, in its entity callback (the game's own order: the components are made there)
+static void dress_owner(Cpu *c, Own *o, uint64_t ent) {
+    static __thread uint64_t *t;  // (scratch: result slots, smart pointers; the game keeps its own references)
+    if (!t) t = hle_alloc(0x400);
+    memset(t, 0, 0x400);
+    uint64_t owner = *(const uint64_t *)(uintptr_t)(ent + 0x68), dctx = *(const uint64_t *)(uintptr_t)(ent + 0xb0), al = o->alloc;
+    if (!in_heap(owner) || *(const uint64_t *)(uintptr_t)owner != MODEL_OBJ_VTABLE) {
+        LOG("[npc] mpplayer_%d: its entity %llx has no owner (%llx) - not dressed\n", o->k, (unsigned long long)ent, (unsigned long long)owner);
         return;
     }
-    uint8_t *pr = hle_alloc(0x70);
-    static int share = -1;  // (research LARECOMP_NPC_DRESSSHARE=1: the player's resource handles shared)
-    if (share < 0) share = getenv("LARECOMP_NPC_DRESSSHARE") && atoi(getenv("LARECOMP_NPC_DRESSSHARE"));
-    if (share) memcpy(pr, g_pparams, 0x68);
-    else memcpy(pr + 0x50, g_pparams + 0x50, 0x18);
-    static const int hoff[3] = {0, 0x10, 0x40};
-    for (int j = 0; j < 3 && share; j++) {  // (the resource handles: one more reference each, ours lets go of them)
-        uint64_t h;
-        memcpy(&h, pr + hoff[j], 8);
-        if (in_heap(h)) __atomic_fetch_add((uint32_t *)(uintptr_t)(h + 8), 1, __ATOMIC_SEQ_CST);
+#define T(i) ((uint64_t)(uintptr_t)&t[(i) * 2])
+    uint64_t h0 = gcall(c, 0x700125be64ull, owner, al, 0, 0);
+    if (in_heap(h0)) {
+        gcall(c, 0x7000a17fa0ull, ent, 0, 0, T(0));  // (the entity's +0x70 resource)
+        if (in_heap(t[0])) {
+            gcall(c, 0x70007802f0ull, T(1), t[0] + 0x58, 0, 0);
+            gcall(c, 0x70009b3c84ull, T(2), T(1), 0, 0);
+            gcall(c, 0x7000a1b5bcull, h0 + 0x1f0, T(2), 0, 0);
+        }
+        gcall(c, *(const uint64_t *)(uintptr_t)(*(const uint64_t *)(uintptr_t)h0 + 0xf0), h0, 0, 0, 0);
+        gcall(c, 0x70009ae1c0ull, h0, 0, 0, T(3));
+        gcall(c, 0x700125c614ull, *(const uint64_t *)(uintptr_t)(h0 + 0x200), T(3), 0, 0);
     }
+    uint64_t h1 = gcall(c, 0x700125c050ull, owner, al, 0, 0);
+    if (in_heap(h1)) {
+        gcall(c, 0x7000a18014ull, ent, 0, 0, T(4));  // (the entity's +0x78 resource)
+        if (in_heap(t[8])) {
+            gcall(c, 0x70007802f0ull, T(5), t[8] + 0x58, 0, 0);
+            gcall(c, 0x70009a03f0ull, T(6), T(5), 0, 0);
+            gcall(c, 0x70009eaa8cull, h1 + 0x1f0, T(6), 0, 0);
+        }
+        gcall(c, *(const uint64_t *)(uintptr_t)(*(const uint64_t *)(uintptr_t)h1 + 0xf0), h1, 0, 0, 0);
+        gcall(c, 0x700099ecd4ull, h1, 0, 0, T(7));
+        gcall(c, 0x700125cd08ull, *(const uint64_t *)(uintptr_t)(h1 + 0x200), T(7), 0, 0);
+    }
+    uint64_t h2 = gcall(c, 0x700142f590ull, owner, al, 0, 0);
+    if (in_heap(h2)) {
+        gcall(c, 0x7000a18098ull, ent, 0, 0, T(11));  // (the entity's third resource: a provider asked through its vfunc +0x10)
+        if (in_heap(t[22])) {
+            gcall(c, *(const uint64_t *)(uintptr_t)(*(const uint64_t *)(uintptr_t)t[22] + 0x10), t[22], 0, 0, T(12));
+            gcall(c, 0x70014300dcull, T(13), T(12), 0, 0);
+            gcall(c, 0x700142fad0ull, h2 + 0x1f0, T(13), 0, 0);
+        }
+        gcall(c, *(const uint64_t *)(uintptr_t)(*(const uint64_t *)(uintptr_t)h2 + 0xf0), h2, 0, 0, 0);
+        gcall(c, 0x700142d920ull, h2, 0, 0, T(14));
+        gcall(c, 0x700142f8a0ull, *(const uint64_t *)(uintptr_t)(h2 + 0x200), T(14), 0, 0);
+    }
+    uint8_t *pr = (uint8_t *)&t[0x40];  // (the params, 0x68 B)
+    if (in_heap(h0)) gcall(c, 0x70009ae1c0ull, h0, 0, 0, T(8)), gcall(c, 0x70009b196cull, (uint64_t)(uintptr_t)pr, T(8), 0, 0);
+    if (in_heap(h1)) gcall(c, 0x700099ecd4ull, h1, 0, 0, T(9)), gcall(c, 0x70009b166cull, (uint64_t)(uintptr_t)(pr + 0x10), T(9), 0, 0);
+    if (in_heap(h2)) gcall(c, 0x700142d920ull, h2, 0, 0, T(15)), gcall(c, 0x700142def0ull, (uint64_t)(uintptr_t)(pr + 0x40), T(15), 0, 0);
+#undef T
     memcpy(pr + 0x50, &o->outfit[11], 8);
     pr[0x58] = (uint8_t)o->gender;
-    uint64_t comp = gcall(c, DRESS_MAKE, obj, o->ctx, (uint64_t)(uintptr_t)pr, 0);
-    o->comp = in_heap(comp) ? comp : 0;
+    uint64_t comp = gcall(c, DRESS_MAKE, owner, dctx, (uint64_t)(uintptr_t)pr, 0);
+    o->comp = in_heap(comp) ? comp : 0, o->owner = owner;
     int n = 0;
-    for (int i = 0; i < 12 && o->comp; i++) {
+    for (int i = 0; i < 11 && o->comp; i++) {  // (as the game: items 0-10 put on; item 11 goes in the params)
         if (!o->outfit[i] || o->outfit[i] == EMPTY_HASH) continue;
-        uint64_t *it = hle_alloc(0x20);
-        it[0] = o->outfit[i];
-        gcall(c, MODEL_BUILD, comp, (uint64_t)(uintptr_t)it, 0, 0);
+        t[0x60] = o->outfit[i];
+        gcall(c, MODEL_BUILD, comp, (uint64_t)(uintptr_t)&t[0x60], 0, 0);
         n++;
     }
     memcpy(o->worn, o->outfit, sizeof o->worn);
-    LOG("[npc] mpplayer_%d: dress-up component %llx on its game object, %d items\n", o->k, (unsigned long long)comp, n);
+    LOG("[npc] mpplayer_%d dressed: owner %llx, components %llx %llx %llx, dress-up %llx, %d items\n", o->k, (unsigned long long)owner,
+        (unsigned long long)h0, (unsigned long long)h1, (unsigned long long)h2, (unsigned long long)comp, n);
+}
+
+static int entity_hook(Cpu *c, uint64_t addr) {
+    // (ours: x0 the character whose model job (job_hook) made it with the player's body)
+    uint64_t ent = guest_ptr(c->x[1]) ? *(const uint64_t *)(uintptr_t)c->x[1] : 0;
+    Own *o = NULL;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < NOWN && !o && in_heap(ent); i++)
+        if (g_own[i].dressed == 1 && !g_own[i].comp && g_own[i].chr == c->x[0]) o = &g_own[i];
+    if (o) o->dressed = 2;
+    pthread_mutex_unlock(&g_lock);
+    if (!o) return 0;
+    rt_call_original(c, addr);  // (the person's own setup first: then its owner is ready)
+    dress_owner(c, o, ent);
+    return 1;
+}
+
+// Its parts drawn: each mesh component (vtable 0x70041801a0) of a model is drawn only while its LOD controller
+// ([comp+0x1f0]: +0x180 on, +0x174 the LOD shown, +0x178 the mask of LODs the model has) has its LOD (comp+0x208) in the
+// mask (the update 0x7002997c94 sets each instance's +0x22a from it). The mask comes from the model's own meshes - the
+// shared player body has none, so ours stayed 0 and nothing was drawn (the field player's is 1). LOD 0 is put in.
+static void lod_show(Own *o) {
+    const uint64_t *b = (const uint64_t *)(uintptr_t)*(const uint64_t *)(uintptr_t)(o->owner + 0xf0 + 0xe8);
+    const uint64_t *e = (const uint64_t *)(uintptr_t)*(const uint64_t *)(uintptr_t)(o->owner + 0xf0 + 0xf0);
+    if (!in_heap((uint64_t)(uintptr_t)b) || e < b || e - b > 256) return;
+    for (const uint64_t *q = b; q < e; q++) {
+        uint64_t cp = *q - 0x48;
+        if (!in_heap(cp) || *(const uint64_t *)(uintptr_t)cp != 0x70041801a0ull) continue;
+        uint64_t l = *(const uint64_t *)(uintptr_t)(cp + 0x1f0);
+        if (!in_heap(l)) continue;
+        uint64_t *mask = (uint64_t *)(uintptr_t)(l + 0x178);
+        if (!*mask) {
+            *mask = 1;
+            if (!o->lod_set) o->lod_set = 1, LOG("[npc] mpplayer_%d: its LOD controller %llx had no LOD - LOD 0 shown\n", o->k, (unsigned long long)l);
+        }
+    }
 }
 
 // orders need a vec3 in guest memory: one per person, written just before the call
@@ -549,29 +623,6 @@ void pla_npc_cam(Cpu *c) {  // (the camera update, the game's thread: hle/warp.c
     for (int i = 0; i < NOWN; i++) {
         Own *o = &g_own[i];
         if (o->state == 1 && !made) { make_one(c, o), made = 1; continue; }  // (one a frame)
-        if (o->modeled_frame && !o->comp && o->dressed == 1 && o->nav && (g_frame - o->modeled_frame) % 15 == 2 && o->state != 6) {
-            // (its scene object - where its navigator has it - once it has its model: then dressed; given up after 20 s)
-            uint64_t now[NSEEN], fresh = 0;
-            int n = with_model(c, o->ctx, now, NSEEN), nf = 0;
-            if (!o->seen_taken) memcpy(g_seen, now, n * 8), g_nseen = n, o->seen_taken = 1;  // (those there before)
-            else
-                for (int a = 0; a < n; a++) {
-                    bool old = false;
-                    for (int b = 0; b < g_nseen && !old; b++) old = g_seen[b] == now[a];
-                    if (!old) fresh = now[a], nf++;
-                }
-            if (nf) {
-                LOG("[npc] mpplayer_%d: %d scene objects with a model, %d new: %llx\n", o->k, n, nf, (unsigned long long)fresh);
-                const float *t = (const float *)(uintptr_t)(fresh + 0x40);
-                LOG("[npc]   at %.2f %.2f %.2f (+0xa0), its navigator at %.2f %.2f\n", t[24], t[25], t[26], ((const float *)(uintptr_t)(o->nav + 0x3e0))[0], ((const float *)(uintptr_t)(o->nav + 0x3e0))[2]);
-                o->ent = fresh, o->dressed = 2;
-                if (!getenv("LARECOMP_NPC_DRESSDRY")) dress_up(c, o);
-            }
-            else if (g_frame - o->modeled_frame > 600) {
-                LOG("[npc] mpplayer_%d: its scene object %llx has no model 20 s on - not dressed\n", o->k, (unsigned long long)o->ent);
-                o->dressed = 2;
-            }
-        }
         if ((o->state == 2 || o->state == 5) && g_frame - o->made_frame > 900) {  // (the game makes people far from us slowly)
             // (given up - but the game may still make it later: then it is kept as a free one, not left standing
             // where nobody is; a level change lets it go for good)
@@ -579,23 +630,18 @@ void pla_npc_cam(Cpu *c) {  // (the camera update, the game's thread: hle/warp.c
             o->state = 6;
             continue;
         }
-        if (o->comp && o->state >= 3 && o->state <= 4 && in_heap(o->comp)) {
-            // (its loads: the component's update (vfunc 17, 0x7001a26068 - a state machine over +0x27b8, 1 = idle with
-            // nothing to load) isn't run by the game for a component put on afterwards: run here until it settles)
+        if (o->comp && in_heap(o->owner) && *(const uint64_t *)(uintptr_t)o->owner == MODEL_OBJ_VTABLE && g_frame % 10 == 0) lod_show(o);
+        if (o->comp && o->settled < 2 && in_heap(o->comp) && g_frame % 15 == 0) {  // (log: its items loaded and worn)
             uint32_t st = *(const uint32_t *)(uintptr_t)(o->comp + 0x27b8);
-            uint64_t q0 = *(const uint64_t *)(uintptr_t)(o->comp + 0x27c0), q1 = *(const uint64_t *)(uintptr_t)(o->comp + 0x27c8);
-            if (st != 1 || q0 != q1) {
-                gcall(c, DRESS_UPDATE, o->comp, 0, 0, 0);
-                if (++o->dress_steps == 1 || *(const uint32_t *)(uintptr_t)(o->comp + 0x27b8) == 1)
-                    LOG("[npc] mpplayer_%d's dress-up: state %u (%d updates)\n", o->k, *(const uint32_t *)(uintptr_t)(o->comp + 0x27b8), o->dress_steps);
-            }
+            if ((st == 1) != o->settled) o->settled = st == 1 ? 2 : 0, LOG("[npc] mpplayer_%d's dress-up: state %u\n", o->k, st);
         }
         if ((o->state == 3 || o->state == 4) && o->redress && in_heap(o->comp)) {  // (their changed items put on)
             o->redress = 0;
             int n = 0;
-            for (int j = 0; j < 12; j++) {
+            for (int j = 0; j < 11; j++) {
                 if (!o->outfit[j] || o->outfit[j] == EMPTY_HASH || o->outfit[j] == o->worn[j]) continue;
-                uint64_t *it = hle_alloc(0x20);
+                static uint64_t *it;
+                if (!it) it = hle_alloc(0x20);
                 it[0] = o->outfit[j], o->worn[j] = o->outfit[j], n++;
                 gcall(c, MODEL_BUILD, o->comp, (uint64_t)(uintptr_t)it, 0, 0);
             }
@@ -680,6 +726,13 @@ void pla_npc_free(int i) {  // (it walks off where it was sent last: the caller 
     else if (g_own[i].state == 3) g_own[i].state = 4;  // (4: up, nobody's)
     pthread_mutex_unlock(&g_lock);
 }
+// a dressed person can change into this outfit item by item (0: it has to be made again - an item taken off, which the
+// game has no call for, or item 11, which is in the dress-up's params)
+static bool needs_remake(const uint64_t *worn, const uint64_t *outfit) {
+    for (int j = 0; j < 12; j++)
+        if (worn[j] && worn[j] != EMPTY_HASH && (!outfit[j] || outfit[j] == EMPTY_HASH)) return true;
+    return worn[11] != outfit[11];
+}
 int pla_npc_take(int gender, const uint64_t *outfit) {  // (a free one of that look already up, or -1: the same
     // outfit first, else one dressed the same way (worn by a player / the senior) - re-dressed with theirs)
     pthread_mutex_lock(&g_lock);
@@ -689,6 +742,7 @@ int pla_npc_take(int gender, const uint64_t *outfit) {  // (a free one of that l
             Own *o = &g_own[i];
             if (o->state != 4 || o->gender != gender || (o->dressed != 0) != want) continue;
             if (pass == 0 && want && memcmp(o->outfit, outfit, sizeof o->outfit)) continue;
+            if (want && o->comp && needs_remake(o->worn, outfit)) continue;
             o->state = 3, r = i;
             if (want && memcmp(o->outfit, outfit, sizeof o->outfit)) memcpy(o->outfit, outfit, sizeof o->outfit), o->redress = 1;
             if (o->nav && *(const uint64_t *)(uintptr_t)o->nav == NAV_VTABLE)  // (where it stands now: its skeleton is looked for there)
@@ -706,7 +760,8 @@ int pla_npc_outfit(int i, const uint64_t *outfit) {
     int r = 0;
     if (o->state == 1 || ((o->state == 2 || o->state == 5) && !o->modeled) || (o->dressed && !o->comp)) memcpy(o->outfit, outfit, sizeof o->outfit), o->has_outfit = 1;
     else if (o->comp) {
-        if (memcmp(o->outfit, outfit, sizeof o->outfit)) memcpy(o->outfit, outfit, sizeof o->outfit), o->redress = 1;
+        if (needs_remake(o->worn, outfit)) r = 1;
+        else if (memcmp(o->outfit, outfit, sizeof o->outfit)) memcpy(o->outfit, outfit, sizeof o->outfit), o->redress = 1;
     } else if (o->state == 3 || o->state == 4) r = 1;
     pthread_mutex_unlock(&g_lock);
     return r;
@@ -734,7 +789,17 @@ static void live_poll(void) {
         float at[3];
         char g = 0;
         int k = 0, run = 0;
-        if (sscanf(l, "make %f %f %f %c", &at[0], &at[1], &at[2], &g) >= 3) pla_npc_new(at, g == 'f', NULL);
+        char o = 0;
+        uint64_t mine[12];
+        int used = 0;
+        if (sscanf(l, "make %f %f %f %c %c%n", &at[0], &at[1], &at[2], &g, &o, &used) >= 3) {  // ("o": our outfit; then <slot>=<item name>...)
+            bool fit = o == 'o' && pla_npc_my_outfit(mine);
+            char item[96];
+            int slot = 0, n = 0;
+            for (const char *q = used ? l + used : ""; fit && sscanf(q, " %d=%95s%n", &slot, item, &n) == 2; q += n)
+                if (slot >= 0 && slot < 12) mine[slot] = fnv(item);
+            pla_npc_new(at, g == 'f', fit ? mine : NULL);
+        }
         else if (sscanf(l, "go %d %f %f %f %d", &k, &at[0], &at[1], &at[2], &run) >= 4) pla_npc_order(k, at, run);
         else if (!strncmp(l, "near", 4)) { extern void pla_world_list_near(float); pla_world_list_near(25); }
         else if (!strncmp(l, "list", 4)) {
@@ -770,8 +835,8 @@ __attribute__((constructor)) static void pla_npc_init(void) {
     rt_register_fnhook_at(SET_NAVIGATOR, setnav_hook);
     if (!(no & 16)) rt_register_fnhook_at(NAV_OUT_OF_TOL, tol_hook);
     if (!(no & 4)) rt_register_fnhook_at(MODEL_BUILD, model_hook);
-    g_dress = getenv("LARECOMP_NPC_DRESS") && atoi(getenv("LARECOMP_NPC_DRESS"));  // (research: not working yet)
-    rt_register_fnhook_at(DRESS_MAKE, dressmake_hook);  // (the player's own: our outfit is read from the save's dress-up data)
-    rt_register_fnhook_at(SAVE_DRESS_SLOT, saveslot_hook);
-    if (g_dress) rt_register_fnhook_at(CREATE_MODEL, create_hook);
+    g_dress = getenv("LARECOMP_NPC_DRESS") && atoi(getenv("LARECOMP_NPC_DRESS"));  // (research: dressed, but not animated yet)
+    rt_register_fnhook_at(DRESS_MAKE, dressmake_hook);  // (the player's own, for the log)
+    rt_register_fnhook_at(SAVE_DRESS_SLOT, saveslot_hook);  // (our outfit is read from the save's dress-up data)
+    if (g_dress) rt_register_fnhook_at(CREATE_MODEL, create_hook), rt_register_fnhook_at(NPC_ENTITY_CB, entity_hook), rt_register_fnhook_at(NPC_MODEL_JOB, job_hook);
 }
