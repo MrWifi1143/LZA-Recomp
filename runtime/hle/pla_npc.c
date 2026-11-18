@@ -723,7 +723,8 @@ static void par_run(Cpu *c) {
 // 0x7004147468, set through the same setters as the people's: Lua-traced 2026-11-18 - a dodge sets rolling_direction_int,
 // then rolling_triger and upperbody_one_action_trigger), and the person runs the same net (pc0002_00.tracn): ours are
 // watched as the game sets them (k_mirror) and sent ('S1', hle/pla_world.c); theirs are set on their person, at the
-// moment they are drawn. A trigger travels as a count (one more each time it fires).
+// moment they are drawn. A trigger travels as a count (one more each time it fires). Verified 2026-11-18 (single copy,
+// LARECOMP_GHOST_DELAY): a dodge roll (testout/pla-mp7 st4-roll-strip.png), crouching (fl-crouch*).
 #define PLAYER_ANIM_VTABLE 0x7004147468ull
 static const char *const k_mirror[] = {
     "rolling_direction_int", "set_squat_bool", "swim_bool", "swim_action_int", "dive_bool", "set_ride_bool", "ride_type_int",
@@ -752,6 +753,30 @@ static void my_set(Cpu *c, char type) {
     if (type == 'B') v &= 1;
     if (g_my_type[k] == type && g_my_state[k] == v) return;
     g_my_state[k] = v, g_my_type[k] = type, g_my_state_seq++;
+}
+// (crouching and swimming don't go through those parameters: the field player's character controller (vtable
+// 0x700413db58 - the people's base class 0x7004139ab0) is told Crouch(cc, on) (vfunc +0x1c8, its own 0x7001a0d110: kept
+// at +0x910 unless refused) and Swim(cc, on) (vfunc +0x210, its own 0x7001a16cf4: +0x918 1 swimming, 2 drowning) - what
+// they leave is sent as the net's set_squat_bool / swim_bool, which crouch / swim a person running it)
+#define PLAYER_CC_VTABLE 0x700413db58ull
+#define PLAYER_CC_CROUCH 0x7001a0d110ull
+#define PLAYER_CC_SWIM 0x7001a16cf4ull
+static void my_flag(const char *name, uint32_t v) {
+    int k = mirror_index(fnv(name));
+    if (k < 0 || (g_my_type[k] == 'B' && g_my_state[k] == v)) return;
+    g_my_state[k] = v, g_my_type[k] = 'B', g_my_state_seq++;
+}
+static int crouch_hook(Cpu *c, uint64_t addr) {
+    uint64_t cc = c->x[0];
+    rt_call_original(c, addr);
+    if (in_heap(cc) && *(const uint64_t *)(uintptr_t)cc == PLAYER_CC_VTABLE) my_flag("set_squat_bool", *(const uint8_t *)(uintptr_t)(cc + 0x910) != 0);
+    return 1;
+}
+static int swim_hook(Cpu *c, uint64_t addr) {
+    uint64_t cc = c->x[0];
+    rt_call_original(c, addr);
+    if (in_heap(cc) && *(const uint64_t *)(uintptr_t)cc == PLAYER_CC_VTABLE) my_flag("swim_bool", *(const uint32_t *)(uintptr_t)(cc + 0x918) == 1);
+    return 1;
 }
 static int myset_f(Cpu *c, uint64_t addr) { (void)addr; my_set(c, 'F'); return 0; }
 static int myset_i(Cpu *c, uint64_t addr) { (void)addr; my_set(c, 'I'); return 0; }
@@ -1208,6 +1233,7 @@ __attribute__((constructor)) static void pla_npc_init(void) {
     for (int k = 0; k < NMIRROR; k++) g_mirror_hash[k] = fnv(k_mirror[k]);  // (our own state, sent: pla_npc_my_state)
     rt_register_fnhook_at(ANIM_SET_FLOAT, myset_f), rt_register_fnhook_at(ANIM_SET_INT, myset_i);
     rt_register_fnhook_at(ANIM_SET_BOOL, myset_b), rt_register_fnhook_at(ANIM_SET_TRIGGER, myset_t);
+    rt_register_fnhook_at(PLAYER_CC_CROUCH, crouch_hook), rt_register_fnhook_at(PLAYER_CC_SWIM, swim_hook);
     rt_register_fnhook_at(SAVE_DRESS_SLOT, saveslot_hook);
     try_parse();  // (our outfit is read from the save's dress-up data)
     rt_register_fnhook_at(CHAR_BUILD, build_hook), rt_register_fnhook_at(ANIM_CTOR, actor_hook), rt_register_fnhook_at(NPC_MODEL_CTOR, chr_ctor_hook);
