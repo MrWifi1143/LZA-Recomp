@@ -12,8 +12,9 @@
 --   network late in that window is still joining the session (its Pia join request lost / late). The joiner completes
 --   JoinSession during the host's LeaveMeshWithHostMigration (count 2), then the host is gone (count 1 -> 0).
 --   Tried and dropped: letting the joiner's state 1 wait up to 10 s for the count - it never came back (0 of 2 after
---   10 s, the trade 69 s instead of ~41 s with the immediate give-up and a rejoin). The fix belongs on the host: keep the
---   room up while an ldn station is connected (the window's timer not found yet).
+--   10 s, the trade 69 s instead of ~41 s with the immediate give-up and a rejoin). The fix is on the host: its room
+--   window is the "wait for players" job 0x700199b0d0 (za_room_window.lua), held while an ldn station is still joining
+--   (runtime/hle/za_fixes.c, 2026-11-17).
 local last = {}
 local function count() local g = mem.u64(0x70040fc390) or 0; if g == 0 then return -1 end return mem.u32(g + 0x110) or -2 end
 hook(0x7000b8c4e8, function(c)

@@ -175,6 +175,7 @@ static struct {
     KEvent *event;          // the game's state change event (AttachStateChangeEvent)
     int ctrl;               // control socket, -1 none
     uint8_t changes[NODES]; // NodeLatestUpdate: 1 joined, 2 left - since the game last read them
+    uint64_t joined_ns[NODES];  // (the host: when each station joined, plat_now_ns)
     struct { uint8_t session[16]; uint32_t addr; } found[NODES];  // the last scan's hosts
     int nfound;
 } L = {.lock = PTHREAD_MUTEX_INITIALIZER, .state = ST_NONE, .node = -1, .ctrl = -1};
@@ -355,6 +356,7 @@ static void *ctrl_thread(void *arg) {
                 L.info.ldn.nodes_n++;
                 L.real[k] = src;
                 L.changes[k] = 1;
+                L.joined_ns[k] = plat_now_ns();
                 memcpy(r, "LDN1A", 5), r[5] = (uint8_t)k;
                 size_t pn = host_packet(r + 6);
                 net_sendto(fd, r, 6 + pn, 0, &from);
@@ -799,6 +801,22 @@ int ldn_trade_state(void) {
 }
 
 uint64_t ldn_trade_active_ns(void) { return T.active_ns; }  // (the game's last ldn command, plat_now_ns)
+
+// (a game fix - runtime/hle/za_fixes.c, the host's room kept while someone is still joining it) hosting: the players in
+// our network, us included, and when the last station joined it (plat_now_ns); 0 when not hosting
+int ldn_host_players(uint64_t *last_join_ns) {
+    pthread_mutex_lock(&L.lock);
+    int n = 0;
+    uint64_t last = 0;
+    if (L.state == ST_AP_CREATED) {
+        n = L.info.ldn.nodes_n;
+        for (int k = 1; k < NODES; k++)
+            if (L.info.ldn.nodes[k].connected && L.joined_ns[k] > last) last = L.joined_ns[k];
+    }
+    pthread_mutex_unlock(&L.lock);
+    if (last_join_ns) *last_join_ns = last;
+    return n;
+}
 
 SERVICE("ldn:u", ldn_u) {
     (void)s;

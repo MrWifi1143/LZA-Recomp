@@ -672,6 +672,47 @@ static int collision_make(Cpu *c, uint64_t addr) {
     return 0;
 }
 
+// Link Play: the host's room kept while someone is still joining it (2026-11-17). Looking for a Link Trade partner the
+// game takes turns: it looks for a room, and when it finds none opens its own and waits for the others in a job,
+// 0x700199b0d0 (the job in x0: +0x50 u16 players needed, +0x58 double ms left, +0x60 double ms added per player who
+// comes (5000), +0x68 u16 players counted, +0x6a set once this copy hosts the session; its clock starts at ~2.9-4 s
+// and runs only on the host). At 0 it fails with Pia's Timeout, the game leaves the session (0x70019b71e0 -> LeaveSession) and
+// looks again. It counts players in Pia's session - a station that already joined our ldn network but whose Pia join
+// is still going (its join request or an answer lost, resent only after 0.5-1 s; over a lagged server that is a few
+// seconds) isn't one yet: the host left under it, and the joiner, its JoinSession done during the host's leave, saw
+// the player count fall to 1 and gave up (its connect task 0x7000b8c4e8, result 3): a rejoin, ~41 s a trade instead of
+// ~25. So while our network has more players than the job has counted, its clock is held at >= 1 s - for up to
+// ROOM_HOLD_S after that station joined (a station that never comes can't keep the room up for good).
+// LARECOMP_ROOM_HOLD=0: the game's own window (research), =<s>: another limit.
+#define ZA_WAIT_PLAYERS 0x700199b0d0ull
+#define ROOM_HOLD_S 10
+int ldn_host_players(uint64_t *last_join_ns);
+static int g_room_hold_s = ROOM_HOLD_S;
+static int wait_players_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    uint64_t job = c->x[0];
+    if (job < GUEST_LO || job >= GUEST_HI || (job & 7) || !*(volatile uint8_t *)(uintptr_t)(job + 0x6a)) return 0;
+    uint16_t need = *(uint16_t *)(uintptr_t)(job + 0x50), counted = *(uint16_t *)(uintptr_t)(job + 0x68);
+    uint64_t joined;
+    int players = ldn_host_players(&joined);
+    if (players <= counted || counted >= need || !joined) return 0;
+    uint64_t now = plat_now_ns();
+    static uint64_t logged_for, capped_for;
+    if (now - joined >= (uint64_t)g_room_hold_s * 1000000000ull) {
+        if (logged_for == joined && capped_for != joined)
+            capped_for = joined, LOG("[za] Link Play: the player who joined our room %d s ago never came - let go\n", g_room_hold_s);
+        return 0;
+    }
+    double *left = (double *)(uintptr_t)(job + 0x58);
+    if (*left < 1000.0) {
+        if (logged_for != joined)
+            logged_for = joined, LOG("[za] Link Play: our room kept - a player joined it %.1f s ago and is still joining (%d in the "
+                                     "network, %u in the session)\n", (double)(now - joined) / 1e9, players, counted);
+        *left = 1000.0;
+    }
+    return 0;
+}
+
 void za_fixes_configure(const char *exefs) {
     static const uint8_t ZA_MAIN[8] = {0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a};  // 2.0.2 (any other build: none of this)
     static bool done;
@@ -691,6 +732,8 @@ void za_fixes_configure(const char *exefs) {
     rt_register_fnhook_at(0x7001108570ull, collision_make);  // (NPC spawners' trigger radius)
     g_mouse_look = !getenv("LARECOMP_ZA_MOUSE_LOOK") || atoi(getenv("LARECOMP_ZA_MOUSE_LOOK")) != 0;
     rt_register_fnhook_at(ZA_CAM_ANGLES, mouse_look_hook);
+    if (getenv("LARECOMP_ROOM_HOLD")) g_room_hold_s = atoi(getenv("LARECOMP_ROOM_HOLD"));
+    if (g_room_hold_s > 0) rt_register_fnhook_at(ZA_WAIT_PLAYERS, wait_players_hook);
     { extern void za_options_configure(void); za_options_configure(); }
     {   // (runtime/hle/menu_mouse.c: ui2d pane matrices, the menu navigator's core, the scroll lists' select cell)
         extern void menu_mouse_configure(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t);
