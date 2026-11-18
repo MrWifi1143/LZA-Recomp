@@ -139,20 +139,20 @@ static void (*w_send)(const void *, size_t);
 static int (*w_recv)(uint64_t *, void *, size_t);
 
 static void pick_standin(void) {
+    // kept while it is still posed (we move its body, so wherever the other player goes it comes along); else the
+    // person posed within 40 m of us nearest to where the other player is
     uint64_t f = g_frame, best = 0, cur = g_standin, me = g_player_sk;
     float bd = 1e30f;
-    bool cur_ok = false;
-    float cd = 0;
     for (int i = 0; i < NSK; i++) {
         uint64_t sk = g_sk[i].sk;
+        if (sk == cur && sk != me && f - g_sk[i].frame < 60) return;  // (a person right by the camera isn't posed every frame)
         if (!sk || sk == me || f - g_sk[i].frame > 3 || g_sk[i].bones < 60) continue;  // (people only)
         float dx = g_sk[i].p[0] - g_me[0], dy = g_sk[i].p[1] - g_me[1], dz = g_sk[i].p[2] - g_me[2];
         float d = sqrtf(dx * dx + dz * dz);
-        if ((d < 1.5f && sk != cur) || d > 35.0f || fabsf(dy) > 6.0f) continue;  // (ours is drawn where the other player is)
-        if (sk == cur) cur_ok = true, cd = d;
-        if (d < bd) bd = d, best = sk;
+        if (d < 1.5f || d > 40.0f || fabsf(dy) > 8.0f) continue;
+        float ex = g_sk[i].p[0] - g_peer.tgt[0], ez = g_sk[i].p[2] - g_peer.tgt[2], e = sqrtf(ex * ex + ez * ez);
+        if (e < bd) bd = e, best = sk;
     }
-    if (cur_ok && cd < bd + 10.0f) return;  // (it is still posed near us, not much farther than the nearest: kept)
     if (best == cur) return;
     let_go();
     g_standin = best;
@@ -165,7 +165,7 @@ static void pick_standin(void) {
         g_body_off[0] = p[0] - g_body_was[12], g_body_off[1] = p[1] - g_body_was[13], g_body_off[2] = p[2] - g_body_was[14];
         g_body = body;
     }
-    LOG("[world] stand-in: skeleton %llx at %.2f %.2f %.2f, %.1f m from us%s, its body %llx at %.2f %.2f %.2f\n", (unsigned long long)best,
+    LOG("[world] stand-in: skeleton %llx at %.2f %.2f %.2f, %.1f m from the other player%s, its body %llx at %.2f %.2f %.2f\n", (unsigned long long)best,
         p[0], p[1], p[2], bd, best ? "" : " (none near)", (unsigned long long)body, g_body_was[12], g_body_was[13], g_body_was[14]);
 }
 
@@ -220,7 +220,7 @@ static void world_tick(uint64_t frame) {
         g_show = 0;
         return;
     }
-    if (frame % 15 == 0 || !g_standin) pick_standin();
+    if (frame % 15 == 0) pick_standin();
     // smoothing toward the newest heard (a jump over 8 m: at once)
     static uint64_t last_ns;
     float dt = last_ns ? (float)(now - last_ns) * 1e-9f : 0.033f;
