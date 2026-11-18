@@ -9,10 +9,14 @@
 // still fails with ENETDOWN: nothing ever goes to the internet.
 // Control messages, UDP port LDN_CTRL_PORT ("LDN1" + type ...): 'S' scan -> 's' + NetworkInfo from a host; 'C' join
 // (user name, version) -> 'A' node + NetworkInfo + the nodes' addresses / 'R' refused; 'I' + NetworkInfo + addresses
-// (the host to its stations, on a change); 'L' node (a station leaves; 0xff: whichever node this address is - a join
-// given up on); 'D' (the host closed the network); 'n' (a relay peer asked by a scan: not hosting - the scan needn't wait
-// for it). Over the relay (an online server, the internet) these can come late or not at all: a scan waits longer for
-// relay peers and asks again, a join asks again (a host answers a repeat with the same node).
+// (the host to its stations, on a change); 'L' node [session id] (a station leaves; 0xff: whichever node this address
+// is - a join given up on); 'D' [session id] (the host closed the network); 'n' (a relay peer asked by a scan: not
+// hosting - the scan needn't wait for it). Over the relay (an online server, the internet) these can come late, out of
+// order or not at all: a scan waits longer for relay peers and asks again, a join asks again (a host answers a repeat
+// with the same node); 'L' and 'D' go three times (nothing else repeats them: a lost 'D' left the station in a closed
+// room until the game gave up ~7 s later; a lost 'L', the host with a node that never comes) and carry the network's
+// session id, so a late copy can't end the next network between the same two copies (older copies send none: taken as
+// before), and a 'D' that overtakes the answer to our join is kept for that join (Connect).
 // Structures (NetworkInfo 0x480 ...) as switchbrew / Ryujinx's Ldn types document them. Windows: the same, on Winsock.
 #include <stdbool.h>
 #include <stdio.h>
@@ -176,6 +180,8 @@ static struct {
     int ctrl;               // control socket, -1 none
     uint8_t changes[NODES]; // NodeLatestUpdate: 1 joined, 2 left - since the game last read them
     uint64_t joined_ns[NODES];  // (the host: when each station joined, plat_now_ns)
+    uint8_t closed[16];         // (a station: the last network whose 'D' came while we weren't in it - Connect below)
+    uint64_t closed_ns;
     struct { uint8_t session[16]; uint32_t addr; } found[NODES];  // the last scan's hosts
     int nfound;
 } L = {.lock = PTHREAD_MUTEX_INITIALIZER, .state = ST_NONE, .node = -1, .ctrl = -1};
@@ -275,6 +281,11 @@ static void ctrl_send(int fd, uint32_t ip, char type, const void *body, size_t n
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(LDN_CTRL_PORT), .sin_addr.s_addr = htonl(ip)};
     net_sendto(fd, m, 5 + n, 0, &a);
 }
+static int ctrl_repeat(void) {  // ('L' / 'D': 3 copies; research LARECOMP_LDN_REPEAT=1: one, as before 2026-11-17)
+    static int n = -1;
+    if (n < 0) n = getenv("LARECOMP_LDN_REPEAT") && atoi(getenv("LARECOMP_LDN_REPEAT")) > 0 ? atoi(getenv("LARECOMP_LDN_REPEAT")) : 3;
+    return n;
+}
 // (L.lock held) the network's info and its nodes' addresses, as the host sends them: 0 for itself; then the relay ids
 // of the nodes it reaches through the relay
 #define TABLE_SIZE (4 * NODES + 8 * NODES)
@@ -366,7 +377,7 @@ static void *ctrl_thread(void *arg) {
             }
         } else if (L.state == ST_AP_CREATED && t == 'C') {  // (a hidden room: refused)
             net_sendto(fd, "LDN1R", 5, 0, &from);
-        } else if (L.state == ST_AP_CREATED && t == 'L' && n >= 6) {  // a station leaves
+        } else if (L.state == ST_AP_CREATED && t == 'L' && n >= 6 && (n < 6 + 16 || !memcmp(m + 6, L.info.id.session, 16))) {  // a station leaves
             int k = m[5];
             if (k == 0xff)  // (a join it gave up on - our answer never reached it: whichever node that address is)
                 for (k = NODES - 1; k > 0 && !(L.info.ldn.nodes[k].connected && L.real[k] == src); k--) {}
@@ -386,11 +397,13 @@ static void *ctrl_thread(void *arg) {
                 L.info = ni;
                 station_table(m + 5 + sizeof ni);
                 signal_change();
-            } else if (t == 'D') {  // it closed the network
+            } else if (t == 'D' && (n < 5 + 16 || !memcmp(m + 5, L.info.id.session, 16))) {  // it closed the network
                 L.state = ST_STATION, L.disconnect_reason = 3, L.node = -1;  // (DestroyedByAccessPoint)
                 LOG("[ldn] the host closed the network\n");
                 signal_change();
             }
+        } else if (t == 'D' && n >= 5 + 16) {  // (a room that closed as we were joining it: its 'D' overtook its answer)
+            memcpy(L.closed, m + 5, 16), L.closed_ns = plat_now_ns();
         }
         pthread_mutex_unlock(&L.lock);
     }
@@ -613,8 +626,9 @@ static bool station_connect(const NetworkInfo *want, const UserConfig *uc, uint1
     }
     kernel_block_end();
     if (!ok && !refused) {  // (it may have taken us without our hearing it: let that node go)
-        uint8_t any = 0xff;
-        ctrl_send(fd, host, 'L', &any, 1);
+        uint8_t b[1 + 16] = {0xff};
+        memcpy(b + 1, want->id.session, 16);
+        for (int i = 0; i < ctrl_repeat(); i++) ctrl_send(fd, host, 'L', b, sizeof b);
     }
     close_sock(fd);
     char sb[16];
@@ -625,12 +639,14 @@ static bool station_connect(const NetworkInfo *want, const UserConfig *uc, uint1
 }
 static void leave(void) {  // (L.lock held) a station out / the host's network closed
     if (L.state == ST_STATION_CONNECTED && L.node > 0) {
-        uint8_t k = (uint8_t)L.node;
-        ctrl_send(L.ctrl, L.host_addr, 'L', &k, 1);
+        uint8_t b[1 + 16] = {(uint8_t)L.node};
+        memcpy(b + 1, L.info.id.session, 16);
+        for (int i = 0; i < ctrl_repeat(); i++) ctrl_send(L.ctrl, L.host_addr, 'L', b, sizeof b);
     }
     if (L.state == ST_AP_CREATED) {
         for (int k = 1; k < NODES; k++)
-            if (L.info.ldn.nodes[k].connected && L.real[k]) ctrl_send(L.ctrl, L.real[k], 'D', NULL, 0);
+            if (L.info.ldn.nodes[k].connected && L.real[k])
+                for (int i = 0; i < ctrl_repeat(); i++) ctrl_send(L.ctrl, L.real[k], 'D', L.info.id.session, 16);
         if (g_relay) g_relay->hosting(0);
     }
     T.hidden = 0;
@@ -774,6 +790,12 @@ static void ldn_user(Service *s, IpcReq *req, IpcResp *resp) {
         pthread_mutex_unlock(&L.lock);
         bool ok = station_connect(&want, &uc, version);
         pthread_mutex_lock(&L.lock);
+        if (ok && L.closed_ns && plat_now_ns() - L.closed_ns < 10000000000ull && !memcmp(L.closed, L.info.id.session, 16)) {
+            // (its host took us and closed the room at once - its 'D' came first and was set aside: a station of a room
+            // that is gone waited ~7 s for the game to give up on it, 2026-11-17)
+            ok = false, L.node = -1, L.host_addr = 0;
+            LOG("[ldn] that room closed as we joined it\n");
+        }
         if (ok) L.state = ST_STATION_CONNECTED, L.disconnect_reason = 0, signal_change();
         else resp->result = MAKE_RESULT(203, 64), LOG("[ldn] couldn't join the network\n");  // (ConnectFailure)
         break;
