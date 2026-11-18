@@ -162,6 +162,10 @@ typedef struct {
     float ax[6];        // (their ride's up and forward axes, riding a climber / swimmer: ax_ok)
     int ax_ok;
     float rlq[4];       // (the rider's local rotation written last frame)
+    float rlt[3];       // (and its local translation)
+    int rl_set;         // (rlq / rlt hold what is in its owner)
+    int rhidden;        // (not drawn while it rides in Sneasler's basket: its meshes' LOD masks kept in rmask)
+    uint64_t rmask[24];
 } Own;
 // research knobs, <live>/npc "knob <i> <value>" (puppet_step): 0 up/down (1 down only, 0 also lifted as before, 2 none),
 // 1 a mount's "move" per m/s (ride_step), 2 the rider's seat higher by, 4 the rider's turn about x (radians, added), 5 the
@@ -315,6 +319,8 @@ typedef struct {
     int term;           // (to be removed: its rider let go)
     int research;       // (made by the live "poke" line: no rider rules)
     float lq[4];        // (its local rotation written last frame: tilted onto a wall / the water)
+    uint64_t jsk;       // (its skeleton, where its seat joint was looked up)
+    int jidx;           // (the seat joint's matrix index + 1 in jsk; -1 not found)
 } Mnt;
 static Mnt g_mnt[NMNT];
 static int g_poke_n;
@@ -838,6 +844,7 @@ static int entity_hook(Cpu *c, uint64_t addr) {
 // mask (the update 0x7002997c94 sets each instance's +0x22a from it). The mask comes from the model's own meshes - the
 // shared player body has none, so ours stayed 0 and nothing was drawn (the field player's is 1). LOD 0 is put in.
 static void lod_show(Own *o) {
+    if (o->rhidden) return;  // (put away on purpose: rider_show)
     const uint64_t *b = (const uint64_t *)(uintptr_t)*(const uint64_t *)(uintptr_t)(o->owner + 0xf0 + 0xe8);
     const uint64_t *e = (const uint64_t *)(uintptr_t)*(const uint64_t *)(uintptr_t)(o->owner + 0xf0 + 0xf0);
     if (!in_heap((uint64_t)(uintptr_t)b) || e < b || e - b > 256) return;
@@ -852,6 +859,20 @@ static void lod_show(Own *o) {
             if (!o->lod_set) o->lod_set = 1, LOG("[npc] mpplayer_%d: its LOD controller %llx had no LOD - LOD 0 shown\n", o->k, (unsigned long long)l);
         }
     }
+}
+
+// Kept moving on screen. A model owner's byte +0x33c freezes its model: while set, the mesh update 0x7002997c94 leaves
+// every instance's world transform (+0xf0 scale, +0x100 rotation, +0x110 position) - and so its bounds (+0x1d0) - as
+// they were. The player-model controller our dressed persons carry (vt 0x70041284b8, the field player's kind) sets it
+// from 0x7001d1054c each frame its model was not seen in any view the frame before (0x700299d20c; unless its +0x360
+// bit 0), and clears it only on its own state changes (0x700173740c) - getting on or off a ride. The field player is
+// never off screen; ours are: one that left the view froze there, moved on, and its bounds stayed behind where nobody
+// looks - never seen again, never unfrozen (rider invisible until its player got off and on, 2026-11-18). Cleared each
+// frame from the camera update (before the mesh update), for persons and mounts.
+static void unfreeze(uint64_t owner) {
+    if (!in_heap(owner) || *(const uint64_t *)(uintptr_t)owner != MODEL_OBJ_VTABLE) return;
+    uint8_t *f = (uint8_t *)(uintptr_t)(owner + 0x33c);
+    if (*f) *f = 0;
 }
 
 // The animation component's parameters, set by name hash (FNV-1a of the name in the control net's .tracp): the
@@ -1166,6 +1187,8 @@ static void q_char(float r[4], uint64_t owner, const float last[4]) {
     q_conj(c, l), q_mul(r, w, c);
 }
 
+// the joint of the ride model the game hangs its player on (app_config ride_*_config.bin "player_attach_joint_name")
+static const char *const k_ride_joint[8] = {NULL, "parts", "origin", "parts_01", "parts_03", "origin", NULL, NULL};
 static struct { int mons; float seat_y, seat_z, turn_x, mount_y; } k_ride[8] = {  // (research: live "seat <type> <mons> <y> <z> <turn> [mount y]")
     {0, 0, 0, 0, 0}, {899, 1.20f, -0.15f, 1.5707963f, 0}, {902, 0, 0, 0, 0}, {901, 1.20f, 0, 1.5707963f, 0}, {628, 1.20f, 0, 1.5707963f, 0}, {903, 0, 0, 0, 0}, {0, 0, 0, 0, 0}, {0, 0, 0, 0, 0},
 };
@@ -1199,6 +1222,90 @@ static void mount_park(Cpu *c, Mnt *m, const float at[3]) {  // (not ridden: hid
     cc_warp(c, m->cc, p, 0);
     mount_show(m, 0);
 }
+// The seat, as the game seats its own player (2026-11-18, Lua: the riding player's model owner world = the ride
+// Pokémon's owner world x this joint's matrix, exactly, its local 0): the ride model's skeleton (vt 0x7004185640) is
+// [instance +0xe8] of its first mesh; joint names (FNV-1a, the game's basis) are in the unordered maps of its parts
+// (vector +0x58 of {map, _, u16 first joint +0xa}; map +0x60 buckets, +0x68 count; node +0x10 key, +0x30 index); a
+// joint's matrix (model space, columns x y z position, 64 B) = [sk+0x2a8] + 64 x [sk+0xc8][index] (as 0x7002a6962c
+// reads it - kept posed: its dirty bit in [sk+0x138] not set for these).
+#define SKEL_VTABLE 0x7004185640ull
+static bool mount_joint(Mnt *m, int t, float out_q[4], float out_p[3]) {
+    if (!m->owner || !k_ride_joint[t & 7]) return false;
+    const uint64_t *b = (const uint64_t *)(uintptr_t)*(const uint64_t *)(uintptr_t)(m->owner + 0xf0 + 0xe8);
+    const uint64_t *e = (const uint64_t *)(uintptr_t)*(const uint64_t *)(uintptr_t)(m->owner + 0xf0 + 0xf0);
+    if (!in_heap((uint64_t)(uintptr_t)b) || e < b || e - b > 256) return false;
+    uint64_t sk = 0;
+    for (const uint64_t *q = b; q < e && !sk; q++) {
+        uint64_t cp = *q - 0x48;
+        if (!in_heap(cp) || *(const uint64_t *)(uintptr_t)cp != 0x70041801a0ull) continue;
+        uint64_t md = *(const uint64_t *)(uintptr_t)(cp + 0x200);
+        if (!in_heap(md)) continue;
+        uint64_t ib = *(const uint64_t *)(uintptr_t)(md + 0x90), ie = *(const uint64_t *)(uintptr_t)(md + 0x98);
+        if (!in_heap(ib) || ie <= ib) continue;
+        uint64_t ins = *(const uint64_t *)(uintptr_t)ib;
+        if (in_heap(ins)) sk = *(const uint64_t *)(uintptr_t)(ins + 0xe8);
+    }
+    if (!in_heap(sk) || *(const uint64_t *)(uintptr_t)sk != SKEL_VTABLE) return false;
+    if (m->jsk != sk) {  // (looked up once per skeleton)
+        m->jsk = sk, m->jidx = -1;
+        uint64_t h = fnv(k_ride_joint[t & 7]);
+        uint64_t vb = *(const uint64_t *)(uintptr_t)(sk + 0x58), ve = *(const uint64_t *)(uintptr_t)(sk + 0x60);
+        for (uint64_t v = vb; in_heap(vb) && v + 16 <= ve && v - vb < 16 * 16 && m->jidx < 0; v += 16) {
+            uint64_t map = *(const uint64_t *)(uintptr_t)v;
+            if (!in_heap(map)) continue;
+            uint64_t bk = *(const uint64_t *)(uintptr_t)(map + 0x60), nb = *(const uint64_t *)(uintptr_t)(map + 0x68);
+            if (!in_heap(bk) || nb > 4096) continue;
+            for (uint64_t i = 0; i < nb && m->jidx < 0; i++) {
+                uint64_t n = *(const uint64_t *)(uintptr_t)(bk + 8 * i);
+                if (!in_heap(n)) continue;
+                n = *(const uint64_t *)(uintptr_t)n;
+                for (int k = 0; in_heap(n) && k < 256; k++, n = *(const uint64_t *)(uintptr_t)n)
+                    if (*(const uint64_t *)(uintptr_t)(n + 0x10) == h) {
+                        int g = *(const uint16_t *)(uintptr_t)(n + 0x30) + *(const uint16_t *)(uintptr_t)(v + 0xa);
+                        uint64_t remap = *(const uint64_t *)(uintptr_t)(sk + 0xc8);
+                        if (in_heap(remap)) m->jidx = *(const uint16_t *)(uintptr_t)(remap + 2 * (uint64_t)g) + 1;
+                        break;
+                    }
+            }
+        }
+        LOG("[npc] %s: seat joint %s %s (skeleton %llx)\n", m->name, k_ride_joint[t & 7], m->jidx > 0 ? "found" : "NOT found", (unsigned long long)sk);
+    }
+    if (m->jidx <= 0) return false;
+    uint64_t mt = *(const uint64_t *)(uintptr_t)(sk + 0x2a8);
+    if (!in_heap(mt)) return false;
+    const float *j = (const float *)(uintptr_t)(mt + 64 * (uint64_t)(m->jidx - 1));
+    float jq[4], wq[4], jp[3];
+    q_from_axes(jq, j, j + 4, j + 8);
+    q_from_axes(wq, (const float *)(uintptr_t)(m->owner + 0x70), (const float *)(uintptr_t)(m->owner + 0x80), (const float *)(uintptr_t)(m->owner + 0x90));
+    q_mul(out_q, wq, jq);
+    q_rot(jp, wq, j + 12);
+    const float *mp = (const float *)(uintptr_t)(m->owner + 0xa0);
+    for (int i = 0; i < 3; i++) out_p[i] = mp[i] + jp[i];
+    return isfinite(out_p[0]) && isfinite(out_p[1]) && isfinite(out_p[2]) && isfinite(out_q[3]);
+}
+
+// The rider drawn or not: the game hides its own player while it rides Sneasler (in the basket - its meshes' LOD
+// controller +0x180 off from getting on till off, measured 2026-11-18; Wyrdeer / Braviary / Ursaluna on). Ours the
+// same, by its meshes' LOD masks (see lod_show / mount_show).
+static void rider_show(Own *o, int on) {
+    if (!o->owner || on == !o->rhidden) return;
+    const uint64_t *b = (const uint64_t *)(uintptr_t)*(const uint64_t *)(uintptr_t)(o->owner + 0xf0 + 0xe8);
+    const uint64_t *e = (const uint64_t *)(uintptr_t)*(const uint64_t *)(uintptr_t)(o->owner + 0xf0 + 0xf0);
+    if (!in_heap((uint64_t)(uintptr_t)b) || e < b || e - b > 256) return;
+    int n = 0;
+    for (const uint64_t *q = b; q < e && n < 24; q++) {
+        uint64_t cp = *q - 0x48;
+        if (!in_heap(cp) || *(const uint64_t *)(uintptr_t)cp != 0x70041801a0ull) continue;
+        uint64_t l = *(const uint64_t *)(uintptr_t)(cp + 0x1f0);
+        if (!in_heap(l)) continue;
+        uint64_t *mask = (uint64_t *)(uintptr_t)(l + 0x178);
+        if (on) *mask = o->rmask[n] ? o->rmask[n] : 1;
+        else o->rmask[n] = *mask, *mask = 0;
+        n++;
+    }
+    o->rhidden = !on;
+}
+
 // a riding person's frame: its mount where they are, the person on it. 1 = done (the walking steps skipped)
 static int ride_step(Cpu *c, Own *o, float dt) {
     int t = o->ride_type & 7;
@@ -1242,7 +1349,8 @@ static int ride_step(Cpu *c, Own *o, float dt) {
             o->rode = 0;
             anim_set(c, o->actl, ANIM_SET_BOOL, fnv("set_ride_bool"), 0, 0);
             loc[0] = loc[1] = loc[2] = 0, lq[0] = lq[1] = lq[2] = 0, lq[3] = 1, o->lyaw = 0, o->fa_set = 0;
-            memset(o->rlq, 0, sizeof o->rlq);
+            memset(o->rlq, 0, sizeof o->rlq), memset(o->rlt, 0, sizeof o->rlt), o->rl_set = 0;
+            rider_show(o, 1);
             for (int j = 0; j < 8; j++) {
                 int i = o->mnt[j] - 1;
                 if (i >= 0 && i < NMNT && g_mnt[i].state == 3) mount_park(c, &g_mnt[i], o->fo);
@@ -1332,16 +1440,33 @@ static int ride_step(Cpu *c, Own *o, float dt) {
     float park = g_knob[5];
     float under[3] = {o->fo[0], o->fo[1] - park, o->fo[2]};
     cc_warp(c, o->cc, under, yaw);
-    loc[0] = 0, loc[1] = park + k_ride[t].mount_y + k_ride[t].seat_y + g_knob[2], loc[2] = k_ride[t].seat_z;
-    float qa = (k_ride[t].turn_x + g_knob[4]) * 0.5f;  // (into the joint's frame: Wyrdeer's about x +90 degrees, y forward, z down)
-    lq[0] = sinf(qa), lq[1] = 0, lq[2] = 0, lq[3] = cosf(qa);
-    if (tilt) {  // (turned with its mount: the seat in the mount's tilted frame)
-        float qc[4], ic[4], rel[4], seat[4] = {lq[0], lq[1], lq[2], lq[3]}, sl[3] = {loc[0], loc[1], loc[2]};
+    guest_call_saved(c, CC_SET_FORWARD, o->cc, (uint64_t)(uintptr_t)g_fwd_vec, 0, 0, 0);  // (its own way too: the seat is put
+    // on top of its character's turn - one left facing elsewhere sat its model on the ride sideways a frame)
+    if (!o->rl_set) memcpy(o->rlq, lq, 16), memcpy(o->rlt, loc, 12), o->rl_set = 1;  // (what its owner has now)
+    float sq[4], sp[3];
+    if (!((int)g_knob[6] & 8) && mount_joint(m, m->t ? m->t : t, sq, sp)) {
+        // (on the seat joint, as the game's own rider: its world = the joint's; its character (under it) taken out - its
+        // turn and place measured from its world less the local written last frame)
+        float qc[4], ic[4], lt[3], d[3];
+        const float *wp = (const float *)(uintptr_t)(o->owner + 0xa0);
         q_char(qc, o->owner, o->rlq);
-        q_conj(ic, qc), q_mul(rel, ic, qt);
-        q_mul(lq, rel, seat), q_rot(loc, rel, sl);
+        q_rot(lt, qc, o->rlt);
+        for (int i = 0; i < 3; i++) d[i] = sp[i] - (wp[i] - lt[i]);
+        q_conj(ic, qc);
+        q_mul(lq, ic, sq), q_rot(loc, ic, d);
+    } else {  // (no joint found: the seat guessed per ride - research knob 6 bit 8 too)
+        loc[0] = 0, loc[1] = park + k_ride[t].mount_y + k_ride[t].seat_y + g_knob[2], loc[2] = k_ride[t].seat_z;
+        float qa = (k_ride[t].turn_x + g_knob[4]) * 0.5f;  // (into the joint's frame: Wyrdeer's about x +90 degrees, y forward, z down)
+        lq[0] = sinf(qa), lq[1] = 0, lq[2] = 0, lq[3] = cosf(qa);
+        if (tilt) {  // (turned with its mount: the seat in the mount's tilted frame)
+            float qc[4], ic[4], rel[4], seat[4] = {lq[0], lq[1], lq[2], lq[3]}, sl[3] = {loc[0], loc[1], loc[2]};
+            q_char(qc, o->owner, o->rlq);
+            q_conj(ic, qc), q_mul(rel, ic, qt);
+            q_mul(lq, rel, seat), q_rot(loc, rel, sl);
+        }
     }
-    memcpy(o->rlq, lq, 16);
+    memcpy(o->rlq, lq, 16), memcpy(o->rlt, loc, 12);
+    rider_show(o, (m->t ? m->t : t) != 5);  // (in Sneasler's basket: not drawn, as the game's own rider)
     // (their speed to the rider's net: the riding pose moves with it)
     float mf = mf_for(o->fo[4]);
     if (o->rp_type[0] == 'F') memcpy(&mf, &o->rp_val[0], 4);  // (the ride's own move_front, as the game sets both)
@@ -1626,6 +1751,7 @@ void pla_npc_cam(Cpu *c) {  // (the camera update, the game's thread: hle/warp.c
         if (m->state && m->level != g_level) { memset(m, 0, sizeof *m); continue; }  // (went with its level)
         if (m->state == 2 && g_frame - m->asked > 900) { mount_term(c, m, "not up 30 s after asking"); continue; }
         if (m->state != 3) continue;
+        if (m->owner) unfreeze(m->owner);
         if (m->research && m->term) { mount_term(c, m, "asked"); continue; }
         if (m->t && !m->research) {   // (in use: ridden now by its rider - else removed after a while, or at once when its rider was let go)
             Own *ro = m->rider > 0 && m->rider <= NOWN ? &g_own[m->rider - 1] : NULL;
@@ -1660,6 +1786,7 @@ void pla_npc_cam(Cpu *c) {  // (the camera update, the game's thread: hle/warp.c
             continue;
         }
         if (o->comp && in_heap(o->owner) && *(const uint64_t *)(uintptr_t)o->owner == MODEL_OBJ_VTABLE && g_frame % 10 == 0) lod_show(o);
+        if (o->owner && (o->state == 3 || o->state == 4)) unfreeze(o->owner);
         if (o->comp && o->settled < 2 && in_heap(o->comp) && g_frame % 15 == 0) {  // (log: its items loaded and worn)
             uint32_t st = *(const uint32_t *)(uintptr_t)(o->comp + 0x27b8);
             if ((st == 1) != o->settled) o->settled = st == 1 ? 2 : 0, LOG("[npc] mpplayer_%d's dress-up: state %u\n", o->k, st);
