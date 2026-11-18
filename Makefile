@@ -254,7 +254,7 @@ RELAYH := $(B)/plugins/steamrelay-helper
 RELAYH_LIBS := -lpthread -ldl
 endif
 steamrelay: $(RELAY) $(RELAYH)
-$(RELAY): contrib/steamrelay/steamrelay.c runtime/plugin.h
+$(RELAY): contrib/steamrelay/steamrelay.c runtime/plugin.h runtime/acct_proto.h
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -Wall -shared -Iruntime -Ithird_party $(DEPINC) $< -o $@ $(RELAY_LIBS)
 $(RELAYH): contrib/steamrelay/steamrelay.c
@@ -271,9 +271,9 @@ LZASERVER := $(B)/lzaserver
 LZASERVER_LIBS :=
 endif
 lzaserver: $(LZASERVER)
-$(LZASERVER): contrib/lzaserver/lzaserver.c
+$(LZASERVER): contrib/lzaserver/lzaserver.c runtime/acct_proto.h
 	@mkdir -p $(dir $@)
-	$(CC) -O2 -Wall $< -o $@ $(LZASERVER_LIBS)
+	$(CC) -O2 -Wall -DLZA_NO_ACCOUNTS -Iruntime $< -o $@ $(LZASERVER_LIBS)
 
 # Legends Lua (contrib/legendslua): Lua scripting of the game (hooks, memory, calls; scripts in <game folder>/lua/).
 # In <game folder>/plugins/; off until switched on in the Mods page.
