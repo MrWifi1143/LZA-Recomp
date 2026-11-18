@@ -1202,7 +1202,7 @@ static void mount_park(Cpu *c, Mnt *m, const float at[3]) {  // (not ridden: hid
 // a riding person's frame: its mount where they are, the person on it. 1 = done (the walking steps skipped)
 static int ride_step(Cpu *c, Own *o, float dt) {
     int t = o->ride_type & 7;
-    bool want = o->riding && t && k_ride[t].mons;
+    bool want = o->riding && t && k_ride[t].mons && o->state == 3;  // (theirs only: one let go asks for none)
     Mnt *m = want ? ride_mount(o) : NULL;
     if (want && !m && o->mnt[t] && !g_mnt[o->mnt[t] - 1].state) o->mnt[t] = 0, o->mnt_fail++;  // (never came up: again)
     if (want && !m && !o->mnt[t] && g_frame >= o->mnt_retry) {  // (its mount asked for, where it is - or, after one that
