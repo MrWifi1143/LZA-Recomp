@@ -40,6 +40,7 @@ void rt_call_original(Cpu *c, uint64_t addr);
 #define NAV_VTABLE 0x7004127458ull
 #define NAV_SET_DEST 0x700171bb88ull
 #define NAV_SET_MOVESTATE 0x700171d458ull
+#define NAV_SET_STEERING 0x700171e30cull  // (SetIsSteering(bool): FObjMove sets false after each destination)
 #define MODEL_BUILD 0x7001a2b778ull  // (the player's model from its dress-up: [x0+0x248] != 0 = the p2 body)
 #define CHR_SENPAI_M 0x2d992cf818c93910ull  // tr0036_00_senpai_m
 #define CHR_SENPAI_F 0xfca68432c5c9b79eull  // tr0037_00_senpai_f
@@ -92,10 +93,11 @@ typedef struct {
     int state;  // 0 free, 1 asked for, 2 made (its navigator not seen yet), 3 walking orders taken
     int gender, k;
     float at[3];        // where it was made
-    uint64_t nav, made_frame;
+    uint64_t nav, made_frame, up_frame;
     uint64_t level;
     float dest[3];      // the newest order
     int run, order;     // (order: a new one to give)
+    int run_set;        // (the move state given last: 0 none, 1 run, 2 walk)
     uint64_t asked;     // (frame asked)
 } Own;
 static Own g_own[NOWN];
@@ -124,6 +126,9 @@ static int place_hook(Cpu *c, uint64_t addr) {
         g_ent[i].chr = o ? *(const uint64_t *)(uintptr_t)(e + o) : 0;
     }
     pthread_mutex_unlock(&g_lock);
+    static int nowrap = -1;
+    if (nowrap < 0) nowrap = getenv("LARECOMP_NPC_NOHOOK") && (atoi(getenv("LARECOMP_NPC_NOHOOK")) & 1);
+    if (nowrap) { if (i >= 0) g_ent[i].made = 1; return 0; }
     t_load_ent = i;
     rt_call_original(c, addr);
     t_load_ent = -1;
@@ -136,26 +141,43 @@ static int fcreate_hook(Cpu *c, uint64_t addr) {
     return 0;
 }
 
-// a navigator set up: ours when it stands where one of ours was asked for
-static int nav_init_hook(Cpu *c, uint64_t addr) {
-    uint64_t nav = c->x[0];
-    rt_call_original(c, addr);
-    if (!in_heap(nav)) return 1;
-    const float *p = (const float *)(uintptr_t)(nav + 0x3e0);
+// a navigator set up: its init (0x70017187d0) asks GetLocalTranslation 0x70017199f4 for the character's spot (lr
+// 0x7001718908) and keeps it at +0x3e0. That call is watched without touching the init itself (a hook calling the init
+// through left its person standing for good); the navigators seen are matched on the camera update, by that spot.
+#define NAV_POS_FN 0x70017199f4ull
+#define NAV_POS_LR 0x7001718908ull
+static uint64_t g_navq[32];
+static volatile int g_navn;
+static int nav_pos_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    if (c->x[30] != NAV_POS_LR || !in_heap(c->x[0])) return 0;
+    pthread_mutex_lock(&g_lock);
+    if (g_navn < 32) g_navq[g_navn++] = c->x[0];
+    pthread_mutex_unlock(&g_lock);
+    return 0;
+}
+static void nav_match(void) {
+    if (!g_navn) return;
     extern bool warp_player_pos(float out[3]);
     float me[3];
-    if (warp_player_pos(me) && fabsf(p[0] - me[0]) < 1.5f && fabsf(p[2] - me[2]) < 1.5f) return 1;  // (the player's own)
+    bool have_me = warp_player_pos(me);
     pthread_mutex_lock(&g_lock);
-    for (int i = 0; i < NOWN; i++) {
-        Own *o = &g_own[i];
-        if (o->state != 2 || fabsf(p[0] - o->at[0]) > 1.0f || fabsf(p[2] - o->at[2]) > 1.0f) continue;
-        o->nav = nav, o->state = 3, o->order = 1;
-        LOG("[npc] mpplayer_%d is up: navigator %llx at %.2f %.2f %.2f (%llu frames after asking)\n", o->k, (unsigned long long)nav, p[0], p[1], p[2],
-            (unsigned long long)(g_frame - o->asked));
-        break;
+    for (int q = 0; q < g_navn; q++) {
+        uint64_t nav = g_navq[q];
+        if (*(const uint64_t *)(uintptr_t)nav != NAV_VTABLE) continue;
+        const float *p = (const float *)(uintptr_t)(nav + 0x3e0);
+        if (have_me && fabsf(p[0] - me[0]) < 1.5f && fabsf(p[2] - me[2]) < 1.5f) continue;  // (the player's own)
+        for (int i = 0; i < NOWN; i++) {
+            Own *o = &g_own[i];
+            if (o->state != 2 || fabsf(p[0] - o->at[0]) > 1.0f || fabsf(p[2] - o->at[2]) > 1.0f) continue;
+            o->nav = nav, o->state = 3, o->order = 0, o->up_frame = g_frame;  // (no order before one is given: an order to where it stands left it unable to walk)
+            LOG("[npc] mpplayer_%d is up: navigator %llx at %.2f %.2f %.2f (%llu frames after asking)\n", o->k, (unsigned long long)nav, p[0], p[1], p[2],
+                (unsigned long long)(g_frame - o->made_frame));
+            break;
+        }
     }
+    g_navn = 0;
     pthread_mutex_unlock(&g_lock);
-    return 1;
 }
 
 static int model_hook(Cpu *c, uint64_t addr) {
@@ -223,6 +245,10 @@ static void make_one(Cpu *c, Own *o) {
     pthread_mutex_lock(&g_lock);
     // (a townsperson the level made itself first - "_npc_g" names are the plain ones - then any it made, then any; never
     // a senior's entry: theirs belongs to the story)
+    static const char *force = (const char *)1;  // (research LARECOMP_NPC_LIKE=<entry name>: that one)
+    if (force == (const char *)1) force = getenv("LARECOMP_NPC_LIKE");
+    for (int i = 0; force && i < g_nent && !ce; i++)
+        if (!strcmp(g_ent[i].name, force)) ce = copy_entry(g_ent[i].e, name, o->at, chr), like = g_ent[i].name;
     for (int pass = 0; pass < 3 && !ce; pass++)
         for (int i = 0; i < g_nent && !ce; i++) {
             if (strstr(g_ent[i].name, "senior") || g_ent[i].chr == CHR_SENPAI_M || g_ent[i].chr == CHR_SENPAI_F || g_ent[i].chr == 0x5facc1d35b48a02dull) continue;
@@ -256,16 +282,20 @@ static void make_one(Cpu *c, Own *o) {
 static float *g_vec[NOWN];
 void pla_npc_cam(Cpu *c) {  // (the camera update, the game's thread: hle/warp.c)
     if (!g_mgr) return;
+    nav_match();
     int made = 0;
     for (int i = 0; i < NOWN; i++) {
         Own *o = &g_own[i];
         if (o->state == 1 && !made) { make_one(c, o), made = 1; continue; }  // (one a frame)
-        if (o->state == 2 && g_frame - o->made_frame > 300) {
-            LOG("[npc] mpplayer_%d: no navigator 10 s after making it - asking again\n", o->k);
-            o->state = 1, o->k = ++g_count;
+        if (o->state == 2 && g_frame - o->made_frame > 900) {  // (the game makes people far from us slowly)
+            LOG("[npc] mpplayer_%d: no navigator 30 s after making it - forgotten\n", o->k);
+            o->state = 0;
             continue;
         }
         if ((o->state != 3 && o->state != 4) || !o->order) continue;
+        static int hold = -1;  // (research LARECOMP_NPC_HOLD=<frames>: no orders that long after it is up)
+        if (hold < 0) hold = getenv("LARECOMP_NPC_HOLD") ? atoi(getenv("LARECOMP_NPC_HOLD")) : 0;
+        if (g_frame - o->up_frame < (uint64_t)hold) continue;
         if (*(const uint64_t *)(uintptr_t)o->nav != NAV_VTABLE) {
             LOG("[npc] mpplayer_%d: its navigator is gone\n", o->k);
             o->state = 0;
@@ -275,7 +305,12 @@ void pla_npc_cam(Cpu *c) {  // (the camera update, the game's thread: hle/warp.c
         float *v = g_vec[i];
         v[0] = o->dest[0], v[1] = o->dest[1], v[2] = o->dest[2], v[3] = 0;
         o->order = 0;
-        guest_call_saved(c, NAV_SET_MOVESTATE, o->nav, o->run ? 1 : 2, 0, 0, 0);
+        static int st1 = -1;  // (research LARECOMP_NPC_RUNSTATE=0: never state 1)
+        if (st1 < 0) st1 = !(getenv("LARECOMP_NPC_RUNSTATE") && atoi(getenv("LARECOMP_NPC_RUNSTATE")) == 0);
+        int want = o->run && st1 ? 1 : 2;
+        static int mode = -1;  // (research LARECOMP_NPC_ORDERMODE: bit 0 move state every order, bit 1 no SetIsSteering)
+        if (mode < 0) mode = getenv("LARECOMP_NPC_ORDERMODE") ? atoi(getenv("LARECOMP_NPC_ORDERMODE")) : 0;
+        if (o->run_set != want || (mode & 1)) o->run_set = want, guest_call_saved(c, NAV_SET_MOVESTATE, o->nav, want, 0, 0, 0);
         uint64_t sx[32], snzcv = c->nzcv;  // (SetDestination's answer: 0 = no navmesh there)
         __uint128_t sv[32];
         memcpy(sx, c->x, sizeof sx), memcpy(sv, c->v, sizeof sv);
@@ -283,6 +318,7 @@ void pla_npc_cam(Cpu *c) {  // (the camera update, the game's thread: hle/warp.c
         guest_call(c, NAV_SET_DEST);
         uint32_t ok = (uint32_t)c->x[0] & 1;
         memcpy(c->x, sx, sizeof sx), memcpy(c->v, sv, sizeof sv), c->nzcv = snzcv;
+        if (!(mode & 2)) guest_call_saved(c, NAV_SET_STEERING, o->nav, 0, 0, 0, 0);
         static int nlog;
         if (nlog < 12 || !ok) nlog++, LOG("[npc] mpplayer_%d sent to %.2f %.2f %.2f (%s): %s\n", o->k, v[0], v[1], v[2], o->run ? "run" : "walk", ok ? "on its way" : "no navmesh there");
     }
@@ -303,6 +339,7 @@ int pla_npc_new(const float at[3], int gender) {
     pthread_mutex_unlock(&g_lock);
     return r;
 }
+void pla_npc_at(int i, float out[3]) { if (i >= 0 && i < NOWN) memcpy(out, g_own[i].at, 12); }
 int pla_npc_state(int i) { return i >= 0 && i < NOWN ? g_own[i].state : 0; }
 int pla_npc_gender_of(int i) { return i >= 0 && i < NOWN ? g_own[i].gender : -1; }
 void pla_npc_order(int i, const float to[3], int run) {
@@ -340,7 +377,9 @@ static void live_poll(void) {
     while (fgets(l, sizeof l, f)) {
         float at[3];
         char g = 0;
+        int k = 0, run = 0;
         if (sscanf(l, "make %f %f %f %c", &at[0], &at[1], &at[2], &g) >= 3) pla_npc_new(at, g == 'f');
+        else if (sscanf(l, "go %d %f %f %f %d", &k, &at[0], &at[1], &at[2], &run) >= 4) pla_npc_order(k, at, run);
         else if (!strncmp(l, "near", 4)) { extern void pla_world_list_near(float); pla_world_list_near(25); }
         else if (!strncmp(l, "list", 4)) {
             pthread_mutex_lock(&g_lock);
@@ -369,7 +408,8 @@ int pla_npc_enabled(void) {
 __attribute__((constructor)) static void pla_npc_init(void) {
     if (!pla_npc_enabled()) return;
     rt_register_fnhook_at(PLACE_NPC, place_hook);
-    rt_register_fnhook_at(FACTORY_CREATE, fcreate_hook);
-    rt_register_fnhook_at(NAV_INIT, nav_init_hook);
-    rt_register_fnhook_at(MODEL_BUILD, model_hook);
+    int no = getenv("LARECOMP_NPC_NOHOOK") ? atoi(getenv("LARECOMP_NPC_NOHOOK")) : 0;
+    if (!(no & 2)) rt_register_fnhook_at(FACTORY_CREATE, fcreate_hook);
+    rt_register_fnhook_at(NAV_POS_FN, nav_pos_hook);
+    if (!(no & 4)) rt_register_fnhook_at(MODEL_BUILD, model_hook);
 }

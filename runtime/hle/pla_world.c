@@ -79,9 +79,32 @@ static unsigned sk_slot(uint64_t sk, uint64_t f) {  // (its entry, or a free / s
     return free_at < NSK ? free_at : h;
 }
 
+// our people whose navigator doesn't walk them (a person the game made but left standing): drawn where their player
+// is from their body object, as the borrowed stand-in is (no walking animation then)
+#define NOV 8
+typedef struct { volatile uint64_t sk, body; float was[16], off[3]; volatile float draw[4]; volatile int on; } Over;
+static Over g_ov[NOV];
+static int g_ov_own[NOV];  // (the person of hle/pla_npc.c it belongs to)
+
 static int pose_hook(Cpu *c, uint64_t addr) {
     uint64_t sk = c->x[0], body = g_body;
     bool mine = sk == g_standin && g_show && in_heap(sk);
+    Over *ov = NULL;
+    for (int i = 0; i < NOV && !mine; i++)
+        if (g_ov[i].on && g_ov[i].sk == sk) ov = &g_ov[i];
+    if (ov) {
+        float d[4] = {ov->draw[0], ov->draw[1], ov->draw[2], ov->draw[3]};
+        uint64_t b = ov->body;
+        if (b && *(const uint64_t *)(uintptr_t)b == BODY_VTABLE) {
+            float at[3] = {d[0] - ov->off[0], d[1] - ov->off[1], d[2] - ov->off[2]};
+            put((float *)(uintptr_t)(b + 0x60), at, d[3]);
+        }
+        t_posing = sk, t_bones = 0;
+        rt_call_original(c, addr);
+        t_posing = 0;
+        put((float *)(uintptr_t)(sk + SK_WORLD), d, d[3]);
+        return 1;
+    }
     if (mine && body && *(const uint64_t *)(uintptr_t)body == BODY_VTABLE) {
         float at[3] = {g_draw[0] - g_body_off[0], g_draw[1] - g_body_off[1], g_draw[2] - g_body_off[2]};
         put((float *)(uintptr_t)(body + 0x60), at, g_draw[3]);
@@ -182,6 +205,12 @@ typedef struct {
     uint64_t id, heard_ns, first_ns;
     int have, gender, own, n_snap, borrowed, own_up;
     uint64_t retry_ns;     // (no new person asked for before then: the last never came up)
+    float jump_at[3];
+    uint64_t sk;           // (its person's skeleton, once seen)
+    int ov;                // (its g_ov entry while drawn from its body: -1 walked by its navigator)
+    uint64_t far_ns;       // (since when its person stands over 2 m from where they are)
+    float draw[4];
+    uint64_t jump_ns;      // (their last jump over 8 m: a warp, a load - no person made for 3 s after one)
     uint16_t seq;
     Snap snap[NSNAP];      // (newest last)
     int64_t off_min;       // (min over the newest of local ms - sender ms)
@@ -244,9 +273,10 @@ static void peer_let_go(Peer *p, const char *why) {
         float to[3] = {p->tgt[0] + (d > 0.1f ? dx / d : 1) * 25, p->tgt[1], p->tgt[2] + (d > 0.1f ? dz / d : 0) * 25};
         pla_npc_order(p->own, to, 0);
         pla_npc_free(p->own);
+        if (p->ov >= 0) g_ov[p->ov].draw[1] = -1000;  // (drawn from its body: put out of sight instead)
         LOG("[world] player %016llx %s: its person walks off\n", (unsigned long long)p->id, why);
     }
-    p->own = -1, p->own_up = 0;
+    p->own = -1, p->own_up = 0, p->ov = -1, p->sk = 0, p->far_ns = 0;
 }
 
 static void world_tick(uint64_t frame) {
@@ -266,6 +296,10 @@ static void world_tick(uint64_t frame) {
     }
     uint64_t now = plat_now_ns();
     bool me_ok = g_me_frame && frame - g_me_frame < 10;
+    static uint64_t tick_ns;
+    float tick_dt = tick_ns && now > tick_ns ? (float)(now - tick_ns) * 1e-9f : 0.033f;
+    tick_dt = tick_dt > 0.2f ? 0.2f : tick_dt;
+    tick_ns = now;
     // our speed (m/s, eased)
     static float last_me[3], my_speed;
     static uint64_t last_me_ns;
@@ -315,7 +349,7 @@ static void world_tick(uint64_t frame) {
                 if (!fr) continue;  // (MAXPEER heard already)
                 p = fr;
                 memset(p, 0, sizeof *p);
-                p->id = from, p->have = 1, p->own = -1, p->first_ns = now;
+                p->id = from, p->have = 1, p->own = -1, p->ov = -1, p->first_ns = now;
                 LOG("[world] hearing player %016llx at %.2f %.2f %.2f (%s body)\n", (unsigned long long)from, v[0], v[1], v[2], b[28] ? "p2" : "p1");
             } else if ((int16_t)(s - p->seq) <= 0) continue;  // (an older one, overtaken)
             p->seq = s, p->heard_ns = now, p->heard++;
@@ -327,12 +361,47 @@ static void world_tick(uint64_t frame) {
         if (ms - sent_ms >= 50) {
             sent_ms = ms;
             Peer *p = &g_peers[0];
-            if (!p->have) memset(p, 0, sizeof *p), p->have = 1, p->id = 1, p->own = -1, p->first_ns = now;
+            if (!p->have) memset(p, 0, sizeof *p), p->have = 1, p->id = 1, p->own = -1, p->ov = -1, p->first_ns = now;
             float v[4] = {g_me[0] + sinf(g_me[3]) * g_self_ahead, g_me[1], g_me[2] + cosf(g_me[3]) * g_self_ahead, g_me[3]};
             static int sg = -2;
             if (sg == -2) sg = getenv("LARECOMP_GHOST_GENDER") ? atoi(getenv("LARECOMP_GHOST_GENDER")) : -1;
             p->heard_ns = now, p->heard++;
             peer_take(p, (uint32_t)ms, v, my_speed, sg >= 0 ? sg : gender > 0);
+        }
+    }
+    // research LARECOMP_WORLD_FAKE=<n>: n made-up players around where we stood when they began - #0 walks a 6 m circle,
+    // #1 goes quiet after 40 s, #2 runs back and forth over 20 m, the rest stand 5..60 m out (bodies alternate)
+    static int nfake = -1;
+    static float fbase[4];
+    static uint64_t fstart;
+    if (nfake < 0) nfake = getenv("LARECOMP_WORLD_FAKE") ? atoi(getenv("LARECOMP_WORLD_FAKE")) : 0;
+    if (nfake > MAXPEER) nfake = MAXPEER;
+    static uint64_t fsent;
+    if (nfake > 0 && me_ok && now_ms() - fsent >= 50) {
+        uint64_t ms = now_ms();
+        fsent = ms;
+        if (!fstart) fstart = ms, fbase[0] = g_me[0], fbase[1] = g_me[1], fbase[2] = g_me[2], fbase[3] = g_me[3];
+        float t = (float)(ms - fstart) * 1e-3f;
+        static const float dist[] = {0, 7, 8, 10, 14, 22, 35, 60}, ang[] = {0, 40, -40, 20, -60, 70, -15, 5};
+        for (int i = 0; i < nfake; i++) {
+            if (i == 1 && t > 40) continue;  // (gone quiet)
+            Peer *p = &g_peers[i];
+            float v[4], spd = 0;
+            if (i == 0) {
+                float a = t * 1.5f / 6.0f;
+                v[0] = fbase[0] + sinf(fbase[3]) * 10 + sinf(a) * 6, v[2] = fbase[2] + cosf(fbase[3]) * 10 + cosf(a) * 6, v[3] = a + 1.5708f, spd = 1.5f;
+            } else if (i == 2) {
+                float ph = fmodf(t * 5.0f, 40.0f), x = ph < 20 ? ph : 40 - ph, a = fbase[3] + 1.5708f;
+                v[0] = fbase[0] + sinf(fbase[3]) * 6 + sinf(a) * (x - 10), v[2] = fbase[2] + cosf(fbase[3]) * 6 + cosf(a) * (x - 10);
+                v[3] = ph < 20 ? a : a + 3.14159f, spd = 5.0f;
+            } else {
+                float a = fbase[3] + ang[i] * 0.0174533f;
+                v[0] = fbase[0] + sinf(a) * dist[i], v[2] = fbase[2] + cosf(a) * dist[i], v[3] = fbase[3] + 3.14159f;
+            }
+            v[1] = fbase[1];
+            if (!p->have) memset(p, 0, sizeof *p), p->have = 1, p->id = 0xfa0e000000000001ull + i, p->own = -1, p->ov = -1, p->first_ns = now;
+            p->heard_ns = now, p->heard++;
+            peer_take(p, (uint32_t)ms, v, spd, i & 1);
         }
     }
     // (people are made only once we have stood in the world a while: not mid-load, not right after a warp)
@@ -373,19 +442,77 @@ static void world_tick(uint64_t frame) {
         if (p->own >= 0 && !pla_npc_state(p->own)) {  // (gone with a level, or never made)
             LOG("[world] player %016llx's person is gone%s\n", (unsigned long long)p->id, p->own_up ? ": another" : " before it came up: another in 10 s");
             if (!p->own_up) p->retry_ns = now + 10000000000ull;
-            p->own = -1, p->own_up = 0;
+            p->own = -1, p->own_up = 0, p->ov = -1, p->sk = 0, p->far_ns = 0;
         }
         if (p->own >= 0 && pla_npc_state(p->own) == 3) p->own_up = 1;
-        if (p->own < 0 && settled && now >= p->retry_ns) {
+        if (fabsf(p->tgt[0] - p->jump_at[0]) + fabsf(p->tgt[2] - p->jump_at[2]) > 8.0f) {
+            memcpy(p->jump_at, p->tgt, 12), p->jump_ns = now;
+            if (p->own >= 0 && pla_npc_state(p->own) != 3) {  // (asked for where they were before the jump: start over)
+                extern void pla_npc_free(int);
+                pla_npc_free(p->own), p->own = -1;
+            }
+        }
+        bool peer_settled = now - p->jump_ns > 3000000000ull && now - p->first_ns > 3000000000ull;
+        if (p->own < 0 && settled && peer_settled && now >= p->retry_ns) {
             int t = pla_npc_take(p->gender);
             p->own = t >= 0 ? t : pla_npc_new(p->tgt, p->gender);
+            p->ov = -1, p->sk = 0, p->far_ns = 0;
+            for (int k = 0; t >= 0 && k < NOV; k++)
+                if (g_ov[k].on && g_ov_own[k] == t) p->ov = k, p->sk = g_ov[k].sk, memcpy(p->draw, p->tgt, 16);
             if (p->own >= 0) LOG("[world] player %016llx gets %s person %d (the %s senior) at %.2f %.2f %.2f, %.1f m from us\n", (unsigned long long)p->id,
                                  t >= 0 ? "the free" : "a new", p->own, p->gender ? "female" : "male", p->tgt[0], p->tgt[1], p->tgt[2], d);
             p->order_frame = 0;
         }
-        if (p->own >= 0 && pla_npc_state(p->own) == 3 && frame - p->order_frame >= 6) {  // (5 orders a second)
+        if (p->own >= 0 && pla_npc_state(p->own) == 3) {
+            extern void pla_npc_at(int, float *);
+            if (!p->sk) {  // (its skeleton: a person posed where it was made)
+                float at[3];
+                pla_npc_at(p->own, at);
+                for (int i = 0; i < NSK; i++)
+                    if (g_sk[i].sk && g_sk[i].sk != g_player_sk && frame - g_sk[i].frame < 5 && g_sk[i].bones >= 150 &&
+                        fabsf(g_sk[i].p[0] - at[0]) < 1.2f && fabsf(g_sk[i].p[2] - at[2]) < 1.2f) p->sk = g_sk[i].sk;
+                if (p->sk) LOG("[world] player %016llx's person: skeleton %llx\n", (unsigned long long)p->id, (unsigned long long)p->sk);
+            }
+            float sp[3] = {0};
+            bool seen = false;
+            for (int i = 0; p->sk && i < NSK; i++)
+                if (g_sk[i].sk == p->sk && frame - g_sk[i].frame < 30) sp[0] = g_sk[i].p[0], sp[1] = g_sk[i].p[1], sp[2] = g_sk[i].p[2], seen = true;
+            if (seen && p->ov < 0) {
+                float ex = sp[0] - p->tgt[0], ez = sp[2] - p->tgt[2];
+                if (ex * ex + ez * ez > 4.0f) { if (!p->far_ns) p->far_ns = now; }
+                else p->far_ns = 0;
+                if (p->far_ns && now - p->far_ns > 3000000000ull) {  // (its navigator isn't walking it: drawn from its body)
+                    int k = -1;
+                    for (int j = 0; j < NOV && k < 0; j++)
+                        if (!g_ov[j].on) k = j;
+                    uint64_t body = k >= 0 ? body_at(sp) : 0;
+                    if (body) {
+                        Over *o = &g_ov[k];
+                        memcpy(o->was, (const float *)(uintptr_t)(body + 0x60), 64);
+                        o->off[0] = sp[0] - o->was[12], o->off[1] = sp[1] - o->was[13], o->off[2] = sp[2] - o->was[14];
+                        memcpy(p->draw, p->tgt, 16);
+                        memcpy((void *)o->draw, p->draw, 16);
+                        o->sk = p->sk, o->body = body, g_ov_own[k] = p->own, o->on = 1, p->ov = k;
+                        LOG("[world] player %016llx's person stands %.1f m off for 3 s: drawn from its body %llx instead\n", (unsigned long long)p->id,
+                            sqrtf(ex * ex + ez * ez), (unsigned long long)body);
+                    }
+                    p->far_ns = 0;
+                }
+            }
+            if (p->ov >= 0) {  // (eased toward where they are drawn; a jump over 8 m at once)
+                float k = 1.0f - expf(-tick_dt * 12.0f);
+                float dx = p->tgt[0] - p->draw[0], dy = p->tgt[1] - p->draw[1], dz = p->tgt[2] - p->draw[2];
+                if (dx * dx + dy * dy + dz * dz > 64.0f) k = 1.0f;
+                p->draw[0] += dx * k, p->draw[1] += dy * k, p->draw[2] += dz * k;
+                p->draw[3] += remainderf(p->tgt[3] - p->draw[3], 6.2831853f) * k;
+                memcpy((void *)g_ov[p->ov].draw, p->draw, 16);
+            }
+        }
+        if (p->own >= 0 && p->ov < 0 && pla_npc_state(p->own) == 3 && frame - p->order_frame >= 6) {  // (5 orders a second)
             float mx = p->tgt[0] - p->ordered[0], mz = p->tgt[2] - p->ordered[2];
-            if (!p->order_frame || mx * mx + mz * mz > 0.01f || frame - p->order_frame >= 60) {
+            static int per = -1;  // (research LARECOMP_NPC_ORDERMODE bit 2: an order every 2 s while standing too)
+            if (per < 0) per = getenv("LARECOMP_NPC_ORDERMODE") && (atoi(getenv("LARECOMP_NPC_ORDERMODE")) & 4);
+            if (!p->order_frame || mx * mx + mz * mz > 0.25f || (per && frame - p->order_frame >= 60)) {
                 pla_npc_order(p->own, p->tgt, p->tgt[4] > 3.6f);
                 memcpy(p->ordered, p->tgt, 12), p->order_frame = frame;
             }
@@ -464,6 +591,7 @@ int pla_world_enabled(void) {
 __attribute__((constructor)) static void pla_world_init(void) {
     if (!pla_world_enabled()) return;
     if (getenv("LARECOMP_HIDE_PLAYER")) { g_on = 0; return; }  // (that research hooks the same posing)
+    if (getenv("LARECOMP_NPC_NOHOOK") && (atoi(getenv("LARECOMP_NPC_NOHOOK")) & 8)) return;
     rt_register_fnhook_at(POSE_FN, pose_hook);
     rt_register_fnhook_at(0x70029c983cull, palette_hook);
 }
