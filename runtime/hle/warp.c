@@ -1157,6 +1157,7 @@ void menu_notice_for(const char *text, unsigned ms);
 extern char g_kbd_auto_once[32];
 static int g_trade;            // 0 nothing, 1 we asked, 2 they asked
 static uint64_t g_trade_with;  // (that player)
+static uint64_t g_trade_via;   // (that player as the server knows them - see the world's receive loop)
 static uint32_t g_trade_code;
 static uint64_t g_trade_at;
 static void trade_send(int accept, uint64_t to, uint32_t code) {
@@ -1330,7 +1331,7 @@ static void trade_start(uint32_t code, unsigned wait_ms, int role) {
     ldn_trade_role(role, TRADE_LINK_S + 30 + wait_ms / 1000);
     g_trade = 0;
 }
-static void trade_message(const WorldPkt *k, uint64_t frame) {
+static void trade_message(const WorldPkt *k, uint64_t frame, uint64_t via) {
     if (k->t.to != g_self || k->t.code >= 100000000u) return;  // (a Link Code has 8 digits)
     if (k->type == 4) {
         if (g_trade == 1 && k->from == g_trade_with && k->t.code == g_trade_code) trade_start(k->t.code, 0, 2);
@@ -1339,7 +1340,7 @@ static void trade_message(const WorldPkt *k, uint64_t frame) {
     if (g_trade == 2 && k->from == g_trade_with && k->t.code == g_trade_code) return;  // (a repeat)
     if (g_trade == 2 && frame - g_trade_at < 600) return;  // (a newer ask within 10 s: the first one stands - no notice spam)
     if (g_trade == 1 && k->from == g_trade_with && k->t.code > g_trade_code) return;  // (both asked at once: the lower code)
-    g_trade = 2, g_trade_with = k->from, g_trade_code = k->t.code, g_trade_at = frame;
+    g_trade = 2, g_trade_with = k->from, g_trade_via = via, g_trade_code = k->t.code, g_trade_at = frame;
     menu_notice_for("Another player wants to trade! Walk up to them and press A.", 8000);
     LOG("[world] trade asked by %016llx (code %08u)\n", (unsigned long long)k->from, k->t.code);
 }
@@ -1386,7 +1387,7 @@ static void trade_frame(uint64_t me, uint64_t frame) {
         trade_start(g_trade_code, 0, 1);
     } else if (!theirs || g_trade == 0) {
         g_trade_code = 10000000u + (uint32_t)(world_now_ns() / 1000 % 89999999u);
-        g_trade = 1, g_trade_with = by->id, g_trade_at = frame;
+        g_trade = 1, g_trade_with = by->id, g_trade_via = by->via, g_trade_at = frame;
         trade_send(0, g_trade_with, g_trade_code);
         menu_notice_for("Trade request sent. Waiting for them to walk up to you and press A.", 6000);
         LOG("[world] trade asked of %016llx (code %08u)\n", (unsigned long long)g_trade_with, g_trade_code);
@@ -2232,8 +2233,12 @@ static void ghost_frame(uint64_t frame) {
         if (g_self_test && in.from == g_self) in.from = g_self ^ 2;  // (ourselves, as someone else)
         if (in.ver != 1 || in.from == g_self || !in.from) continue;
         Peer *p = peer_from(&in, via);
-        if (in.type == 3 || in.type == 4) { if (n >= 28 && p) trade_message(&in, frame); continue; }
-        if (in.type == 9) { if (n >= 29 && p) trade_link_message(&in); continue; }
+        // (a walk-up trade's messages: from a player we hear - or from the one we trade with, known by the server's word,
+        // while we have no stand-in for them: back from a menu or a lag stall they are heard again only with their next
+        // position - the answer to our ask came first, was dropped, and the trade never started, 2026-11-17)
+        bool partner = p || (via && in.from == g_trade_with && via == g_trade_via);
+        if (in.type == 3 || in.type == 4) { if (n >= 28 && partner) trade_message(&in, frame, via); continue; }
+        if (in.type == 9) { if (n >= 29 && partner) trade_link_message(&in); continue; }
         if (in.type == 5) { outfit_message(p, &in, (size_t)n); continue; }
         if (in.type == 8) {  // (what they have of ours: ours stop being resent once everyone has them)
             if (p && n >= 32 && (in.a.to == g_self || (g_self_test && in.a.to == (g_self ^ 2))))
