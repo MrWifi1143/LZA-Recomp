@@ -208,7 +208,8 @@ typedef struct {
     float jump_at[3];
     uint64_t sk;           // (its person's skeleton, once seen)
     int ov;                // (its g_ov entry while drawn from its body: -1 walked by its navigator)
-    uint64_t far_ns;       // (since when its person stands over 2 m from where they are)
+    uint64_t far_ns;       // (since when its person is over 2 m from where they are)
+    float far_at[3];       // (where its person was then: one walking after them isn't stuck, only behind)
     float draw[4];
     uint64_t jump_ns;      // (their last jump over 8 m: a warp, a load - no person made for 3 s after one)
     uint16_t seq;
@@ -479,9 +480,16 @@ static void world_tick(uint64_t frame) {
                 if (g_sk[i].sk == p->sk && frame - g_sk[i].frame < 30) sp[0] = g_sk[i].p[0], sp[1] = g_sk[i].p[1], sp[2] = g_sk[i].p[2], seen = true;
             if (seen && p->ov < 0) {
                 float ex = sp[0] - p->tgt[0], ez = sp[2] - p->tgt[2];
-                if (ex * ex + ez * ez > 4.0f) { if (!p->far_ns) p->far_ns = now; }
+                float e2 = ex * ex + ez * ez;
+                if (e2 > 4.0f) { if (!p->far_ns) p->far_ns = now, memcpy(p->far_at, sp, 12); }
                 else p->far_ns = 0;
-                if (p->far_ns && now - p->far_ns > 3000000000ull) {  // (its navigator isn't walking it: drawn from its body)
+                // (its navigator isn't walking it - under 1 m in 3 s while over 2 m off - or it can't keep up: over 15 m
+                // behind for 6 s - then it's drawn from its body)
+                float mx = sp[0] - p->far_at[0], mz = sp[2] - p->far_at[2];
+                bool stuck = p->far_ns && now - p->far_ns > 3000000000ull && mx * mx + mz * mz < 1.0f;
+                bool lost = p->far_ns && now - p->far_ns > 6000000000ull && e2 > 225.0f;
+                if (p->far_ns && now - p->far_ns > 3000000000ull && !stuck && !lost && e2 <= 225.0f) p->far_ns = now, memcpy(p->far_at, sp, 12);
+                if (stuck || lost) {
                     int k = -1;
                     for (int j = 0; j < NOV && k < 0; j++)
                         if (!g_ov[j].on) k = j;
@@ -493,8 +501,8 @@ static void world_tick(uint64_t frame) {
                         memcpy(p->draw, p->tgt, 16);
                         memcpy((void *)o->draw, p->draw, 16);
                         o->sk = p->sk, o->body = body, g_ov_own[k] = p->own, o->on = 1, p->ov = k;
-                        LOG("[world] player %016llx's person stands %.1f m off for 3 s: drawn from its body %llx instead\n", (unsigned long long)p->id,
-                            sqrtf(ex * ex + ez * ez), (unsigned long long)body);
+                        LOG("[world] player %016llx's person %s %.1f m off: drawn from its body %llx instead\n", (unsigned long long)p->id,
+                            stuck ? "stands" : "can't keep up,", sqrtf(e2), (unsigned long long)body);
                     }
                     p->far_ns = 0;
                 }

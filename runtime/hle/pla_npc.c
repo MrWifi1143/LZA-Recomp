@@ -42,6 +42,19 @@ void rt_call_original(Cpu *c, uint64_t addr);
 #define NAV_SET_MOVESTATE 0x700171d458ull
 #define NAV_SET_STEERING 0x700171e30cull  // (SetIsSteering(bool): FObjMove sets false after each destination)
 #define MODEL_BUILD 0x7001a2b778ull  // (the player's model from its dress-up: [x0+0x248] != 0 = the p2 body)
+// The character controller (vtable 0x700413c888) of each character gets its navigator at setup: SetNavigator
+// 0x700197344c(ctrl, &weak navigator) keeps it at ctrl+0x258 ({table entry, handle}: navigator = [entry+0x18]-0x50) and
+// installs the navigator's root-motion step (0x7001979fe8) - the step that walks a character toward its destination
+// with its own walk/run animation. That step only runs while the byte ctrl+0x240 is 0 (the character's transform
+// provider 0x7001978570 takes the plain animation path 0x70019748d4 while it is set; ctrl vfunc +0xf0 0x70017d46b8 sets
+// it). The level's standing people (guards, townspeople at their spot: 12 of the 41 in Jubilife's first area) have it
+// set - and ours are copies of them. With it set, the navigator takes the order (+0x240 moving, its AI character added),
+// but the AI character is given the person's own spot as its goal (cmd 0x47 = the animation's next position), finds a
+// one-point path, reports "goal reached" (AI event 6 -> the completion callback 0x7001725010 -> +0x418 -> the next
+// update's StopPathfinding clears +0x240): the person stays where it was made. Cleared, it walks (Lua-traced 2026-11-18).
+#define SET_NAVIGATOR 0x700197344cull
+#define CTRL_VTABLE 0x700413c888ull
+#define CTRL_FIXED 0x240
 #define CHR_SENPAI_M 0x2d992cf818c93910ull  // tr0036_00_senpai_m
 #define CHR_SENPAI_F 0xfca68432c5c9b79eull  // tr0037_00_senpai_f
 
@@ -94,6 +107,7 @@ typedef struct {
     int gender, k;
     float at[3];        // where it was made
     uint64_t nav, made_frame, up_frame;
+    uint64_t ctrl;      // (its character controller, once seen: ctrl+0x240 kept 0 so the navigator walks it)
     uint64_t level;
     float dest[3];      // the newest order
     int run, order;     // (order: a new one to give)
@@ -156,6 +170,40 @@ static int nav_pos_hook(Cpu *c, uint64_t addr) {
     pthread_mutex_unlock(&g_lock);
     return 0;
 }
+// controllers given a navigator lately (SetNavigator), by navigator: ours is looked up when its navigator is matched
+#define NCTL 64
+static struct { uint64_t nav, ctrl; } g_ctl[NCTL];
+static unsigned g_nctl;
+static int setnav_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    uint64_t ctrl = c->x[0], w = c->x[1];
+    if (!in_heap(ctrl) || !guest_ptr(w)) return 0;  // (the weak reference is on the stack)
+    uint64_t entry = *(const uint64_t *)(uintptr_t)w;
+    if (!in_heap(entry)) return 0;
+    uint64_t p = *(const uint64_t *)(uintptr_t)(entry + 0x18), nav = p - 0x50;
+    if (!in_heap(nav) || *(const uint64_t *)(uintptr_t)nav != NAV_VTABLE) return 0;
+    pthread_mutex_lock(&g_lock);
+    g_ctl[g_nctl++ % NCTL].nav = nav, g_ctl[(g_nctl - 1) % NCTL].ctrl = ctrl;
+    pthread_mutex_unlock(&g_lock);
+    return 0;
+}
+static uint64_t ctrl_of(uint64_t nav) {  // (g_lock held)
+    for (unsigned i = 0; i < NCTL; i++)
+        if (g_ctl[i].nav == nav && in_heap(g_ctl[i].ctrl) && *(const uint64_t *)(uintptr_t)g_ctl[i].ctrl == CTRL_VTABLE) return g_ctl[i].ctrl;
+    return 0;
+}
+static void unfix(Own *o) {  // (its controller's "stands at its spot" byte cleared: the navigator's root motion steps it)
+    if (!o->ctrl || *(const uint64_t *)(uintptr_t)o->ctrl != CTRL_VTABLE) return;
+    uint8_t *f = (uint8_t *)(uintptr_t)(o->ctrl + CTRL_FIXED);
+    static int keep = -1;  // (research LARECOMP_NPC_KEEPFIXED=1: left as the copied entry had it - the person stands)
+    if (keep < 0) keep = getenv("LARECOMP_NPC_KEEPFIXED") && atoi(getenv("LARECOMP_NPC_KEEPFIXED"));
+    if (*f && !keep) {
+        static int nlog;
+        if (nlog++ < 8) LOG("[npc] mpplayer_%d: its controller %llx stood at its spot - let go so its navigator walks it\n", o->k, (unsigned long long)o->ctrl);
+        *f = 0;
+    }
+}
+
 static void nav_match(void) {
     if (!g_navn) return;
     extern bool warp_player_pos(float out[3]);
@@ -171,8 +219,10 @@ static void nav_match(void) {
             Own *o = &g_own[i];
             if (o->state != 2 || fabsf(p[0] - o->at[0]) > 1.0f || fabsf(p[2] - o->at[2]) > 1.0f) continue;
             o->nav = nav, o->state = 3, o->order = 0, o->up_frame = g_frame;  // (no order before one is given: an order to where it stands left it unable to walk)
-            LOG("[npc] mpplayer_%d is up: navigator %llx at %.2f %.2f %.2f (%llu frames after asking)\n", o->k, (unsigned long long)nav, p[0], p[1], p[2],
-                (unsigned long long)(g_frame - o->made_frame));
+            o->ctrl = ctrl_of(nav);
+            LOG("[npc] mpplayer_%d is up: navigator %llx at %.2f %.2f %.2f (%llu frames after asking), controller %llx\n", o->k, (unsigned long long)nav, p[0], p[1],
+                p[2], (unsigned long long)(g_frame - o->made_frame), (unsigned long long)o->ctrl);
+            unfix(o);
             break;
         }
     }
@@ -301,6 +351,12 @@ void pla_npc_cam(Cpu *c) {  // (the camera update, the game's thread: hle/warp.c
             o->state = 0;
             continue;
         }
+        if (!o->ctrl) {  // (its controller's setup seen after its navigator's)
+            pthread_mutex_lock(&g_lock);
+            o->ctrl = ctrl_of(o->nav);
+            pthread_mutex_unlock(&g_lock);
+        }
+        unfix(o);
         if (!g_vec[i]) g_vec[i] = hle_alloc(16);
         float *v = g_vec[i];
         v[0] = o->dest[0], v[1] = o->dest[1], v[2] = o->dest[2], v[3] = 0;
@@ -411,5 +467,6 @@ __attribute__((constructor)) static void pla_npc_init(void) {
     int no = getenv("LARECOMP_NPC_NOHOOK") ? atoi(getenv("LARECOMP_NPC_NOHOOK")) : 0;
     if (!(no & 2)) rt_register_fnhook_at(FACTORY_CREATE, fcreate_hook);
     rt_register_fnhook_at(NAV_POS_FN, nav_pos_hook);
+    rt_register_fnhook_at(SET_NAVIGATOR, setnav_hook);
     if (!(no & 4)) rt_register_fnhook_at(MODEL_BUILD, model_hook);
 }
