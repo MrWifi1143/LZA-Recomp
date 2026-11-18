@@ -127,6 +127,8 @@ GAMELIB_SRCS := tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools
 GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS) $(PGO_ZST); echo '$(GENFLAGS)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
 
 RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
+# (the Mbed TLS rules below come before `all`: without this a bare `make` built only build/libmbedtls.a)
+.DEFAULT_GOAL := all
 # Mbed TLS (third_party/mbedtls, configuration lza_mbedtls_config.h): the online server's accounts and save sync over
 # TLS (runtime/acct.c; the server: contrib/lzaserver). A static library: only what is used is linked.
 MBEDTLS_SRC   := $(wildcard third_party/mbedtls/library/*.c)
