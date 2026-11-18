@@ -24,7 +24,8 @@
 //
 // An online server instead of Steam (contrib/lzaserver; larecomp.ini online_server = <host>[:port], the launcher's
 // Options > Online tab, or LARECOMP_RELAY_SERVER): no Steam, no friends list - players who enter the same Link Code meet
-// in a lobby on the server, which passes their traffic on (larecomp_relay_code: runtime/hle/swkbd.c tells the code).
+// in a lobby on the server, which passes their traffic on (larecomp_relay_code: runtime/hle/swkbd.c tells the code);
+// a Private Battle's host and joiners meet in its room's lobby (larecomp_relay_room: the passcode).
 // An lzaserver with accounts lets only signed-in players play: the hello carries a play ticket from runtime/acct.c
 // (larecomp_server_ticket; acct_proto.h). The server's address is never written to the log.
 //
@@ -538,6 +539,17 @@ static sock_t g_srv = NO_SOCK;
 static uint64_t g_srv_id;
 static uint8_t g_srv_game;            // (1 Arceus, 2 Z-A)
 static char g_srv_code[9];            // (the lobby: the Link Code last entered)
+// Entering a lobby over a lossy link (2026-11-18): a Private Battle's joiner scans ONCE, right after typing the passcode,
+// and the room's host is known only from the server's member list ('M') - its 'L' (in the hello) or the server's
+// answer lost = "No room could be found!" (1 in 2 joins through a 10 %-loss proxy). So a lobby entered is said 4 times
+// in its first second, and a scan in a Private Battle room's lobby's first 5 s waits for its member list (up to 2.5 s).
+// LARECOMP_RELAY_LOBBY_WAIT=0 (research): neither - as before.
+static volatile uint64_t g_lobby_at, g_lobby_m_at;  // (ms: this copy entered a lobby; the first member list heard since)
+static int lobby_wait_on(void) {
+    static int on = -1;
+    if (on < 0) on = !(getenv("LARECOMP_RELAY_LOBBY_WAIT") && atoi(getenv("LARECOMP_RELAY_LOBBY_WAIT")) == 0);
+    return on;
+}
 static volatile int g_srv_hosting;
 // The shared world (lzaserver 'W' / 'X'): the game's other players walking around, opt-in (runtime/hle/warp.c). What
 // arrives waits in a small queue for the game to take (larecomp_world_recv) - only the newest per player matters.
@@ -852,6 +864,14 @@ static uint64_t now_ms(void) {
 static int relay_targets(uint32_t *out, int max) {
     int n = 0;
     g_scan_ms = now_ms();
+    if (g_srv != NO_SOCK && g_srv_code[0] == 'B' && lobby_wait_on() && g_lobby_at && g_scan_ms - g_lobby_at < 5000 && !g_lobby_m_at) {
+        // (above: the member list first - a Private Battle room's lobby only: a walk-up trade's joiner looks again and
+        // again by itself, runtime/services/ldn.c join_scan, and Pia's own look for a room lasts 2 s whatever a scan takes)
+        uint64_t t0 = now_ms();
+        while (!g_lobby_m_at && now_ms() - t0 < 2500) nap_ms(10);
+        LOG("[steamrelay] online server: the lobby's member list %s (waited %llu ms)\n", g_lobby_m_at ? "came" : "didn't come",
+            (unsigned long long)(now_ms() - t0));
+    }
     if (g_fake != NO_SOCK) {
         if (max > 0) out[n++] = peer_addr(peer_of(g_fake_peer));
         return n;
@@ -899,7 +919,8 @@ static void *pump(void *arg) {
         if (g_srv != NO_SOCK) {
             uint64_t t = now_ms();
             if (g_srv_hello_now && t - last_now >= 250) g_srv_hello_now = 0, last_now = t, last_hello = 0;  // (a new address or cookie:
-            if (t - last_hello >= 2000) last_hello = t, srv_hello();                                         //  hello at once)
+            if (t - last_hello >= 2000 || (lobby_wait_on() && g_lobby_at && t - g_lobby_at < 1100 && t - last_hello >= 300))  //  hello at once;
+                last_hello = t, srv_hello();                                                                 //  a new lobby: 4x)
             dup_send_due(t);
             struct sockaddr_in a;
             socklen_t al = sizeof a;
@@ -934,6 +955,10 @@ static void *pump(void *arg) {
                     memcpy(&from, m + 1, 8);
                     deliver(from, m + 9, (size_t)n - 9);
                 } else if (m[0] == 'M' && n >= 2) {
+                    // (a server since 2026-11-18 ends the list with its lobby's code: one still on its way from the lobby
+                    // left before - a mistyped passcode, then the right one - isn't this lobby's)
+                    if (n >= 2 + 9 * m[1] + 8 && memcmp(m + 2 + 9 * m[1], g_srv_code, 8)) { al = sizeof a; continue; }
+                    if (g_lobby_at && !g_lobby_m_at) g_lobby_m_at = t ? t : 1;
                     pthread_mutex_lock(&g_hosts_lock);
                     g_nhosts = 0;
                     for (int i = 0; i < m[1] && 2 + 9 * i + 9 <= n && g_nhosts < 64; i++) {
@@ -1028,9 +1053,28 @@ int larecomp_relay_join(const char *secret) {
 void larecomp_relay_code(const char *code) {
     if (g_srv == NO_SOCK || !code || strlen(code) != 8 || strspn(code, "0123456789") != 8) return;
     memcpy(g_srv_code, code, 9);
+    g_lobby_m_at = 0, g_lobby_at = now_ms();
     srv_hello();
     LOG("[steamrelay] online server: in the lobby of this Link Code\n");
 }
+
+// A Private Battle's room (4-digit passcode - the host's from its room's advertise data, runtime/services/ldn.c; a
+// joiner's as typed, runtime/hle/swkbd.c): with an online server, this copy's lobby there is the room's, "B000" +
+// passcode (lzaserver: a 'B' lobby never meets a Link Code's 8 digits). Before 2026-11-18 neither side of a Private
+// Battle entered a lobby, so "Nearby" battles never found each other through a server.
+void larecomp_relay_room(const char *pass) {
+    if (g_srv == NO_SOCK || !pass || strlen(pass) != 4 || strspn(pass, "0123456789") != 4) return;
+    char c[9];
+    snprintf(c, sizeof c, "B000%s", pass);
+    if (!strcmp(c, g_srv_code)) return;
+    memcpy(g_srv_code, c, 9);
+    g_lobby_m_at = 0, g_lobby_at = now_ms();
+    srv_hello();
+    LOG("[steamrelay] online server: in the lobby of this Private Battle room\n");
+}
+
+// In a Private Battle room's lobby on an online server (1): runtime/services/ldn.c gives a scan longer for its host's answer
+int larecomp_relay_battle_lobby(void) { return g_srv != NO_SOCK && g_srv_code[0] == 'B'; }
 
 // The online server's state (runtime/hle/warp.c tells the player when it can't be reached, drops or comes back): 0 no
 // server in use, 1 not heard from yet, 2 answering, 3 never answered in 8 s, 4 stopped answering 8 s ago, 5 its name
