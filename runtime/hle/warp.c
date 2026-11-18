@@ -2109,10 +2109,10 @@ static void server_notice_frame(uint64_t frame) {
     else if (st == 4) snprintf(t, sizeof t, "Lost the connection to the online server (%s) - trying again...", name), lt = "lost the server";
     else if (st == 5) snprintf(t, sizeof t, "The online server's name (%s) can't be found - check the address (launcher > Options > Online) and your connection.", name), lt = "the server's name doesn't resolve";
     else if (st == 6) snprintf(t, sizeof t, "Sign in to %s to play online there: launcher > Options > Online. (Playing offline needs no account.)", name), lt = "sign in to play on that server";
-    else if (st == 2 && (was == 3 || was == 4 || was == 5)) snprintf(t, sizeof t, was == 4 ? "Connected to the online server again." : "Online server reached (%s).", name), lt = was == 4 ? "connected again" : "server reached";
     else if (st == 2 && was == 6) snprintf(t, sizeof t, "Signed in on %s: online play is on.", name), lt = "signed in: online play on";
+    // (back after it couldn't be reached: online play just carries on - nothing to tell, the notice said it waits for it)
     if (t[0]) menu_notice_for(t, st == 2 ? 5000 : st == 6 ? 12000 : 10000), told_at = frame, LOG("[online] told: %s\n", lt);
-    else if (st != was) LOG("[online] the server: %s\n", st == 1 ? "asked, no answer yet" : st == 2 ? "answering" : "not in use");
+    else if (st != was) LOG("[online] the server: %s\n", st == 1 ? "asked, no answer yet" : st != 2 ? "not in use" : was == 4 ? "answering again (not told)" : was == 3 || was == 5 ? "reached (not told)" : "answering");
     was = st;
 }
 

@@ -1293,6 +1293,11 @@ static void *online_thread(void *arg) {
             if (!auth || !state) set_ticket = NULL;
         }
         if (set_ticket && state(NULL, 0)) {
+            int st = state(NULL, 0);
+            // (the server answers again after it couldn't be reached: a ticket at once - the backoff that built up while
+            // it was away (up to 2 min) kept a signed-in player out after it came back, and the server's "sign in"
+            // answer meanwhile had the game tell them to sign in)
+            if (st == 2 && was_state && was_state != 2) next = 0, backoff = 5000;
             char tok[ACCT_TOKEN_MAX + 8], key[300];
             bool in = token_of(g_settings.online_server, tok, sizeof tok, key, sizeof key);
             mbedtls_platform_zeroize(tok, sizeof tok);
@@ -1309,7 +1314,6 @@ static void *online_thread(void *arg) {
                 } else next = now + backoff, backoff = backoff * 2 > 120000 ? 120000 : backoff * 2;
                 mbedtls_platform_zeroize(k, sizeof k);
             }
-            int st = state(NULL, 0);
             if (g_sync_on && st == 2 && was_state != 2 && was_state) retry_now(true);  // (the server answers again: catch up now)
             was_state = st;
         }
