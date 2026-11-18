@@ -356,6 +356,16 @@ static void world_tick(uint64_t frame) {
         } else LOG("[world] shared world: single-copy test, ourselves %.1f m ahead\n", g_self_ahead);
     }
     uint64_t now = plat_now_ns();
+    {   // (riding: where we are is our body - the ride Pokémon's, on the ground - not our skeleton up on the saddle; our
+        // way, the body's z axis)
+        extern int pla_npc_my_riding(void);
+        float bp[3];
+        uint64_t b = warp_player_body();
+        if (pla_npc_my_riding() && b && warp_player_pos(bp)) {
+            const float *bm = (const float *)(uintptr_t)(b + 0x60);
+            g_me[0] = bp[0], g_me[1] = bp[1], g_me[2] = bp[2], g_me[3] = atan2f(bm[8], bm[10]), g_me_frame = frame;
+        }
+    }
     bool me_ok = g_me_frame && frame - g_me_frame < 10;
     static uint64_t tick_ns;
     float tick_dt = tick_ns && now > tick_ns ? (float)(now - tick_ns) * 1e-9f : 0.033f;
