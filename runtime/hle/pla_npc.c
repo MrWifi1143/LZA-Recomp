@@ -874,7 +874,9 @@ static void puppet_step(Cpu *c, Own *o) {
     float yx = sinf(o->fo[3]), yz = cosf(o->fo[3]);
     // (left far behind - stuck on something, or they jumped down / turned a corner it can't follow: over 10 m for 2 s
     // or over 25 m at once - it is put where they are: the physics character's Warp 0x7001983770(cc, &pos, &rotation))
-    if (s >= 0 && d > 10.0f) { if (!o->far_frame) o->far_frame = g_frame; }
+    // (also over 4 m above or below them - made where they were mid-fall or under the ground, or fallen through it:
+    // it never walks there)
+    if (s >= 0 && (d > 10.0f || fabsf(o->fo[1] - pos[1]) > 4.0f)) { if (!o->far_frame) o->far_frame = g_frame; }
     else o->far_frame = 0;
     bool stuck = o->stuck_frame && g_frame - o->stuck_frame > 45 && d > 2.0f;
     if (s >= 0 && (d > 25.0f || (o->far_frame && g_frame - o->far_frame > 60) || stuck || o->warp_now)) {
@@ -884,7 +886,7 @@ static void puppet_step(Cpu *c, Own *o) {
         g_warp_vec[0] = o->fo[0], g_warp_vec[1] = o->fo[1] + 0.1f, g_warp_vec[2] = o->fo[2], g_warp_vec[3] = 0;
         g_warp_vec[4] = 0, g_warp_vec[5] = sinf(o->fo[3] * 0.5f), g_warp_vec[6] = 0, g_warp_vec[7] = cosf(o->fo[3] * 0.5f);
         guest_call_saved(c, CC_WARP, o->cc, (uint64_t)(uintptr_t)g_warp_vec, (uint64_t)(uintptr_t)(g_warp_vec + 4), 0, 0);
-        LOG("[npc] mpplayer_%d was %.1f m behind%s: put where they are (%.2f %.2f %.2f)\n", o->k, d, stuck ? " (stuck)" : "", o->fo[0], o->fo[1], o->fo[2]);
+        LOG("[npc] mpplayer_%d was %.1f m behind (%.1f m below them)%s: put where they are (%.2f %.2f %.2f)\n", o->k, d, o->fo[1] - pos[1], stuck ? " (stuck)" : "", o->fo[0], o->fo[1], o->fo[2]);
         o->far_frame = 0;
         return;
     }
