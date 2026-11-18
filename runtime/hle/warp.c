@@ -171,6 +171,7 @@ static int g_world;  // (hle/pla_world.c, the shared world prototype: the player
 static int cam_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     if ((g_state == 0 || g_state == 3 || g_world) && in_heap(c->x[0])) g_cam = c->x[0];
+    if (g_world) { extern void pla_npc_cam(Cpu *); pla_npc_cam(c); }  // (characters of our own are made here: hle/pla_npc.c)
     if (g_area_state == 2) {
         g_area_state = 0;
         if (g_works_state == 1) works_write();  // (the story point before the area change: it loads with it)
