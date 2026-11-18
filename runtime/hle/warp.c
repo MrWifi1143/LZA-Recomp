@@ -166,10 +166,11 @@ static void works_write(void) {
 }
 
 static volatile uint64_t g_seen_body;  // (the player's body as last found, warp or not: LARECOMP_LIVE's state shows it)
+static int g_world;  // (hle/pla_world.c, the shared world prototype: the player followed all the time)
 
 static int cam_hook(Cpu *c, uint64_t addr) {
     (void)addr;
-    if ((g_state == 0 || g_state == 3) && in_heap(c->x[0])) g_cam = c->x[0];
+    if ((g_state == 0 || g_state == 3 || g_world) && in_heap(c->x[0])) g_cam = c->x[0];
     if (g_area_state == 2) {
         g_area_state = 0;
         if (g_works_state == 1) works_write();  // (the story point before the area change: it loads with it)
@@ -181,7 +182,7 @@ static int cam_hook(Cpu *c, uint64_t addr) {
 static int body_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     uint64_t o = c->x[0], cam = g_cam;
-    if ((g_state != 0 && g_state != 3) || !cam || !in_heap(o) || *(const uint64_t *)(uintptr_t)o != BODY_VTABLE) return 0;
+    if ((g_state != 0 && g_state != 3 && !g_world) || !cam || !in_heap(o) || *(const uint64_t *)(uintptr_t)o != BODY_VTABLE) return 0;
     const float *p = (const float *)(uintptr_t)(o + 0x90), *t = (const float *)(uintptr_t)(cam + 0x320);
     if (fabsf(p[0] - t[0]) + fabsf(p[1] - t[1]) + fabsf(p[2] - t[2]) < 1e-3f) g_seen_body = o, g_body = g_state == 0 ? o : g_body;
     return 0;
@@ -260,9 +261,11 @@ __attribute__((constructor)) static void warp_init(void) {
     }
     if (getenv("LARECOMP_HIDE_PLAYER"))
         rt_register_fnhook_at(0x7002a6ba60ull, hide_player_hook), rt_register_fnhook_at(0x70029c983cull, hide_palette_hook);
+    extern int pla_world_enabled(void);
+    g_world = pla_world_enabled() && !getenv("LARECOMP_HIDE_PLAYER");
     const char *w = getenv("LARECOMP_WARP");
     if (!w || sscanf(w, "%f %f %f", &g_to[0], &g_to[1], &g_to[2]) != 3) {
-        if (!getenv("LARECOMP_LIVE")) return;
+        if (!getenv("LARECOMP_LIVE") && !g_world) return;
         g_state = 3;  // (no warp: only following the player, for LARECOMP_LIVE)
     } else g_state = 0;
     const char *a = getenv("LARECOMP_WARP_AREA");
@@ -294,6 +297,11 @@ bool warp_player_pos(float out[3]) {
     return true;
 }
 
+uint64_t warp_player_body(void) {  // (the player's body object, 0 before it is found: hle/pla_world.c)
+    uint64_t b = g_seen_body;
+    return b && *(const uint64_t *)(uintptr_t)b == BODY_VTABLE ? b : 0;
+}
+
 void warp_frame(uint64_t frame) {  // (each game frame: runtime/hle/input.c)
     g_frame_now = frame;
     { extern void pla_slot_watch(uint64_t); pla_slot_watch(frame); }  // (research: hle/pla_drawdist.c)
@@ -304,6 +312,7 @@ void warp_frame(uint64_t frame) {  // (each game frame: runtime/hle/input.c)
         if (every > 0 && frame % (uint64_t)every == 0 && warp_player_pos(p))
             LOG("[player] frame %llu %.2f %.2f %.2f\n", (unsigned long long)frame, p[0], p[1], p[2]);
     }
+    { extern void pla_world_frame(uint64_t); pla_world_frame(frame); }
     if (g_state < 0 || g_state >= 2) return;
     static uint64_t body, since, still_since, writes;
     static float last[3];
