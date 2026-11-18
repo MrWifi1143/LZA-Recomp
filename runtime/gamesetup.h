@@ -33,6 +33,8 @@ enum {
     SETUP_FAIL_KEYS_OLD,    // the keys can't open them (older than the game, or no ticket / title key)
     SETUP_FAIL_NO_BASE,     // the update's package without the base game's
     SETUP_FAIL_UNPACK,      // a package couldn't be read (damaged, or a layout runtime/nxpkg.c doesn't read)
+    SETUP_FAIL_ROMFS,       // the RomFS image's tables don't find the game's own files (romfs_check: a base game dump
+                            // the update doesn't fit), or a set-up image like that (game_romfs_broken)
 };
 
 // While the game code is compiled: the estimated minutes left (from the pace so far), -1 before there is one.
@@ -48,6 +50,9 @@ enum { GAME_BUILD_OTHER, GAME_BUILD_EEVEE_100, GAME_BUILD_PIKACHU_100, GAME_BUIL
 int game_build(const char *exefs);
 // Legends Z-A, but not 2.0.2 (2.0.0, say): not played - its addresses are all elsewhere (SETUP_FAIL_ZA_VERSION).
 bool game_za_unsupported(const char *exefs);
+// <data root>/extracted/romfs.bin is there but the game wouldn't find its own files in it (romfs_check, once per file
+// size / time): not played - the game would stop at its first file (SETUP_FAIL_ROMFS).
+bool game_romfs_broken(void);
 // Its version ("1.0.0", "1.0.2"...: the builds known by their build id; "1.0.0" otherwise), told to the game (am).
 const char *game_version(const char *exefs);
 // Starts a setup from the picked folder (NULL: only rebuild the game code from files set up already).
