@@ -191,19 +191,29 @@ static char *read_all(const char *path, size_t *n, size_t max) {
     if (b) b[sz] = 0, *n = (size_t)sz;
     return b;
 }
-// "host[:port]" -> host, port; the key the files use is "host:port"
+// "host[:port]" -> host, port; the key the files use is "host:port". IPv6: "[v6]:port", "[v6]" or a bare v6 address
+// (more than one ':' - no port then); its key is "[v6]:port".
 static bool parse_server(const char *s, char *host, size_t hn, int *port, char *key, size_t kn) {
     while (*s == ' ') s++;
     if (!*s) return false;
-    const char *c = strrchr(s, ':');
-    size_t l = c ? (size_t)(c - s) : strlen(s);
+    const char *b = s, *c;
+    size_t l;
+    if (*s == '[' && strchr(s, ']')) {
+        const char *e = strchr(s, ']');
+        b = s + 1, l = (size_t)(e - b), c = e[1] == ':' ? e + 1 : NULL;
+        if (e[1] && e[1] != ':') return false;
+    } else {
+        c = strrchr(s, ':');
+        if (c && strchr(s, ':') != c) c = NULL;  // (a bare IPv6 address)
+        l = c ? (size_t)(c - s) : strlen(s);
+    }
     if (!l || l >= hn) return false;
-    memcpy(host, s, l), host[l] = 0;
+    memcpy(host, b, l), host[l] = 0;
     *port = c ? atoi(c + 1) : ACCT_DEFAULT_PORT;
     if (*port <= 0 || *port > 65535) return false;
     for (char *q = host; *q; q++)
-        if (*q == ' ' || *q == '/') return false;
-    snprintf(key, kn, "%s:%d", host, *port);
+        if (*q == ' ' || *q == '/' || *q == '[' || *q == ']') return false;
+    snprintf(key, kn, strchr(host, ':') ? "[%s]:%d" : "%s:%d", host, *port);
     hide_in_log(key), hide_in_log(s), hide_in_log(host);
     return true;
 }

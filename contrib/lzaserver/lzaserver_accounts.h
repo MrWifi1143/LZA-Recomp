@@ -15,6 +15,14 @@ typedef struct {
 } AccountsOptions;
 
 int accounts_start(const AccountsOptions *o);  // 0: listening (its own threads)
+// (lzaserver.c) a listening socket on that port: bind "" = IPv6 and IPv4 both, else that address; *fam its family.
+// The socket as an integer (Windows' SOCKET, else the file descriptor); NO_SOCK on failure.
+#ifdef _WIN32
+#include <winsock2.h>
+SOCKET lza_listen(int type, const char *bind_addr, int port, int *fam);
+#else
+int lza_listen(int type, const char *bind_addr, int port, int *fam);
+#endif
 int accounts_add_user(const AccountsOptions *o, const char *name);
 // A play ticket (JOIN, acct_proto.h) by its id: its key and account name; false: unknown or expired (any thread)
 #include <stdint.h>
