@@ -1152,7 +1152,7 @@ static bool puppet_ready(const Own *o) {
            *(const uint64_t *)(uintptr_t)o->actl == ANIM_VTABLE && o->ctrl && *(const uint64_t *)(uintptr_t)o->ctrl == CTRL_VTABLE && o->cc &&
            *(const uint64_t *)(uintptr_t)o->cc == CC_VTABLE;
 }
-static float *g_fwd_vec, *g_vel_vec, *g_warp_vec;
+static float *g_fwd_vec, *g_vel_vec, *g_warp_vec, *g_vel2;
 static void cc_warp(Cpu *c, uint64_t cc, const float at[3], float yaw) {
     static float *w;
     if (!w) w = hle_alloc(32);
@@ -1805,7 +1805,55 @@ static int attach_to(Cpu *c, uint64_t owner, uint64_t parent, const char *joint)
 // orders need a vec3 in guest memory: one per person, written just before the call
 static float *g_vec[NOWN];
 static void mod_cam(Cpu *c);
+// ---- items (the mod API's item_give): the bag's own add, Bag::AddItem 0x7000fdb1d8(bag, item, n, slot - -1: where it
+// fits, its stack or the first free) - the script binding "Bag.AddItem" (registered with GetItemNum 0x7000fda868,
+// HaveNeverAdded, IsAddItem, AddItemToLimit, SubItem by 0x7000f431e0). The bag is [holder + 0x280], the holder the
+// global behind GOT 0x7004279560 (as 0x7000cab054 reads it for GetItemNum). Found 2026-11-19 (Studio exestrings + a
+// flat image of main: AddItem's name -> its registration -> the function stored beside it).
+#define BAG_HOLDER_GOT 0x7004279560ull
+#define BAG_ADD 0x7000fdb1d8ull
+#define BAG_NUM 0x7000fda868ull
+static struct { int item, n; } g_items[16];
+static volatile int g_nitems;
+int pla_item_give(int item, int n) {
+    if (item <= 0 || item > 0xffff || n <= 0 || n > 999) return 0;
+    pthread_mutex_lock(&g_lock);
+    int ok = g_nitems < 16;
+    if (ok) g_items[g_nitems].item = item, g_items[g_nitems].n = n, g_nitems++;
+    pthread_mutex_unlock(&g_lock);
+    return ok;
+}
+static void items_run(Cpu *c) {
+    if (!g_nitems) return;
+    uint64_t got = *(const uint64_t *)(uintptr_t)BAG_HOLDER_GOT, holder = 0, bag = 0;
+    if (got >= 0x7000000000ull && got < 0x7008000000ull) holder = *(const uint64_t *)(uintptr_t)got;
+    if (in_heap(holder)) bag = *(const uint64_t *)(uintptr_t)(holder + 0x280);
+    if (!in_heap(bag)) return;  // (no save loaded yet: at a later frame)
+    pthread_mutex_lock(&g_lock);
+    int n = g_nitems;
+    struct { int item, n; } todo[16];
+    memcpy(todo, g_items, sizeof todo);
+    g_nitems = 0;
+    pthread_mutex_unlock(&g_lock);
+    uint64_t sx[32], snzcv = c->nzcv;
+    __uint128_t sv[32];
+    memcpy(sx, c->x, sizeof sx), memcpy(sv, c->v, sizeof sv);
+    for (int i = 0; i < n; i++) {
+        c->x[0] = bag, c->x[1] = (uint32_t)todo[i].item;
+        guest_call(c, BAG_NUM);
+        uint32_t had = (uint32_t)c->x[0];
+        c->x[0] = bag, c->x[1] = (uint32_t)todo[i].item, c->x[2] = (uint32_t)todo[i].n, c->x[3] = 0xffffffffull;
+        guest_call(c, BAG_ADD);
+        int ok = (int)(c->x[0] & 0xff);
+        c->x[0] = bag, c->x[1] = (uint32_t)todo[i].item;
+        guest_call(c, BAG_NUM);
+        LOG("[npc] item %d x%d %s (had %u, now %u)\n", todo[i].item, todo[i].n, ok ? "given" : "not given (full, or no such item)", had, (uint32_t)c->x[0]);
+    }
+    memcpy(c->x, sx, sizeof sx), memcpy(c->v, sv, sizeof sv), c->nzcv = snzcv;
+}
+
 void pla_npc_cam(Cpu *c) {  // (the camera update, the game's thread: hle/warp.c)
+    items_run(c);
     if (!g_mgr) return;
     nav_match();
     mod_cam(c);
@@ -2231,6 +2279,7 @@ typedef struct {
     uint64_t asked_sk_frame; // (pla_world.c's frame when it was asked for: its skeleton is first posed after that)
     int stop;                // (its walk to stop: its navigator stopped, where it stands)
     int retried;             // (its walk's order given again after getting nowhere)
+    int steer;               // (its navigator's root motion stopped giving it any way: steered here instead - below)
     uint64_t order_frame;    // (its last order)
     char outfit[256];        // (what it wears - npc_outfit's spec; "" its look's own)
     int told_outfit;
@@ -2455,17 +2504,48 @@ static void mod_cam_(Cpu *c) {
         }
         bool settling = g_frame - m->up_frame < 30;  // (an order given as it comes up comes to nothing: a second later)
         if (m->order && !settling) {  // (a walk: its navigator's order - given by pla_npc_cam right after this)
-            if (!m->walking) m->moved_frame = g_frame, memcpy(m->last, m->at, 12);  // (a new walk: progress measured from here)
+            if (!m->walking) m->moved_frame = g_frame, memcpy(m->last, m->at, 12), m->steer = 0;  // (a new walk: progress measured from here)
             m->order = 0, m->walking = 1, m->order_frame = g_frame;
             memcpy(o->dest, m->goal, 12), o->run = m->run, o->order = 1, o->shrink = 0;
             o->run_set = 0;  // (its move state given with every order: after a walk's end it stood and took no more - 2026-11-19)
         } else if (m->stop) {  // (stopped: its navigator, where it stands)
             m->stop = 0, m->walking = 0;
             guest_call_saved(c, NAV_STOP, o->nav, 0, 0, 0, 0);
+        } else if (m->walking && m->sk && m->steer && o->cc && *(const uint64_t *)(uintptr_t)o->cc == CC_VTABLE) {
+            // (steered: its physics character given the way to its goal each frame - its navigator still plays its walk.
+            // After a walk had ended, a villager's next legs played the walk on the spot: the navigator's mover
+            // 0x700172b964 found no root motion in its source (+0x170 of 0x700172ccc4's, zero on every later leg - a
+            // fresh one's first leg had 1.6 m/s) and set the velocity to zero (0x700172bdf0, vs 0x700172bebc moving).
+            // Lua-traced 2026-11-19. A straight line, against the world's collision; the goal on the navigation mesh)
+            float gx = m->goal[0] - m->at[0], gz = m->goal[2] - m->at[2], gd = sqrtf(gx * gx + gz * gz);
+            if (gd < 0.6f || g_frame - m->moved_frame > 90) {
+                m->walking = 0, m->steer = 0;
+                guest_call_saved(c, NAV_STOP, o->nav, 0, 0, 0, 0);
+                if (!g_vel2) g_vel2 = hle_alloc(16);
+                g_vel2[0] = g_vel2[1] = g_vel2[2] = g_vel2[3] = 0;
+                guest_call_saved(c, CC_SET_VELOCITY, o->cc, (uint64_t)(uintptr_t)g_vel2, 0, 0, 0);
+                if (gd >= 0.6f) LOG("[npc] luanpc_%d (%s) can't get to %.1f %.1f %.1f (steered, stuck %.1f m off): stops\n", m->k, m->label, m->goal[0], m->goal[1], m->goal[2], gd);
+            } else {
+                float lx = m->at[0] - m->last[0], lz = m->at[2] - m->last[2];
+                if (lx * lx + lz * lz > 0.3f * 0.3f) memcpy(m->last, m->at, 12), m->moved_frame = g_frame;
+                float v = m->run ? 4.2f : 1.4f;
+                if (!g_vel2) g_vel2 = hle_alloc(16);
+                g_vel2[0] = gx / gd * v, g_vel2[1] = 0, g_vel2[2] = gz / gd * v, g_vel2[3] = 0;
+                guest_call_saved(c, CC_SET_VELOCITY, o->cc, (uint64_t)(uintptr_t)g_vel2, 0, 0, 0);
+                if (!g_fwd_vec) g_fwd_vec = hle_alloc(16);
+                g_fwd_vec[0] = gx / gd, g_fwd_vec[1] = 0, g_fwd_vec[2] = gz / gd, g_fwd_vec[3] = 0;
+                guest_call_saved(c, CC_SET_FORWARD, o->cc, (uint64_t)(uintptr_t)g_fwd_vec, 0, 0, 0);
+                if (g_frame - m->order_frame >= 15) m->order = 1;  // (its walk kept playing)
+            }
         } else if (m->walking && m->sk) {
             float gx = m->goal[0] - m->at[0], gz = m->goal[2] - m->at[2];
             float lx = m->at[0] - m->last[0], lz = m->at[2] - m->last[2];
             if (gx * gx + gz * gz < 0.8f * 0.8f) m->walking = 0;  // (there)
+            else if (g_frame - m->moved_frame > 20 && g_frame - m->order_frame < 15 && lx * lx + lz * lz < 0.25f * 0.25f && !m->steer) {
+                m->steer = 1, m->moved_frame = g_frame;  // (ordered, walking, not getting on: steered from here - above)
+                static int nlog;
+                if (nlog++ < 8) LOG("[npc] luanpc_%d (%s): its walk doesn't move it - steered\n", m->k, m->label);
+            }
             else if (g_frame - m->order_frame >= 15) m->order = 1;  // (its order again twice a second, as the shared world's
                                                                     //  persons get theirs: one given once was walked a leg, the
                                                                     //  next ones taken but not walked - 2026-11-19)

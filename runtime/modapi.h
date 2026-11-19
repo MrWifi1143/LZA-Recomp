@@ -10,7 +10,7 @@
 #pragma once
 #include <stdint.h>
 
-#define LARECOMP_MODAPI_VERSION 2  // (2: npc_outfit, npc_anim, pokemon_*, game_work)
+#define LARECOMP_MODAPI_VERSION 3  // (2: npc_outfit, npc_anim, pokemon_*, game_work; 3: game_script, item_give, npc_object)
 
 // npc_state answers
 enum {
@@ -60,8 +60,8 @@ typedef struct {
     double (*now)(void);  // seconds, a steady clock
 
     // ---- version 2
-    // What a character wears, given before it is made (0: not taken): "player" - the player's own clothes (Z-A: and
-    // their look - skin, hair, eyes). Arceus also "<slot>=<item>,..." over the player's (items of dressup_table_p1/p2:
+    // What a character wears, given before it is made (0: not taken): "player" - the player's own clothes (Z-A: the
+    // parts the player character's model was made with). Arceus also "<slot>=<item>,..." over the player's (items of dressup_table_p1/p2:
     // "0=p1_hrs0001_00_default_blond") and "body=p1" / "body=p2". Arceus: a dressed character walks as a player does
     // (its own steps, steering each frame), the most reliable walk there.
     int (*npc_outfit)(int h, const char *spec);
@@ -77,6 +77,20 @@ typedef struct {
     // A story work (a number the game keeps by name: Z-A "SYS_WORK_PHASE", Arceus "WPHA_STORY"...): read (set 0) or
     // written (set 1). Answers 1 when the game has it.
     int (*game_work)(const char *name, int set, int64_t value, int64_t *out);
+
+    // ---- version 3
+    // Lua text run in the game's own Lua (Z-A: its event framework, Lua 5.4 - hle/za_script.c) at the game's next
+    // frame: a job number (0: this game has none, or too many waiting). script_result: 0 still waiting, 1 ran (out: what
+    // it returned, as text), 2 failed (out: the error), -1 no such job (its result taken already).
+    int (*game_script)(const char *code);
+    int (*script_result)(int id, char *out, int cap);
+    // Items into the bag by the game's own add: item number, how many. 1 done (Z-A: queued for the next frame), 0 not.
+    int (*item_give)(int item, int count);
+    // The name the game knows a script's character by (its object: Z-A "luanpc_001"), for game_script; 0 none yet.
+    int (*npc_object)(int h, char *out, int cap);
+    // The time of day: the hour (0-24) the game's clock is set to at its next frame. 1 asked, 0 not in this game.
+    int (*time_set)(float hour);
+    // (version 3 also: npc_walk_to's run | 2 - Z-A: the game's own navigation walks it, game_script orders the walk)
 } LarecompModApi;
 
 // ---- runtime side

@@ -1,9 +1,10 @@
 # Lua mods: the mod API
 
 Mods can carry Lua scripts. A script can make **new characters** that the game itself creates (they look, move and
-animate like the game's own people), dress them, pose them, walk them around, make **Pokémon** (Arceus), read and set
-the story's progress values, react to the player, add console commands, show notices on screen and hook anything in
-the game. The API is the same in **Legends: Z-A** and **Legends: Arceus**. Where the two
+animate like the game's own people), dress them, pose them, walk them around, make **Pokémon**, give **items**, set the
+**time of day** (Z-A), read and set the story's progress values, run the game's **own script commands** (Z-A: message
+windows, its objects, everything its events use), react to the player, add console commands, show notices on screen
+and hook anything in the game. The API is the same in **Legends: Z-A** and **Legends: Arceus**. Where the two
 games differ, this page says so.
 
 The scripts run in **Legends Lua** (`contrib/legendslua`), a Lua 5.3 plugin that ships in the game's `plugins/` folder
@@ -85,7 +86,7 @@ spot when the player comes back, carrying on its walk. Removing a handle is the 
 
 | | |
 |---|---|
-| `n:walk_to(pos [, run])` / `n:run_to(pos)` | Walk (or run) there. **Z-A**: a straight line at a stroll (1.3 m/s; run 4.2), the height eased between the two points (give points on the ground: it doesn't follow the ground or stairs, and walks through walls). **Arceus, dressed** (`outfit`): walked the way the player is, by the player's own movement and physics, so it follows the ground, climbs slopes and walks any number of legs; a goal it can't reach within a minute ends the walk where it got to. **Arceus, not dressed**: the game's own pathfinding on the navigation mesh. A goal off the mesh (inside a building, on a roof) is refused. Known issue: after a walk has ended, the next order is accepted but not walked, so routes stop after their first leg. Dress characters that walk routes. |
+| `n:walk_to(pos [, run])` / `n:run_to(pos)` | Walk (or run) there. **Z-A**: the game's own navigation walks it (FObj_Move_To_PosXYZ_Navi, as its events walk people): on the ground, around things; done within 1 m of the goal. If the game's walk doesn't get it anywhere for 1.5 s (it happens to some characters after a leg), it walks on in a straight line (the height eased between the points, through walls). **Arceus, dressed** (`outfit`): walked the way the player is, by the player's own movement and physics, so it follows the ground, climbs slopes and walks any number of legs; a goal it can't reach within a minute ends the walk where it got to. **Arceus, not dressed**: the game's own pathfinding on the navigation mesh. A goal off the mesh (inside a building, on a roof) is refused. After a walk has ended, the navigator plays the next legs' walk on the spot (its mover finds no root motion and sets no speed), so those legs are steered: its physics character given the way to the goal, a straight line against the world's collision. Routes loop either way; dressed ones walk the most naturally. |
 | `n:walk_route(points, opts)` | Walk a list of points in turn. `opts`: `loop` (start again at the end), `run`, `wait` (seconds at each point), `start` (the first point to head for), `on_point = function(n, i)`. |
 | `n:pause()` / `n:resume()` | Stop on a route and stand, then carry on where it was going. |
 | `n:stop()` | Stand where it is (and forget the route). |
@@ -99,6 +100,8 @@ spot when the player comes back, carrying on its walk. Removing a handle is the 
 | `n:say(text [, seconds])` | A notice on screen: `Name: text`. |
 | `n:anim(name, value [, kind])` | Set one of its animation's parameters (the game's own: what its animation graph reads to pick a pose). `value` true/false sets a bool, a whole number an int, any other number a float, `nil` fires a trigger (or pass `kind` `"b"`, `"i"`, `"f"`, `"t"`). Returns whether the character has that parameter. Checked: **Z-A** `n:anim("sit_bool", true) n:anim("sit_int", 1)` sits (int 2 another way; back to `false` / `0` stands up). The city's own people also use `speak_bool` + `wait_int` 2 (chatting) and `loop_action_bool`. **Arceus** `n:anim("set_squat_bool", true)` crouches (dressed characters run the player's animation, the others a villager's). In a pose a Z-A character doesn't walk: stand it up first. |
 | `n:trigger(name)` | Fire a trigger parameter (`n:anim(name)`). |
+| `n:play_anim(id)` | (Z-A) One of the game's own animations by number, as its events play them (`FObj_Set_Animation`: 1 is standing; events use numbers like 2, 20, 174). |
+| `n:object()` | (Z-A) The name the game knows it by (`"luanpc_001"`), for `game.call`'s `FObj_*` commands. `nil` until it is up; it can change when it is made again. |
 | `n:on(event, fn)` | This character's events: `"talk"`, `"near"`, `"far"`, `"arrived"`, `"up"`, `"gone"`. |
 | `n.name`, `n.data` | Its name, and a table for your own data. |
 | `n.near_radius` | Metres for `near` / `far` (default 4). |
@@ -113,18 +116,63 @@ local p = pokemon.spawn{species = 25, pos = player.ahead(4), yaw = 180, form = 0
 ```
 
 Makes a Pokémon in the world, standing where it was put: the game's own Pokémon object, with its model, colours and
-idle animation. `species` is the national dex number (one the game has: the Hisui Pokédex), `form` the form number
-(default 0), `shiny` true for the shiny colours. It returns a handle at once (or `nil` and a reason), and the Pokémon is
-made within a frame or two in the level the player is in (up to 16 at once, shared with the shared world's ridden Pokémon). A loading screen into another level ends it.
+idle animation. `species` is the national dex number (one the game has), `form` the form number (default 0), `shiny`
+true for the shiny colours (Z-A also `gender`). It returns a handle at once (or `nil` and a reason), and the Pokémon is
+made within a frame or two in the level the player is in.
+
+* **Arceus**: made by the runtime like the shared world's ridden Pokémon (up to 16 at once, shared with them). A
+  loading screen into another level ends it.
+* **Z-A**: made by the game's own event framework, as its events make theirs (`dyn_MANKII_1`...: its make by name, here
+  `luapoke_<n>`), so any Pokémon the game has a model for. `p:pos()` is where it was made (ask the game with
+  `game.call("Commands.FObj_Get_Pos", p.object, fn)`); `p.object` is its name for the game's `FObj_*` commands. An area
+  load (a loading screen, the time of day changing) ends it, and one made while an area is loading may not show.
 
 | | |
 |---|---|
 | `p:pos()` | Where it is, or `nil` when it isn't in the world. |
 | `p:state()` / `p:valid()` | `"coming"`, `"up"`, `"removed"` (also once its level is gone) / not removed. |
-| `p:remove()` | Gone (the game ends it the next frame). |
+| `p:remove()` | Gone (Arceus: the game ends it the next frame; Z-A: the framework's own delete). |
 | `pokemon.all()` | This mod's Pokémon. |
 
-**Z-A** doesn't have this yet: `pokemon.spawn` returns `nil, "not made (not in Z-A yet)"`.
+## Items and the time of day
+
+| | |
+|---|---|
+| `item.give(id, n [, show])` | `n` of item `id` into the bag, by the game's own add. **Arceus**: `Bag::AddItem` (the script binding `Bag.AddItem`); Hisui's own items have their own numbers - its Poké Ball is 1710 (4 is the modern one, which Arceus doesn't use). **Z-A**: `Commands.AddItem`; with `show` the game's own "You obtained 10 Poké Balls!" window too (A closes it). Returns true when asked. |
+| `game.set_time(hour)` | (Z-A) The time of day: the game's clock set to that hour (0-24), as the bench's "wait until night" does. The story may hold the clock (the test save held 15:00): the hold is let go. The city changes after the game's own short black transition (lit windows and the night zones at night); the area loads again, so script Pokémon go and characters are made again. |
+
+## The game's own scripts: `game.script`, `game.call`, `game.run` (Z-A)
+
+Z-A's events are Lua 5.4 inside the game (Haxe compiled to Lua: the framework `script/lua/bin/release/main/main.blua`
+and every event in `event_ik.blua`). A mod can run Lua text there, at the game's next frame, with everything its events
+have:
+
+```lua
+game.call("Commands.FObj_Get_Pos", "Player", function(r) print("the player is at", r) end)
+game.script("return Commands.IsDayTime()", function(r, err) print("day?", r) end)
+game.run("Commands.S6DCE2895AC79F359(Commands.S5DF104B25CC642C7(4), 10)")  -- the "You obtained 10 Poke Balls!" window
+```
+
+| | |
+|---|---|
+| `game.script(code [, fn])` | Runs `code` once in the game's Lua; `fn(result, err)` gets what it returned, as text (`"nil"` for nothing). |
+| `game.call(name, args... [, fn])` | Calls one function with these arguments (numbers, strings, booleans, `{x, y, z}` / `vec`, lists). A list result comes back as its items with spaces between. |
+| `game.run(code [, fn])` | Runs `code` as a coroutine, resumed once a frame until it ends: for what waits (the message windows, `Wait_Time`, fades). |
+| `game.hash(name)` | The game's name for a member: `"S"` + its FNV-1a 64 in hex. |
+
+* `Commands` is the framework's commands class (`C0C062DE5AED06885`). Its members' names are hashed in the game;
+  `Commands.Name` in the code is turned into `Commands.S<hash>` for you. Studio (`zalua chunk main`) shows the framework
+  with the names it recovered: what each command takes.
+* Useful ones: `FObj_Set_Pos(name, x, y, z)`, `FObj_Set_Ang(name, yaw)`, `FObj_Get_Pos(name)`, `FObj_Set_Animation(name, n)`,
+  `FObj_Set_Visibility(name, bool)`, `FObj_LookAt_Obj(name, other, "head")`, `FObj_Move_To_PosXYZ_Navi(name, x, y, z)` -
+  on any named object: `"Player"`, a character's `n:object()`, a Pokémon's `p.object`, the city's own people.
+  `AddItem(id, n)`, `IsDayTime()`. The game's texts by label: `ShowMessageWindow(kind, label, file)` + `HideMessageWindow()`
+  in `game.run`, once their message file is loaded as the framework does it (its item window, above, does that itself;
+  the item window is the one checked).
+* **Only what a mod would do**: this is the game's own machinery, with nothing checked. A wrong call can break an event
+  or the save, like any raw-layer hook.
+* Each job costs a load of its text: tens of microseconds on the game's thread. Keep them for events, not every frame.
+* Arceus' scripts aren't reached this way yet (`game.script` answers `nil, "not in this game"`).
 
 ## The player: `player`
 
@@ -210,17 +258,20 @@ Measured on 2026-11-19 (Core i9-12900K, both games, with other games sharing the
 | Arceus, the test mod: 3 dressed characters walking, 2 Pokémon, `tick` handlers | 25 us (most 335 us, a reload) |
 | Arceus Windows build under Wine, Village Walk with 3 dressed walkers | 26 us |
 | Z-A, the test mod: 3 characters, one dressed, poses | 16 us |
+| Z-A, Town Walk + the test mod: 3 walkers on the game's navigation, 3 Pokémon, game scripts | 18-20 us (the game's thread: a job's load and run on top) |
+| Arceus, the test mod: an undressed villager's steered loop, items | 20 us |
 
 At 60 fps a frame is 16,700 us, so a mod like the samples costs about 0.1-0.2% of the frame.
 
 ## Not there yet
 
-* **The game's own message box and Talk prompt.** `n:say` and `ui.say` show a notice, and `talk` is an A press near the
-  character, not the game's Talk prompt.
-* **Giving items, time of day, weather.** The game has them (Arceus: `AddItem`, `SetTime`, `GetWeather` in its script
-  commands; Z-A: its `WeatherController`), but they aren't wired up yet. Use the raw layer meanwhile.
-* **Z-A Pokémon** (`pokemon.spawn`) and **Z-A outfits other than `"player"`.**
-* **Z-A walks on uneven ground:** a walk eases the height between its two points. Give each point of a route on the ground.
+* **A message window with a script's own text.** The game's windows show its texts by label (`game.run` above, Z-A);
+  `n:say` and `ui.say` show a notice. `talk` is an A press near the character, not the game's Talk prompt.
+* **Weather** (both games): Z-A's framework has no setter (its `FixWeather` is empty), only the C++ `WeatherController`.
+  Arceus' field weather isn't found yet.
+* **Arceus' time of day and Arceus' own scripts** (its `SetTime` / `GetWeather` bindings belong to a mini-game and the
+  battle AI).
+* **Z-A outfits other than `"player"`.**
 
 ## The raw layer
 
@@ -233,7 +284,7 @@ have yet. It's research-grade: addresses differ between the two games and betwee
 `contrib/legendslua/examples/` has the game's sample mod (**Town Walk** for Z-A, **Village Walk** for Arceus): three
 townspeople walk a square; one stops, turns and greets the player who comes near, and walks on when they leave. Talk
 to one for a line. Copy the folder to `mods/` and switch it on. (In Arceus the three are dressed: one in your outfit,
-two with other items over it, so they walk the whole square round and round.)
+two with other items over it. In Z-A they walk on the game's own navigation.)
 
 **React when the player comes near:**
 

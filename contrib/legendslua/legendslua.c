@@ -463,7 +463,7 @@ static int r_npc_walk(lua_State *s) {
     need_m(s);
     float p[3];
     opt_pos(s, 2, p);
-    M->npc_walk_to((int)luaL_checkinteger(s, 1), p, lua_toboolean(s, 5));
+    M->npc_walk_to((int)luaL_checkinteger(s, 1), p, lua_isinteger(s, 5) ? (int)lua_tointeger(s, 5) : lua_toboolean(s, 5));
     return 0;
 }
 static int r_npc_stop(lua_State *s) { need_m(s); M->npc_stop((int)luaL_checkinteger(s, 1)); return 0; }
@@ -541,6 +541,30 @@ static int r_work(lua_State *s) {
     int set = !lua_isnoneornil(s, 2);
     if (!M->game_work(luaL_checkstring(s, 1), set, set ? (int64_t)luaL_checkinteger(s, 2) : 0, &v)) return 0;
     lua_pushinteger(s, (lua_Integer)v);
+    return 1;
+}
+static void need_m3(lua_State *s) {
+    need_m(s);
+    if (M->version < 3) luaL_error(s, "this game build's mod API is too old for this (version %d, needs 3): update the game", (int)M->version);
+}
+// the game's own Lua (Z-A): a job number, 0 when the game has none
+static int r_game_script(lua_State *s) { need_m3(s); lua_pushinteger(s, M->game_script(luaL_checkstring(s, 1))); return 1; }
+static int r_script_result(lua_State *s) {  // -> state (0 waiting, 1 ran, 2 failed, -1 gone), text
+    need_m3(s);
+    char out[1024];
+    out[0] = 0;
+    int st = M->script_result((int)luaL_checkinteger(s, 1), out, (int)sizeof out);
+    lua_pushinteger(s, st);
+    lua_pushstring(s, out);
+    return 2;
+}
+static int r_time_set(lua_State *s) { need_m3(s); lua_pushboolean(s, M->time_set((float)luaL_checknumber(s, 1))); return 1; }
+static int r_item_give(lua_State *s) { need_m3(s); lua_pushboolean(s, M->item_give((int)luaL_checkinteger(s, 1), (int)luaL_checkinteger(s, 2))); return 1; }
+static int r_npc_object(lua_State *s) {
+    need_m3(s);
+    char out[64];
+    if (!M->npc_object((int)luaL_checkinteger(s, 1), out, (int)sizeof out)) return 0;
+    lua_pushstring(s, out);
     return 1;
 }
 static int r_buttons(lua_State *s) { lua_pushinteger(s, M ? (lua_Integer)M->buttons() : 0); return 1; }
@@ -629,7 +653,9 @@ static void new_state(void) {
                                   {"teleport", r_teleport}, {"area", r_area}, {"buttons", r_buttons}, {"notify", r_notify}, {"now", r_now}, {"cpu", r_cpu},
                                   {"stats", r_stats}, {"stats_reset", r_stats_reset}, {"loadfile", r_loadfile}, {"log", l_log},
                                   {"npc_outfit", r_npc_outfit}, {"npc_anim", r_npc_anim}, {"poke_spawn", r_poke_spawn}, {"poke_remove", r_poke_remove},
-                                  {"poke_state", r_poke_state}, {"work", r_work},
+                                  {"poke_state", r_poke_state}, {"work", r_work}, {"game_script", r_game_script},
+                                  {"script_result", r_script_result}, {"item_give", r_item_give}, {"npc_object", r_npc_object},
+                                  {"time_set", r_time_set},
                                   {"trace", l_trace}, {NULL, NULL}};
     uint64_t was = deadline_set(LUA_LOAD_MS);
     if (luaL_loadbufferx(L, k_api_lua, strlen(k_api_lua), "=api.lua", "t")) {
