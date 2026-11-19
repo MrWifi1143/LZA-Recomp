@@ -14,6 +14,7 @@
 #include "../../settings.h"
 #include "../../ui/menu.h"
 #include "vk.h"
+#include "gpudiag.h"
 #include "../../plugin.h"
 #include "../output_scale.h"
 #include "../renderer.h"
@@ -148,10 +149,9 @@ static void pick_device(void) {
 }
 
 static bool g_fault_ext;
-// After VK_ERROR_DEVICE_LOST: what the driver says faulted (VK_EXT_device_fault), into the log.
-void vk_device_fault_report(void) {
-    static int once;
-    if (once++ || !g_fault_ext) return;
+// After VK_ERROR_DEVICE_LOST: what the driver says faulted (VK_EXT_device_fault), into the log; then the GPU crash
+// report (gpudiag.c: what was on the GPU, the crash note). desc gets a one-line summary.
+static void fault_info(char *desc, size_t n) {
     PFN_vkGetDeviceFaultInfoEXT get = (PFN_vkGetDeviceFaultInfoEXT)vkGetDeviceProcAddr(g_vk.dev, "vkGetDeviceFaultInfoEXT");
     if (!get) return;
     VkDeviceFaultCountsEXT c = {.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
@@ -164,13 +164,23 @@ void vk_device_fault_report(void) {
     VkDeviceFaultInfoEXT info = {.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT, .pAddressInfos = addr, .pVendorInfos = vend};
     if (get(g_vk.dev, &c, &info) != VK_SUCCESS && 0) return;
     LOG("[vk] device fault: %s\n", info.description);
+    size_t l = (size_t)snprintf(desc, n, "%s", info.description[0] ? info.description : "a fault");
     static const char *const kind[] = {"none", "read invalid", "write invalid", "execute invalid", "ip unknown", "ip invalid", "ip valid"};
-    for (uint32_t i = 0; i < c.addressInfoCount; i++)
-        LOG("[vk]   address %s %#llx (precision %#llx)\n", addr[i].addressType < 7 ? kind[addr[i].addressType] : "?",
-            (unsigned long long)addr[i].reportedAddress, (unsigned long long)addr[i].addressPrecision);
+    for (uint32_t i = 0; i < c.addressInfoCount; i++) {
+        const char *k = addr[i].addressType < 7 ? kind[addr[i].addressType] : "?";
+        LOG("[vk]   address %s %#llx (precision %#llx)\n", k, (unsigned long long)addr[i].reportedAddress, (unsigned long long)addr[i].addressPrecision);
+        if (l < n) l += (size_t)snprintf(desc + l, n - l, "; address %s %#llx", k, (unsigned long long)addr[i].reportedAddress);
+    }
     for (uint32_t i = 0; i < c.vendorInfoCount; i++)
         LOG("[vk]   vendor: %s (code %#llx data %#llx)\n", vend[i].description, (unsigned long long)vend[i].vendorFaultCode,
             (unsigned long long)vend[i].vendorFaultData);
+}
+void vk_device_fault_report(void) {
+    static atomic_int once;
+    if (atomic_exchange(&once, 1)) return;
+    char desc[512] = "";
+    if (g_fault_ext) fault_info(desc, sizeof desc);
+    gd_device_lost(desc[0] ? desc : NULL);
 }
 
 static void create_device(void) {
@@ -238,6 +248,17 @@ static void create_device(void) {
     if (g_pipe_exec_stats) ext[n_ext++] = VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;
     else if (ENV("LARECOMP_PIPE_STATS")) LOG("[vk] LARECOMP_PIPE_STATS: the driver has no VK_KHR_pipeline_executable_properties\n");
     g_fault_ext = fault;
+    {   // GPU crash diagnostics (gpudiag.c): NVIDIA checkpoints at each pass / dispatch (every draw after a crash)
+        uint32_t dv = g_vk.props.driverVersion;
+        char drv[32];
+        if (g_vk.props.vendorID == 0x10DE) snprintf(drv, sizeof drv, "%u.%02u", dv >> 22, (dv >> 14) & 0xff);
+#ifdef _WIN32
+        else if (g_vk.props.vendorID == 0x8086) snprintf(drv, sizeof drv, "%u.%u", dv >> 14, dv & 0x3fff);
+#endif
+        else snprintf(drv, sizeof drv, "%u.%u.%u", VK_API_VERSION_MAJOR(dv), VK_API_VERSION_MINOR(dv), VK_API_VERSION_PATCH(dv));
+        if (gd_setup(&g_vk.props, drv, has_ext(ep, ne, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME), false))
+            ext[n_ext++] = VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME;
+    }
     {   // plugins' device extensions, once each and only those the device has
         const char *pe[24];
         uint32_t np = plugins_vk_device_extensions(g_vk.phys, pe, 24);
@@ -368,6 +389,7 @@ static void create_device(void) {
                              .pQueueCreateInfos = &qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
+    gd_device_ready(g_vk.dev, g_vk.queue);
     plugins_vk_ready(g_vk.inst, g_vk.phys, g_vk.dev, g_vk.qfam, g_vk.queue);
     if (g_vk.xfb) {
         g_vk.bind_xfb = (PFN_vkCmdBindTransformFeedbackBuffersEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdBindTransformFeedbackBuffersEXT");
@@ -948,6 +970,7 @@ void backend_present(NvnTexture *t) {
     }
     extern void vk_prof_frame(uint64_t frame, uint64_t present_ns);
     vk_prof_frame(total_frames, SDL_GetTicksNS() - t0);
+    { extern void vk_gd_frame(void); vk_gd_frame(); }  // (GPU crash diagnostics: gpudiag.c)
     frames++;
     total_frames++;
     g_frame_counter++;

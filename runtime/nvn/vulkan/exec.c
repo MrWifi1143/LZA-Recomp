@@ -18,6 +18,7 @@
 #include "shaders.h"
 #include "../../plugin.h"
 #include "vk.h"
+#include "gpudiag.h"
 #include "../../platform.h"
 #include "../renderer.h"
 #include "../../settings.h"
@@ -91,6 +92,7 @@ void vk_wait_seq(uint64_t seq) {
     VkResult r = vkWaitSemaphores(g_vk.dev, &wi, 10ull * 1000000000ull);
     stat_wait_ns += SDL_GetTicksNS() - t0;
     cum_wait += SDL_GetTicksNS() - t0;
+    if (r == VK_SUCCESS && seq > g_gd_done) g_gd_done = seq;  // (the crash report: what the GPU had finished)
     if (r == VK_TIMEOUT) LOG("[vk] GPU did not finish submission %llu within 10 s (device lost?)\n", (unsigned long long)seq);
     else if (r != VK_SUCCESS) {
         extern void vk_devlost_dump(void);
@@ -146,6 +148,7 @@ VkCommandBuffer vk_cmd(void) {
     if (!s->main_begun) {
         begin_cb(&s->main, &s->main_begun);
         gp_mark(s->main, "(submission start; includes GPU idle before it)");
+        gd_mark(s->main, GD_M_CB, 0, 0, 0, 0);
         if (prof_qp) {
             vkCmdResetQueryPool(s->main, prof_qp, (uint32_t)cur_sub * 2, 2);
             vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_NONE, prof_qp, (uint32_t)cur_sub * 2);
@@ -333,6 +336,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     }
     pthread_mutex_lock(&seq_lock);
     submit_seq++;
+    g_gd_seq = submit_seq + 1;  // (gpudiag marks: the submission they are in)
     cur_sub = (cur_sub + 1) % SUBS;
     pthread_cond_broadcast(&seq_cond);
     pthread_mutex_unlock(&seq_lock);
@@ -344,6 +348,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
 }
 
 void renderer_submit(void) { vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE); }
+void vk_gd_frame(void) { gd_frame(g_draws_total); }  // (device.c, each present: gpudiag.c)
 void renderer_wait_seq(uint64_t seq);
 uint64_t renderer_fence_seq(void);
 
@@ -1183,6 +1188,9 @@ static void begin_pass(void) {
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = layers,
                           .colorAttachmentCount = pass_ncolor, .pColorAttachments = ca,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
+    {   // (GPU crash reports: a checkpoint at each pass, gpudiag.c)
+        gd_mark(cb, GD_M_PASS, minw, minh, pass_rt[0] ? pass_rt[0]->format : 0, (int)pass_ncolor);
+    }
     vkCmdBeginRendering(cb, &ri);
     in_pass = true;
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
@@ -1399,6 +1407,9 @@ typedef struct {
     uint64_t fs_hash;   // vk_fs_hash of the fragment program (draw_: made on first use, fs_hash_ok)
     bool fs_hash_ok;
     bool warm;          // (vk_warm_program's: released right after, no pipeline parts)
+    uint64_t gd_key;    // gpudiag.h: the program's identity for GPU crash reports and the skip list (made with fs_hash)
+    int8_t gd_skip;     // on the GPU crash skip list (index + 1; 0 not)
+    bool gd_iso;        // (the deeper mode after a crash: drawn in a pass of its own between full barriers, gpudiag.c)
 } Prog;
 
 // What this thread is building, for a crash inside the driver (rt_fatal_trace -> vk_crash_note): NVIDIA's compiler dying
@@ -2079,6 +2090,11 @@ static void translate_program(void *arg) {
             static int nlog;
             if (nlog++ < 400) LOG("[pla] plants x%d: vs %llx\n", dk, (unsigned long long)p->code[0]);
         }
+    }
+    if (p->code[1] && !p->warm && ENV("LARECOMP_TEST_GPUCRASH")) {  // (test only: this program crashes the GPU, gpudiag.c)
+        extern uint64_t vk_fs_hash(uint64_t fs);
+        char *t = gd_test_inject(p->vi->msl, vk_fs_hash(p->code[1]));
+        if (t) p->vi->msl = t;
     }
     if (p->vkey.xfb_count[0]) xfb_rewrite(p);
     p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
@@ -4263,6 +4279,15 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     }
     CsProg *cp = compute_program(st.program);
     if (!cp || atomic_load(&cp->p.state) != 1) { stat_skipped++; return; }
+    if (!cp->p.gd_key) {  // (GPU crash reports, gpudiag.c: the compute program by its code)
+        uint64_t cs = st.program->stages[5].code_addr;
+        uint64_t ch = hmix(1469598103934665603ull, (const void *)(uintptr_t)(cs + 0x30), 0x200);
+        cp->p.gd_key = gd_key_cs(ch);
+        gd_register(cp->p.gd_key, 2, 0, ch, 0, cs, NULL, cp->si ? cp->si->msl : NULL);
+        cp->p.gd_skip = (int8_t)gd_skip_lookup(cp->p.gd_key);
+        cp->p.gd_iso = gd_isolate_lookup(cp->p.gd_key);
+    }
+    if (cp->p.gd_skip && gd_skip_hit(cp->p.gd_skip - 1)) { stat_skipped++; return; }
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
@@ -4291,7 +4316,10 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     VkDescriptorSet ds = stage_set(&cp->p, cp->p.set_layout[0], 0, 5, cp->si, NULL, NULL, gx, gy, gz, NULL);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, 0, 1, &ds, 0, NULL);
+    if (!g_gd_drawmarks) gd_mark(cb, GD_M_DISPATCH, gx, gy, 0, 0);  // (per-draw marks: gd_op sets one)
+    gd_op(cb, cp->p.gd_key, GD_I_DISPATCH);
     vkCmdDispatch(cb, gx, gy, gz);
+    if (cp->p.gd_iso) hz_all = true;  // (the deeper mode: the next pass waits for it, gpudiag.c)
     stat_dispatches++;
 }
 
@@ -4510,7 +4538,17 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
         uint64_t fs = st.program->stages[1].code_addr;
-        if (!pr->fs_hash_ok) pr->fs_hash = fs ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(fs + 0x30), 0x200) : 0, pr->fs_hash_ok = true;
+        if (!pr->fs_hash_ok) {
+            pr->fs_hash = fs ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(fs + 0x30), 0x200) : 0, pr->fs_hash_ok = true;
+            // (GPU crash reports, gpudiag.c: the program by both its shaders; on the skip list?)
+            uint64_t vs = st.program->stages[0].code_addr;
+            uint64_t vh = vs ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(vs + 0x30), 0x200) : 0;
+            pr->gd_key = gd_key_draw(pr->fs_hash, vh);
+            gd_register(pr->gd_key, 1, vh, pr->fs_hash, vs, fs, pr->vi ? pr->vi->msl : NULL, pr->fi ? pr->fi->msl : NULL);
+            pr->gd_skip = (int8_t)gd_skip_lookup(pr->gd_key);
+            pr->gd_iso = gd_isolate_lookup(pr->gd_key);
+        }
+        if (pr->gd_skip && gd_skip_hit(pr->gd_skip - 1)) { stat_skipped++; return; }  // (crashed the GPU twice: gpudiag.c)
         uint64_t last_hash = pr->fs_hash;
         static uint64_t skip[16];
         static int nskip = -1;
@@ -4574,6 +4612,7 @@ static void draw_(CmdRec *r, bool indexed) {
     snap_reason = "draw-colorwrite";
     for (int i = 0; i < st.rt.ncolor; i++)
         if (st.rt.color[i] && ((st.channel_mask >> (i * 4)) & 0xF)) snapshots_invalidate(st.rt.color[i]);
+    if (pr->gd_iso) vk_end_pass(), hz_all = true;  // (on the GPU at the last crash: alone, gpudiag.c)
     begin_pass();
     hz_draw(pr, true);
     VkCommandBuffer cb = vk_cmd();
@@ -5076,6 +5115,7 @@ static void draw_(CmdRec *r, bool indexed) {
             g_vk.begin_xfb(cb, 0, 0, NULL, NULL);
         }
     }
+    gd_op(cb, pr->gd_key, GD_I_DRAW | (!use_index && count <= 4 && inst <= 1 ? GD_I_FULL : 0) | (inst > 65535 ? 65535u : inst) << 16);
     if (exp_hit && exp_mode == 1) { /* skipped */ }
     else if (!use_index) vkCmdDraw(cb, count, inst_eff, first, base_inst);
     else vkCmdDrawIndexed(cb, icount, inst_eff, 0, base_vertex, base_inst);
@@ -5086,6 +5126,7 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     if (gp_q) { vkCmdEndQuery(cb, gps_qp, (uint32_t)gps_n); gp_stat[gp_n - 1] = gps_n + 1; gps_n++; }
     if (exp_hit && exp_mode == 2) apply_scissor();
+    if (pr->gd_iso) vk_end_pass(), hz_all = true;  // (and nothing else on the GPU beside it)
     stat_draws++;
     g_draws_total++;
     cum_draws++;
