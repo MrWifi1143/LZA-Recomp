@@ -494,6 +494,11 @@ typedef struct {
     // held where scripts put it (walked / set): its node's transform written at each update
     volatile int over, walking, run, drawn_ok;
     float goal[3], from[3], drawn[3], drawn_yaw, want_yaw;
+    // a walk the game's own navigation does (FObj_Move_To_PosXYZ_Navi from the script - hle/za_script.c): not moved here,
+    // only followed - where it has got to, the walk over within 1 m of the goal; 1.5 s without getting on: walked here
+    volatile int navi;
+    float navi_last[3];
+    uint64_t navi_ns;
     uint64_t step_ns;
     // its walk animation
     uint64_t bb, scratch, move_ns, bb_ns;
@@ -547,6 +552,15 @@ static ModNpc *mod_of(int h) {
     if (h <= 0 || i < 0 || i >= MAXMOD) return NULL;
     ModNpc *m = &g_mod[i];
     return m->used && !m->removing && (m->gen & 0x3fffff) == ((uint32_t)h >> 8) ? m : NULL;
+}
+// the name the game knows it by (its object luanpc_<k>: the mod API's npc_object, for the game's own FObj_* calls)
+int newnpc_mod_object(int h, char *out, int cap) {
+    pthread_mutex_lock(&g_mlock);
+    ModNpc *m = mod_of(h);
+    int ok = m && m->state == MODNPC_UP && m->k > 0;
+    if (ok) snprintf(out, (size_t)cap, "luanpc_%03d", m->k);
+    pthread_mutex_unlock(&g_mlock);
+    return ok;
 }
 static void modnpc_made_from(int i, int snap) {  // (do_spawn, the game thread: which kept spawn it was made from; -1 none)
     if (i < 0 || i >= MAXMOD) return;
@@ -603,6 +617,25 @@ static void modnpc_move(Cpu *c, ModNpc *m, uint64_t n) {
         memcpy(m->drawn, t, 12);
         m->drawn_yaw = 2.0f * atan2f(q[1], q[3]), m->drawn_ok = 1;
         memcpy(m->from, t, 12);
+    }
+    if (m->navi) {  // (the game walks it: followed, not moved - its node, its body and its walk animation are the game's)
+        memcpy(m->drawn, t, 12);
+        m->drawn_yaw = m->want_yaw = 2.0f * atan2f(q[1], q[3]);
+        memcpy(m->at, m->drawn, 12), m->yaw = m->drawn_yaw;
+        float dx = m->goal[0] - t[0], dz = m->goal[2] - t[2];
+        float mx = t[0] - m->navi_last[0], mz = t[2] - m->navi_last[2];
+        if (mx * mx + mz * mz > 0.09f) memcpy(m->navi_last, t, 12), m->navi_ns = now;
+        if (m->walking && dx * dx + dz * dz < 1.0f) m->walking = 0, m->navi = 0, m->state = MODNPC_UP;
+        else if (m->walking && now - m->navi_ns > 1500000000ull) {
+            // (the game's walk not getting it anywhere for 1.5 s: walked here instead, straight on - a Town Walk walker
+            // took one leg of the game's walk and then no more orders, 2026-11-19, the game's own move calls answering)
+            static int nlog;
+            if (nlog++ < 8) LOG("[modnpc] %s: the game's walk doesn't move it - walked straight on\n", m->label);
+            m->navi = 0, memcpy(m->from, m->drawn, 12);
+        } else {
+            m->move_given = -1;
+            return;
+        }
     }
     if (m->walking) {
         float dx = m->goal[0] - m->drawn[0], dz = m->goal[2] - m->drawn[2], d = sqrtf(dx * dx + dz * dz);
@@ -689,7 +722,7 @@ void newnpc_body(uint64_t b) {
             uint64_t v = 0;
             // (its body - its collision - where it is drawn. Its height isn't the ground's: a townsperson's body follows its
             // node, no physics under it - tried 2026-11-19, a walk to a spot 2.5 m up rose with it)
-            if (m->used && m->body == b && m->drawn_ok && rd(b, &v, 8) && v == BODY_VTABLE) memcpy((void *)(uintptr_t)(b + 0x90), m->drawn, 12);
+            if (m->used && m->body == b && m->drawn_ok && !m->navi && rd(b, &v, 8) && v == BODY_VTABLE) memcpy((void *)(uintptr_t)(b + 0x90), m->drawn, 12);
             return;
         }
     if (!g_naway_m) return;
@@ -873,7 +906,8 @@ void newnpc_mod_walk(int h, const float p[3], int run) {
     ModNpc *m = mod_of(h);
     if (m) {
         memcpy(m->goal, p, 12), memcpy(m->from, m->drawn_ok ? m->drawn : m->at, 12);
-        m->run = run, m->walking = 1, m->over = 1;
+        m->run = run & 1, m->walking = 1, m->over = 1;
+        m->navi = (run & 2) != 0, memcpy(m->navi_last, m->at, 12), m->navi_ns = plat_now_ns();  // (run | 2: the game's walk)
         mod_nodes_rebuild();
         void warp_node_hook_on(void);
         warp_node_hook_on();
@@ -883,14 +917,14 @@ void newnpc_mod_walk(int h, const float p[3], int run) {
 void newnpc_mod_stop(int h) {
     pthread_mutex_lock(&g_mlock);
     ModNpc *m = mod_of(h);
-    if (m) m->walking = 0;
+    if (m) m->walking = 0, m->navi = 0;
     pthread_mutex_unlock(&g_mlock);
 }
 void newnpc_mod_set(int h, const float p[3], float yaw_deg) {
     pthread_mutex_lock(&g_mlock);
     ModNpc *m = mod_of(h);
     if (m) {
-        m->walking = 0, m->over = 1;
+        m->walking = 0, m->navi = 0, m->over = 1;
         memcpy(m->at, p, 12), memcpy(m->drawn, p, 12), memcpy(m->from, p, 12);
         if (m->node) m->drawn_ok = 1;
         if (yaw_deg < 1e8f) m->want_yaw = yaw_deg * (float)M_PI / 180.0f, m->yaw = m->want_yaw;

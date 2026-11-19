@@ -171,6 +171,83 @@ function ui.say(who, text, seconds)
   rt.notify(name .. ": " .. tostring(text), tonumber(seconds) or 4)
 end
 
+-- ---------------------------------------------------------------- the game's own scripts (Z-A)
+-- Lua text run in the game's own Lua 5.4 (its event framework) at the game's next frame; fn(result, err) gets what it
+-- returned as text. Each job starts with `local Commands = C0C062DE5AED06885` (the framework's Commands class).
+local jobs = {}  -- id -> {fn, mod}
+local function lit(v)  -- (a value as Lua source, for the game's Lua)
+  local t = type(v)
+  if t == "number" then return math.type(v) == "integer" and tostring(v) or fmt("%.9g", v) end
+  if t == "string" then return fmt("%q", v) end
+  if t == "boolean" or t == "nil" then return tostring(v) end
+  if t == "table" then
+    if v.x and v.y and v.z then return fmt("{%.9g, %.9g, %.9g}", v.x, v.y, v.z) end
+    local p = {}
+    for i = 1, #v do p[i] = lit(v[i]) end
+    return "{" .. table.concat(p, ", ") .. "}"
+  end
+  error("game.call: can't pass a " .. t, 3)
+end
+-- (the framework's names are hashed: Commands.AddItem is Commands.S<FNV-1a 64 of "AddItem">)
+local function fnv64(str)
+  local h = 0xcbf29ce484222645
+  for i = 1, #str do h = (h ~ str:byte(i)) * 0x100000001b3 end
+  return fmt("%016X", h)
+end
+local function hashed(code)
+  return (code:gsub("Commands%.([%a_][%w_]*)", function(n)
+    if #n == 17 and n:match("^S%x+$") then return nil end
+    return "Commands.S" .. fnv64(n)
+  end))
+end
+local function script(mod, code, fn)
+  if (rt.api_version or 1) < 3 then return nil, "this game build is too old" end
+  -- (its first result as text: the game's lua_tolstring takes strings and numbers only)
+  local id = rt.game_script("local Commands = C0C062DE5AED06885\nlocal __r = (function()\n" .. hashed(code) .. "\nend)()\nreturn tostring(__r)")
+  if id == 0 then return nil, game.name == "za" and "too many waiting" or "not in this game" end
+  jobs[id] = {fn = fn, mod = mod}
+  return id
+end
+local function jobs_poll()
+  for id, j in pairs(jobs) do
+    local st, out = rt.script_result(id)
+    if st ~= 0 then
+      jobs[id] = nil
+      if st == 2 and not j.fn then report(j.mod, "game.script", out) end
+      if j.fn then run({fn = j.fn, mod = j.mod}, "game.script", st == 1 and out or nil, st ~= 1 and out or nil) end
+    end
+  end
+end
+-- a job that waits (message windows, Wait_Time: the framework's Suspend yields): run as a coroutine in the game's Lua,
+-- resumed once a frame until it ends (game.run)
+local co_alive = false
+local co_job = nil
+local CO_TICK = "local n, t = 0, __LZA_CO or {} for i = #t, 1, -1 do local co = t[i] local ok, e = coroutine.resume(co) " ..
+  "if coroutine.status(co) == 'dead' then table.remove(t, i) if not ok then __LZA_ERR = tostring(e) end else n = n + 1 end end " ..
+  "local e = __LZA_ERR __LZA_ERR = nil return n .. (e and (' ' .. e) or '')"
+local function run_co(mod, code, fn)
+  local id, err = script(mod, "__LZA_CO = __LZA_CO or {} local co = coroutine.create(function()\n" .. code ..
+    "\nend) local ok, e = coroutine.resume(co) if coroutine.status(co) ~= 'dead' then __LZA_CO[#__LZA_CO + 1] = co end " ..
+    "if not ok then error(e, 0) end return 'started'", fn)
+  if id then co_alive = true end
+  return id, err
+end
+local function co_tick()
+  if not co_alive or co_job then return end
+  co_job = script(nil, CO_TICK, function(r, e)
+    co_job = nil
+    local n, msg = (r or ""):match("^(%d+)%s*(.*)$")
+    co_alive = (tonumber(n) or 0) > 0
+    if msg and msg ~= "" then rt.log("game.run: " .. msg) end
+    if e then rt.log("game.run: " .. e) co_alive = false end
+  end)
+end
+local function call_code(fname, args)
+  local a = {}
+  for i = 1, args.n do a[i] = lit(args[i]) end
+  return fmt("local r = %s(%s) if type(r) == 'table' then local t = {} for i = 1, #r do t[i] = tostring(r[i]) end return table.concat(t, ' ') end return r", fname, table.concat(a, ", "))
+end
+
 -- ---------------------------------------------------------------- the player
 local BUTTONS = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS", "MINUS", "LEFT", "UP", "RIGHT", "DOWN"}
 local BIT = {}
@@ -265,9 +342,23 @@ function Npc:dist(to)
   if not p or not q then return math.huge end
   return p:dist2d(q)
 end
+local function za_obj(n)  -- (Z-A: the name the game knows it by, while it is up)
+  return game.name == "za" and (rt.api_version or 1) >= 3 and rt.npc_object(n.id) or nil
+end
 local function go(n, p, run)
   n._goal, n._req_t, n._seen_walk = p, now(), false
+  local obj = za_obj(n)
+  if obj then  -- (Z-A: the game's own navigation walks it - around things, on the ground)
+    rt.npc_walk(n.id, p.x, p.y, p.z, (run and 1 or 0) | 2)
+    script(n.mod, fmt("Commands.FObj_Move_To_PosXYZ_Navi(%q, %.9g, %.9g, %.9g, %s)", obj, p.x, p.y, p.z, run and "6.0" or "2.0"))
+    n._navi = obj
+    return
+  end
   rt.npc_walk(n.id, p.x, p.y, p.z, run and true or false)
+end
+local function halt(n)  -- (stands: held where it is by the runtime - the game's walk, if it was walking it, has no say)
+  rt.npc_stop(n.id)
+  n._navi = nil
 end
 function Npc:walk_to(x, y, z, run)
   check_npc(self)
@@ -296,7 +387,7 @@ function Npc:pause()
   check_npc(self)
   if self._route then self._route.paused = true self._route.wait_until = nil end
   self._goal = nil
-  rt.npc_stop(self.id)
+  halt(self)
   return self
 end
 function Npc:resume()
@@ -305,12 +396,13 @@ function Npc:resume()
   if r and r.paused then r.paused = false go(self, r.pts[r.i], r.opts.run) end
   return self
 end
-function Npc:stop() check_npc(self) self._route, self._goal = nil, nil rt.npc_stop(self.id) return self end  -- (its route dropped too: pause keeps it)
+function Npc:stop() check_npc(self) self._route, self._goal = nil, nil halt(self) return self end  -- (its route dropped too: pause keeps it)
 function Npc:set_pos(x, y, z, yaw)
   check_npc(self)
   local p
   if is_vec(x) then p, yaw = vec(x), y else p = vec(x, y, z) end
   self._route, self._goal = nil, nil
+  if self._navi then halt(self) end
   rt.npc_set(self.id, p.x, p.y, p.z, tonumber(yaw) or 1e9)
   return self
 end
@@ -342,6 +434,16 @@ function Npc:anim(name, value, kind)
   return rt.npc_anim(self.id, name, k, v)
 end
 function Npc:trigger(name) return self:anim(name, nil, "t") end
+-- Z-A: the name the game knows it by (for game.call's FObj_* functions), nil until it is up
+function Npc:object() check_npc(self) return za_obj(self) end
+-- Z-A: one of the game's own animations by number (FObj_Set_Animation: 1 standing ... the events' numbers)
+function Npc:play_anim(id)
+  check_npc(self)
+  local obj = za_obj(self)
+  if not obj then return false end
+  script(self.mod, fmt("Commands.FObj_Set_Animation(%q, %d)", obj, math.floor(id)))
+  return true
+end
 -- this character's events: on("talk"), on("near"), on("arrived"), on("up"), on("gone") - the same as on(event, npc, fn)
 function Npc:on(ev, fn)
   local map = {talk = "talk", near = "near", far = "far", arrived = "npc_arrived", up = "npc_up", gone = "npc_gone"}
@@ -353,27 +455,72 @@ function npc.models() return rt.have_api and rt.npc_models() or "" end
 function npc.find(name) for _, n in pairs(npcs) do if n.name == name then return n end end end
 function npc.all() local t = {} for _, n in pairs(npcs) do t[#t + 1] = n end table.sort(t, function(a, b) return a.id < b.id end) return t end
 
--- ---------------------------------------------------------------- Pokémon of a script's own (Arceus)
+-- ---------------------------------------------------------------- items
+local item = {}
+function item.give(id, n, show)
+  if (rt.api_version or 1) < 3 then error("item.give: this game build is too old", 2) end
+  id, n = math.floor(id), math.floor(n or 1)
+  local ok = rt.item_give(id, n)
+  if ok and show and game.name == "za" then  -- (Z-A: the game's own "You got ...!" window too - A closes it)
+    run_co(nil, fmt("Commands.S6DCE2895AC79F359(Commands.S5DF104B25CC642C7(%d), %d)", id, n))
+  end
+  return ok
+end
+
+-- ---------------------------------------------------------------- Pokémon of a script's own
+-- (Arceus: made by the runtime like the shared world's mounts. Z-A: the event framework's own make, by name)
 local Poke = {}
 Poke.__index = Poke
 Poke.__tostring = function(p) return fmt("pokemon %s (#%d %d)", p.name, p.species, p.id) end
 local pokemon = {}
 local pokes = {}
+local za_poke_n = 0
 function pokemon.spawn(t)
   if type(t) ~= "table" or not tonumber(t.species) then error("pokemon.spawn{species = n, pos = {x, y, z}, ...}", 2) end
   if (rt.api_version or 1) < 2 then error("pokemon.spawn: this game build is too old", 2) end
   local pos = t.pos and vec(t.pos) or player.ahead(3)
   if not pos then error("pokemon.spawn: pos needed (no player yet)", 2) end
+  if game.name == "za" then
+    if (rt.api_version or 1) < 3 then return nil, "this game build is too old" end
+    za_poke_n = za_poke_n + 1
+    local name = fmt("luapoke_%d", za_poke_n)
+    local p = setmetatable({id = -za_poke_n, species = math.floor(t.species), name = t.name or name, object = name, data = {},
+                            _at = pos, _yaw = tonumber(t.yaw) or 0, _st = 2}, Poke)
+    local code = fmt("return Commands.S0D43FC7826F5A0FA(%q, {%.9g, %.9g, %.9g}, %.9g, %d, %d, %d, nil, nil, true, %s) ~= nil",
+      name, pos.x, pos.y, pos.z, p._yaw, p.species, math.floor(tonumber(t.form) or 0), math.floor(tonumber(t.gender) or 0), t.shiny and "true" or "false")
+    local id, err = script(nil, code, function(r, e)
+      if p.removed then return end
+      p._st = r == "true" and 3 or 0
+      if p._st == 0 then rt.log(fmt("pokemon.spawn: %s not made (%s)", name, e or r or "?")) end
+    end)
+    if not id then return nil, err end
+    pokes[p.id] = p
+    return p
+  end
   local h = rt.poke_spawn(math.floor(t.species), pos.x, pos.y, pos.z, tonumber(t.yaw) or 0, math.floor(tonumber(t.form) or 0), t.shiny and true or false, t.name or "")
   if h == 0 then return nil, "not made (" .. (game.name == "za" and "not in Z-A yet" or "none free") .. ")" end
   local p = setmetatable({id = h, species = math.floor(t.species), name = t.name or ("pokemon" .. h), data = {}}, Poke)
   pokes[h] = p
   return p
 end
-function Poke:state() local st = rt.poke_state(self.id) return STATES[st] or "removed" end
-function Poke:valid() return not self.removed and rt.poke_state(self.id) ~= 0 end
-function Poke:pos() local st, x, y, z = rt.poke_state(self.id) if st == 0 then return nil end return vec(x, y, z) end
-function Poke:remove() if not self.removed then rt.poke_remove(self.id) pokes[self.id] = nil self.removed = true end end
+local function za_poke(p) return p.id < 0 end
+function Poke:state()
+  if self.removed then return "removed" end
+  if za_poke(self) then return STATES[self._st] or "removed" end
+  local st = rt.poke_state(self.id) return STATES[st] or "removed"
+end
+function Poke:valid() return not self.removed and (za_poke(self) and self._st ~= 0 or not za_poke(self) and rt.poke_state(self.id) ~= 0) end
+function Poke:pos()
+  if self.removed then return nil end
+  if za_poke(self) then return self._st ~= 0 and self._at or nil end  -- (Z-A: where it was made; game.call FObj_Get_Pos for now)
+  local st, x, y, z = rt.poke_state(self.id) if st == 0 then return nil end return vec(x, y, z)
+end
+function Poke:remove()
+  if self.removed then return end
+  self.removed = true
+  pokes[self.id] = nil
+  if za_poke(self) then script(nil, fmt("Commands.SB1734BFAFC3FB69D(%q)", self.object)) else rt.poke_remove(self.id) end  -- (Z-A: the framework's delete of a Pokémon it made)
+end
 function pokemon.all() local t = {} for _, p in pairs(pokes) do t[#t + 1] = p end return t end
 G.pokemon = pokemon
 -- a story work (Z-A "SYS_WORK_PHASE", Arceus "WPHA_STORY"; Arceus flags as "flag:<name>"): its value, or nil when the
@@ -381,6 +528,12 @@ G.pokemon = pokemon
 game.work = function(name, value)
   if (rt.api_version or 1) < 2 then error("game.work: this game build is too old", 2) end
   return rt.work(tostring(name), value ~= nil and math.floor(value) or nil)
+end
+G.item = item
+-- the time of day: the game's clock set to that hour (0-24) at its next frame (Z-A)
+game.set_time = function(hour)
+  if (rt.api_version or 1) < 3 then error("game.set_time: this game build is too old", 2) end
+  return rt.time_set(tonumber(hour) or error("game.set_time(hour)", 2))
 end
 
 -- each frame: the characters' states -> npc_up / npc_gone / npc_arrived; routes; near / far; talk (A by one)
@@ -490,11 +643,13 @@ G.__tick = function(frame)
     if frame_n % 6 < e and next(npcs) then npcs_poll() end
     if (frame_n + 3) % 10 < e and next(npcs) then near_poll() end
   end
+  if next(jobs) then jobs_poll() end
+  if co_alive then co_tick() end
   timers_run()
   if has("tick") then emit("tick", dt) end
   -- (how often the plugin calls this: every frame while something needs each one - tick handlers, buttons, talk -
   -- else every 4th, the rest needs no more: timers a few frames late at most)
-  G.__tick_every = (has("tick") or has("button") or has("button_up") or has("talk")) and 1 or 4
+  G.__tick_every = (has("tick") or has("button") or has("button_up") or has("talk") or co_alive) and 1 or 4
 end
 
 -- ---------------------------------------------------------------- each mod's globals
@@ -523,6 +678,18 @@ local function api_for(mod, env)
   }, {__index = npc})
   env.player = player
   env.pokemon = pokemon
+  env.item = item
+  env.game = setmetatable({
+    script = function(code, fn) return script(mod, tostring(code), fn) end,
+    run = function(code, fn) return run_co(mod, tostring(code), fn) end,  -- (a coroutine: may wait - message windows)
+    hash = function(name) return "S" .. fnv64(tostring(name)) end,
+    call = function(fname, ...)  -- game.call("Commands.FObj_Get_Pos", "Player", function(r) ... end)
+      local args = table.pack(...)
+      local fn = args.n > 0 and type(args[args.n]) == "function" and args[args.n] or nil
+      if fn then args[args.n] = nil args.n = args.n - 1 end
+      return script(mod, call_code(tostring(fname), args), fn)
+    end,
+  }, {__index = game})
   env.ui = ui
   env.include = function(file)  -- (another script of this mod's own folder - "lib/x.lua" - run in its globals: its results)
     if type(file) ~= "string" or file:find("%.%.") or file:find("^[/\\]") or file:find(":") then
@@ -571,7 +738,7 @@ end
 G.__unload = function()
   emit("unload")
   for h, n in pairs(npcs) do rt.npc_remove(h) end
-  for h, p in pairs(pokes) do rt.poke_remove(h) end
+  for h, p in pairs(pokes) do p:remove() end
 end
 
 -- ---------------------------------------------------------------- built-in console commands
