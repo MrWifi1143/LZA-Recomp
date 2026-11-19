@@ -1857,8 +1857,116 @@ static void items_run(Cpu *c) {
     memcpy(c->x, sx, sizeof sx), memcpy(c->v, sv, sizeof sv), c->nzcv = snzcv;
 }
 
+// ---- The time of day for scripts (time_set: game.set_time; traced 2026-11-19). Arceus' clock is an object (vtable
+// 0x700415e328) whose +0x70 is the minute of the day (a double: hour * 60 + minute + second / 60) and +0x78 the hour -
+// found by heap snapshots across rests at camp (the double 486.7 -> 1263.3 -> 422.9 for 8:06 -> nightfall -> morning).
+// Resting sets it through the event system: the camp's triggers (bin/event/event_progress/trigger, after CampEvent's
+// result 0-3) carry the action time_change (kind 0x48d69d8788b2fe61: "sets the time to 7 / 12 / 19 / 21"), whose
+// handler (vtable 0x7004123e40, execute 0x70015917b8) finds the clock (0x700155a260 -> 0x70014196f8 -> 0x70018cb7ec:
+// [+0x1d0]), sets it (CLOCK_SET(clock, hour, minute, second, 1)) and has the sky follow at once (0x700155a7a0's object:
+// its +0xf0 (0x700189c708) told the old minute (0x7002499244), its +0xe0 (0x700189c694) 0x7001e20578(0.01, 0)) - the
+// clock alone set leaves the sky as it was. Done here as that handler does, references taken and given back the same.
+#define CLOCK_ROOT 0x700155a260ull
+#define CLOCK_CAST 0x70014196f8ull
+#define CLOCK_OF 0x70018cb7ecull
+#define CLOCK_GET 0x70024acf84ull
+#define CLOCK_SET 0x70024accdcull
+#define SKY_ROOT 0x700155a7a0ull
+#define SKY_TYPE_GOT 0x70042796e8ull
+#define SKY_A 0x700189c708ull
+#define SKY_A_TELL 0x7002499244ull
+#define SKY_B 0x700189c694ull
+#define SKY_B_SNAP 0x7001e20578ull
+#define REF_WEAK_DROP 0x7002943934ull
+#define REF_DROP 0x7002943a5cull
+static volatile float g_time_want = -1;
+int pla_time_set(float hour) {
+    if (!(hour >= 0 && hour < 24.0f)) return 0;
+    g_time_want = hour;
+    return 1;
+}
+static uint64_t tcall(Cpu *c, uint64_t fn, uint64_t x0, uint64_t x8) {  // (x0 in, x8 the result's slot: x0 out)
+    c->x[0] = x0, c->x[8] = x8;
+    guest_call(c, fn);
+    return c->x[0];
+}
+static void tdrop(Cpu *c, uint64_t obj) {  // (a strong reference given back: its control block +0x58, deleted at 0)
+    if (!in_heap(obj)) return;
+    c->x[0] = *(const uint64_t *)(uintptr_t)(obj + 0x58);
+    guest_call(c, REF_DROP);
+    if (c->x[0] & 1) c->x[0] = obj, guest_call(c, *(const uint64_t *)(uintptr_t)(*(const uint64_t *)(uintptr_t)obj + 0x20));
+}
+static void time_run(Cpu *c) {
+    float want = g_time_want;
+    if (want < 0) return;
+    g_time_want = -1;
+    static uint64_t *slot;
+    if (!slot) slot = hle_alloc(0x40);
+    uint64_t s0 = (uint64_t)(uintptr_t)slot, s1 = s0 + 0x20;
+    int h = (int)want, m = (int)((want - (float)h) * 60.0f + 0.5f);
+    if (m >= 60) m = 59;
+    uint64_t sx[32], snzcv = c->nzcv;
+    __uint128_t sv[32];
+    memcpy(sx, c->x, sizeof sx), memcpy(sv, c->v, sizeof sv);
+    double was = 0;
+    uint64_t a, b = 0, clock = 0;
+    memset(slot, 0, 0x40);
+    tcall(c, CLOCK_ROOT, 0, s0);
+    if ((a = slot[0])) {
+        tcall(c, CLOCK_CAST, a, s1), b = slot[4];
+        c->x[0] = a, guest_call(c, REF_WEAK_DROP);
+    }
+    if (b) {
+        slot[0] = 0;
+        tcall(c, CLOCK_OF, b, s0), clock = slot[0];
+        if (clock) {
+            c->x[0] = clock, guest_call(c, CLOCK_GET);
+            memcpy(&was, &c->v[0], 8);
+            c->x[0] = clock, c->x[1] = (uint32_t)h, c->x[2] = (uint32_t)m, c->x[3] = 0, c->x[4] = 1;
+            guest_call(c, CLOCK_SET);
+            tdrop(c, clock);
+        }
+        tdrop(c, b);
+    }
+    int sky = 0;
+    if (clock) {  // (the sky told: as the handler does)
+        memset(slot, 0, 0x40);
+        tcall(c, SKY_ROOT, 0, s0);
+        uint64_t w = slot[0], e = 0, want_t = *(const uint64_t *)(uintptr_t)SKY_TYPE_GOT;
+        if (in_heap(w) && *(const uint32_t *)(uintptr_t)(w + 0xc)) {  // (the weak reference locked if its type is the sky's)
+            uint64_t t = *(const uint64_t *)(uintptr_t)(w + 0x10);
+            for (int i = 0; i < 16 && t && t != want_t && guest_ptr(t); i++) t = *(const uint64_t *)(uintptr_t)t;
+            uint64_t p = *(const uint64_t *)(uintptr_t)(w + 0x18);
+            if (t == want_t && p) __atomic_add_fetch((uint32_t *)(uintptr_t)(w + 0xc), 1, __ATOMIC_ACQ_REL), e = p - 0x50;
+        }
+        if (w) c->x[0] = w, guest_call(c, REF_WEAK_DROP);
+        if (e) {
+            slot[0] = 0;
+            uint64_t f = (tcall(c, SKY_A, e, s0), slot[0]);
+            if (f) {
+                c->x[0] = f, memcpy(&c->v[0], &was, 8);
+                guest_call(c, SKY_A_TELL);
+                tdrop(c, f), sky |= 1;
+            }
+            slot[0] = 0;
+            uint64_t g = (tcall(c, SKY_B, e, s0), slot[0]);
+            if (g) {
+                double snap = 0.01;
+                c->x[0] = g, c->x[1] = 0, memcpy(&c->v[0], &snap, 8);
+                guest_call(c, SKY_B_SNAP);
+                tdrop(c, g), sky |= 2;
+            }
+            tdrop(c, e);
+        }
+    }
+    memcpy(c->x, sx, sizeof sx), memcpy(c->v, sv, sizeof sv), c->nzcv = snzcv;
+    if (!clock) LOG("[npc] time %.2f: the game's clock isn't there (no level yet?)\n", want);
+    else LOG("[npc] time set to %02d:%02d (was %02d:%02d; the sky %s)\n", h, m, (int)(was / 60), (int)was % 60, sky == 3 ? "told" : "not found");
+}
+
 void pla_npc_cam(Cpu *c) {  // (the camera update, the game's thread: hle/warp.c)
     items_run(c);
+    time_run(c);
     if (!g_mgr) return;
     nav_match();
     mod_cam(c);
@@ -2302,6 +2410,7 @@ typedef struct {
     int told_outfit;
     struct { uint64_t hash; char kind; float v; } anim[8];  // (animation parameters to set - npc_anim)
     int nanim;
+    int talk;                // (the game's Talk prompt over it - npc_talk, below)
 } ModNpc;
 static ModNpc g_mod[MAXMOD];
 static volatile int g_mods_any;
@@ -2599,9 +2708,74 @@ void pla_npc_api_frame(uint64_t frame) {
 
 // ---- the API (hle/modapi.c)
 static int g_api;
+// ---- The game's own Talk prompt on a script's character (npc_talk; traced 2026-11-19). The player's interaction
+// update 0x70018648bc follows the object it targets ([[ctrl+0xc8]+0x1f0], a weak ref; the object's kind at +0x220: 2 a
+// person, 14 a tent...) and for a person asks the event system whether a talk trigger (bin/event/event_progress/
+// trigger: where {kind npc_talk, name}) holds for it: TRIG_QUERY(&kind, the person's name hash [obj+0x1f8], 3 x the
+// empty hash, a callback set) - true puts "A <its character's name>" over it. A then fires that trigger: TRIG_FIRE
+// (&kind, name, ...) (its answer unused). Ours (luanpc_<k>) have no trigger of the game's: a talkable one answers true
+// here, and its fire is taken - the game does nothing more (no event; the player stays free) - and handed to the script
+// (npc_talked). The game's own triggers and people are untouched.
+#define TRIG_QUERY 0x70015698d0ull
+#define TRIG_FIRE 0x70015693c0ull
+#define KIND_NPC_TALK 0xab00e1a6f5d27687ull
+static int g_talked[16], g_ntalked;
+static int talk_handle(uint64_t name) {  // (the talkable script character with that name hash; 0 none - g_mlock held)
+    char nm[24];
+    for (int i = 0; i < MAXMOD; i++) {
+        ModNpc *m = &g_mod[i];
+        if (!m->used || !m->talk || m->state < MODNPC_UP) continue;
+        snprintf(nm, sizeof nm, "luanpc_%d", m->k);
+        if (fnv(nm) == name) return (int)((m->gen & 0x3fffff) << 8 | (uint32_t)(i + 1));
+    }
+    return 0;
+}
+static int talkq_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    if (!guest_ptr(c->x[0]) || *(const uint64_t *)(uintptr_t)c->x[0] != KIND_NPC_TALK || !g_mods_any) return 0;
+    pthread_mutex_lock(&g_mlock);
+    int h = talk_handle(c->x[1]);
+    pthread_mutex_unlock(&g_mlock);
+    if (!h) return 0;
+    c->x[0] = 1;
+    return 1;
+}
+static int talkf_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    if (!guest_ptr(c->x[0]) || *(const uint64_t *)(uintptr_t)c->x[0] != KIND_NPC_TALK || !g_mods_any) return 0;
+    pthread_mutex_lock(&g_mlock);
+    int h = talk_handle(c->x[1]);
+    if (h && g_ntalked < 16) g_talked[g_ntalked++] = h;
+    pthread_mutex_unlock(&g_mlock);
+    if (!h) return 0;
+    LOG("[npc] the player talked to script character %d (the game's Talk prompt)\n", h);
+    c->x[0] = 0;
+    return 1;
+}
+// h > 0: its prompt on (on 1) or off; h 0: 1 when this game has the prompt
+int pla_npc_mod_talk(int h, int on) {
+    if (h == 0) return 1;
+    pthread_mutex_lock(&g_mlock);
+    ModNpc *m = mod_of(h);
+    if (m) m->talk = on != 0;
+    pthread_mutex_unlock(&g_mlock);
+    return m != NULL;
+}
+int pla_npc_mod_talked(void) {
+    pthread_mutex_lock(&g_mlock);
+    int h = 0;
+    if (g_ntalked > 0) {
+        h = g_talked[0];
+        memmove(g_talked, g_talked + 1, (size_t)--g_ntalked * sizeof g_talked[0]);
+    }
+    pthread_mutex_unlock(&g_mlock);
+    return h;
+}
+
 void pla_npc_api_on(void) {
     if (g_api) return;
     g_api = 1;
+    rt_register_fnhook_at(TRIG_QUERY, talkq_hook), rt_register_fnhook_at(TRIG_FIRE, talkf_hook);
     rt_register_fnhook_at(PLACE_NPC, place_hook);
     rt_register_fnhook_at(FACTORY_CREATE, fcreate_hook);
     rt_register_fnhook_at(NAV_POS_FN, nav_pos_hook);

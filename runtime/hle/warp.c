@@ -391,6 +391,7 @@ void warp_frame(uint64_t frame) {  // (each game frame: runtime/hle/input.c)
     }
     server_notice_frame(frame);
     { extern void pla_slot_watch(uint64_t); pla_slot_watch(frame); }  // (research: hle/pla_drawdist.c)
+    { extern void heapsnap_frame(void); heapsnap_frame(); }  // (research: hle/heapsnap.c)
     {   // (research) LARECOMP_LOG_PLAYER=<n>: the player's position every n frames ("[player] frame f x y z")
         static long every = -2;
         if (every == -2) every = getenv("LARECOMP_LOG_PLAYER") ? atol(getenv("LARECOMP_LOG_PLAYER")) : 0;

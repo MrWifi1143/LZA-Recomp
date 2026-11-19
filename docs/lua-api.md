@@ -2,7 +2,7 @@
 
 Mods can carry Lua scripts. A script can make **new characters** that the game itself creates (they look, move and
 animate like the game's own people), dress them, pose them, walk them around, make **Pokémon**, give **items**, set the
-**time of day** (Z-A), read and set the story's progress values, run the game's **own script commands** (Z-A: message
+**time of day**, read and set the story's progress values, run the game's **own script commands** (Z-A: message
 windows, its objects, everything its events use), react to the player, add console commands, show notices on screen
 and hook anything in the game. The API is the same in **Legends: Z-A** and **Legends: Arceus**. Where the two
 games differ, this page says so.
@@ -69,6 +69,7 @@ local n = npc.spawn{pos = {x, y, z}, yaw = 90, name = "Bob", model = "...", outf
 | `name` | Your name for it (used in logs, `npc.find`, `n:say`). |
 | `outfit` | (Optional) dress it like a player. `"player"`: the player character's clothes. **Arceus**: the outfit the player has on now, and a table puts other items over it, `{[slot] = "item name", ...}` (the 12 slots of the save's dress-up data: 0 hair, 4 hat, 7 clothes were checked; item names from `bin/chara/table/dressup_table_p1.bin` / `_p2.bin`, e.g. `"p1_hdw0001_00_hunting_green"`). **Z-A**: `"player"` only, the parts the player character's model was made with (not the save's look on top, so some pieces differ from what you wear). |
 | `body` | (Optional, Arceus) `"p1"` or `"p2"`: which of the two player bodies a dressed character has (default: the player's). |
+| `talk` | (Optional, Arceus) `false`: no Talk prompt over it, even while a `talk` handler is for it (see the `talk` event). |
 | `model` | (Optional) what it looks like. **Z-A**: a station NPC's id from the level data (`npc_A04_z02_02_0002`; `npc.models()` lists the ones loaded near you). Leave it out to copy the nearest townsperson's look. **Arceus**: a character id (`tr0036_00_senpai_m`), its hash (`"0x2d992cf818c93910"`), or the name of a placement in the area (`area00_npc_g_002`, to copy that NPC's look). Leave it out to copy a villager of the area. |
 
 `npc.spawn` returns a **handle** at once. The game makes the character when the player is within about 50 m (Z-A) or
@@ -155,7 +156,7 @@ timer.after(3, function() p:play_once(7) end)   -- once_action 7 now plays "mysp
 | | |
 |---|---|
 | `item.give(id, n [, show])` | `n` of item `id` into the bag, by the game's own add. **Arceus**: `Bag::AddItem` (the script binding `Bag.AddItem`); Hisui's own items have their own numbers - its Poké Ball is 1710 (4 is the modern one, which Arceus doesn't use). **Z-A**: `Commands.AddItem`; with `show` the game's own "You obtained 10 Poké Balls!" window too (A closes it). Returns true when asked. |
-| `game.set_time(hour)` | (Z-A) The time of day: the game's clock set to that hour (0-24), as the bench's "wait until night" does. The story may hold the clock (the test save held 15:00): the hold is let go. The city changes after the game's own short black transition (lit windows and the night zones at night); the area loads again, so script Pokémon go and characters are made again. |
+| `game.set_time(hour)` | The time of day: the game's clock set to that hour (0-24; `18.5` is 18:30). **Z-A**: as the bench's "wait until night" does. The story may hold the clock (the test save held 15:00): the hold is let go. The city changes after the game's own short black transition (lit windows and the night zones at night); the area loads again, so script Pokémon go and characters are made again. **Arceus**: as resting at a camp's tent does (the camp's `time_change`: morning is 7, midday 12, evening 19, nightfall 21), without the rest - the sky, light and stars change at once, nothing loads again, and the clock runs on from there. Returns false for an hour outside 0-24. |
 
 ## The game's own scripts: `game.script`, `game.call`, `game.run`
 
@@ -220,7 +221,7 @@ off(id)
 | `tick` | `dt` (seconds) | Every frame. |
 | `area_loaded` | `{id, name}` | A part of the world finished loading. **Arceus**: an area's people were made (`name` = `area00`...). **Z-A**: a batch of the city's people (`name` = the city block, `A04`...). |
 | `button` / `button_up` | button name | A button pressed / let go (filter: the name). |
-| `talk` | character | A pressed while facing one of the mods' characters within 2.2 m. (This isn't the game's own Talk prompt. The game still sees the A press too.) |
+| `talk` | character | The player talked to one of the mods' characters. **Arceus**: through the game's own Talk prompt - while a `talk` handler is for a character (a global `on("talk")`, or its own `n:on("talk")`), facing it shows "Ⓐ *its name*" as over the game's people (a villager's look says what that villager is called, a dressed one your name), and A on it is the talk. The game does nothing else (no event; the player can walk off). `npc.spawn{..., talk = false}` keeps one without the prompt. **Z-A**: its townspeople have no prompt: A pressed while facing a character within 2.2 m (the game still sees the A press too). |
 | `near` / `far` | character, metres | The player came within `n.near_radius` / went beyond it. |
 | `npc_up` / `npc_gone` | character | Made in the world / gone with its area. |
 | `npc_arrived` | character | A `walk_to` (or a route without `loop`) ended. |
@@ -293,15 +294,11 @@ At 60 fps a frame is 16,700 us, so a mod like the samples costs about 0.1-0.2% o
   looks like the game. The bubble is the townspeople's C++ AI; a script character has the same InteractNPC component, but
   its record (+0x48) is named after its object (`luanpc_001`). Pointing that record at a talkable townsperson's, copying
   that townsperson (`model`), or giving it the talkable talk script (research `LARECOMP_MODNPC_TALK=1`) brought no bubble.
-  Arceus has a real Talk prompt ("A Laventon"); script characters don't get it yet.
 * **Weather** (both games). Z-A's framework has no setter (its `FixWeather` is empty); the weather the game reports
   comes from an object of the environment clock's (a list of 4 entries, the current one at +0x68): pointing it at
   another entry changes what the game reports (`c4B6212B8.f6362F6BB()`), but nothing on screen. Arceus' scripts have
   no weather calls.
-* **Arceus' time of day**: resting at a camp's tent (or a bed) is an event script (`CampEvent.restLoop`, `BedTimeChange`)
-  that only returns the choice (0 morning, 1 midday, 2 evening, 3 nightfall, 500 a little while); C++ sets the clock
-  during the black fade - not through the map change request, not in any work or flag (all 76 works and 572 flags the
-  same before and after). The writer isn't found yet; the profile of that fade is in testout. **Arceus' own-text window**: its line decoder is found (0x7002b2e654, the same as Z-A's) and its
+* **Arceus' own-text window**: its line decoder is found (0x7002b2e654, the same as Z-A's) and its
   window's `CreateMessageWindow` (0x70024862cc) takes the message file and label as 64-bit FNV hashes; the hash-to-line
   lookup isn't found yet, and the message files are loaded per event.
 * **Z-A outfits other than `"player"`.**

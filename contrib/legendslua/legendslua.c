@@ -569,6 +569,14 @@ static int r_message_text(lua_State *s) {
     lua_pushboolean(s, M->message_text((int)luaL_checkinteger(s, 1), luaL_checkstring(s, 2)));
     return 1;
 }
+// (version 4) the game's Talk prompt over a script's character: npc_talk(h, on) -> 1 done / h 0: 1 when the game has
+// it; npc_talked() -> the character talked to through it (0 none). Older builds: 0 (api.lua's own A-by-one talk then)
+static int r_npc_talk(lua_State *s) {
+    need_m(s);
+    lua_pushinteger(s, M->version >= 4 ? M->npc_talk((int)luaL_checkinteger(s, 1), (int)luaL_optinteger(s, 2, 1)) : 0);
+    return 1;
+}
+static int r_npc_talked(lua_State *s) { need_m(s); lua_pushinteger(s, M->version >= 4 ? M->npc_talked() : 0); return 1; }
 static int r_time_set(lua_State *s) { need_m3(s); lua_pushboolean(s, M->time_set((float)luaL_checknumber(s, 1))); return 1; }
 static int r_item_give(lua_State *s) { need_m3(s); lua_pushboolean(s, M->item_give((int)luaL_checkinteger(s, 1), (int)luaL_checkinteger(s, 2))); return 1; }
 static int r_npc_object(lua_State *s) {
@@ -667,6 +675,7 @@ static void new_state(void) {
                                   {"poke_state", r_poke_state}, {"work", r_work}, {"game_script", r_game_script},
                                   {"script_result", r_script_result}, {"item_give", r_item_give}, {"npc_object", r_npc_object},
                                   {"time_set", r_time_set}, {"message_text", r_message_text}, {"object_anim", r_object_anim},
+                                  {"npc_talk", r_npc_talk}, {"npc_talked", r_npc_talked},
                                   {"trace", l_trace}, {NULL, NULL}};
     uint64_t was = deadline_set(LUA_LOAD_MS);
     if (luaL_loadbufferx(L, k_api_lua, strlen(k_api_lua), "=api.lua", "t")) {
