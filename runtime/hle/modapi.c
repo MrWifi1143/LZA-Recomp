@@ -42,7 +42,7 @@ int pla_script_result(int id, char *out, int cap);
 static int object_none(int h, char *out, int cap) { (void)h, (void)out, (void)cap; return 0; }
 static int time_none(float hour) { (void)hour; return 0; }  // (Arceus: its clock isn't reached yet)
 static int message_none(int slot, const char *text) { (void)slot, (void)text; return 0; }
-static int object_anim_none(const char *o, const char *p, int k, float v) { (void)o, (void)p, (void)k, (void)v; return 0; }
+int pla_npc_object_anim(const char *object, const char *param, int kind, float value);  // (hle/pla_npc.c)
 static const LarecompModApi g_modapi = {
     .version = LARECOMP_MODAPI_VERSION, .game = "pla", .enable = enable,
     .npc_spawn = pla_npc_mod_spawn, .npc_remove = pla_npc_mod_remove, .npc_remove_all = pla_npc_mod_remove_all,
@@ -54,6 +54,6 @@ static const LarecompModApi g_modapi = {
     .pokemon_spawn = pla_npc_poke_spawn, .pokemon_remove = pla_npc_poke_remove, .pokemon_state = pla_npc_poke_state,
     .game_work = warp_work,
     .game_script = pla_script, .script_result = pla_script_result, .item_give = pla_item_give, .npc_object = object_none,
-    .time_set = time_none, .message_text = message_none, .object_anim = object_anim_none,
+    .time_set = time_none, .message_text = message_none, .object_anim = pla_npc_object_anim,
 };
 const LarecompModApi *modapi_get(void) { return &g_modapi; }

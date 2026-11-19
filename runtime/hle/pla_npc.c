@@ -333,6 +333,8 @@ typedef struct {
     int jidx;           // (the seat joint's matrix index + 1 in jsk; -1 not found)
     int form, rare;     // (a script's Pokémon - the mod API's pokemon.spawn: its form, shiny)
     int script;
+    struct { uint64_t hash; char kind; float v; } anim[8];  // (its animation's parameters asked for: object_anim)
+    volatile int nanim;
 } Mnt;
 static Mnt g_mnt[NMNT];
 static int g_poke_n;
@@ -912,8 +914,11 @@ static void unfreeze(uint64_t owner) {
 #define ANIM_SET_BOOL 0x700195bd74ull
 #define ANIM_SET_TRIGGER 0x700194f4d4ull
 static uint64_t *g_hash_slot;  // (guest memory for the hash argument)
+#define POKE_ANIM_VTABLE 0x7004147c18ull  // (a Pokémon's animation component: the same setters)
 static void anim_set(Cpu *c, uint64_t actl, uint64_t fn, uint64_t hash, float f, uint32_t i) {
-    if (!in_heap(actl) || *(const uint64_t *)(uintptr_t)actl != ANIM_VTABLE) return;
+    if (!in_heap(actl)) return;
+    uint64_t av = *(const uint64_t *)(uintptr_t)actl;
+    if (av != ANIM_VTABLE && av != POKE_ANIM_VTABLE) return;
     if (!g_hash_slot) g_hash_slot = hle_alloc(16);
     g_hash_slot[0] = hash;
     uint64_t sx[32], snzcv = c->nzcv;
@@ -1887,6 +1892,18 @@ void pla_npc_cam(Cpu *c) {  // (the camera update, the game's thread: hle/warp.c
         if (m->state == 2 && g_frame - m->asked > 900) { mount_term(c, m, "not up 30 s after asking"); continue; }
         if (m->state != 3) continue;
         if (m->owner) unfreeze(m->owner);
+        if (m->nanim) {  // (a script's parameters for its animation: one_emotion_int + one_emotion_trigger ... - in the order asked)
+            pthread_mutex_lock(&g_lock);
+            int na = m->nanim;
+            struct { uint64_t hash; char kind; float v; } an[8];
+            memcpy(an, m->anim, sizeof an);
+            m->nanim = 0;
+            pthread_mutex_unlock(&g_lock);
+            for (int k = 0; k < na; k++) {
+                uint64_t fn = an[k].kind == 'f' ? ANIM_SET_FLOAT : an[k].kind == 'i' ? ANIM_SET_INT : an[k].kind == 'b' ? ANIM_SET_BOOL : ANIM_SET_TRIGGER;
+                anim_set(c, m->actl, fn, an[k].hash, an[k].v, (uint32_t)(int32_t)an[k].v);
+            }
+        }
         if (m->research && m->term) { mount_term(c, m, "asked"); continue; }
         if (m->t && !m->research) {   // (in use: ridden now by its rider - else removed after a while, or at once when its rider was let go)
             Own *ro = m->rider > 0 && m->rider <= NOWN ? &g_own[m->rider - 1] : NULL;
@@ -2751,6 +2768,22 @@ void pla_npc_poke_remove(int h) {
     Mnt *m = poke_of(h);
     if (m) m->term = 1;
     pthread_mutex_unlock(&g_lock);
+}
+// an animation parameter of a script's Pokémon by its name (luapoke_<k>: the mod API's object_anim), set at the next
+// camera update through its animation component (vtable 0x7004147c18 - pm<n>_base.tracp's parameters: Pokémon play a
+// one-shot with one_emotion_int + one_emotion_trigger, idle_emotion_int + idle_emotion_trigger - Studio motionstates)
+int pla_npc_object_anim(const char *object, const char *param, int kind, float value) {
+    if (!object || !param) return 0;
+    pthread_mutex_lock(&g_lock);
+    int ok = 0;
+    for (int i = 0; i < NMNT && !ok; i++) {
+        Mnt *m = &g_mnt[i];
+        if (!m->state || !m->script || strcmp(m->name, object) || m->nanim >= 8) continue;
+        m->anim[m->nanim].hash = fnv(param), m->anim[m->nanim].kind = (char)kind, m->anim[m->nanim].v = value, m->nanim++;
+        ok = 1;
+    }
+    pthread_mutex_unlock(&g_lock);
+    return ok;
 }
 int pla_npc_poke_state(int h, float pos[3], float *yaw) {
     pthread_mutex_lock(&g_lock);
