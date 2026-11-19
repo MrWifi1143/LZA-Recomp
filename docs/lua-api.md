@@ -133,8 +133,8 @@ made within a frame or two in the level the player is in.
 | `p:pos()` | Where it is, or `nil` when it isn't in the world. |
 | `p:state()` / `p:valid()` | `"coming"`, `"up"`, `"removed"` (also once its level is gone) / not removed. |
 | `p:remove()` | Gone (Arceus: the game ends it the next frame; Z-A: the framework's own delete). |
-| `p:anim(name, value [, kind])` / `p:trigger(name)` | (Z-A) Its animation's parameters, as a character's `n:anim` - set on its node, found by its name at its next update. |
-| `p:play_once(n)` | (Z-A) Its once-action `n` (`once_action_int` n + `once_action_trigger`): for a Pokémon, `n` 1-10 route to `#0_def01_once_actionNN#` (Studio's `motionstates <model> once_action` lists them). |
+| `p:anim(name, value [, kind])` / `p:trigger(name)` | Its animation's parameters, as a character's `n:anim`. Z-A: set on its node, found by its name at its next update. Arceus: through its animation component, at the next camera update. |
+| `p:play_once(n [, seconds])` | **Z-A**: its once-action `n` (`once_action_int` n + `once_action_trigger`): `n` 1-10 route to `#0_def01_once_actionNN#` (Studio's `motionstates <model> once_action` lists them). **Arceus**: its emotion `n` held `seconds` (default 3), then let go - `loop_emotion_int` n + `loop_emotion_bool`, entered with `one_emotion_trigger` (1 sleep, 2 eat for most: `motionstates <model> emotion`). Its one-shot branch (glad) wants the bool true to enter and false at the entry, which a script doesn't reach. |
 
 **A new motion, played from a script** (Z-A, checked with Pikachu): Studio's rig commands put a new animation in one of
 a model's once-action states, in a mod, and the script plays that state.
@@ -287,16 +287,20 @@ At 60 fps a frame is 16,700 us, so a mod like the samples costs about 0.1-0.2% o
 
 ## Not there yet
 
-* **The game's Talk prompt** on script characters. `talk` is an A press near the character. Z-A: giving one the talk
-  script of a talkable townsperson (`StandTalkNpcLookAtOnInteractTurn` for `TalkNpcEmpty`, research switch
-  `LARECOMP_MODNPC_TALK=1`), or making it as a copy of one, doesn't bring the prompt up - it needs more than its spawn
-  entries (its talk data, by its object name, likely).
+* **The game's Talk prompt** on script characters. `talk` is an A press near the character. Z-A: a script character
+  does get the InteractNPC component that offers Talk (0x7000d44050 updates it), the same as the townspeople's except one
+  pointer (+0x48): a record named after its object - `luanpc_001` where a townsperson's carries its NPC data's name
+  (`npc_A04_z02_02_0031`). The talk data is found by that name, so a new name has none. Neither the talk script of a
+  talkable townsperson (`StandTalkNpcLookAtOnInteractTurn` for `TalkNpcEmpty`, research `LARECOMP_MODNPC_TALK=1`) nor a
+  copy of one brings the prompt up.
 * **Weather** (both games). Z-A's framework has no setter (its `FixWeather` is empty); the weather the game reports
   comes from an object of the environment clock's (a list of 4 entries, the current one at +0x68): pointing it at
   another entry changes what the game reports (`c4B6212B8.f6362F6BB()`), but nothing on screen. Arceus' scripts have
   no weather calls.
 * **Arceus' time of day**: its scripts have no clock calls (`EventProgressTimeManager` is a stopwatch; resting at camp is
-  C++). **Arceus' own-text window**: its line decoder is found (0x7002b2e654, the same as Z-A's), its label path not yet.
+  C++, not found). **Arceus' own-text window**: its line decoder is found (0x7002b2e654, the same as Z-A's) and its
+  window's `CreateMessageWindow` (0x70024862cc) takes the message file and label as 64-bit FNV hashes; the hash-to-line
+  lookup isn't found yet, and the message files are loaded per event.
 * **Z-A outfits other than `"player"`.**
 
 ## The raw layer

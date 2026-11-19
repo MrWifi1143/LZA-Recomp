@@ -538,7 +538,8 @@ function pokemon.spawn(t)
   end
   local h = rt.poke_spawn(math.floor(t.species), pos.x, pos.y, pos.z, tonumber(t.yaw) or 0, math.floor(tonumber(t.form) or 0), t.shiny and true or false, t.name or "")
   if h == 0 then return nil, "not made (" .. (game.name == "za" and "not in Z-A yet" or "none free") .. ")" end
-  local p = setmetatable({id = h, species = math.floor(t.species), name = t.name or ("pokemon" .. h), data = {}}, Poke)
+  local p = setmetatable({id = h, species = math.floor(t.species), name = t.name or ("pokemon" .. h), data = {},
+                          object = "luapoke_" .. (h >> 8)}, Poke)  -- (Arceus: its name, luapoke_<k>)
   pokes[h] = p
   return p
 end
@@ -546,14 +547,24 @@ local function za_poke(p) return p.id < 0 end
 -- (Z-A) its animation's parameters, as a character's n:anim; p:play_once(n): its once-action n (once_action_int n,
 -- then once_action_trigger) - the motion its set has there, or a new one put there with Studio's motionadd
 function Poke:anim(name, value, kind)
-  if self.removed or not za_poke(self) or (rt.api_version or 1) < 3 then return false end
+  if self.removed or not self.object or (rt.api_version or 1) < 3 then return false end
   local k = kind and kind:sub(1, 1) or (value == nil and "t") or (type(value) == "boolean" and "b")
     or (math.type(value) == "integer" and "i") or "f"
   local v = type(value) == "boolean" and (value and 1 or 0) or tonumber(value) or 0
   return rt.object_anim(self.object, tostring(name), k, v)
 end
 function Poke:trigger(name) return self:anim(name, nil, "t") end
-function Poke:play_once(n) return self:anim("once_action_int", math.floor(n)) and self:trigger("once_action_trigger") end
+-- (Arceus: its emotion n held `seconds` (default 3), then let go - loop_emotion_int n + loop_emotion_bool, entered by
+-- one_emotion_trigger: 1 sleep, 2 eat for most (Studio motionstates <model> emotion). Its one-shot branch (glad) needs
+-- loop_emotion_bool true to enter and false at the entry: not reached from here - 2026-11-19)
+function Poke:play_once(n, seconds)
+  if game.name == "za" then return self:anim("once_action_int", math.floor(n)) and self:trigger("once_action_trigger") end
+  if not (self:anim("loop_emotion_int", math.floor(n)) and self:anim("loop_emotion_bool", true) and self:trigger("one_emotion_trigger")) then
+    return false
+  end
+  timer_add(shared, tonumber(seconds) or 3, false, function() if not self.removed then self:anim("loop_emotion_bool", false) end end)
+  return true
+end
 function Poke:state()
   if self.removed then return "removed" end
   if za_poke(self) then return STATES[self._st] or "removed" end
