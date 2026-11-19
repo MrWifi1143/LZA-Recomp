@@ -34,6 +34,7 @@
 // window. On by default for integrated GPUs and small heaps (host_lazy_wanted); LARECOMP_LAZY_IMPORT=0 / 1 forces it
 // off / on. Without sparse buffers (or if the device can't take the chunks: gpuheap_host_cancel) the whole import as before.
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,6 +46,7 @@
 #if defined(__linux__) || defined(_WIN32)
 #include <pthread.h>
 #ifdef _WIN32
+#include <malloc.h>
 #include <windows.h>
 #else
 #include <sys/mman.h>
@@ -116,6 +118,61 @@ static bool has_ext(VkExtensionProperties *e, uint32_t n, const char *name) {
                     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | \
                     VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)
 
+// (decide) Whether imported host memory can back the heap window's sparse buffer: the memory types a host pointer
+// import may use and those a sparse buffer takes must meet. On NVIDIA they don't (host memory: types 0xc, the buffer:
+// 0x2 - checked on Linux, RTX 4090) though the driver says such a buffer can be imported into; exec.c found out only
+// at the first chunk and imported the window whole instead - all 3.75 GB of it (Z-A 1.2.4) on the small heaps the
+// lazy import is for. A device of our own for the check (the game's comes later); true when unsure.
+static bool host_sparse_types_meet(uint32_t qfam) {
+    float prio = 1.0f;
+    VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = qfam, .queueCount = 1,
+                                  .pQueuePriorities = &prio};
+    const char *ext[] = {VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME};
+    VkPhysicalDeviceFeatures f = {.sparseBinding = VK_TRUE, .sparseResidencyBuffer = VK_TRUE};
+    VkDeviceCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qi,
+                              .enabledExtensionCount = 2, .ppEnabledExtensionNames = ext, .pEnabledFeatures = &f};
+    VkDevice dev;
+    if (vkCreateDevice(H.phys, &dci, NULL, &dev) != VK_SUCCESS) return true;
+    bool meet = true;
+    PFN_vkGetMemoryHostPointerPropertiesEXT props =
+        (PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(dev, "vkGetMemoryHostPointerPropertiesEXT");
+    const size_t sz = 1u << 20;  // (aligned well past minImportedHostPointerAlignment)
+#ifdef _WIN32
+    void *mem = _aligned_malloc(sz, 1u << 16);
+#else
+    void *mem = NULL;
+    if (posix_memalign(&mem, 1u << 16, sz)) mem = NULL;
+#endif
+    VkExternalMemoryBufferCreateInfo eb = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+                                           .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = CHUNK,
+                             .flags = VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT,
+                             .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+                                      VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT};
+    VkBuffer buf = VK_NULL_HANDLE;
+    if (props && mem) {
+        memset(mem, 0, sz);
+        VkMemoryHostPointerPropertiesEXT mp = {.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+        if (props(dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, mem, &mp) == VK_SUCCESS &&
+            vkCreateBuffer(dev, &bi, NULL, &buf) == VK_SUCCESS) {
+            VkMemoryRequirements req;
+            vkGetBufferMemoryRequirements(dev, buf, &req);
+            meet = (mp.memoryTypeBits & req.memoryTypeBits) != 0;
+            if (!meet) LOG("[vk] guest heap: host memory imports (memory types %#x) can't back a sparse buffer (%#x)\n",
+                           mp.memoryTypeBits, req.memoryTypeBits);
+            vkDestroyBuffer(dev, buf, NULL);
+        }
+    }
+#ifdef _WIN32
+    _aligned_free(mem);
+#else
+    free(mem);
+#endif
+    vkDestroyDevice(dev, NULL);
+    return meet;
+}
+
 // Whether the host import should be lazy on this device (it has VK_EXT_external_memory_host): where the import's pinned
 // memory is scarce - an integrated GPU (its memory is the system's, the driver's budget for it a part), or a heap the
 // import may land in under 6 GB - and only if the device can bind imported host memory into a sparse buffer.
@@ -139,8 +196,22 @@ static bool host_lazy_wanted(const VkPhysicalDeviceFeatures *f) {
         if (sz > any_heap) any_heap = sz;
     }
     uint64_t heap = host_heap ? host_heap : any_heap;
-    bool integrated = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU, small = heap < (6ull << 30);
-    if (!force && !table_on && !integrated && !small) return false;
+    if (ENV("LARECOMP_TEST_HOST_HEAP_MB")) heap = strtoull(ENV("LARECOMP_TEST_HOST_HEAP_MB"), NULL, 0) << 20;  // (research: another PC's heap)
+    // The whole import pins all of the window the game is given (SetHeapSize and the StandardAllocator block: hle/heaps.c,
+    // hle/za_fixes.c) for as long as the game runs, in the heap host memory imports come out of - on Windows the "shared
+    // GPU memory" (about half the RAM), which also takes what doesn't fit in VRAM. Z-A 1.2.4's 3.5 GB block made that
+    // 3.75 GB at 720p (3 GB before), more with bigger shadows / Draw Distance: a driver that won't pin that much leaves
+    // the GPU reading zeros for the game's memory - no characters, no text. Imported whole only where it's at most half
+    // of that heap; elsewhere in chunks as they're used, as on integrated GPUs and small heaps. (Decided at the start
+    // screen, before the game's settings size the block: at least Z-A's 3.5 GB at 1440p and below is assumed.)
+    uint64_t cap = HEAP_BASE + HEAP_MAX - STDHEAP_BASE, blk = g_stdheap_size > 0xE0000000ull ? g_stdheap_size : 0xE0000000ull;
+    uint64_t whole = (STDHEAP_BASE - HEAP_BASE) + (blk < cap ? blk : cap);
+    bool integrated = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU, small = heap < (6ull << 30), tight = whole * 2 > heap;
+    if (!force && !table_on && !integrated && !small && !tight) {
+        LOG("[vk] guest heap: imported whole (%llu MB, the system-memory heap has %llu MB)\n", (unsigned long long)(whole >> 20),
+            (unsigned long long)(heap >> 20));
+        return false;
+    }
     const char *why = NULL;
     uint32_t nq = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(H.phys, &nq, NULL);
@@ -160,8 +231,12 @@ static bool host_lazy_wanted(const VkPhysicalDeviceFeatures *f) {
         vkGetPhysicalDeviceExternalBufferProperties(H.phys, &xi, &xp);
         if (!(xp.externalMemoryProperties.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT))
             why = "host memory can't back a sparse buffer";
+        else if (!table_on && !host_sparse_types_meet(q))
+            why = "host memory can't back a sparse buffer (memory types)";
     }
-    const char *who = table_on ? "LARECOMP_CHUNK_TABLE=1" : force ? "LARECOMP_LAZY_IMPORT=1" : integrated ? "integrated GPU" : "small heap";
+    char tight_who[96];
+    snprintf(tight_who, sizeof tight_who, "a whole import of %llu MB would be over half of it", (unsigned long long)(whole >> 20));
+    const char *who = table_on ? "LARECOMP_CHUNK_TABLE=1" : force ? "LARECOMP_LAZY_IMPORT=1" : integrated ? "integrated GPU" : small ? "small heap" : tight_who;
     if (table_on || (why && !table_off)) {
         H.table = true;
         LOG("[vk] guest heap: imported in %llu MB chunks as they're first used (chunk table: %s; %s, %llu MB heap)\n",
@@ -169,8 +244,7 @@ static bool host_lazy_wanted(const VkPhysicalDeviceFeatures *f) {
         return true;
     }
     if (why) {
-        LOG("[vk] guest heap: imported whole (%s: no lazy import; %s, %llu MB heap)\n", why,
-            integrated ? "integrated GPU" : "small heap", (unsigned long long)(heap >> 20));
+        LOG("[vk] guest heap: imported whole (%s: no lazy import; %s, %llu MB heap)\n", why, who, (unsigned long long)(heap >> 20));
         return false;
     }
     LOG("[vk] guest heap: imported in %llu MB chunks as they're first used (%s, %llu MB heap)\n", CHUNK >> 20, who,

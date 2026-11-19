@@ -5,6 +5,18 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsZA`)
 
+- Missing characters and text after updating to 1.2.4 on PCs with little memory to spare (a possible cause of a Discord
+  report; not confirmed on the reporter's PC yet): 1.2.4's bigger 3.5 GB game memory block made the part of it the
+  graphics card reads from system memory 3.75 GB (3 GB before). Where the graphics driver won't set aside that much,
+  the card read zeros for the game's memory - no player, no NPCs or stretched shapes, empty speech bubbles and name
+  plates. On NVIDIA cards the in-parts sharing meant for small-memory PCs never worked (it fell back to all at once),
+  so the 8 GB RAM laptops it was for got the whole 3.75 GB too. Now the game's memory is shared in parts as it is
+  used (about 2.5 GB in Lumiose) wherever all of it would take more than half of the system memory the driver offers,
+  NVIDIA included; and lasrecomp.log lists the GPU's memory at the start and says plainly when the driver refuses.
+- Where the game's memory is shared in parts (integrated graphics, AMD on Windows with 8 GB of RAM, and now the case
+  above), some of Lumiose's GPU-placed scenery was skipped - several hundred draws every 2 seconds, whose index data
+  sat near the end of a 64 MB part. They're drawn now.
+
 ## 2026-11-17: LegendsZA-v1.2.4
 
 Previous release: LegendsZA-v1.2.3. Game version: Pokemon Legends: Z-A 2.0.2. A hotfix: same game code as 1.2.0, so

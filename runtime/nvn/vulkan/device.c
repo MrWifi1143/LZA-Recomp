@@ -400,6 +400,24 @@ static void create_device(void) {
                                  .vulkanApiVersion = VK_API_VERSION_1_3,
                                  .flags = g_vk.mem_budget ? VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT : 0};
     VK_CHECK(vmaCreateAllocator(&ai, &g_vk.vma));
+    {   // the GPU's memory as the driver reports it at the start: what a "missing characters / text" report needs first
+        // (the game's memory is imported from the system-memory heap: exec.c gmem_import, gpuheap.c)
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT bud = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+        VkPhysicalDeviceMemoryProperties2 mp2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2,
+                                                 .pNext = g_vk.mem_budget ? &bud : NULL};
+        vkGetPhysicalDeviceMemoryProperties2(g_vk.phys, &mp2);
+        char line[512];
+        int n = 0;
+        for (uint32_t h = 0; h < mp2.memoryProperties.memoryHeapCount && n < (int)sizeof line - 96; h++) {
+            const VkMemoryHeap *mh = &mp2.memoryProperties.memoryHeaps[h];
+            n += snprintf(line + n, sizeof line - n, "%s heap %u %s %llu MB", h ? ";" : "", h,
+                          mh->flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ? "GPU" : "system", (unsigned long long)(mh->size >> 20));
+            if (g_vk.mem_budget)
+                n += snprintf(line + n, sizeof line - n, " (budget %llu, in use %llu)", (unsigned long long)(bud.heapBudget[h] >> 20),
+                              (unsigned long long)(bud.heapUsage[h] >> 20));
+        }
+        LOG("[vk] memory:%s\n", line);
+    }
 
     VkSemaphoreTypeCreateInfo st = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
                                     .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE, .initialValue = 0};

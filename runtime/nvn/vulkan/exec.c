@@ -3720,6 +3720,17 @@ static VkDeviceMemory gmem_mem;
 static uint64_t gmem_size;
 static VkDeviceAddress gmem_addr;  // (its GPU address: shaders reach the heap through it - gmem_ref_info)
 
+// (research) LARECOMP_TEST_IMPORT_MAX_MB=<n>: host memory imports that would take the guest heap's imported total past n MB
+// fail as a driver out of memory does - a GPU / driver whose budget for pinned host memory is that small (Windows: the
+// shared GPU memory, about half the RAM, also holds what doesn't fit in VRAM)
+static bool test_import_refused(uint64_t total) {
+    static int64_t cap = -2;
+    if (cap == -2) cap = ENV("LARECOMP_TEST_IMPORT_MAX_MB") ? atoll(ENV("LARECOMP_TEST_IMPORT_MAX_MB")) : -1;
+    if (cap < 0 || total <= ((uint64_t)cap << 20)) return false;
+    LOG("[vk] (test) host import refused: %llu MB > LARECOMP_TEST_IMPORT_MAX_MB=%lld\n", (unsigned long long)(total >> 20), (long long)cap);
+    return true;
+}
+
 static bool gmem_import(uint64_t size) {
 #ifdef _WIN32
     plat_commit(HEAP_BASE, size);  // (Windows commits guest memory on first touch: the driver can only pin committed pages)
@@ -3740,7 +3751,7 @@ static bool gmem_import(uint64_t size) {
     VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &af, .allocationSize = size,
                                .memoryTypeIndex = (uint32_t)__builtin_ctz(mp.memoryTypeBits)};
     VkDeviceMemory mem;
-    VkResult ar = vkAllocateMemory(g_vk.dev, &ai, NULL, &mem);
+    VkResult ar = test_import_refused(size) ? VK_ERROR_OUT_OF_DEVICE_MEMORY : vkAllocateMemory(g_vk.dev, &ai, NULL, &mem);
     if (ar != VK_SUCCESS) { LOG("[vk] guest heap import: vkAllocateMemory %d (%llu MB)\n", (int)ar, (unsigned long long)(size >> 20)); return false; }
     VkExternalMemoryBufferCreateInfo eb = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
                                            .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
@@ -3807,7 +3818,7 @@ static bool gmem_host_chunk(unsigned k, uint64_t chunk, uint32_t type_bits, VkDe
                                     .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
     VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &af, .allocationSize = chunk,
                                .memoryTypeIndex = (uint32_t)__builtin_ctz(bits)};
-    r = vkAllocateMemory(g_vk.dev, &ai, NULL, mem);
+    r = test_import_refused((gmem_chunks_imported + 1ull) * chunk) ? VK_ERROR_OUT_OF_DEVICE_MEMORY : vkAllocateMemory(g_vk.dev, &ai, NULL, mem);
     if (r != VK_SUCCESS) {
         LOG("[vk] guest heap chunk %u: import failed (%d, %llu MB imported so far)\n", k, (int)r,
             (unsigned long long)((gmem_chunks_imported * chunk) >> 20));
@@ -4092,6 +4103,9 @@ static VkDescriptorBufferInfo gmem_info(void) {
     if (want > HEAP_MAX) want = HEAP_MAX;
     if (!off && want > gmem_size && !gmem_import(want)) {
         LOG("[vk] guest heap import failed (%llu MB): shader global memory reads return zero\n", (unsigned long long)(want >> 20));
+        // (what a player sees: no characters, no text, stretched shapes - the GPU can't read the game's memory)
+        LOG("[vk] OUT OF GRAPHICS MEMORY: the driver wouldn't share %llu MB of the game's memory with the GPU - characters "
+            "and text will be missing. LARECOMP_LAZY_IMPORT=1 imports it in parts instead.\n", (unsigned long long)(want >> 20));
         off = 1;
     }
     if (gmem_buf) return (VkDescriptorBufferInfo){gmem_buf, 0, gmem_size};
@@ -5492,6 +5506,11 @@ static void draw_(CmdRec *r, bool indexed) {
             uint64_t in = 4ull << 20;
             gmem_info();
             if (iaddr >= HEAP_BASE && iaddr < HEAP_BASE + gmem_size && iaddr + in > HEAP_BASE + gmem_size) in = HEAP_BASE + gmem_size - iaddr;
+            if (gmem_table_backed() && gmem_chunk_size && iaddr >= HEAP_BASE) {  // (the chunk table: up to its chunk's end - a
+                // 4 MB window across two chunks isn't one buffer, and those draws were skipped: ~700 every 2 s in Lumiose)
+                uint64_t ce = ((iaddr - HEAP_BASE) / gmem_chunk_size + 1) * gmem_chunk_size + HEAP_BASE;
+                if (iaddr + in > ce) in = ce - iaddr;
+            }
             if (itype == 0 || iaddr % isz || !guest_direct(iaddr, in, &ib.buf, &ib.off)) {
                 static int warned;
                 if (!warned++) LOG("[vk] indirect draw: index buffer %llx (type %u) not readable in place: skipped\n", (unsigned long long)iaddr, itype);
