@@ -57,9 +57,11 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
     }
     int ok = menu_keyboard_run(initial, max_len, header[0] ? header : guide[0] ? guide : sub, text, sizeof text);
     if (ok) discord_link_code_entered(text, max_len);  // (a Link Code typed here goes in this copy's invites)
-    if (ok && max_len == 8 && strlen(text) == 8 && strspn(text, "0123456789") == 8) {  // (an online server's lobby: contrib/steamrelay)
+    bool link_code = max_len == 8 && strlen(text) == 8 && strspn(text, "0123456789") == 8;
+    bool passcode = max_len == 4 && strlen(text) == 4 && strspn(text, "0123456789") == 4;  // (a Private Battle room's)
+    if (ok && (link_code || passcode)) {  // (an online server's lobby: contrib/steamrelay)
         extern void *plugins_symbol(const char *name);
-        void (*code)(const char *) = (void (*)(const char *))plugins_symbol("larecomp_relay_code");
+        void (*code)(const char *) = (void (*)(const char *))plugins_symbol(link_code ? "larecomp_relay_code" : "larecomp_relay_room");
         if (code) code(text);
         // (the server needs an account and this copy isn't signed in on it: said now, at the join - not a silent
         // search that never finds anyone; runtime/acct.c, contrib/lzaserver)

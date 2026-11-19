@@ -429,6 +429,31 @@ static bool attach(void) {
     return true;
 }
 
+// A Private Battle room's passcode (Z-A): Pia's advertise data is its header (first a u16 big-endian: the header's size,
+// 0x5c) and then the game's bytes - for a Private Battle room the passcode as 4 ASCII digits, 8 zero bytes, the rules
+// (2026-11-13 / 11-18 dumps: "6888" 00 x8 00 00 00 00 04 00 00 00). Over an online server players meet in lobbies, and
+// the host never types its passcode: the room's lobby is taken from here (contrib/steamrelay larecomp_relay_room; a
+// joiner's from the passcode it types, runtime/hle/swkbd.c).
+static bool room_passcode(const uint8_t *adv, size_t n, char out[5]) {
+    if (n < 4) return false;
+    size_t h = (size_t)adv[0] << 8 | adv[1];
+    if (h < 4 || h + 16 > n) return false;
+    const uint8_t *d = adv + h;
+    for (int i = 0; i < 4; i++)
+        if (d[i] < '0' || d[i] > '9') return false;
+    for (int i = 4; i < 12; i++)
+        if (d[i]) return false;
+    memcpy(out, d, 4), out[4] = 0;
+    return true;
+}
+static void relay_room(void) {  // (L.lock held) hosting a room with a passcode: its lobby on an online server
+    char pass[5];
+    if (!g_relay || T.hidden || !room_passcode(L.info.ldn.adv, L.info.ldn.adv_size, pass)) return;
+    extern void *plugins_symbol(const char *name);
+    void (*room)(const char *) = (void (*)(const char *))plugins_symbol("larecomp_relay_room");
+    if (room) room(pass);
+}
+
 static void host_create(const NetworkConfig *nc, const SecurityConfig *sc, const UserConfig *uc) {
     uint16_t adv_size = L.info.ldn.adv_size;  // (the advertise data set before the network is made stays: Pia reads
     uint8_t adv[sizeof L.info.ldn.adv];        // it back with GetNetworkInfo and sends that copy again later)
@@ -456,6 +481,7 @@ static void host_create(const NetworkConfig *nc, const SecurityConfig *sc, const
     LOG("[ldn] hosting (local id %016llx, scene %u, up to %d players)%s t %llu\n", (unsigned long long)L.info.id.intent.local_id,
         nc->intent.scene_id, L.info.ldn.max_nodes, T.hidden ? " - hidden: the other player of this walk-up trade hosts" : "",
         (unsigned long long)(plat_now_ns() / 1000000));
+    relay_room();  // (before hosting(1): the server lists us as hosting in the room's lobby)
     if (g_relay && !T.hidden) g_relay->hosting(1);
 }
 
@@ -501,14 +527,22 @@ static int scan(const ScanFilter *f, NetworkInfo *out, int max) {
     // LAN's take a millisecond: those peers get up to 1.2 s and are asked again every 350 ms (a lost ask or answer).
     // Copies since 2026-11-17 answer 'n' when they have no room, so a scan ends once every peer has answered)
     uint32_t rt[32];
+    kernel_block_begin();  // (the relay may wait for its lobby's member list first: contrib/steamrelay relay_targets)
     int nt = g_relay ? g_relay->targets(rt, 32) : 0;
+    kernel_block_end();
     bool answered[32] = {0};
     for (int i = 0; i < nt; i++) ctrl_send(fd, rt[i], 'S', NULL, 0);
     int n = 0;
     pthread_mutex_lock(&L.lock);
     L.nfound = 0;
     pthread_mutex_unlock(&L.lock);
-    uint64_t start = plat_now_ns(), end = start + (nt ? 1200000000ull : 250000000ull), local_end = start + 250000000ull;
+    // (a Private Battle's joiner scans ONCE - its room not found then is "No room could be found!": through a lossy
+    // server it gets 2.5 s for its host's answer, contrib/steamrelay larecomp_relay_battle_lobby; a walk-up trade's joiner
+    // looks again and again by itself, join_scan)
+    extern void *plugins_symbol(const char *name);
+    int (*battle)(void) = nt ? (int (*)(void))plugins_symbol("larecomp_relay_battle_lobby") : NULL;
+    uint64_t relay_ns = battle && battle() ? 2500000000ull : 1200000000ull;
+    uint64_t start = plat_now_ns(), end = start + (nt ? relay_ns : 250000000ull), local_end = start + 250000000ull;
     uint64_t again = start + 350000000ull;
     kernel_block_begin();
     for (uint64_t now; n < max && (now = plat_now_ns()) < end;) {
@@ -771,7 +805,7 @@ static void ldn_user(Service *s, IpcReq *req, IpcResp *resp) {
             LOG("\n");
             log_guest_stack();
         }
-        if (L.state == ST_AP_CREATED) host_broadcast_info();
+        if (L.state == ST_AP_CREATED) relay_room(), host_broadcast_info();
         break;
     }
     case 207: L.info.ldn.accept_policy = IN(uint8_t, 0); break;  // SetStationAcceptPolicy

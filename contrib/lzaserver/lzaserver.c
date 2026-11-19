@@ -22,14 +22,16 @@
 //
 // Protocol (UDP, every packet starts with its type byte; ids are u64 little-endian, picked at random by each client):
 //   client -> server  'H' ver(1) id game(1: Arceus, 2: Z-A)   hello / keep-alive, every 2 s
-//                     'L' id code[8]                          join the lobby of that Link Code (8 ASCII digits)
+//                     'L' id code[8]                          join the lobby of that Link Code (8 ASCII digits), or of
+//                                                             a Private Battle room: 'B' + 7 digits (B000 + passcode)
 //                     'P' id hosting(1)                       the client's game hosts a network / no longer
 //                     'D' id to payload                       pass payload to another client of the same lobby
 //                     'W' id on(1)                            in the shared world or not (opt-in, game setting)
 //                     'X' id payload (up to 96 bytes)         to everyone in the shared world of the same game (where
 //                                                             the player is, ~20 times a second: players see each
 //                                                             other walking around)
-//   server -> client  'M' n (id hosting(1)) x n               the lobby's other members, every second
+//   server -> client  'M' n (id hosting(1)) x n code[8]       the lobby's other members, every second (and at once
+//                                                             when someone comes in or starts / stops hosting)
 //                     'D' from payload                        a lobby member's payload
 //                     'X' from payload                        a shared-world player's payload
 //   server -> client  'C' cookie[8]                           the answer to every hello: this address's cookie
@@ -260,22 +262,27 @@ static void hello_auth(Client *c, const uint8_t *b, int n) {
     if (was && !c->in) c->code[0] = 0, c->world = false;  // (out: its lobby and the shared world too)
 }
 
-static void members(void) {  // (each lobby member: the others, with their hosting flag)
-    static uint8_t b[2 + 9 * 64];
-    for (int i = 0; i < g_max; i++) {
-        Client *c = &g_c[i];
-        if (!c->used || !c->code[0] || !PLAYS(c)) continue;
-        int n = 0;
-        b[0] = 'M';
-        for (int j = 0; j < g_max && n < 64; j++) {
-            Client *o = &g_c[j];
-            if (j == i || !o->used || !PLAYS(o) || o->game != c->game || strcmp(o->code, c->code)) continue;
-            memcpy(b + 2 + 9 * n, &o->id, 8), b[2 + 9 * n + 8] = o->hosting;
-            n++;
-        }
-        b[1] = (uint8_t)n;
-        send_to(c, b, 2 + 9 * (size_t)n);
+static void member_list(Client *c) {  // (a lobby member: the others, with their hosting flag; then the lobby's code)
+    static uint8_t b[2 + 9 * 64 + 8];
+    if (!c->used || !c->code[0] || !PLAYS(c)) return;
+    int n = 0;
+    b[0] = 'M';
+    for (int j = 0; j < g_max && n < 64; j++) {
+        Client *o = &g_c[j];
+        if (o == c || !o->used || !PLAYS(o) || o->game != c->game || strcmp(o->code, c->code)) continue;
+        memcpy(b + 2 + 9 * n, &o->id, 8), b[2 + 9 * n + 8] = o->hosting;
+        n++;
     }
+    b[1] = (uint8_t)n;
+    memcpy(b + 2 + 9 * n, c->code, 8);  // (2026-11-18: which lobby - a list still on its way from the one left before
+    send_to(c, b, 2 + 9 * (size_t)n + 8);  //  isn't taken for the new one's; older clients read only the entries)
+}
+static void members(void) {  // (every second: each lobby member)
+    for (int i = 0; i < g_max; i++) member_list(&g_c[i]);
+}
+static void lobby_changed(const Client *c) {  // (someone came into a lobby or started / stopped hosting there: its
+    for (int i = 0; i < g_max; i++)           //  members hear it now, not up to a second later - a Private Battle's
+        if (g_c[i].used && g_c[i].game == c->game && !strcmp(g_c[i].code, c->code)) member_list(&g_c[i]);  // joiner looks right away)
 }
 
 int main(int argc, char **argv) {
@@ -426,13 +433,17 @@ int main(int argc, char **argv) {
                 if (buf[0] == 'L' && n >= 17) {
                     char code[9];
                     memcpy(code, buf + 9, 8), code[8] = 0;
-                    if (strspn(code, "0123456789") != 8) continue;
+                    bool battle = code[0] == 'B' && strspn(code + 1, "0123456789") == 7;  // (a Private Battle room's)
+                    if (strspn(code, "0123456789") != 8 && !battle) continue;
                     if (strcmp(code, c->code)) {
                         memcpy(c->code, code, 9);
-                        printf("  %016llx in a lobby (%s)\n", (unsigned long long)id, c->game == 1 ? "Arceus" : "Z-A");
+                        printf("  %016llx in a lobby (%s%s)\n", (unsigned long long)id, c->game == 1 ? "Arceus" : "Z-A",
+                               battle ? ", a Private Battle room" : "");
+                        lobby_changed(c);
                     }
                 } else if (buf[0] == 'P' && n >= 10) {
-                    c->hosting = buf[9] ? 1 : 0;
+                    uint8_t h = buf[9] ? 1 : 0;
+                    if (h != c->hosting) c->hosting = h, lobby_changed(c);
                 } else if (buf[0] == 'W' && n >= 10) {
                     bool on = buf[9] != 0;
                     if (on != c->world) printf("  %016llx %s the shared world (%s)\n", (unsigned long long)id, on ? "in" : "out of",
