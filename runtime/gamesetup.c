@@ -361,6 +361,16 @@ static void *setup_thread(void *arg) {
         game_module_id(f.exefs, mid);
         LOG("[setup] %s: Legends: Arceus, but not 1.1.1 (main %s) - this build needs Arceus 1.1.1\n", f.exefs, mid);
         g_state = SETUP_FAIL_PLA_VERSION;
+        // (an extracted base game left beside the .nsp / .xci files - an earlier extraction, say: the packages may hold
+        // the 1.1.1 update, so they're read instead of refusing the folder for the extracted copy)
+        if (f.package || nxpkg_any(g_folder)) {
+            LOG("[setup] packages in the folder too: reading those instead\n");
+            if (from_packages() && build_code()) g_state = setup_ready() ? SETUP_DONE : SETUP_FAIL_BUILD;
+            if (g_state == SETUP_FAIL_VERSION) g_state = SETUP_FAIL_PLA_VERSION;  // (no Arceus base game among them: the
+            LOG("[setup] %s\n", g_state == SETUP_DONE ? "ready" : "failed");      // extracted copy's message stands)
+            g_running = false;
+            return NULL;
+        }
     } else {
         // (the picked folder can't be our own copy: setting up again deletes that first)
         char a[4096], b[4096];
