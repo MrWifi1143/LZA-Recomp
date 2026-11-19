@@ -287,18 +287,21 @@ At 60 fps a frame is 16,700 us, so a mod like the samples costs about 0.1-0.2% o
 
 ## Not there yet
 
-* **The game's Talk prompt** on script characters. `talk` is an A press near the character. Z-A: a script character
-  does get the InteractNPC component that offers Talk (0x7000d44050 updates it), the same as the townspeople's except one
-  pointer (+0x48): a record named after its object - `luanpc_001` where a townsperson's carries its NPC data's name
-  (`npc_A04_z02_02_0031`). The talk data is found by that name, so a new name has none. Neither the talk script of a
-  talkable townsperson (`StandTalkNpcLookAtOnInteractTurn` for `TalkNpcEmpty`, research `LARECOMP_MODNPC_TALK=1`) nor a
-  copy of one brings the prompt up.
+* **The townspeople's speech bubbles** on script characters. Z-A's townspeople have no A prompt: a talkable one
+  (talk script `StandTalkNpcLookAt...`) says a line in a bubble when the player comes near, and A does nothing more. A
+  script character's `talk` is an A press near it, and with `ui.say` that opens the game's own window - so talking to one
+  looks like the game. The bubble is the townspeople's C++ AI; a script character has the same InteractNPC component, but
+  its record (+0x48) is named after its object (`luanpc_001`). Pointing that record at a talkable townsperson's, copying
+  that townsperson (`model`), or giving it the talkable talk script (research `LARECOMP_MODNPC_TALK=1`) brought no bubble.
+  Arceus has a real Talk prompt ("A Laventon"); script characters don't get it yet.
 * **Weather** (both games). Z-A's framework has no setter (its `FixWeather` is empty); the weather the game reports
   comes from an object of the environment clock's (a list of 4 entries, the current one at +0x68): pointing it at
   another entry changes what the game reports (`c4B6212B8.f6362F6BB()`), but nothing on screen. Arceus' scripts have
   no weather calls.
-* **Arceus' time of day**: its scripts have no clock calls (`EventProgressTimeManager` is a stopwatch; resting at camp is
-  C++, not found). **Arceus' own-text window**: its line decoder is found (0x7002b2e654, the same as Z-A's) and its
+* **Arceus' time of day**: resting at a camp's tent (or a bed) is an event script (`CampEvent.restLoop`, `BedTimeChange`)
+  that only returns the choice (0 morning, 1 midday, 2 evening, 3 nightfall, 500 a little while); C++ sets the clock
+  during the black fade - not through the map change request, not in any work or flag (all 76 works and 572 flags the
+  same before and after). The writer isn't found yet; the profile of that fade is in testout. **Arceus' own-text window**: its line decoder is found (0x7002b2e654, the same as Z-A's) and its
   window's `CreateMessageWindow` (0x70024862cc) takes the message file and label as 64-bit FNV hashes; the hash-to-line
   lookup isn't found yet, and the message files are loaded per event.
 * **Z-A outfits other than `"player"`.**
