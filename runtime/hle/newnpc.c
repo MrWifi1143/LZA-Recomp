@@ -693,8 +693,61 @@ static void modnpc_move(Cpu *c, ModNpc *m, uint64_t n) {
 static int g_mstats = -1;
 static uint64_t g_ms_calls, g_ms_ns, g_ms_frame_ns, g_ms_frames, g_ms_all;
 static void modnpc_node_(Cpu *c, uint64_t n);
+// ---- An object's animation parameters by its name (the mod API's object_anim): what a script made through the game's
+// own framework - pokemon.spawn's luapoke_<n> - has no character slot here. Its node is found by its name (+0x2b0 {hash,
+// char *, len}) at its next update (this hook sees every node) and the parameter set there through its blackboard, as a
+// character's (warp_anim_param). 2026-11-19: once_action_int + once_action_trigger play a Pokemon's once-action motion -
+// a new one too (Studio rig: motionadd). Asked ones not found in 2 s are dropped.
+#define NOANIM 16
+static struct { char name[48]; uint64_t hash; char kind; float v; uint64_t asked; volatile int on; } g_oanim[NOANIM];
+static volatile int g_noanim;
+static uint64_t g_oanim_scratch;
+static pthread_mutex_t g_olock = PTHREAD_MUTEX_INITIALIZER;
+int newnpc_object_anim(const char *object, const char *param, int kind, float value) {
+    if (!object || !param || !*object || strlen(object) >= 48) return 0;
+    pthread_mutex_lock(&g_olock);
+    int ok = 0;
+    for (int i = 0; i < NOANIM && !ok; i++)
+        if (!g_oanim[i].on) {
+            snprintf(g_oanim[i].name, sizeof g_oanim[i].name, "%s", object);
+            g_oanim[i].hash = fnv(param), g_oanim[i].kind = (char)kind, g_oanim[i].v = value, g_oanim[i].asked = plat_now_ns();
+            g_oanim[i].on = 1, g_noanim++, ok = 1;
+        }
+    pthread_mutex_unlock(&g_olock);
+    if (ok) {
+        if (!g_oanim_scratch) g_oanim_scratch = (uint64_t)(uintptr_t)hle_alloc(16);
+        extern volatile int g_newnpc_mods;
+        void warp_node_hook_on(void);
+        g_newnpc_mods = 1, warp_node_hook_on();
+    }
+    return ok;
+}
+static void oanim_check(Cpu *c, uint64_t n) {
+    uint64_t v = 0, p = 0, len = 0;
+    if (!rd(n, &v, 8) || v != NODE_VTABLE || !rd(n + 0x2b8, &p, 8) || !rd(n + 0x2c0, &len, 8) || !p || len == 0 || len >= 48) return;
+    char nm[48];
+    if (!rd(p, nm, len)) return;
+    nm[len] = 0;
+    uint64_t now = plat_now_ns();
+    pthread_mutex_lock(&g_olock);
+    for (int i = 0; i < NOANIM; i++) {  // (in the order asked: an int before the trigger that reads it)
+        if (!g_oanim[i].on) continue;
+        if (now - g_oanim[i].asked > 2000000000ull) {
+            LOG("[modnpc] %s: no such object (its animation parameter not set)\n", g_oanim[i].name);
+            g_oanim[i].on = 0, g_noanim--;
+            continue;
+        }
+        if (strcmp(nm, g_oanim[i].name)) continue;
+        bool warp_anim_param(Cpu *c, uint64_t node, uint64_t hash, char kind, float val, uint64_t scratch);
+        if (!warp_anim_param(c, n, g_oanim[i].hash, g_oanim[i].kind, g_oanim[i].v, g_oanim_scratch))
+            LOG("[modnpc] %s: its animation has no such parameter (%c %016llx)\n", nm, g_oanim[i].kind, (unsigned long long)g_oanim[i].hash);
+        g_oanim[i].on = 0, g_noanim--;
+    }
+    pthread_mutex_unlock(&g_olock);
+}
 void newnpc_node(Cpu *c, uint64_t n) {
     if (g_mstats > 0) __atomic_add_fetch(&g_ms_all, 1, __ATOMIC_RELAXED);
+    if (g_noanim) oanim_check(c, n);
     if (!(g_node_mask & mask_bit(n))) return;
     if (g_mstats <= 0) { modnpc_node_(c, n); return; }
     uint64_t k = __atomic_add_fetch(&g_ms_calls, 1, __ATOMIC_RELAXED);

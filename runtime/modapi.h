@@ -93,6 +93,9 @@ typedef struct {
     // A message window's own text: reserved line `slot` (0-15) of every message file - label "lza_say_<slot>" (Z-A,
     // hle/za_script.c) - is this UTF-8 text. 1 set, 0 not in this game.
     int (*message_text)(int slot, const char *text);
+    // An animation parameter of an object the game made by its name (Z-A: pokemon.spawn's "luapoke_<n>"), as npc_anim:
+    // set at its next update. 1 asked, 0 not in this game.
+    int (*object_anim)(const char *object, const char *param, int kind, float value);
     // (version 3 also: npc_walk_to's run | 2 - Z-A: the game's own navigation walks it, game_script orders the walk)
 } LarecompModApi;
 

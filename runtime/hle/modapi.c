@@ -27,6 +27,7 @@ int za_script_result(int id, char *out, int cap);
 int newnpc_mod_object(int h, char *out, int cap);
 int za_time_set(float hour);
 int za_message_text(int slot, const char *text);
+int newnpc_object_anim(const char *object, const char *param, int kind, float value);
 bool warp_player_now(float pos[3], float *yaw);
 void warp_teleport(const float p[3]);
 uint64_t input_buttons_now(void);
@@ -78,5 +79,6 @@ static const LarecompModApi g_modapi = {
     .game_work = warp_work,
     .game_script = za_script, .script_result = za_script_result, .item_give = item_give, .npc_object = newnpc_mod_object,
     .time_set = za_time_set, .message_text = za_message_text,
+    .object_anim = newnpc_object_anim,
 };
 const LarecompModApi *modapi_get(void) { return &g_modapi; }
