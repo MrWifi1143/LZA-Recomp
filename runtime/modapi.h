@@ -10,7 +10,8 @@
 #pragma once
 #include <stdint.h>
 
-#define LARECOMP_MODAPI_VERSION 3  // (2: npc_outfit, npc_anim, pokemon_*, game_work; 3: game_script, item_give, npc_object)
+#define LARECOMP_MODAPI_VERSION 4  // (2: npc_outfit, npc_anim, pokemon_*, game_work; 3: game_script, item_give, npc_object;
+                                   //  4: npc_talk, npc_talked)
 
 // npc_state answers
 enum {
@@ -97,6 +98,13 @@ typedef struct {
     // set at its next update. 1 asked, 0 not in this game.
     int (*object_anim)(const char *object, const char *param, int kind, float value);
     // (version 3 also: npc_walk_to's run | 2 - Z-A: the game's own navigation walks it, game_script orders the walk)
+
+    // ---- version 4
+    // The game's own Talk prompt over a script's character (Arceus: "A <its name>", as over the game's people): on 1
+    // shows it while the player faces it, 0 not. h 0 asks whether this game has it (1 yes, 0 no - Z-A's townspeople have
+    // no prompt). npc_talked: a character the player talked to through that prompt since the last call (0 none).
+    int (*npc_talk)(int h, int on);
+    int (*npc_talked)(void);
 } LarecompModApi;
 
 // ---- runtime side

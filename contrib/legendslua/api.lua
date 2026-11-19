@@ -317,7 +317,7 @@ local function npc_spawn(mod, t)
     if t.body then spec = spec .. ",body=" .. tostring(t.body) end
     if (rt.api_version or 1) < 2 or not rt.npc_outfit(h, spec) then report(mod, "npc.spawn", "outfit \"" .. spec .. "\" not taken - its look's own") end
   end
-  local n = setmetatable({id = h, name = name or ("npc" .. h), mod = mod, data = {}, home = pos, _st = 1}, Npc)
+  local n = setmetatable({id = h, name = name or ("npc" .. h), mod = mod, data = {}, home = pos, _st = 1, talk = t.talk}, Npc)
   npcs[h] = n
   return n
 end
@@ -599,7 +599,16 @@ end
 
 -- each frame: the characters' states -> npc_up / npc_gone / npc_arrived; routes; near / far; talk (A by one)
 local NEAR = 4.0        -- (near: within this many metres - a character's own near_radius overrides it)
-local TALK = 2.2        -- (talk: A pressed this close, the character in front - not the game's own Talk prompt)
+local TALK = 2.2        -- (talk where the game has no Talk prompt (Z-A): A pressed this close, the character in front)
+-- (Arceus: the game's own Talk prompt - "A <name>" over a character a talk handler is for, its A the talk)
+local PROMPT = rt.have_api and (rt.api_version or 1) >= 4 and rt.npc_talk(0, 0) == 1
+local function talks_to(n)
+  if n.talk == false then return false end
+  local l = handlers.talk
+  if not l then return false end
+  for _, h in ipairs(l) do if not h.dead and (h.filter == nil or h.filter == n) then return true end end
+  return false
+end
 local function arrive(n, t)
   n._goal = nil
   local r = n._route
@@ -623,6 +632,10 @@ local function npcs_poll()
       if up and not wasup then n._up_t = t emit_to("npc_up", n, n) end
       if wasup and not up then emit_to("npc_gone", n, n) n._near = false end
       if st == 4 then n._seen_walk = true end
+      if PROMPT and up then  -- (the prompt over it while a talk handler is for it)
+        local want = talks_to(n)
+        if want ~= (n._prompt or false) then rt.npc_talk(h, want and 1 or 0) n._prompt = want end
+      end
       -- (there: it walked and stands again - or it never had to walk, its goal a second old and it up)
       if n._goal and st == 3 and (n._seen_walk or t - math.max(n._req_t or 0, n._up_t or 0) > 1.0) then arrive(n, t) end
       local r = n._route
@@ -652,6 +665,15 @@ local function near_poll()
   end
 end
 local function talk_check()
+  if PROMPT then  -- (the game's prompt: who was talked to)
+    local h = rt.npc_talked()
+    while h and h ~= 0 do
+      local n = npcs[h]
+      if n then emit_to("talk", n, n) end
+      h = rt.npc_talked()
+    end
+    return
+  end
   if not has("talk") then return end
   local p, yaw = player.pos(), player.yaw()
   if not p then return end
@@ -690,7 +712,7 @@ G.__tick = function(frame)
         local bit = 1 << (i - 1)
         if down & bit ~= 0 then
           emit_to("button", name, name)
-          if name == "A" then talk_check() end
+          if name == "A" and not PROMPT then talk_check() end
         end
         if up & bit ~= 0 then emit_to("button_up", name, name) end
       end
@@ -703,6 +725,7 @@ G.__tick = function(frame)
     local e = G.__tick_every or 1
     if frame_n % 6 < e and next(npcs) then npcs_poll() end
     if (frame_n + 3) % 10 < e and next(npcs) then near_poll() end
+    if PROMPT and next(npcs) then talk_check() end
   end
   if next(jobs) then jobs_poll() end
   if co_alive then co_tick() end

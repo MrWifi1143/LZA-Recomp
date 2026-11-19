@@ -67,6 +67,9 @@ static int item_give(int item, int count) {
     snprintf(code, sizeof code, "C0C062DE5AED06885.SB01A9B29CD4CC6CB(%d, %d) return 1", item, count);  // (AddItem: "S" + FNV-1a 64)
     return za_script(code) ? 1 : 0;
 }
+// the Talk prompt: Z-A's townspeople have none (a script's talk is A pressed by one - contrib/legendslua/api.lua)
+static int talk_none(int h, int on) { (void)h, (void)on; return 0; }
+static int talked_none(void) { return 0; }
 static const LarecompModApi g_modapi = {
     .version = LARECOMP_MODAPI_VERSION, .game = "za", .enable = enable,
     .npc_spawn = newnpc_mod_spawn, .npc_remove = newnpc_mod_remove, .npc_remove_all = newnpc_mod_remove_all,
@@ -80,5 +83,6 @@ static const LarecompModApi g_modapi = {
     .game_script = za_script, .script_result = za_script_result, .item_give = item_give, .npc_object = newnpc_mod_object,
     .time_set = za_time_set, .message_text = za_message_text,
     .object_anim = newnpc_object_anim,
+    .npc_talk = talk_none, .npc_talked = talked_none,
 };
 const LarecompModApi *modapi_get(void) { return &g_modapi; }
