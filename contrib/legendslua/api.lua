@@ -225,9 +225,18 @@ local function npc_spawn(mod, t)
   local name = t.name and tostring(t.name) or nil
   local model = t.model or t.template or ""
   if type(model) ~= "string" then error("npc.spawn: model is a name (npc.models() lists them)", 3) end
-  if t.outfit ~= nil then report(mod, "npc.spawn", "outfit: not supported yet - made with the model's own look") end
   local h = rt.npc_spawn(model, pos.x, pos.y, pos.z, yaw, name or "")
   if h == 0 then error("npc.spawn: too many characters at once (remove some first)", 3) end
+  if t.outfit ~= nil or t.body ~= nil then  -- (what it wears: "player", or {[slot] = item, ...} over the player's (Arceus))
+    local spec
+    if type(t.outfit) == "table" then
+      local parts = {"player"}
+      for slot, item in pairs(t.outfit) do parts[#parts + 1] = tostring(slot) .. "=" .. tostring(item) end
+      spec = table.concat(parts, ",")
+    else spec = t.outfit and tostring(t.outfit) or "player" end
+    if t.body then spec = spec .. ",body=" .. tostring(t.body) end
+    if (rt.api_version or 1) < 2 or not rt.npc_outfit(h, spec) then report(mod, "npc.spawn", "outfit \"" .. spec .. "\" not taken - its look's own") end
+  end
   local n = setmetatable({id = h, name = name or ("npc" .. h), mod = mod, data = {}, home = pos, _st = 1}, Npc)
   npcs[h] = n
   return n
@@ -321,6 +330,18 @@ function Npc:remove()
   self.removed = true
 end
 function Npc:say(text, seconds) ui.say(self.name, text, seconds) return self end
+-- one of its animation's parameters, by the game's name: true / false a bool, a whole number an int, else a float;
+-- n:anim(name) (or kind "trigger") fires a trigger. Z-A: "sit_bool" + "sit_int" (1, 2) sit it down, "speak_bool" talks,
+-- "once_action_trigger" a gesture; Arceus (dressed ones: the player's net) "set_squat_bool" crouches
+function Npc:anim(name, value, kind)
+  check_npc(self)
+  if type(name) ~= "string" then error("anim(name, value): the parameter's name", 2) end
+  local k = kind and kind:sub(1, 1) or (value == nil and "t") or (type(value) == "boolean" and "b")
+    or (math.type(value) == "integer" and "i") or "f"
+  local v = type(value) == "boolean" and (value and 1 or 0) or tonumber(value) or 0
+  return rt.npc_anim(self.id, name, k, v)
+end
+function Npc:trigger(name) return self:anim(name, nil, "t") end
 -- this character's events: on("talk"), on("near"), on("arrived"), on("up"), on("gone") - the same as on(event, npc, fn)
 function Npc:on(ev, fn)
   local map = {talk = "talk", near = "near", far = "far", arrived = "npc_arrived", up = "npc_up", gone = "npc_gone"}
@@ -331,6 +352,36 @@ local npc = {}
 function npc.models() return rt.have_api and rt.npc_models() or "" end
 function npc.find(name) for _, n in pairs(npcs) do if n.name == name then return n end end end
 function npc.all() local t = {} for _, n in pairs(npcs) do t[#t + 1] = n end table.sort(t, function(a, b) return a.id < b.id end) return t end
+
+-- ---------------------------------------------------------------- Pokémon of a script's own (Arceus)
+local Poke = {}
+Poke.__index = Poke
+Poke.__tostring = function(p) return fmt("pokemon %s (#%d %d)", p.name, p.species, p.id) end
+local pokemon = {}
+local pokes = {}
+function pokemon.spawn(t)
+  if type(t) ~= "table" or not tonumber(t.species) then error("pokemon.spawn{species = n, pos = {x, y, z}, ...}", 2) end
+  if (rt.api_version or 1) < 2 then error("pokemon.spawn: this game build is too old", 2) end
+  local pos = t.pos and vec(t.pos) or player.ahead(3)
+  if not pos then error("pokemon.spawn: pos needed (no player yet)", 2) end
+  local h = rt.poke_spawn(math.floor(t.species), pos.x, pos.y, pos.z, tonumber(t.yaw) or 0, math.floor(tonumber(t.form) or 0), t.shiny and true or false, t.name or "")
+  if h == 0 then return nil, "not made (" .. (game.name == "za" and "not in Z-A yet" or "none free") .. ")" end
+  local p = setmetatable({id = h, species = math.floor(t.species), name = t.name or ("pokemon" .. h), data = {}}, Poke)
+  pokes[h] = p
+  return p
+end
+function Poke:state() local st = rt.poke_state(self.id) return STATES[st] or "removed" end
+function Poke:valid() return not self.removed and rt.poke_state(self.id) ~= 0 end
+function Poke:pos() local st, x, y, z = rt.poke_state(self.id) if st == 0 then return nil end return vec(x, y, z) end
+function Poke:remove() if not self.removed then rt.poke_remove(self.id) pokes[self.id] = nil self.removed = true end end
+function pokemon.all() local t = {} for _, p in pairs(pokes) do t[#t + 1] = p end return t end
+G.pokemon = pokemon
+-- a story work (Z-A "SYS_WORK_PHASE", Arceus "WPHA_STORY"; Arceus flags as "flag:<name>"): its value, or nil when the
+-- game has no such work (yet); game.work(name, value) writes it
+game.work = function(name, value)
+  if (rt.api_version or 1) < 2 then error("game.work: this game build is too old", 2) end
+  return rt.work(tostring(name), value ~= nil and math.floor(value) or nil)
+end
 
 -- each frame: the characters' states -> npc_up / npc_gone / npc_arrived; routes; near / far; talk (A by one)
 local NEAR = 4.0        -- (near: within this many metres - a character's own near_radius overrides it)
@@ -471,6 +522,7 @@ local function api_for(mod, env)
                       table.sort(t, function(a, b) return a.id < b.id end) return t end,
   }, {__index = npc})
   env.player = player
+  env.pokemon = pokemon
   env.ui = ui
   env.include = function(file)  -- (another script of this mod's own folder - "lib/x.lua" - run in its globals: its results)
     if type(file) ~= "string" or file:find("%.%.") or file:find("^[/\\]") or file:find(":") then
@@ -519,6 +571,7 @@ end
 G.__unload = function()
   emit("unload")
   for h, n in pairs(npcs) do rt.npc_remove(h) end
+  for h, p in pairs(pokes) do rt.poke_remove(h) end
 end
 
 -- ---------------------------------------------------------------- built-in console commands

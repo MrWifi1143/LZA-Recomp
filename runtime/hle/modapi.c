@@ -20,6 +20,12 @@ void pla_npc_mod_set(int h, const float p[3], float yaw_deg);
 int pla_npc_mod_state(int h, float p[3], float *yaw);
 int pla_npc_mod_models(char *out, int cap);
 uint64_t pla_npc_area(char *name, int cap);
+int pla_npc_mod_outfit(int h, const char *spec);
+int pla_npc_mod_anim(int h, const char *name, int kind, float value);
+int pla_npc_poke_spawn(int species, const float pos[3], float yaw_deg, int form, int shiny, const char *label);
+void pla_npc_poke_remove(int h);
+int pla_npc_poke_state(int h, float pos[3], float *yaw);
+int warp_work(const char *name, int set, int64_t value, int64_t *out);
 bool warp_player_now(float pos[3], float *yaw);
 void warp_teleport(const float p[3]);
 uint64_t input_buttons_now(void);
@@ -37,5 +43,8 @@ static const LarecompModApi g_modapi = {
     .npc_models = pla_npc_mod_models,
     .player_pos = player_pos, .player_teleport = warp_teleport,
     .area = pla_npc_area, .buttons = input_buttons_now, .notify = menu_notice_for, .mod_lua_dirs = lua_dirs, .now = now,
+    .npc_outfit = pla_npc_mod_outfit, .npc_anim = pla_npc_mod_anim,
+    .pokemon_spawn = pla_npc_poke_spawn, .pokemon_remove = pla_npc_poke_remove, .pokemon_state = pla_npc_poke_state,
+    .game_work = warp_work,
 };
 const LarecompModApi *modapi_get(void) { return &g_modapi; }

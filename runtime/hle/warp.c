@@ -114,6 +114,17 @@ static uint32_t *work_node(uint64_t h, uint16_t at) {
 #undef RD
 }
 
+// the mod API's game.work: a work (map +0x1d8) or, named "flag:<name>", a flag (+0x1b8) read or written in place
+int warp_work(const char *name, int set, int64_t value, int64_t *out) {
+    uint16_t map = WORKS_MAP;
+    if (!strncmp(name, "flag:", 5)) name += 5, map = FLAGS_MAP;
+    uint32_t *v = work_node(fnv1a64(name), map);
+    if (!v) return 0;
+    if (out) *out = *v;
+    if (set) *v = (uint32_t)value, LOG("[warp] script: %s %s = %lld\n", map == FLAGS_MAP ? "flag" : "work", name, (long long)value);
+    return 1;
+}
+
 // the works written where the game keeps them: by the map above; failing that a scan of game memory for the hash twice
 // (the ranges as LARECOMP_LIVE's "find" takes them: the heaps, then the game's own .data / .bss), written only when
 // unique - other maps keyed by the same hashes have such nodes too, and a write into one of those crashed the game

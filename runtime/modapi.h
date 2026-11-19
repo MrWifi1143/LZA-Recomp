@@ -10,7 +10,7 @@
 #pragma once
 #include <stdint.h>
 
-#define LARECOMP_MODAPI_VERSION 1
+#define LARECOMP_MODAPI_VERSION 2  // (2: npc_outfit, npc_anim, pokemon_*, game_work)
 
 // npc_state answers
 enum {
@@ -58,6 +58,25 @@ typedef struct {
     // the folders (relative to the game folder) of the mods that are on and carry scripts: mods/<name>/lua
     int (*mod_lua_dirs)(char (*dirs)[256], int max);
     double (*now)(void);  // seconds, a steady clock
+
+    // ---- version 2
+    // What a character wears, given before it is made (0: not taken): "player" - the player's own clothes (Z-A: and
+    // their look - skin, hair, eyes). Arceus also "<slot>=<item>,..." over the player's (items of dressup_table_p1/p2:
+    // "0=p1_hrs0001_00_default_blond") and "body=p1" / "body=p2". Arceus: a dressed character walks as a player does
+    // (its own steps, steering each frame), the most reliable walk there.
+    int (*npc_outfit)(int h, const char *spec);
+    // One of its animation's parameters set (the game's own names: Z-A "sit_bool", "sit_int", "once_action_trigger";
+    // Arceus "set_squat_bool", "move_front"...): kind 'f' float, 'i' int, 'b' bool, 't' trigger (value ignored). Done on
+    // the game's thread within a frame; 0: no such character.
+    int (*npc_anim)(int h, const char *name, int kind, float value);
+    // A Pokémon of a script's own (0: not in this game / none free): species number, form, shiny. Made like the
+    // characters, near the player in a loaded area; pokemon_state answers as npc_state.
+    int (*pokemon_spawn)(int species, const float pos[3], float yaw, int form, int shiny, const char *label);
+    void (*pokemon_remove)(int h);
+    int (*pokemon_state)(int h, float pos[3], float *yaw);
+    // A story work (a number the game keeps by name: Z-A "SYS_WORK_PHASE", Arceus "WPHA_STORY"...): read (set 0) or
+    // written (set 1). Answers 1 when the game has it.
+    int (*game_work)(const char *name, int set, int64_t value, int64_t *out);
 } LarecompModApi;
 
 // ---- runtime side

@@ -1,6 +1,6 @@
 -- Village Walk - a sample mod for Legends: Arceus (Legends Lua, docs/lua-api.md).
--- Three new townspeople walk a loop in front of where you stand when the game loads (Jubilife Village, the Fieldlands -
--- anywhere with people). Come near one and it stops, turns to you and says hello; walk away and it carries on. Talk to
+-- Three new people (dressed like players) walk a loop in front of where you stand when the game loads (Jubilife
+-- Village, the Fieldlands - anywhere with people). Come near one and it stops, turns to you and says hello; walk away and it carries on. Talk to
 -- one (A, facing it) for a line of its own.
 -- Install: copy this folder to <game folder>/mods/villagewalk/ and switch the mod on (Mods page) - or Legends Studio's Play.
 
@@ -13,11 +13,18 @@ local lines = {
 }
 
 local walkers = {}
+-- (dressed walkers - Arceus walks those as it walks the player, around every corner of their route: the player's own
+-- outfit, and two with other items over it - names from bin/chara/table/dressup_table_p1.bin)
+local outfits = {
+  "player",
+  {[0] = "p1_hrs0001_00_default_blond", [4] = "p1_hdw0001_00_hunting_green"},
+  {[7] = "p1_drs0002_00_shinobi_blue"},
+}
 
 local function make(c)
   local loop = {c + vec(SIZE, 0, -SIZE), c + vec(SIZE, 0, SIZE), c + vec(-SIZE, 0, SIZE), c + vec(-SIZE, 0, -SIZE)}
   for i = 1, 3 do
-    local n = npc.spawn{pos = loop[i], name = "Walker " .. i, yaw = loop[i]:yaw_to(loop[i % 4 + 1])}
+    local n = npc.spawn{pos = loop[i], name = "Walker " .. i, yaw = loop[i]:yaw_to(loop[i % 4 + 1]), outfit = outfits[i], body = i > 1 and "p1" or nil}
     n.near_radius = 2.5
     n.data.line = lines[i]
     n:walk_route(loop, {loop = true, wait = 1, start = i % 4 + 1})  -- (each starts toward the next corner)

@@ -1,11 +1,13 @@
 # Lua mods: the mod API
 
 Mods can carry Lua scripts. A script can make **new characters** that the game itself creates (they look, move and
-animate like the game's own people), walk them around, react to the player, add console commands, show notices on
-screen and hook anything in the game. The API is the same in **Legends: Z-A** and **Legends: Arceus**. Where the two
+animate like the game's own people), dress them, pose them, walk them around, make **Pokémon** (Arceus), read and set
+the story's progress values, react to the player, add console commands, show notices on screen and hook anything in
+the game. The API is the same in **Legends: Z-A** and **Legends: Arceus**. Where the two
 games differ, this page says so.
 
-The scripts run in **Legends Lua** (`contrib/legendslua`), a Lua 5.3 plugin that ships in the game's `plugins/` folder.
+The scripts run in **Legends Lua** (`contrib/legendslua`), a Lua 5.3 plugin that ships in the game's `plugins/` folder
+(`liblegendslua.so` on Linux, `legendslua.dll` on Windows).
 You don't have to switch it on. When a mod that carries scripts is on, the game loads Legends Lua for it. A game with no
 such mod doesn't load it at all, so it costs nothing.
 
@@ -56,7 +58,7 @@ end)
 ## Characters: `npc`
 
 ```lua
-local n = npc.spawn{pos = {x, y, z}, yaw = 90, name = "Bob", model = "..."}
+local n = npc.spawn{pos = {x, y, z}, yaw = 90, name = "Bob", model = "...", outfit = "player"}
 ```
 
 | Field | |
@@ -64,6 +66,8 @@ local n = npc.spawn{pos = {x, y, z}, yaw = 90, name = "Bob", model = "..."}
 | `pos` | Where to make it: `{x, y, z}`, `vec(x, y, z)` or `{x = .., y = .., z = ..}`. If you leave it out, the character goes 2 m in front of the player. |
 | `yaw` | Which way it faces, in degrees: 0 faces +z, 90 faces +x. |
 | `name` | Your name for it (used in logs, `npc.find`, `n:say`). |
+| `outfit` | (Optional) dress it like a player. `"player"`: the player character's clothes. **Arceus**: the outfit the player has on now, and a table puts other items over it, `{[slot] = "item name", ...}` (the 12 slots of the save's dress-up data: 0 hair, 4 hat, 7 clothes were checked; item names from `bin/chara/table/dressup_table_p1.bin` / `_p2.bin`, e.g. `"p1_hdw0001_00_hunting_green"`). **Z-A**: `"player"` only, the parts the player character's model was made with (not the save's look on top, so some pieces differ from what you wear). |
+| `body` | (Optional, Arceus) `"p1"` or `"p2"`: which of the two player bodies a dressed character has (default: the player's). |
 | `model` | (Optional) what it looks like. **Z-A**: a station NPC's id from the level data (`npc_A04_z02_02_0002`; `npc.models()` lists the ones loaded near you). Leave it out to copy the nearest townsperson's look. **Arceus**: a character id (`tr0036_00_senpai_m`), its hash (`"0x2d992cf818c93910"`), or the name of a placement in the area (`area00_npc_g_002`, to copy that NPC's look). Leave it out to copy a villager of the area. |
 
 `npc.spawn` returns a **handle** at once. The game makes the character when the player is within about 50 m (Z-A) or
@@ -81,7 +85,7 @@ spot when the player comes back, carrying on its walk. Removing a handle is the 
 
 | | |
 |---|---|
-| `n:walk_to(pos [, run])` / `n:run_to(pos)` | Walk (or run) there. **Z-A**: a straight line at a stroll (1.3 m/s; run 4.2), the height eased between the two points (give points on the ground; it walks through walls). **Arceus**: the game's own pathfinding on the navigation mesh. A goal off the mesh (inside a building, on a roof) is refused. Known issue: after a walk has ended, the next order is accepted but not walked, so routes stop after their first leg. |
+| `n:walk_to(pos [, run])` / `n:run_to(pos)` | Walk (or run) there. **Z-A**: a straight line at a stroll (1.3 m/s; run 4.2), the height eased between the two points (give points on the ground: it doesn't follow the ground or stairs, and walks through walls). **Arceus, dressed** (`outfit`): walked the way the player is, by the player's own movement and physics, so it follows the ground, climbs slopes and walks any number of legs; a goal it can't reach within a minute ends the walk where it got to. **Arceus, not dressed**: the game's own pathfinding on the navigation mesh. A goal off the mesh (inside a building, on a roof) is refused. Known issue: after a walk has ended, the next order is accepted but not walked, so routes stop after their first leg. Dress characters that walk routes. |
 | `n:walk_route(points, opts)` | Walk a list of points in turn. `opts`: `loop` (start again at the end), `run`, `wait` (seconds at each point), `start` (the first point to head for), `on_point = function(n, i)`. |
 | `n:pause()` / `n:resume()` | Stop on a route and stand, then carry on where it was going. |
 | `n:stop()` | Stand where it is (and forget the route). |
@@ -93,12 +97,34 @@ spot when the player comes back, carrying on its walk. Removing a handle is the 
 | `n:is_up()` / `n:valid()` | In the world / not removed. |
 | `n:dist([pos])` | Metres to the player (or to `pos`), along the ground. |
 | `n:say(text [, seconds])` | A notice on screen: `Name: text`. |
+| `n:anim(name, value [, kind])` | Set one of its animation's parameters (the game's own: what its animation graph reads to pick a pose). `value` true/false sets a bool, a whole number an int, any other number a float, `nil` fires a trigger (or pass `kind` `"b"`, `"i"`, `"f"`, `"t"`). Returns whether the character has that parameter. Checked: **Z-A** `n:anim("sit_bool", true) n:anim("sit_int", 1)` sits (int 2 another way; back to `false` / `0` stands up). The city's own people also use `speak_bool` + `wait_int` 2 (chatting) and `loop_action_bool`. **Arceus** `n:anim("set_squat_bool", true)` crouches (dressed characters run the player's animation, the others a villager's). In a pose a Z-A character doesn't walk: stand it up first. |
+| `n:trigger(name)` | Fire a trigger parameter (`n:anim(name)`). |
 | `n:on(event, fn)` | This character's events: `"talk"`, `"near"`, `"far"`, `"arrived"`, `"up"`, `"gone"`. |
 | `n.name`, `n.data` | Its name, and a table for your own data. |
 | `n.near_radius` | Metres for `near` / `far` (default 4). |
 
 `npc.list()` lists this mod's characters, `npc.all()` everyone's, `npc.find(name)` finds one by name, and
 `npc.models()` returns what new characters can look like here as text (also the console command `models`).
+
+## Pokémon: `pokemon` (Arceus)
+
+```lua
+local p = pokemon.spawn{species = 25, pos = player.ahead(4), yaw = 180, form = 0, shiny = true, name = "Sparky"}
+```
+
+Makes a Pokémon in the world, standing where it was put: the game's own Pokémon object, with its model, colours and
+idle animation. `species` is the national dex number (one the game has: the Hisui Pokédex), `form` the form number
+(default 0), `shiny` true for the shiny colours. It returns a handle at once (or `nil` and a reason), and the Pokémon is
+made within a frame or two in the level the player is in (up to 16 at once, shared with the shared world's ridden Pokémon). A loading screen into another level ends it.
+
+| | |
+|---|---|
+| `p:pos()` | Where it is, or `nil` when it isn't in the world. |
+| `p:state()` / `p:valid()` | `"coming"`, `"up"`, `"removed"` (also once its level is gone) / not removed. |
+| `p:remove()` | Gone (the game ends it the next frame). |
+| `pokemon.all()` | This mod's Pokémon. |
+
+**Z-A** doesn't have this yet: `pokemon.spawn` returns `nil, "not made (not in Z-A yet)"`.
 
 ## The player: `player`
 
@@ -145,6 +171,7 @@ off(id)
 | `include("lib/x.lua")` | Runs another file of this mod in its globals and returns what it returns. |
 | `log(...)` / `print(...)` | Writes to the log (`[lua] <mod>: ...`). |
 | `game.name` | `"za"` or `"pla"`. Also `game.dt` (the last frame's seconds), `game.title`, `game.frame()`. |
+| `game.work(name [, value])` | One of the game's own progress values ("works", the numbers its story scripts read and set): its value, or `nil` when the game has none by that name (yet). With `value` it writes it, so be careful: the story reads these. **Z-A**: e.g. `"SYS_WORK_PHASE"`. **Arceus**: e.g. `"WPHA_STORY"`, and its flags as `"flag:<name>"` (0 / 1). |
 | `lua.stats()` | What the scripts cost (below). |
 
 ### The console
@@ -180,8 +207,20 @@ Measured on 2026-11-19 (Core i9-12900K, both games, with other games sharing the
 | Z-A runtime: characters' bookkeeping | 0.3-0.7 us; 3-7 us with characters made |
 | Z-A runtime: the node hook (only once a script moves a character) | about 2500 calls a frame, 1 test each past a filter |
 | Arceus runtime: characters' bookkeeping (camera update) | 5-16 us with 3 characters |
+| Arceus, the test mod: 3 dressed characters walking, 2 Pokémon, `tick` handlers | 25 us (most 335 us, a reload) |
+| Arceus Windows build under Wine, Village Walk with 3 dressed walkers | 26 us |
+| Z-A, the test mod: 3 characters, one dressed, poses | 16 us |
 
 At 60 fps a frame is 16,700 us, so a mod like the samples costs about 0.1-0.2% of the frame.
+
+## Not there yet
+
+* **The game's own message box and Talk prompt.** `n:say` and `ui.say` show a notice, and `talk` is an A press near the
+  character, not the game's Talk prompt.
+* **Giving items, time of day, weather.** The game has them (Arceus: `AddItem`, `SetTime`, `GetWeather` in its script
+  commands; Z-A: its `WeatherController`), but they aren't wired up yet. Use the raw layer meanwhile.
+* **Z-A Pokémon** (`pokemon.spawn`) and **Z-A outfits other than `"player"`.**
+* **Z-A walks on uneven ground:** a walk eases the height between its two points. Give each point of a route on the ground.
 
 ## The raw layer
 
@@ -193,8 +232,8 @@ have yet. It's research-grade: addresses differ between the two games and betwee
 
 `contrib/legendslua/examples/` has the game's sample mod (**Town Walk** for Z-A, **Village Walk** for Arceus): three
 townspeople walk a square; one stops, turns and greets the player who comes near, and walks on when they leave. Talk
-to one for a line. Copy the folder to `mods/` and switch it on. (In Arceus they walk the first side of the square only:
-see `walk_to`.)
+to one for a line. Copy the folder to `mods/` and switch it on. (In Arceus the three are dressed: one in your outfit,
+two with other items over it, so they walk the whole square round and round.)
 
 **React when the player comes near:**
 

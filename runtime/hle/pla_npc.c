@@ -331,6 +331,8 @@ typedef struct {
     float lq[4];        // (its local rotation written last frame: tilted onto a wall / the water)
     uint64_t jsk;       // (its skeleton, where its seat joint was looked up)
     int jidx;           // (the seat joint's matrix index + 1 in jsk; -1 not found)
+    int form, rare;     // (a script's Pokémon - the mod API's pokemon.spawn: its form, shiny)
+    int script;
 } Mnt;
 static Mnt g_mnt[NMNT];
 static int g_poke_n;
@@ -1718,7 +1720,7 @@ static void puppet_step(Cpu *c, Own *o) {
 // w7 monsno, stack: u16 form, u32 sex, u8 rare, u32 height, u8 alpha, u8 p11, u8 p12 - 8-byte slots) -> 0x7001e9b53c)
 #define FO_GET 0x7000d91c8cull
 #define FO_POKE_DIRECT 0x70020bf6fcull
-static uint64_t poke_make(Cpu *c, int mons, int form, const float at[3], float yaw_deg, const char *name) {
+static uint64_t poke_make(Cpu *c, int mons, int form, const float at[3], float yaw_deg, const char *name, int rare) {
     static uint8_t *m;
     if (!m) m = hle_alloc(0x100);
     memset(m, 0, 0x100);
@@ -1733,7 +1735,7 @@ static uint64_t poke_make(Cpu *c, int mons, int form, const float at[3], float y
     uint64_t sp = (c->sp - 0x800) & ~0xfull;
     uint64_t *st = (uint64_t *)(uintptr_t)sp;
     memset(st, 0, 0x40);
-    st[0] = (uint64_t)form, st[1] = 0, st[2] = 0, st[3] = 128, st[4] = 0, st[5] = 1, st[6] = 1;  // (form, sex, rare, height, alpha, p11, p12)
+    st[0] = (uint64_t)form, st[1] = 0, st[2] = (uint64_t)(rare != 0), st[3] = 128, st[4] = 0, st[5] = 1, st[6] = 1;  // (form, sex, rare, height, alpha, p11, p12)
     c->sp = sp;
     c->x[0] = fo, c->x[1] = (uint64_t)(uintptr_t)pos, c->x[2] = (uint64_t)(uintptr_t)rot, c->x[3] = (uint64_t)(uintptr_t)scale;
     c->x[4] = (uint64_t)(uintptr_t)(m + 0x30), c->x[5] = (uint64_t)(uintptr_t)(m + 0x40), c->x[6] = (uint64_t)(uintptr_t)(m + 0x38), c->x[7] = (uint64_t)mons;
@@ -1823,7 +1825,7 @@ void pla_npc_cam(Cpu *c) {  // (the camera update, the game's thread: hle/warp.c
         Mnt *m = &g_mnt[i];
         if (m->state == 1) {
             g_making = m;
-            m->state = poke_make(c, m->mons, m->t == 4 ? 1 : 0, m->at, m->yaw, m->name) ? 2 : 0, m->asked = g_frame;
+            m->state = poke_make(c, m->mons, m->form ? m->form : m->t == 4 ? 1 : 0, m->at, m->yaw, m->name, m->rare) ? 2 : 0, m->asked = g_frame;
             g_making = NULL;
             if (m->chr_pre) LOG("[npc] %s: its model component %llx made at once\n", m->name, (unsigned long long)m->chr_pre);
             continue;
@@ -2230,6 +2232,10 @@ typedef struct {
     int stop;                // (its walk to stop: its navigator stopped, where it stands)
     int retried;             // (its walk's order given again after getting nowhere)
     uint64_t order_frame;    // (its last order)
+    char outfit[256];        // (what it wears - npc_outfit's spec; "" its look's own)
+    int told_outfit;
+    struct { uint64_t hash; char kind; float v; } anim[8];  // (animation parameters to set - npc_anim)
+    int nanim;
 } ModNpc;
 static ModNpc g_mod[MAXMOD];
 static volatile int g_mods_any;
@@ -2253,6 +2259,71 @@ static uint64_t mod_chr(const char *model, int *sent) {  // (what it looks like:
         if (!strcmp(g_ent[i].name, model)) { *sent = i + 1; return g_ent[i].chr; }
     return fnv(model);
 }
+// what it wears: "player" (our outfit), "<slot>=<item>" over ours, "body=p1|p2" - false while ours isn't known
+static bool mod_outfit_items(const char *spec, uint64_t items[12], int *body) {
+    if (!pla_npc_my_outfit(items)) return false;
+    char buf[256];
+    snprintf(buf, sizeof buf, "%s", spec);
+    for (char *t = strtok(buf, ", "); t; t = strtok(NULL, ", ")) {
+        int slot;
+        char item[96];
+        if (!strcmp(t, "body=p1")) *body = 0;
+        else if (!strcmp(t, "body=p2")) *body = 1;
+        else if (sscanf(t, "%d=%95s", &slot, item) == 2 && slot >= 0 && slot < 12) items[slot] = fnv(item);
+    }
+    return true;
+}
+// its animation's parameters asked for (npc_anim), set now (the game thread)
+static void mod_anims(Cpu *c, ModNpc *m, Own *o) {
+    for (int k = 0; k < m->nanim; k++) {
+        uint64_t fn = m->anim[k].kind == 'f' ? ANIM_SET_FLOAT : m->anim[k].kind == 'i' ? ANIM_SET_INT : m->anim[k].kind == 'b' ? ANIM_SET_BOOL : ANIM_SET_TRIGGER;
+        anim_set(c, o->actl, fn, m->anim[k].hash, m->anim[k].v, (uint32_t)(int32_t)m->anim[k].v);
+    }
+    m->nanim = 0;
+}
+// a dressed one (an outfit): walked as the shared world's players' people are (puppet_step - pla_npc_cam right after
+// this): its target where the script sends it, a negative speed = walk there and stand; where it is: its model owner
+static void mod_puppet(Cpu *c, ModNpc *m, Own *o) {
+    if (!puppet_ready(o)) return;
+    const float *wp = (const float *)(uintptr_t)(o->owner + 0xa0), *wz = (const float *)(uintptr_t)(o->owner + 0x90);
+    memcpy(m->at, wp, 12), memcpy(o->cur, wp, 12), o->cur_ok = 1;
+    float asked_yaw = m->yaw;  // (until it stands: the way it was asked to face)
+    if (o->fo_set && wz[0] * wz[0] + wz[2] * wz[2] > 0.01f) m->yaw = atan2f(wz[0], wz[2]);  // (as drawn)
+    mod_anims(c, m, o);
+    if (!o->fo_set) {  // (up: standing where it was made, facing its way)
+        float t[5] = {m->at[0], m->at[1], m->at[2], asked_yaw, -0.01f};
+        memcpy(o->fo, t, 20), o->fo_set = 1, o->fo_ns = plat_now_ns();
+    }
+    if (m->set) {
+        m->set = 0, m->walking = 0, m->order = 0;
+        cc_warp(c, o->cc, m->set_at, m->yaw);
+        float t[5] = {m->set_at[0], m->set_at[1], m->set_at[2], m->yaw, -0.01f};
+        memcpy(o->fo, t, 20), memcpy(m->at, m->set_at, 12);
+    }
+    if (m->stop) {
+        m->stop = 0, m->walking = 0;
+        float t[5] = {m->at[0], m->at[1], m->at[2], m->yaw, -0.01f};
+        memcpy(o->fo, t, 20);
+    }
+    if (m->order) {
+        m->order = 0, m->walking = 1, m->order_frame = g_frame;
+        float dx = m->goal[0] - m->at[0], dz = m->goal[2] - m->at[2];
+        float t[5] = {m->goal[0], m->goal[1], m->goal[2], atan2f(dx, dz), m->run ? -4.0f : -1.4f};
+        memcpy(o->fo, t, 20), o->fo_ns = plat_now_ns();
+    } else if (m->walking) {
+        float gx = m->goal[0] - m->at[0], gz = m->goal[2] - m->at[2];
+        if (gx * gx + gz * gz < 0.6f * 0.6f) m->walking = 0;  // (there: it stands, facing the way it came)
+        else if (g_frame - m->order_frame > 30 * 60) {  // (a minute and not there: stops)
+            LOG("[npc] luanpc_%d (%s) didn't get to %.1f %.1f %.1f in a minute: stops\n", m->k, m->label, m->goal[0], m->goal[1], m->goal[2]);
+            m->walking = 0;
+            float t[5] = {m->at[0], m->at[1], m->at[2], m->yaw, -0.01f};
+            memcpy(o->fo, t, 20);
+        }
+    } else if (m->face_n > 0) {  // (turned: its target's way)
+        m->face_n = 0, o->fo[3] = m->yaw;
+    }
+}
+
 // (the camera update, the game thread, twice a frame; research LARECOMP_MODNPC_STATS=1: its cost logged every 20 s)
 static void mod_cam_(Cpu *c);
 static void mod_cam(Cpu *c) {
@@ -2306,6 +2377,12 @@ static void mod_cam_(Cpu *c) {
             float dx = m->at[0] - me[0], dz = m->at[2] - me[2];
             if (dx * dx + dz * dz > MOD_RANGE * MOD_RANGE) continue;
             if (m->misses && g_frame - m->asked_frame < (uint64_t)(m->misses < 5 ? m->misses : 5) * 120) continue;
+            uint64_t items[12];
+            int body = -1;
+            if (m->outfit[0] && !mod_outfit_items(m->outfit, items, &body)) {
+                if (!m->told_outfit++) LOG("[npc] %s waits: the player's outfit isn't known yet (no save loaded)\n", m->label);
+                continue;
+            }
             pthread_mutex_lock(&g_lock);
             int sent = 0, slot = -1;
             uint64_t chr = mod_chr(m->model, &sent);
@@ -2315,6 +2392,10 @@ static void mod_cam_(Cpu *c) {
                 Own *n = &g_own[slot];
                 memset(n, 0, sizeof *n);
                 n->state = 1, n->script = 1, n->schr = chr, n->sent = sent, n->k = ++g_count, n->level = g_level, n->asked = g_frame;
+                if (m->outfit[0]) {  // (dressed: made as the senior of that body - the model job swaps in the player's - see create_hook)
+                    n->gender = body >= 0 ? body : g_gender > 0, n->schr = n->gender ? CHR_SENPAI_F : CHR_SENPAI_M, n->sent = 0;
+                    memcpy(n->outfit, items, sizeof n->outfit), n->has_outfit = 1;
+                }
                 memcpy(n->at, m->at, 12), memcpy(n->dest, m->at, 12);
                 extern uint64_t pla_world_frame_now(void);
                 m->own = slot, m->k = n->k, m->state = MODNPC_COMING, m->asked_frame = g_frame, m->asked_sk_frame = pla_world_frame_now();
@@ -2337,6 +2418,7 @@ static void mod_cam_(Cpu *c) {
             }
             continue;
         }
+        if (o && o->has_outfit) { mod_puppet(c, m, o); continue; }  // (dressed: walked as a player - below)
         // up: where it is drawn - its skeleton as posed (hle/pla_world.c: the person-sized one first posed at its spot after
         // it was asked for); its facing: the way it moved. (The navigator's +0x3e0 is its goal; its model owner's world
         // translation a cache nothing keeps up for people the navigator walks; the body objects at its spot other things' -
@@ -2359,6 +2441,7 @@ static void mod_cam_(Cpu *c) {
             if (mx * mx + mz * mz > 0.0025f) m->yaw = atan2f(mx, mz);
             memcpy(m->at, sp, 12), memcpy(o->cur, sp, 12), o->cur_ok = 1;
         }
+        mod_anims(c, m, o);
         if (o->refused) {  // (its walk's goal has no navigation mesh: it stands)
             o->refused = 0;
             if (m->walking) LOG("[npc] luanpc_%d (%s): no way to %.1f %.1f %.1f on the navigation mesh - stops\n", m->k, m->label, m->goal[0], m->goal[1], m->goal[2]);
@@ -2428,6 +2511,13 @@ void pla_npc_api_on(void) {
     rt_register_fnhook_at(SET_NAVIGATOR, setnav_hook);
     rt_register_fnhook_at(NAV_OUT_OF_TOL, tol_hook);
     rt_register_fnhook_at(CHAR_BUILD, build_hook), rt_register_fnhook_at(ANIM_CTOR, actor_hook), rt_register_fnhook_at(NPC_MODEL_CTOR, chr_ctor_hook);
+    // (dressed ones - npc_outfit: the shared world's dressing, as made - and Pokémon of scripts' own: their parts)
+    if (g_dress < 0) g_dress = !getenv("LARECOMP_NPC_DRESS") || atoi(getenv("LARECOMP_NPC_DRESS"));
+    rt_register_fnhook_at(MODEL_BUILD, model_hook), rt_register_fnhook_at(DRESS_MAKE, dressmake_hook);
+    rt_register_fnhook_at(SAVE_DRESS_SLOT, saveslot_hook), rt_register_fnhook_at(NPC_ENTITY_CB, entity_hook);
+    rt_register_fnhook_at(CREATE_MODEL, create_hook);
+    if (g_dress) rt_register_fnhook_at(NPC_MODEL_JOB, job_hook);
+    rt_register_fnhook_at(POKE_ANIM_CTOR, actor_hook), rt_register_fnhook_at(POKE_MODEL_CTOR, poke_ctor_hook);
     extern void warp_api_start(void), pla_world_track_skeletons(void);
     pla_world_track_skeletons();  // (where each is drawn: its posed skeleton)
     warp_api_start();
@@ -2533,4 +2623,68 @@ uint64_t pla_npc_area(char *name, int cap) {  // (the "areaNN" most of the level
         pthread_mutex_unlock(&g_lock);
     }
     return g_area_id;
+}
+
+int pla_npc_mod_outfit(int h, const char *spec) {
+    pthread_mutex_lock(&g_mlock);
+    ModNpc *m = mod_of(h);
+    int ok = m && m->state == MODNPC_WAITING && spec && *spec && g_dress != 0;
+    if (ok) snprintf(m->outfit, sizeof m->outfit, "%s", spec);
+    pthread_mutex_unlock(&g_mlock);
+    return ok;
+}
+int pla_npc_mod_anim(int h, const char *name, int kind, float value) {
+    pthread_mutex_lock(&g_mlock);
+    ModNpc *m = mod_of(h);
+    int ok = m && m->nanim < 8;
+    if (ok) m->anim[m->nanim].hash = fnv(name), m->anim[m->nanim].kind = (char)kind, m->anim[m->nanim].v = value, m->nanim++;
+    pthread_mutex_unlock(&g_mlock);
+    return ok;
+}
+// Pokémon of scripts' own: made as the mounts above are (poke_make from the camera update, its navigator matched within
+// 4 m), named luapoke_<k>; removed by TerminateObject; gone with its level
+int pla_npc_poke_spawn(int species, const float pos[3], float yaw_deg, int form, int shiny, const char *label) {
+    (void)label;
+    if (species <= 0 || species > 1010) return 0;
+    pthread_mutex_lock(&g_lock);
+    int h = 0;
+    for (int i = 0; i < NMNT && !h; i++)
+        if (!g_mnt[i].state) {
+            Mnt *m = &g_mnt[i];
+            memset(m, 0, sizeof *m);
+            m->mons = species, memcpy(m->at, pos, 12), m->yaw = yaw_deg, m->k = ++g_poke_n, m->state = 1, m->level = g_level;
+            m->research = 1, m->script = 1, m->form = form, m->rare = shiny;
+            snprintf(m->name, sizeof m->name, "luapoke_%d", m->k), snprintf(m->joint, sizeof m->joint, "parts");
+            h = (m->k << 8) | (i + 1);
+        }
+    pthread_mutex_unlock(&g_lock);
+    if (!h) LOG("[npc] scripts: no free Pokemon slot (%d in use)\n", NMNT);
+    return h;
+}
+static Mnt *poke_of(int h) {
+    int i = (h & 0xff) - 1;
+    if (h <= 0 || i < 0 || i >= NMNT || !g_mnt[i].state || !g_mnt[i].script || g_mnt[i].k != (h >> 8)) return NULL;
+    return &g_mnt[i];
+}
+void pla_npc_poke_remove(int h) {
+    pthread_mutex_lock(&g_lock);
+    Mnt *m = poke_of(h);
+    if (m) m->term = 1;
+    pthread_mutex_unlock(&g_lock);
+}
+int pla_npc_poke_state(int h, float pos[3], float *yaw) {
+    pthread_mutex_lock(&g_lock);
+    Mnt *m = poke_of(h);
+    int st = 0;
+    if (m && m->level != g_level) st = 0;
+    else if (m) {
+        st = m->state == 3 ? MODNPC_UP : MODNPC_COMING;
+        if (pos) {
+            if (m->owner && in_heap(m->owner) && *(const uint64_t *)(uintptr_t)m->owner == MODEL_OBJ_VTABLE) memcpy(pos, (const float *)(uintptr_t)(m->owner + 0xa0), 12);
+            else memcpy(pos, m->at, 12);
+        }
+        if (yaw) *yaw = m->yaw;
+    }
+    pthread_mutex_unlock(&g_lock);
+    return st;
 }
