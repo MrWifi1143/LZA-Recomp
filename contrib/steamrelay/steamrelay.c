@@ -559,12 +559,21 @@ static int g_wq_head, g_wq_tail;
 static pthread_mutex_t g_wq_lock = PTHREAD_MUTEX_INITIALIZER;
 // (the address is looked up again every 10 s until it is found - a game started before the PC was online, or while the
 // server's name didn't resolve yet, still gets online play once it is - and then every 60 s (every 10 s while the server
-// doesn't answer): a home server on a dynamic-DNS name that gets a new address is followed. IPv4 only. The look-ups run
-// on a thread of their own - a slow DNS answer never holds up the game's traffic.)
+// doesn't answer): a home server on a dynamic-DNS name that gets a new address is followed. The look-ups run on a
+// thread of their own - a slow DNS answer never holds up the game's traffic.)
+// IPv6 (2026-11-18): the socket is a dual-stack IPv6 one (IPv4 alone where the PC has no IPv6); the server's name may
+// give IPv6 and IPv4 addresses (AAAA / A, in the system's order of preference - usually IPv6 first where the PC has it).
+// One is used at a time; while the server doesn't answer, the next is tried every 4 s - a server whose IPv6 is broken is
+// reached over IPv4 a few seconds later. "[v6 address]:port" and a bare IPv6 address are taken as the server too.
+typedef struct sockaddr_in6 SrvAddr;  // (IPv4 as ::ffff:a.b.c.d)
 static char g_srv_host[256];
 static unsigned g_srv_port = 39200;
-static volatile uint64_t g_srv_ap;   // (the server: IPv4 address << 16 | port, network order inside; 0 not found yet)
-static volatile int g_srv_resolved;  // (g_srv_ap known)
+static int g_srv_fam = AF_INET6;      // (our socket's family)
+static pthread_mutex_t g_sa_lock = PTHREAD_MUTEX_INITIALIZER;
+static SrvAddr g_srv_sa;              // (the server's address in use, under g_sa_lock; port 0: not found yet)
+static SrvAddr g_srv_list[8];         // (all its name gave; resolver thread only)
+static int g_srv_nlist, g_srv_pick;
+static volatile int g_srv_resolved;  // (an address known)
 // Is the server there? Every hello (2 s) is answered with a cookie ('C', lzaserver 2026-11-17); anything heard counts.
 // larecomp_server_state (runtime/hle/warp.c tells the player): 1 not heard yet, 2 answering, 3 never answered (8 s),
 // 4 stopped answering (8 s), 5 the name doesn't resolve.
@@ -586,50 +595,95 @@ static uint8_t g_tk_id[8], g_tk_key[16];
 static int g_tk_have;
 static volatile int g_srv_auth;               // (the last 'A': 0 none heard, 1 in, 2 sign-in needed, 3 ticket not known)
 static volatile uint64_t g_srv_auth_at, g_srv_out_since;  // (ms: the last 'A'; since when not in)
-static struct sockaddr_in srv_addr_of(uint64_t ap) {
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof a);
-    a.sin_family = AF_INET, a.sin_addr.s_addr = (uint32_t)(ap >> 16), a.sin_port = (uint16_t)ap;
-    return a;
+static bool sa_v4(const SrvAddr *a) {
+    static const uint8_t pre[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+    return !memcmp(a->sin6_addr.s6_addr, pre, 12);
+}
+static void sa_from(SrvAddr *o, const struct sockaddr *a) {  // (as IPv6; family 0: neither)
+    memset(o, 0, sizeof *o);
+    if (a->sa_family == AF_INET || a->sa_family == AF_INET6) o->sin6_family = AF_INET6;
+    if (a->sa_family == AF_INET) {
+        const struct sockaddr_in *v4 = (const struct sockaddr_in *)a;
+        o->sin6_addr.s6_addr[10] = o->sin6_addr.s6_addr[11] = 0xff;
+        memcpy(o->sin6_addr.s6_addr + 12, &v4->sin_addr, 4), o->sin6_port = v4->sin_port;
+    } else if (a->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *v6 = (const struct sockaddr_in6 *)a;
+        o->sin6_addr = v6->sin6_addr, o->sin6_port = v6->sin6_port, o->sin6_scope_id = v6->sin6_scope_id;
+    }
+}
+static bool sa_same(const SrvAddr *a, const SrvAddr *b) {
+    return a->sin6_port == b->sin6_port && !memcmp(&a->sin6_addr, &b->sin6_addr, sizeof a->sin6_addr);
+}
+static void sa_use(const SrvAddr *a, const char *why) {  // (resolver thread: the address to talk to)
+    pthread_mutex_lock(&g_sa_lock);
+    bool had = g_srv_sa.sin6_port != 0, same = sa_same(&g_srv_sa, a);
+    g_srv_sa = *a;
+    pthread_mutex_unlock(&g_sa_lock);
+    if (same) return;
+    if (had) LOG("[steamrelay] online server: %s - its %s address now\n", why, sa_v4(a) ? "IPv4" : "IPv6");
+    g_srv_have_cookie = 0;  // (another address: its own cookie)
+    g_srv_hello_now = 1;
 }
 static bool server_resolve(void) {
     struct addrinfo hints = {0}, *res = NULL;
-    hints.ai_family = AF_INET, hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_family = g_srv_fam == AF_INET6 ? AF_UNSPEC : AF_INET, hints.ai_socktype = SOCK_DGRAM;
     if (getaddrinfo(g_srv_host, NULL, &hints, &res) || !res) return false;
-    uint32_t ip = ((struct sockaddr_in *)res->ai_addr)->sin_addr.s_addr;
-    freeaddrinfo(res);
-    uint64_t ap = (uint64_t)ip << 16 | htons((uint16_t)g_srv_port), was = g_srv_ap;
-    if (ap != was) {
-        g_srv_ap = ap;
-        if (was) {
-            LOG("[steamrelay] online server: its address changed - following it\n");
-            g_srv_have_cookie = 0;  // (another machine: its own cookie)
-        }
-        g_srv_hello_now = 1;
+    SrvAddr list[8];
+    int n = 0;
+    for (struct addrinfo *r = res; r && n < 8; r = r->ai_next) {
+        SrvAddr a;
+        sa_from(&a, r->ai_addr);
+        if (!a.sin6_family) continue;
+        a.sin6_port = htons((uint16_t)g_srv_port);
+        bool dup = false;
+        for (int i = 0; i < n; i++) dup |= sa_same(&list[i], &a);
+        if (!dup) list[n++] = a;
     }
+    freeaddrinfo(res);
+    if (!n) return false;
+    pthread_mutex_lock(&g_sa_lock);
+    SrvAddr cur = g_srv_sa;
+    pthread_mutex_unlock(&g_sa_lock);
+    int keep = -1;  // (the address in use is still one of its: kept - else the first)
+    for (int i = 0; i < n; i++)
+        if (cur.sin6_port && sa_same(&list[i], &cur)) keep = i;
+    memcpy(g_srv_list, list, sizeof list), g_srv_nlist = n, g_srv_pick = keep >= 0 ? keep : 0;
+    sa_use(&g_srv_list[g_srv_pick], "its address changed - following it");
     g_srv_resolved = 1;
     return true;
 }
 static void *resolver(void *arg) {
     (void)arg;
-    uint64_t last = now_ms();
+    uint64_t last = now_ms(), picked = last;
     while (!g_srv_quit) {
         nap_ms(500);
         uint64_t t = now_ms(), heard = g_srv_heard;
         bool quiet = !heard || t - heard > 8000;
+        if (quiet && g_srv_nlist > 1 && t - picked >= 4000 && (!heard || heard < picked)) {  // (no answer on this one: the next)
+            g_srv_pick = (g_srv_pick + 1) % g_srv_nlist, picked = t;
+            sa_use(&g_srv_list[g_srv_pick], "no answer there");
+        }
         if (t - last < (!g_srv_resolved || quiet ? 10000u : 60000u)) continue;
         last = t;
         bool had = g_srv_resolved;
-        if (server_resolve()) { if (!had) LOG("[steamrelay] online server: address found\n"); }
+        if (server_resolve()) { if (!had) LOG("[steamrelay] online server: address found (%s)\n", sa_v4(&g_srv_sa) ? "IPv4" : "IPv6"), picked = t; }
         else if (had) LOG("[steamrelay] online server: the name didn't resolve this time (the last address kept)\n");
     }
     return NULL;
 }
 static void srv_send(const void *p, size_t n) {
-    uint64_t ap = g_srv_ap;
-    if (!ap) return;  // (its address not found yet: server_resolve)
-    struct sockaddr_in a = srv_addr_of(ap);
-    sendto(g_srv, (const char *)p, (int)n, 0, (const struct sockaddr *)&a, sizeof a);
+    pthread_mutex_lock(&g_sa_lock);
+    SrvAddr a = g_srv_sa;
+    pthread_mutex_unlock(&g_sa_lock);
+    if (!a.sin6_port) return;  // (its address not found yet: server_resolve)
+    if (g_srv_fam == AF_INET6) {
+        sendto(g_srv, (const char *)p, (int)n, 0, (const struct sockaddr *)&a, sizeof a);
+        return;
+    }
+    struct sockaddr_in v4 = {0};
+    v4.sin_family = AF_INET, v4.sin_port = a.sin6_port;
+    memcpy(&v4.sin_addr, a.sin6_addr.s6_addr + 12, 4);
+    sendto(g_srv, (const char *)p, (int)n, 0, (const struct sockaddr *)&v4, sizeof v4);
 }
 static void srv_hello(void) {
     uint8_t b[ACCT_HELLO_AUTH_LEN] = {'H', 1};
@@ -922,12 +976,16 @@ static void *pump(void *arg) {
             if (t - last_hello >= 2000 || (lobby_wait_on() && g_lobby_at && t - g_lobby_at < 1100 && t - last_hello >= 300))  //  hello at once;
                 last_hello = t, srv_hello();                                                                 //  a new lobby: 4x)
             dup_send_due(t);
-            struct sockaddr_in a;
+            struct sockaddr_storage a;
             socklen_t al = sizeof a;
             int n;
-            uint64_t ap = g_srv_ap;
+            pthread_mutex_lock(&g_sa_lock);
+            SrvAddr srv = g_srv_sa;
+            pthread_mutex_unlock(&g_sa_lock);
             while ((n = (int)recvfrom(g_srv, (char *)m, sizeof m, 0, (struct sockaddr *)&a, &al)) > 0) {
-                if (!ap || a.sin_addr.s_addr != (uint32_t)(ap >> 16) || a.sin_port != (uint16_t)ap) { al = sizeof a; continue; }
+                SrvAddr from;
+                sa_from(&from, (const struct sockaddr *)&a);
+                if (!srv.sin6_port || !sa_same(&from, &srv)) { al = sizeof a; continue; }
                 g_srv_heard = t ? t : 1, g_srv_ever = 1;
                 if (m[0] == 'C' && n >= 9) {  // (our address's cookie: the next hello carries it - a new one at once)
                     if (!g_srv_have_cookie || memcmp(g_srv_cookie, m + 1, 8)) {
@@ -1149,10 +1207,22 @@ static bool server_config(char *out, size_t size) {
     return ok;
 }
 static bool server_start(const char *spec) {
-    snprintf(g_srv_host, sizeof g_srv_host, "%s", spec);
-    char *c = strrchr(g_srv_host, ':');
-    if (c) g_srv_port = (unsigned)atoi(c + 1), *c = 0;
-    g_srv = socket(AF_INET, SOCK_DGRAM, 0);
+    // "host", "host:port", "[v6]:port", "[v6]", or a bare IPv6 address (more than one ':')
+    if (spec[0] == '[' && strchr(spec, ']')) {
+        const char *e = strchr(spec, ']');
+        snprintf(g_srv_host, sizeof g_srv_host, "%.*s", (int)(e - spec - 1), spec + 1);
+        if (e[1] == ':') g_srv_port = (unsigned)atoi(e + 2);
+    } else {
+        snprintf(g_srv_host, sizeof g_srv_host, "%s", spec);
+        char *c = strrchr(g_srv_host, ':');
+        if (c && strchr(g_srv_host, ':') == c) g_srv_port = (unsigned)atoi(c + 1), *c = 0;
+    }
+    g_srv = socket(AF_INET6, SOCK_DGRAM, 0);  // (dual-stack: IPv4 servers too, as ::ffff:a.b.c.d)
+    if (g_srv != NO_SOCK) {
+        int off = 0;
+        if (setsockopt(g_srv, IPPROTO_IPV6, IPV6_V6ONLY, (const char *)&off, sizeof off)) sock_close(g_srv), g_srv = NO_SOCK;
+    }
+    if (g_srv == NO_SOCK) g_srv = socket(AF_INET, SOCK_DGRAM, 0), g_srv_fam = AF_INET;  // (no IPv6 on this PC)
     if (g_srv == NO_SOCK) return false;
     nonblocking(g_srv);
     if (!server_resolve()) LOG("[steamrelay] online server: address not found (yet) - trying again every 10 s\n");

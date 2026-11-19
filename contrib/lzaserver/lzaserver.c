@@ -108,10 +108,13 @@ static uint64_t now_ms(void) {
 #define WORLD_FAR_MS 2000
 #define WORLD_POS_MS 10000
 
+// IPv6 (2026-11-18): the server listens on both (one dual-stack socket, :: - or IPv4 alone where the PC has no IPv6, or
+// the --bind address's own family). Every client address is kept as IPv6, an IPv4 one as ::ffff:a.b.c.d.
+typedef struct sockaddr_in6 Addr;
 typedef struct {
     bool used;
     uint64_t id;
-    struct sockaddr_in addr;
+    Addr addr;
     uint8_t game, hosting;
     bool world;    // (in the shared world: 'W')
     char code[9];  // ("" not in a lobby)
@@ -130,6 +133,84 @@ typedef struct {
 static Client *g_c;
 static int g_max = 256;
 static sock_t g_s;
+static int g_fam = AF_INET6;  // (the socket's: AF_INET where IPv6 isn't there or --bind is an IPv4 address)
+static void addr_in(Addr *o, const struct sockaddr_storage *a) {  // (from recvfrom: as IPv6)
+    memset(o, 0, sizeof *o);
+    o->sin6_family = AF_INET6;
+    if (a->ss_family == AF_INET) {
+        const struct sockaddr_in *v4 = (const struct sockaddr_in *)a;
+        o->sin6_addr.s6_addr[10] = o->sin6_addr.s6_addr[11] = 0xff;
+        memcpy(o->sin6_addr.s6_addr + 12, &v4->sin_addr, 4), o->sin6_port = v4->sin_port;
+    } else {
+        const struct sockaddr_in6 *v6 = (const struct sockaddr_in6 *)a;
+        o->sin6_addr = v6->sin6_addr, o->sin6_port = v6->sin6_port, o->sin6_scope_id = v6->sin6_scope_id;
+    }
+}
+static bool addr_v4(const Addr *a) {  // (an IPv4 address, ::ffff:a.b.c.d)
+    static const uint8_t pre[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+    return !memcmp(a->sin6_addr.s6_addr, pre, 12);
+}
+static socklen_t addr_out(const Addr *a, struct sockaddr_storage *o) {  // (for sendto, in the socket's family)
+    memset(o, 0, sizeof *o);
+    if (g_fam == AF_INET) {
+        struct sockaddr_in *v4 = (struct sockaddr_in *)o;
+        v4->sin_family = AF_INET, v4->sin_port = a->sin6_port;
+        memcpy(&v4->sin_addr, a->sin6_addr.s6_addr + 12, 4);
+        return sizeof *v4;
+    }
+    memcpy(o, a, sizeof *a);
+    return sizeof *a;
+}
+static void send_raw(const Addr *a, const void *p, size_t n) {
+    struct sockaddr_storage o;
+    socklen_t ol = addr_out(a, &o);
+    sendto(g_s, (const char *)p, (int)n, 0, (const struct sockaddr *)&o, ol);
+}
+// A listening socket on port (UDP or TCP): bind "" = every address, IPv6 and IPv4 (IPv4 only where IPv6 is off);
+// an IPv4 / IPv6 address ("::1", "[::1]") = that one. *fam: the socket's family. (lzaserver_accounts.c: its TCP one)
+sock_t lza_listen(int type, const char *bind_addr, int port, int *fam) {
+    char b[80];
+    snprintf(b, sizeof b, "%s", bind_addr ? bind_addr : "");
+    if (b[0] == '[' && strchr(b, ']')) memmove(b, b + 1, strlen(b)), *strchr(b, ']') = 0;
+    struct sockaddr_in6 a6 = {0};
+    struct sockaddr_in a4 = {0};
+    a6.sin6_family = AF_INET6, a6.sin6_port = htons((uint16_t)port), a6.sin6_addr = in6addr_any;
+    a4.sin_family = AF_INET, a4.sin_port = htons((uint16_t)port), a4.sin_addr.s_addr = htonl(INADDR_ANY);
+    bool v4 = b[0] && inet_pton(AF_INET, b, &a4.sin_addr) == 1, v6 = !v4 && b[0] && inet_pton(AF_INET6, b, &a6.sin6_addr) == 1;
+    if (b[0] && !v4 && !v6) return NO_SOCK;
+    sock_t s = NO_SOCK;
+    if (!v4) {  // (IPv6 - both families on one socket unless a single IPv6 address was given)
+        s = socket(AF_INET6, type, 0);
+        if (s != NO_SOCK) {
+            int off = 0, on = 1;
+            setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, (const char *)&off, sizeof off);
+            if (type == SOCK_STREAM) setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char *)&on, sizeof on);
+            if (bind(s, (struct sockaddr *)&a6, sizeof a6)) {
+#ifdef _WIN32
+                closesocket(s);
+#else
+                close(s);
+#endif
+                s = NO_SOCK;
+            } else *fam = AF_INET6;
+        }
+        if (s != NO_SOCK || v6) return s;
+    }
+    s = socket(AF_INET, type, 0);
+    if (s == NO_SOCK) return s;
+    int on = 1;
+    if (type == SOCK_STREAM) setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char *)&on, sizeof on);
+    if (bind(s, (struct sockaddr *)&a4, sizeof a4)) {
+#ifdef _WIN32
+        closesocket(s);
+#else
+        close(s);
+#endif
+        return NO_SOCK;
+    }
+    *fam = AF_INET;
+    return s;
+}
 static uint64_t g_fwd_packets, g_fwd_bytes, g_world_packets, g_trimmed, g_world_held;
 static int g_world_crowd = WORLD_CROWD, g_world_n[4];  // (players in each game's shared world, counted every second)
 static float g_world_near = WORLD_NEAR_M;
@@ -167,12 +248,12 @@ static uint64_t siphash(const uint8_t *m, size_t n) {
     for (int r = 0; r < 4; r++) SIPROUND;
     return v0 ^ v1 ^ v2 ^ v3;
 }
-static uint64_t cookie(const struct sockaddr_in *a, uint64_t id, uint64_t minute) {
-    uint8_t m[22];
-    memcpy(m, &a->sin_addr.s_addr, 4), memcpy(m + 4, &a->sin_port, 2), memcpy(m + 6, &id, 8), memcpy(m + 14, &minute, 8);
+static uint64_t cookie(const Addr *a, uint64_t id, uint64_t minute) {
+    uint8_t m[34];
+    memcpy(m, a->sin6_addr.s6_addr, 16), memcpy(m + 16, &a->sin6_port, 2), memcpy(m + 18, &id, 8), memcpy(m + 26, &minute, 8);
     return siphash(m, sizeof m);
 }
-static bool cookie_ok(const struct sockaddr_in *a, uint64_t id, const uint8_t *c, uint64_t now) {
+static bool cookie_ok(const Addr *a, uint64_t id, const uint8_t *c, uint64_t now) {
     uint64_t v, minute = now / 60000;
     memcpy(&v, c, 8);
     return v == cookie(a, id, minute) || v == cookie(a, id, minute - 1);
@@ -203,14 +284,17 @@ static void make_key(void) {
     }
 }
 
-static const char *who(const Client *c, char *b) {
-    snprintf(b, 64, "%s:%u", inet_ntoa(c->addr.sin_addr), ntohs(c->addr.sin_port));
+static const char *who(const Client *c, char *b) {  // ("a.b.c.d:port", "[v6]:port")
+    char h[64] = "?";
+    if (addr_v4(&c->addr)) inet_ntop(AF_INET, c->addr.sin6_addr.s6_addr + 12, h, sizeof h);
+    else inet_ntop(AF_INET6, &c->addr.sin6_addr, h, sizeof h);
+    snprintf(b, 64, addr_v4(&c->addr) ? "%s:%u" : "[%s]:%u", h, ntohs(c->addr.sin6_port));
     return b;
 }
-static bool same_addr(const struct sockaddr_in *a, const struct sockaddr_in *b) {
-    return a->sin_addr.s_addr == b->sin_addr.s_addr && a->sin_port == b->sin_port;
+static bool same_addr(const Addr *a, const Addr *b) {
+    return !memcmp(&a->sin6_addr, &b->sin6_addr, sizeof a->sin6_addr) && a->sin6_port == b->sin6_port;
 }
-static Client *by_addr(const struct sockaddr_in *a) {
+static Client *by_addr(const Addr *a) {
     for (int i = 0; i < g_max; i++)
         if (g_c[i].used && same_addr(&g_c[i].addr, a)) return &g_c[i];
     return NULL;
@@ -225,7 +309,7 @@ static void send_to(Client *c, const void *p, size_t n) {
         if (c->budget < n) { c->trimmed += n, g_trimmed += n; return; }
         c->budget -= (uint32_t)n;
     }
-    sendto(g_s, (const char *)p, (int)n, 0, (const struct sockaddr *)&c->addr, sizeof c->addr);
+    send_raw(&c->addr, p, n);
 }
 static void earn(Client *c, int n) {  // (an unverified address sent n bytes: that much may go back)
     if (!c->verified) c->budget = c->budget + (uint32_t)n > BUDGET_MAX ? BUDGET_MAX : c->budget + (uint32_t)n;
@@ -338,14 +422,13 @@ int main(int argc, char **argv) {
 #ifndef LZA_NO_ACCOUNTS
     if (add_user) return accounts_add_user(&ao, add_user);
 #endif
-    g_s = socket(AF_INET, SOCK_DGRAM, 0);
-    struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)port), .sin_addr.s_addr = htonl(INADDR_ANY)};
-    if (bind_addr[0]) a.sin_addr.s_addr = inet_addr(bind_addr);
-    if (g_s == NO_SOCK || bind(g_s, (struct sockaddr *)&a, sizeof a)) {
-        fprintf(stderr, "lzaserver: can't use UDP port %d\n", port);
+    g_s = lza_listen(SOCK_DGRAM, bind_addr, port, &g_fam);
+    if (g_s == NO_SOCK) {
+        fprintf(stderr, "lzaserver: can't use UDP port %d%s\n", port, bind_addr[0] ? " on that address" : "");
         return 1;
     }
-    printf("lzaserver %d: UDP port %d, up to %d players (cookies: forged addresses get nothing amplified)\n", VERSION, port, g_max);
+    printf("lzaserver %d: UDP port %d (%s), up to %d players (cookies: forged addresses get nothing amplified)\n", VERSION, port,
+           g_fam == AF_INET6 ? (bind_addr[0] ? "IPv6" : "IPv6 and IPv4") : "IPv4", g_max);
 #ifndef LZA_NO_ACCOUNTS
     if (accounts) {
         ao.port = port;
@@ -368,9 +451,11 @@ int main(int argc, char **argv) {
         int r = select((int)g_s + 1, &rd, NULL, NULL, &tv);
         uint64_t now = now_ms();
         if (r > 0 && FD_ISSET(g_s, &rd)) {
-            struct sockaddr_in from;
-            socklen_t fl = sizeof from;
-            int n = (int)recvfrom(g_s, (char *)buf, sizeof buf, 0, (struct sockaddr *)&from, &fl);
+            struct sockaddr_storage fs;
+            socklen_t fl = sizeof fs;
+            int n = (int)recvfrom(g_s, (char *)buf, sizeof buf, 0, (struct sockaddr *)&fs, &fl);
+            Addr from;
+            addr_in(&from, &fs);
             if (n >= 9) {
                 uint64_t id;
                 memcpy(&id, buf + (buf[0] == 'H' ? 2 : 1), 8);
@@ -381,7 +466,7 @@ int main(int argc, char **argv) {
                     uint8_t ck[9] = {'C'};
                     uint64_t v = cookie(&from, id, now / 60000);
                     memcpy(ck + 1, &v, 8);
-                    sendto(g_s, (const char *)ck, sizeof ck, 0, (const struct sockaddr *)&from, sizeof from);
+                    send_raw(&from, ck, sizeof ck);
                     bool echoed = n >= 19 && cookie_ok(&from, id, buf + 11, now);
                     if (!c) {
                         Client *dup = by_id(id);

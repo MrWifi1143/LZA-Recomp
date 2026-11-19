@@ -852,8 +852,22 @@ static void *accept_thread(void *arg) {
         if (s == NO_SOCK) continue;
         Conn *c = calloc(1, sizeof *c);
         c->s = s;
+        // (the address its tries are counted by, and logged as: IPv4 as itself - also one that came in on the IPv6
+        // socket as ::ffff:a.b.c.d - and IPv6 by its /64: one home or phone gets a /64 and picks any address in it)
         if (a.ss_family == AF_INET) inet_ntop(AF_INET, &((struct sockaddr_in *)&a)->sin_addr, c->ip, sizeof c->ip);
-        else inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&a)->sin6_addr, c->ip, sizeof c->ip);
+        else {
+            const uint8_t *b = ((struct sockaddr_in6 *)&a)->sin6_addr.s6_addr;
+            static const uint8_t mapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+            if (!memcmp(b, mapped, 12)) inet_ntop(AF_INET, b + 12, c->ip, sizeof c->ip);
+            else if (!memcmp(b, in6addr_loopback.s6_addr, 16)) snprintf(c->ip, sizeof c->ip, "::1");
+            else {
+                struct in6_addr p = {0};
+                memcpy(p.s6_addr, b, 8);
+                char t[64];
+                inet_ntop(AF_INET6, &p, t, sizeof t);
+                snprintf(c->ip, sizeof c->ip, "%s/64", t);
+            }
+        }
         char k[80];
         snprintf(k, sizeof k, "n:%s", c->ip);
         pthread_mutex_lock(&g_lim);
@@ -966,12 +980,9 @@ int accounts_start(const AccountsOptions *o) {
     mbedtls_ssl_conf_min_tls_version(&g_conf, MBEDTLS_SSL_VERSION_TLS1_3);
     mbedtls_ssl_conf_max_tls_version(&g_conf, MBEDTLS_SSL_VERSION_TLS1_3);
 
-    g_ls = socket(AF_INET, SOCK_STREAM, 0);
-    int one = 1;
-    setsockopt(g_ls, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof one);
-    struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)g_o.port)};
-    a.sin_addr.s_addr = g_o.bind[0] ? inet_addr(g_o.bind) : htonl(INADDR_ANY);
-    if (g_ls == NO_SOCK || bind(g_ls, (struct sockaddr *)&a, sizeof a) || listen(g_ls, 32)) {
+    int fam = 0;
+    g_ls = lza_listen(SOCK_STREAM, g_o.bind, g_o.port, &fam);  // (lzaserver.c: IPv6 and IPv4, as the UDP port)
+    if (g_ls == NO_SOCK || listen(g_ls, 32)) {
         fprintf(stderr, "lzaserver: accounts: can't use TCP port %d\n", g_o.port);
         return 1;
     }
