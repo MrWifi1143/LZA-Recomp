@@ -57,9 +57,13 @@ static bool gone_body(uint64_t b) {
 }
 static volatile int g_world;   // (the shared world on: sending and showing - below)
 static bool g_body_hooks;      // (body_hook registered)
+static volatile int g_follow;  // (the mod API follows the player: warp_follow_player)
+void newnpc_body(uint64_t body);  // (hle/newnpc.c: the mod API's characters' bodies)
+extern volatile int g_newnpc_mods;
 static int body_hook(Cpu *c, uint64_t addr) {
     uint64_t o = c->x[0];
-    if ((g_state < 0 || g_state == 3) && !g_log_every && !g_world && !g_ngone) return 0;  // (off, or finished)
+    if (g_newnpc_mods) newnpc_body(o);
+    if ((g_state < 0 || g_state == 3) && !g_log_every && !g_world && !g_ngone && !g_follow) return 0;  // (off, or finished)
     if (!is_body(o)) return 0;
     if (g_ngone && gone_body(o)) {  // (a let-go dressed walker: kept under the street until the crowd lets it go)
         float *pos = (float *)(uintptr_t)(o + 0x90);
@@ -129,10 +133,35 @@ __attribute__((constructor)) static void warp_init(void) {
     }
 }
 
+// ---- the mod API's player (runtime/hle/modapi.c): where it is, facing, and put somewhere (its body written for a few
+// frames, as the warp above does - the game settles it there)
+void warp_follow_player(void) {
+    if (g_follow) return;
+    g_follow = 1;
+    if (!g_body_hooks) g_body_hooks = true, rt_register_fnhook_at(STEP_A, body_hook), rt_register_fnhook_at(STEP_B, body_hook);
+}
+static float g_tp[3];
+static volatile int g_tp_n;
+static bool heap_read(uint64_t a, void *out, size_t n);
+bool warp_player_now(float pos[3], float *yaw) {  // (yaw: 0 - the body doesn't turn; the facing is the node's, hle/newnpc.c)
+    uint64_t b = player_body(g_frame);
+    if (!b || !heap_read(b + 0x90, pos, 12)) return false;
+    if (yaw) *yaw = 0;
+    return true;
+}
+void warp_teleport(const float p[3]) {
+    memcpy(g_tp, p, 12);
+    g_tp_n = 10;
+}
 static void ghost_frame(uint64_t frame);
 void warp_frame(uint64_t frame) {  // (each game frame: runtime/hle/input.c)
     g_frame = frame;
     ghost_frame(frame);
+    if (g_tp_n > 0) {  // (the mod API's teleport)
+        uint64_t b = player_body(frame);
+        if (!b) g_tp_n = 0, LOG("[warp] teleport: the player has no body yet\n");
+        else if (memcpy((void *)(uintptr_t)(b + 0x90), g_tp, 12), --g_tp_n == 0) LOG("[warp] the player put at %.2f %.2f %.2f\n", g_tp[0], g_tp[1], g_tp[2]);
+    }
     if (g_state < 0 && !g_log_every) return;
     uint64_t b = player_body(frame);
     if (g_log_every > 0 && frame % (uint64_t)g_log_every == 0 && b) {
@@ -617,6 +646,13 @@ static int ai_trigger_hook(Cpu *c, uint64_t addr) {
     return 0;
 }
 static void anim_set_float(Cpu *c, uint64_t bb, uint32_t idx, float val, uint64_t scratch) { anim_set(c, BB_SET_FLOAT, bb, idx, 0, val, scratch); }
+// (hle/newnpc.c: the mod API's characters walk with the same "move" value)
+uint64_t warp_anim_bb(uint64_t node) { return anim_bb_of_node(node); }
+bool warp_anim_move_index(uint64_t bb, uint32_t *idx) { return anim_float_index(bb, HASH_MOVE, idx); }
+void warp_anim_set_move(Cpu *c, uint64_t bb, uint32_t idx, float val, uint64_t scratch) {
+    uint64_t v = 0;
+    if (heap_read(bb, &v, 8) && v == BB_VTABLE) anim_set_float(c, bb, idx, val, scratch);
+}
 
 // ---- Sitting, talking, standing in a loop of its own (2026-11-17, Lua: testout/za-mp8/tools/sit.lua, stand.lua). A
 // townsperson's pose is its blackboard too, set once from its placement as it is made (0x700010e6ac / 0x700010a814 -> the
@@ -915,9 +951,11 @@ static void stand_in_walk(Cpu *c, Peer *p, uint64_t node) {
     anim_set_float(c, p->move_bb, p->move_idx, want, p->move_scratch);
     p->move_given = want, p->move_given_at = f;
 }
+void newnpc_node(Cpu *c, uint64_t node);  // (hle/newnpc.c: the mod API's characters, walked / put away)
 static int node_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     uint64_t n = c->x[0];
+    if (g_newnpc_mods) newnpc_node(c, n);
     if ((!g_world && !g_ngone) || n < HEAP_BASE || n >= HEAP_BASE + HEAP_MAX) return 0;
     if (g_ngone && gone_node(n) && *(const uint64_t *)(uintptr_t)n == NODE_VTABLE) {  // (a let-go dressed character: away)
         float *t = (float *)(uintptr_t)(n + 0xe0);
@@ -2110,10 +2148,14 @@ static Peer *peer_from(const WorldPkt *k, uint64_t via) {
         if (g_peers[i].id && g_peers[i].id == k->from) return !via || g_peers[i].via == via ? &g_peers[i] : NULL;
     return NULL;
 }
+static bool g_node_hooked;
+void warp_node_hook_on(void) {  // (the mod API's characters: hle/newnpc.c)
+    if (!g_node_hooked) g_node_hooked = true, rt_register_fnhook_at(NODE_UPDATE, node_hook);
+}
 static void hooks_on(void) {
     if (g_hooked) return;
     g_hooked = true;
-    rt_register_fnhook_at(NODE_UPDATE, node_hook);
+    warp_node_hook_on();
     rt_register_fnhook_at(BB_SET_FLOAT, bb_set_hook);
     rt_register_fnhook_at(INTERACT_NPC_UPDATE, interact_hook);
     rt_register_fnhook_at(BB_SET_TRIGGER, ai_trigger_hook);
@@ -2771,10 +2813,23 @@ static int part_index_hook(Cpu *c, uint64_t addr) {
     return 1;
 }
 static bool g_dress_hooked;
+// The CharacterCreationMaster make: the shared world's dressing (dress_hook) and the mod API's characters (hle/newnpc.c
+// newnpc_made: which one was made) - one hook on it, either or both
+void newnpc_made(Cpu *c);
+static volatile int g_make_api;
+static int cc_make_hook(Cpu *c, uint64_t addr) {
+    if (g_make_api) newnpc_made(c);
+    return g_dress_hooked ? dress_hook(c, addr) : 0;
+}
+static bool g_make_hooked;
+void warp_make_hook_on(void) {
+    g_make_api = 1;
+    if (!g_make_hooked) g_make_hooked = true, rt_register_fnhook_at(CC_MAKE, cc_make_hook);
+}
 static void dress_hook_on(void) {
     if (g_dress_hooked) return;
     g_dress_hooked = true;
-    rt_register_fnhook_at(CC_MAKE, dress_hook);
+    if (!g_make_hooked) g_make_hooked = true, rt_register_fnhook_at(CC_MAKE, cc_make_hook);
     rt_register_fnhook_at(PART_BY_INDEX, part_index_hook);
     pose_hooks_on();  // (every character's pose, as it is made - the level's people at its load)
     if (own_npc()) newnpc_on();  // (the station spawns kept as the levels load: their own townspeople made from them)

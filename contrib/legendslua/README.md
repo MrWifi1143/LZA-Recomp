@@ -1,8 +1,14 @@
 # Legends Lua
 
-Lua 5.3 scripting for the recompiled games (Pokémon Legends: Z-A and Legends: Arceus). It's a runtime plugin: hook
-any game function, read and write game memory, call the game's own functions and run something every frame. Built
-for research and for mods that need code.
+Lua 5.3 scripting for the recompiled games (Pokémon Legends: Z-A and Legends: Arceus). It's a runtime plugin with two
+layers:
+
+- **The mod API** (`docs/lua-api.md`): mods carry scripts in `mods/<name>/lua/`. Scripts can make new characters
+  that the game itself creates and walk them around, react to the player (events: tick, area loaded, buttons, talk,
+  near), set timers, add console commands and show notices. It's the same in both games, it's written in `api.lua`
+  on top of the game's `runtime/modapi.h`, and there are samples in `examples/`.
+- **The raw layer** (below): hook any game function, read and write game memory, call the game's own functions and
+  run something every frame. It's for research and for what the mod API doesn't have yet.
 
 **Only run scripts you trust.** A script can do anything the game can: change your save, crash the game, or read any
 of its memory.
@@ -10,12 +16,16 @@ of its memory.
 ## Turning it on
 
 1. The plugin ships in `plugins/` next to the game (`liblegendslua.so` on Linux, `legendslua.dll` on Windows). To
-   build it yourself: `make legendslua`.
-2. Switch it on in the start screen: **Mods → Legends Lua**. (Or in `larecomp.ini`: `plugins_on = liblegendslua.so`.
-   Use the plugin's *file name*.)
-3. Put scripts in `<game folder>/lua/*.lua`. They run in name order as the game starts, before the game's first
-   instruction, so boot-time functions can be hooked too.
-4. Saving a script reloads it (hot reload): its hooks are dropped and it runs again.
+   build it yourself: `make legendslua` (clang 19+ or zig 0.14+: `api.lua` is built in with `#embed`).
+2. A mod that is on and has a `lua/` folder loads it by itself. For scripts in `<game folder>/lua/` (research), switch
+   it on in the start screen: **Mods → Legends Lua**. (Or in `larecomp.ini`: `plugins_on = liblegendslua.so`. Use the
+   plugin's *file name*.)
+3. Scripts run in name order as the game starts, before the game's first instruction, so boot-time functions can be
+   hooked too. The game folder's `lua/` runs first, then each mod's `lua/` in the mods' order.
+4. Saving any script reloads them all (hot reload): what they made (characters, hooks, handlers, timers) is dropped
+   and they run again.
+5. A script error is logged, never passed on to the game. A script that runs on for over a second at once is stopped.
+   `lua.stats()` (or the console command `stats`) shows what the scripts cost per frame.
 
 The log (`lasrecomp.log` / `play.log`) shows `[lua] running <name>.lua` and anything a script prints.
 
@@ -23,7 +33,7 @@ The log (`lasrecomp.log` / `play.log`) shows `[lua] running <name>.lua` and anyt
 
 Write Lua to `<dir>/lua_run.lua`, where `<dir>` is `LARECOMP_LIVE` if set, else the game folder. It runs once in the
 running game and is then removed. What it prints goes to the log and to `<dir>/lua_out.txt`, so you can poke a
-running game from a shell:
+running game from a shell. A file `<dir>/lua_cmd` runs console commands (`cmd.add`) instead, one per line:
 
 ```sh
 echo 'log(string.format("%x", mem.u64(0x7006159000)))' > live/lua_run.lua; sleep 2; cat live/lua_out.txt
