@@ -284,6 +284,20 @@ static void do_spawn(Cpu *c, const Req *r) {
         }
         b = (uint64_t)(uintptr_t)ents, e = b + 0xc0 * (uint64_t)n;
     }
+    if (r->mod && s.nent && getenv("LARECOMP_MODNPC_TALK") && atoi(getenv("LARECOMP_MODNPC_TALK"))) {  // (research: talkable)
+        static char *talk;
+        if (!talk) talk = hle_alloc(64), strcpy(talk, "StandTalkNpcLookAtOnInteractTurn");
+        for (uint64_t q = b; q < e; q += 0xc0) {
+            uint64_t vp = 0, vl = 0;
+            memcpy(&vp, (const void *)(uintptr_t)(q + 0x10), 8), memcpy(&vl, (const void *)(uintptr_t)(q + 0x18), 8);
+            if (vl == 12 && vp && !memcmp((const void *)(uintptr_t)vp, "TalkNpcEmpty", 12)) {
+                uint64_t h = fnv(talk), tp = (uint64_t)(uintptr_t)talk, tl = strlen(talk), z = 0;
+                memcpy((void *)(uintptr_t)(q + 8), &h, 8), memcpy((void *)(uintptr_t)(q + 0x10), &tp, 8);
+                memcpy((void *)(uintptr_t)(q + 0x18), &tl, 8), memcpy((void *)(uintptr_t)(q + 0x20), &z, 8);
+                LOG("[newnpc] %s_%03d: talk script %s (was TalkNpcEmpty)\n", r->mod ? "luanpc" : "newnpc", r->k, talk);
+            }
+        }
+    }
     memcpy(blk + 0x1a0, &b, 8), memcpy(blk + 0x1a8, &e, 8), memcpy(blk + 0x1b0, &e, 8);
     float *t = (float *)(blk + 0x40 + 0x30), *q = (float *)(blk + 0x40 + 0x20);
     t[0] = r->at[0], t[1] = r->at[1], t[2] = r->at[2];

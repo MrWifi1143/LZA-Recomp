@@ -558,6 +558,11 @@ static int r_script_result(lua_State *s) {  // -> state (0 waiting, 1 ran, 2 fai
     lua_pushstring(s, out);
     return 2;
 }
+static int r_message_text(lua_State *s) {
+    need_m3(s);
+    lua_pushboolean(s, M->message_text((int)luaL_checkinteger(s, 1), luaL_checkstring(s, 2)));
+    return 1;
+}
 static int r_time_set(lua_State *s) { need_m3(s); lua_pushboolean(s, M->time_set((float)luaL_checknumber(s, 1))); return 1; }
 static int r_item_give(lua_State *s) { need_m3(s); lua_pushboolean(s, M->item_give((int)luaL_checkinteger(s, 1), (int)luaL_checkinteger(s, 2))); return 1; }
 static int r_npc_object(lua_State *s) {
@@ -655,7 +660,7 @@ static void new_state(void) {
                                   {"npc_outfit", r_npc_outfit}, {"npc_anim", r_npc_anim}, {"poke_spawn", r_poke_spawn}, {"poke_remove", r_poke_remove},
                                   {"poke_state", r_poke_state}, {"work", r_work}, {"game_script", r_game_script},
                                   {"script_result", r_script_result}, {"item_give", r_item_give}, {"npc_object", r_npc_object},
-                                  {"time_set", r_time_set},
+                                  {"time_set", r_time_set}, {"message_text", r_message_text},
                                   {"trace", l_trace}, {NULL, NULL}};
     uint64_t was = deadline_set(LUA_LOAD_MS);
     if (luaL_loadbufferx(L, k_api_lua, strlen(k_api_lua), "=api.lua", "t")) {

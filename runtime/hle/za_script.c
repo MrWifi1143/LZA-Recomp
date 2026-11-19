@@ -189,5 +189,102 @@ static void time_run(Cpu *c) {  // (the game's thread, regs saved by the caller)
     LOG("[script] time of day set to %.2f h (clock %llx)\n", g_time_hour, (unsigned long long)clock);
 }
 
+// ---- A message window with a script's own text (the mod API's message_text; api.lua's ui.message / ui.say): the game's
+// windows show a line of a loaded message file by its label. Reserved labels "lza_say_0".."lza_say_15" are answered
+// here in any file: the label lookup 0x70010352a0(the file's table +0x80, -> name struct {hash, char *, len}) gives
+// them index MSG_SLOT0 + n, and the line fetch 0x7001034f6c(file, index, out) gives that index our text - through the
+// game's own line decoder 0x7001035170(file, chars, length, index, out), the text XORed with the index's key first
+// (0x7C89 + 0x2983 * index, turned 3 bits left a character - as the files have it; Studio formats/message.cpp)
+// unless the file says its lines are plain ([+0x68]+8). Found 2026-11-19 by the key's constants in the code.
+#define MSG_LOOKUP 0x70010352a0ull
+#define MSG_FETCH 0x7001034f6cull
+#define MSG_DECODE 0x7001035170ull
+#define MSG_SLOT0 0x7f00u
+#define NSAY 16
+#define SAY_MAX 400
+static uint16_t g_say[NSAY][SAY_MAX + 1];
+static int g_say_len[NSAY];
+static uint16_t *g_say_buf;  // (guest memory: the line as the decoder reads it)
+static pthread_mutex_t g_say_lock = PTHREAD_MUTEX_INITIALIZER;
+static int say_slot_of(uint64_t k) {  // (a name struct {hash, char *, len}: lza_say_<n> -> n, else -1)
+    uint64_t p = 0, n = 0;
+    if (k < 0x7000000000ull || k >= 0x7400000000ull) return -1;
+    memcpy(&p, (const void *)(uintptr_t)(k + 8), 8), memcpy(&n, (const void *)(uintptr_t)(k + 0x10), 8);
+    if (n < 9 || n > 10 || p < 0x7000000000ull || memcmp((const void *)(uintptr_t)p, "lza_say_", 8)) return -1;
+    char d[3] = {0};
+    memcpy(d, (const void *)(uintptr_t)(p + 8), n - 8);
+    int slot = atoi(d);
+    return slot >= 0 && slot < NSAY ? slot : -1;
+}
+static int msg_lookup_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    int slot = say_slot_of(c->x[1]);
+    if (slot < 0) return 0;
+    c->x[0] = MSG_SLOT0 + (uint32_t)slot;
+    return 1;
+}
+// (the framework's "has this file that label" - the native c56DE81E7.f0EBFE455 -> 0x700093d21c(file, name): the lookup
+// and index < its line count; a reserved one is answered yes)
+#define MSG_HAS 0x700093d21cull
+static int msg_has_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    if (say_slot_of(c->x[1]) < 0) return 0;
+    c->x[0] = 1;
+    return 1;
+}
+static int msg_fetch_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    uint32_t idx = (uint32_t)c->x[1];
+    if (idx < MSG_SLOT0 || idx >= MSG_SLOT0 + NSAY) return 0;
+    int slot = (int)(idx - MSG_SLOT0);
+    uint64_t file = c->x[0], out = c->x[2], hdr = 0;
+    memcpy(&hdr, (const void *)(uintptr_t)(file + 0x68), 8);
+    uint32_t plain = 0;
+    if (hdr >= 0x7000000000ull) memcpy(&plain, (const void *)(uintptr_t)(hdr + 8), 4);
+    pthread_mutex_lock(&g_say_lock);
+    int n = g_say_len[slot];
+    uint16_t key = (uint16_t)(0x7C89u + 0x2983u * idx);
+    for (int i = 0; i <= n; i++) {  // (its terminating 0 too: the decoder stops there)
+        uint16_t ch = i < n ? g_say[slot][i] : 0;
+        g_say_buf[i] = plain ? ch : (uint16_t)(ch ^ key);
+        key = (uint16_t)((key << 3) | (key >> 13));
+    }
+    pthread_mutex_unlock(&g_say_lock);
+    uint64_t sx[32], snzcv = c->nzcv;
+    __uint128_t sv[32];
+    memcpy(sx, c->x, sizeof sx), memcpy(sv, c->v, sizeof sv);
+    c->x[0] = file, c->x[1] = (uint64_t)(uintptr_t)g_say_buf, c->x[2] = (uint64_t)(n + 1), c->x[3] = idx, c->x[4] = out;
+    guest_call(c, MSG_DECODE);
+    memcpy(c->x, sx, sizeof sx), memcpy(c->v, sv, sizeof sv), c->nzcv = snzcv;
+    c->x[0] = 0;  // (its flags)
+    return 1;
+}
+// the text of reserved line n (UTF-8; "\n" a new line): 1 set
+int za_message_text(int slot, const char *utf8) {
+    if (slot < 0 || slot >= NSAY || !utf8) return 0;
+    static int on;
+    if (!on) {
+        on = 1;
+        g_say_buf = hle_alloc(2 * (SAY_MAX + 2));
+        rt_register_fnhook_at(MSG_LOOKUP, msg_lookup_hook);
+        rt_register_fnhook_at(MSG_FETCH, msg_fetch_hook);
+        rt_register_fnhook_at(MSG_HAS, msg_has_hook);
+    }
+    uint16_t u[SAY_MAX + 1];
+    int n = 0;
+    const unsigned char *q = (const unsigned char *)utf8;
+    while (*q && n < SAY_MAX) {  // (UTF-8 -> UTF-16: the BMP - what the game's fonts have)
+        uint32_t cp = *q++;
+        if (cp >= 0xf0) { cp = (cp & 7) << 18; for (int k = 12; k >= 0 && *q; k -= 6) cp |= (uint32_t)(*q++ & 0x3f) << k; cp = '?'; }
+        else if (cp >= 0xe0) { cp = (cp & 0xf) << 12; if (*q) cp |= (uint32_t)(*q++ & 0x3f) << 6; if (*q) cp |= (uint32_t)(*q++ & 0x3f); }
+        else if (cp >= 0xc0) { cp = (cp & 0x1f) << 6; if (*q) cp |= (uint32_t)(*q++ & 0x3f); }
+        u[n++] = (uint16_t)cp;
+    }
+    pthread_mutex_lock(&g_say_lock);
+    memcpy(g_say[slot], u, 2 * (size_t)n), g_say_len[slot] = n;
+    pthread_mutex_unlock(&g_say_lock);
+    return 1;
+}
+
 // what the jobs cost (render thread: the stats line)
 void za_script_stats(uint64_t *runs, uint64_t *ns) { *runs = g_runs, *ns = g_ns; }

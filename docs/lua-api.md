@@ -141,11 +141,13 @@ made within a frame or two in the level the player is in.
 | `item.give(id, n [, show])` | `n` of item `id` into the bag, by the game's own add. **Arceus**: `Bag::AddItem` (the script binding `Bag.AddItem`); Hisui's own items have their own numbers - its Poké Ball is 1710 (4 is the modern one, which Arceus doesn't use). **Z-A**: `Commands.AddItem`; with `show` the game's own "You obtained 10 Poké Balls!" window too (A closes it). Returns true when asked. |
 | `game.set_time(hour)` | (Z-A) The time of day: the game's clock set to that hour (0-24), as the bench's "wait until night" does. The story may hold the clock (the test save held 15:00): the hold is let go. The city changes after the game's own short black transition (lit windows and the night zones at night); the area loads again, so script Pokémon go and characters are made again. |
 
-## The game's own scripts: `game.script`, `game.call`, `game.run` (Z-A)
+## The game's own scripts: `game.script`, `game.call`, `game.run`
 
-Z-A's events are Lua 5.4 inside the game (Haxe compiled to Lua: the framework `script/lua/bin/release/main/main.blua`
-and every event in `event_ik.blua`). A mod can run Lua text there, at the game's next frame, with everything its events
-have:
+Both games run their events as Lua inside the game, Haxe compiled to Lua. **Z-A**: Lua 5.4, the framework
+`script/lua/bin/release/main/main.blua` and every event in `event_ik.blua`, the jobs on its main state. **Arceus**: Lua
+5.3 with the C++ side bound through sol2 (`bin/haxe/release/event/*.blua`, `field/*.blua`), the jobs on the player's
+field script's state (about 500 globals: `Bag`, `AppCommand`, `CameraManager`, `FieldMessageWindowManager`,
+`Global.GetFieldMessageWindowManager()`...; names are plain). A mod can run Lua text there, at the game's next frame:
 
 ```lua
 game.call("Commands.FObj_Get_Pos", "Player", function(r) print("the player is at", r) end)
@@ -172,7 +174,7 @@ game.run("Commands.S6DCE2895AC79F359(Commands.S5DF104B25CC642C7(4), 10)")  -- th
 * **Only what a mod would do**: this is the game's own machinery, with nothing checked. A wrong call can break an event
   or the save, like any raw-layer hook.
 * Each job costs a load of its text: tens of microseconds on the game's thread. Keep them for events, not every frame.
-* Arceus' scripts aren't reached this way yet (`game.script` answers `nil, "not in this game"`).
+* Arceus: `Commands` and the name hashing are Z-A's only; `game.call("Global.GetPlayerComponent", fn)` and the like.
 
 ## The player: `player`
 
@@ -213,7 +215,9 @@ off(id)
 | | |
 |---|---|
 | `timer.after(sec, fn)` / `timer.every(sec, fn)` | Returns an id; `timer.cancel(id)` stops it. |
-| `ui.notify(text [, sec])` | A notice at the top of the screen (default 4 s). `ui.say(npc_or_name, text)`. |
+| `ui.notify(text [, sec])` | A notice at the top of the screen (default 4 s). |
+| `ui.message(text [, fn])` | **Z-A**: the game's own message window (the one its people talk in) with this text - `\n` for a new line; A closes it, then `fn()`. Elsewhere a notice. |
+| `ui.say(npc_or_name, text)` | `ui.message("Name:\n" .. text)`. (`n:say(text)` stays a notice: it doesn't wait for A.) |
 | `cmd.add(name, fn, help)` | A console command (below). Its arguments are the words after the name; numbers come as numbers. |
 | `vec(x, y, z)` | `+ - *`, `:len()`, `:dist(b)`, `:dist2d(b)`, `:yaw_to(b)`, `:ahead(yaw, d)`, `:lerp(b, t)`, `:unpack()`, `.x .y .z`. |
 | `include("lib/x.lua")` | Runs another file of this mod in its globals and returns what it returns. |
@@ -265,12 +269,16 @@ At 60 fps a frame is 16,700 us, so a mod like the samples costs about 0.1-0.2% o
 
 ## Not there yet
 
-* **A message window with a script's own text.** The game's windows show its texts by label (`game.run` above, Z-A);
-  `n:say` and `ui.say` show a notice. `talk` is an A press near the character, not the game's Talk prompt.
-* **Weather** (both games): Z-A's framework has no setter (its `FixWeather` is empty), only the C++ `WeatherController`.
-  Arceus' field weather isn't found yet.
-* **Arceus' time of day and Arceus' own scripts** (its `SetTime` / `GetWeather` bindings belong to a mini-game and the
-  battle AI).
+* **The game's Talk prompt** on script characters. `talk` is an A press near the character. Z-A: giving one the talk
+  script of a talkable townsperson (`StandTalkNpcLookAtOnInteractTurn` for `TalkNpcEmpty`, research switch
+  `LARECOMP_MODNPC_TALK=1`), or making it as a copy of one, doesn't bring the prompt up - it needs more than its spawn
+  entries (its talk data, by its object name, likely).
+* **Weather** (both games). Z-A's framework has no setter (its `FixWeather` is empty); the weather the game reports
+  comes from an object of the environment clock's (a list of 4 entries, the current one at +0x68): pointing it at
+  another entry changes what the game reports (`c4B6212B8.f6362F6BB()`), but nothing on screen. Arceus' scripts have
+  no weather calls.
+* **Arceus' time of day**: its scripts have no clock calls (`EventProgressTimeManager` is a stopwatch; resting at camp is
+  C++). **Arceus' own-text window**: its line decoder is found (0x7002b2e654, the same as Z-A's), its label path not yet.
 * **Z-A outfits other than `"player"`.**
 
 ## The raw layer

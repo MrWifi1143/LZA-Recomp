@@ -26,6 +26,7 @@ int za_script(const char *code);  // (hle/za_script.c: the game's own Lua)
 int za_script_result(int id, char *out, int cap);
 int newnpc_mod_object(int h, char *out, int cap);
 int za_time_set(float hour);
+int za_message_text(int slot, const char *text);
 bool warp_player_now(float pos[3], float *yaw);
 void warp_teleport(const float p[3]);
 uint64_t input_buttons_now(void);
@@ -76,6 +77,6 @@ static const LarecompModApi g_modapi = {
     .pokemon_spawn = poke_none, .pokemon_remove = poke_remove_none, .pokemon_state = poke_state_none,  // (not in Z-A yet)
     .game_work = warp_work,
     .game_script = za_script, .script_result = za_script_result, .item_give = item_give, .npc_object = newnpc_mod_object,
-    .time_set = za_time_set,
+    .time_set = za_time_set, .message_text = za_message_text,
 };
 const LarecompModApi *modapi_get(void) { return &g_modapi; }
