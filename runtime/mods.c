@@ -64,7 +64,9 @@ int mods_list(char names[][128], int max) {
         snprintf(ip, sizeof ip, "%s/mod.ini", p);  // (and a mod.ini alone: recomp features, say Lush Foliage)
         struct stat sb;
         bool ini = !stat(ip, &sb) && S_ISREG(sb.st_mode);
-        if (is_dir(p) && (find_romfs(p, 4, r, sizeof r) || is_dir(tp) || ini)) snprintf(names[n++], 128, "%s", e->d_name);
+        char lp[1100];
+        snprintf(lp, sizeof lp, "%s/lua", p);  // (and scripts alone - mods/<name>/lua/: Legends Lua runs them)
+        if (is_dir(p) && (find_romfs(p, 4, r, sizeof r) || is_dir(tp) || ini || is_dir(lp))) snprintf(names[n++], 128, "%s", e->d_name);
     }
     closedir(d);
     return n;
@@ -201,6 +203,16 @@ bool mod_ini_value(const char *key, char *out, size_t cap) {
     for (int i = 0; i < n; i++)  // (the first mod that sets it)
         if (mod_ini_get(names[i], key, out, cap)) { LOG("[mods] %s: %s = %s\n", names[i], key, out); return true; }
     return false;
+}
+
+int mod_lua_dirs(char dirs[][256], int max) {
+    char names[MODS_MAX][128];
+    int n = mods_active(names, MODS_MAX), k = 0;
+    for (int i = 0; i < n && k < max; i++) {
+        snprintf(dirs[k], 256, "mods/%s/lua", names[i]);
+        if (is_dir(dirs[k])) k++;
+    }
+    return k;
 }
 
 bool mod_romfs_override(const char *path, char *out, size_t cap) {

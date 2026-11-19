@@ -41,7 +41,7 @@ static volatile uint64_t g_frame;
 
 // skeletons posed lately (by pointer hash): the stand-in is picked among them
 #define NSK 1024
-static struct { volatile uint64_t sk; volatile float p[3]; volatile uint64_t frame; volatile uint32_t bones; } g_sk[NSK];
+static struct { volatile uint64_t sk; volatile float p[3]; volatile uint64_t frame, first; volatile uint32_t bones; } g_sk[NSK];
 static __thread uint64_t t_posing;  // (the skeleton being posed on this thread)
 static __thread uint32_t t_bones;   // (the most bones one skinning of it had: a person's body has 74 - the props' few)
 static volatile uint64_t g_player_sk;
@@ -120,6 +120,7 @@ static int pose_hook(Cpu *c, uint64_t addr) {
     uint64_t f = g_frame;
     if (mine) put(m, (const float *)g_draw, g_draw[3]);
     unsigned h = sk_slot(sk, f);
+    if (g_sk[h].sk != sk) g_sk[h].first = f;  // (first posed then: the mod API's characters' are new ones)
     g_sk[h].sk = sk, g_sk[h].p[0] = m[12], g_sk[h].p[1] = m[13], g_sk[h].p[2] = m[14], g_sk[h].frame = f, g_sk[h].bones = t_bones;
     float bp[3];
     // (the player's: posed where its body is - the drawn model can sit up to ~0.6 m off the body's point after a warp)
@@ -938,4 +939,40 @@ static void world_hooks(void) {
     if (getenv("LARECOMP_NPC_NOHOOK") && (atoi(getenv("LARECOMP_NPC_NOHOOK")) & 8)) return;
     rt_register_fnhook_at(POSE_FN, pose_hook);
     rt_register_fnhook_at(0x70029c983cull, palette_hook);
+}
+
+// ---- the mod API's characters (hle/pla_npc.c): where each is drawn is its posed skeleton - the person-sized one (100+
+// bones: people have 122-231, props 2-12) first posed at its spot after it was asked for (the people standing there are
+// older). The posing hooks above, switched on for them (with the shared world off, frames counted here).
+static int g_track;
+void pla_world_track_skeletons(void) {
+    if (g_track) return;
+    g_track = 1;
+    if (g_on <= 0) world_hooks();
+    LOG("[world] skeletons followed for scripts' characters\n");
+}
+void pla_world_api_frame(uint64_t frame) { if (g_on <= 0) g_frame = frame; }
+uint64_t pla_world_frame_now(void) { return g_frame; }
+uint64_t pla_world_skel_near(const float p[3], float r, unsigned minbones, uint64_t since, const uint64_t *skip, int nskip) {
+    uint64_t best = 0, f = g_frame;
+    float bd = r * r;
+    for (int i = 0; i < NSK; i++) {
+        uint64_t sk = g_sk[i].sk;
+        if (!sk || sk == g_player_sk || f - g_sk[i].frame >= 5 || g_sk[i].bones < minbones || g_sk[i].first < since) continue;
+        float ex = g_sk[i].p[0] - p[0], ez = g_sk[i].p[2] - p[2], d = ex * ex + ez * ez;
+        if (d >= bd || fabsf(g_sk[i].p[1] - p[1]) > 2.5f) continue;
+        bool taken = false;
+        for (int k = 0; k < nskip && !taken; k++) taken = skip[k] == sk;
+        if (!taken) bd = d, best = sk;
+    }
+    return best;
+}
+int pla_world_skel_pos(uint64_t sk, float out[3]) {  // (0: not posed lately - gone, or far / off screen a while)
+    uint64_t f = g_frame;
+    unsigned h = (unsigned)((sk * 0x9E3779B97F4A7C15ull) >> 54);
+    for (unsigned k = 0; k < 16; k++) {
+        unsigned i = (h + k) % NSK;
+        if (g_sk[i].sk == sk && f - g_sk[i].frame < 60) { out[0] = g_sk[i].p[0], out[1] = g_sk[i].p[1], out[2] = g_sk[i].p[2]; return 1; }
+    }
+    return 0;
 }

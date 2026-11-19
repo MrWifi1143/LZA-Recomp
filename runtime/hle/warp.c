@@ -167,11 +167,12 @@ static void works_write(void) {
 
 static volatile uint64_t g_seen_body;  // (the player's body as last found, warp or not: LARECOMP_LIVE's state shows it)
 static int g_world;  // (hle/pla_world.c, the shared world prototype: the player followed all the time)
+static volatile int g_api;  // (the mod API: scripts' characters made here too, the player followed - warp_api_start)
 
 static int cam_hook(Cpu *c, uint64_t addr) {
     (void)addr;
-    if ((g_state == 0 || g_state == 3 || g_world) && in_heap(c->x[0])) g_cam = c->x[0];
-    if (g_world) { extern void pla_npc_cam(Cpu *); pla_npc_cam(c); }  // (characters of our own are made here: hle/pla_npc.c)
+    if ((g_state == 0 || g_state == 3 || g_world || g_api) && in_heap(c->x[0])) g_cam = c->x[0];
+    if (g_world || g_api) { extern void pla_npc_cam(Cpu *); pla_npc_cam(c); }  // (characters of our own are made here: hle/pla_npc.c)
     if (g_area_state == 2) {
         g_area_state = 0;
         if (g_works_state == 1) works_write();  // (the story point before the area change: it loads with it)
@@ -183,7 +184,7 @@ static int cam_hook(Cpu *c, uint64_t addr) {
 static int body_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     uint64_t o = c->x[0], cam = g_cam;
-    if ((g_state != 0 && g_state != 3 && !g_world) || !cam || !in_heap(o) || *(const uint64_t *)(uintptr_t)o != BODY_VTABLE) return 0;
+    if ((g_state != 0 && g_state != 3 && !g_world && !g_api) || !cam || !in_heap(o) || *(const uint64_t *)(uintptr_t)o != BODY_VTABLE) return 0;
     const float *p = (const float *)(uintptr_t)(o + 0x90), *t = (const float *)(uintptr_t)(cam + 0x320);
     if (fabsf(p[0] - t[0]) + fabsf(p[1] - t[1]) + fabsf(p[2] - t[2]) < 1e-3f) g_seen_body = o, g_body = g_state == 0 ? o : g_body;
     return 0;
@@ -300,6 +301,28 @@ void warp_world_start(void) {
     rt_register_fnhook_at(0x7002fee4e0ull, body_hook);
 }
 
+// The mod API (hle/modapi.c): the player followed (its body found as for the warp) and scripts' characters made from
+// the camera update (hle/pla_npc.c)
+void warp_api_start(void) {
+    if (g_api) return;
+    g_api = 1;
+    if (g_state < 0) g_state = 3;
+    rt_register_fnhook_at(0x7002994b70ull, cam_hook);
+    rt_register_fnhook_at(0x7002fee4e0ull, body_hook);
+}
+// where the player is and which way it faces (its body's z axis, +0x80), for scripts
+bool warp_player_now(float pos[3], float *yaw) {
+    uint64_t b = g_seen_body;
+    if (!b || *(const uint64_t *)(uintptr_t)b != BODY_VTABLE) return false;
+    memcpy(pos, (const float *)(uintptr_t)(b + 0x90), 12);
+    const float *z = (const float *)(uintptr_t)(b + 0x80);
+    if (yaw) *yaw = atan2f(z[0], z[2]) * 57.29578f;
+    return true;
+}
+// a script's teleport: the body written for 10 frames (as the warp does: the game settles it there)
+static float g_tp[3];
+static volatile int g_tp_n;
+void warp_teleport(const float p[3]) { memcpy(g_tp, p, 12), g_tp_n = 10; }
 // where the player is (LARECOMP_LIVE's state file): false before the body is found
 bool warp_player_pos(float out[3]) {
     uint64_t b = g_seen_body;
@@ -349,6 +372,12 @@ static void server_notice_frame(uint64_t frame) {
 
 void warp_frame(uint64_t frame) {  // (each game frame: runtime/hle/input.c)
     g_frame_now = frame;
+    if (g_api) { extern void pla_npc_api_frame(uint64_t); pla_npc_api_frame(frame); }
+    if (g_tp_n > 0) {  // (a script's teleport)
+        uint64_t b = g_seen_body;
+        if (!b || *(const uint64_t *)(uintptr_t)b != BODY_VTABLE) g_tp_n = 0, LOG("[warp] teleport: the player has no body yet\n");
+        else if (memcpy((void *)(uintptr_t)(b + 0x90), g_tp, 12), --g_tp_n == 0) LOG("[warp] the player put at %.2f %.2f %.2f\n", g_tp[0], g_tp[1], g_tp[2]);
+    }
     server_notice_frame(frame);
     { extern void pla_slot_watch(uint64_t); pla_slot_watch(frame); }  // (research: hle/pla_drawdist.c)
     {   // (research) LARECOMP_LOG_PLAYER=<n>: the player's position every n frames ("[player] frame f x y z")

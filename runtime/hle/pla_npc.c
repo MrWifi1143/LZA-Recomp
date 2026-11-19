@@ -104,12 +104,18 @@ static volatile int g_ours;
 static volatile int g_gender = -1;  // (ours: 0 the p1 body, 1 p2; -1 not seen yet)
 
 // our people
-#define NOWN 16
+#define NOWN 32  // (the shared world's players' people and scripts' characters)
 typedef struct {
     int state;  // 0 free, 1 asked for, 2 made (its navigator not seen yet), 3 walking orders taken, 4 up and nobody's,
                 // 5 made but let go before it came up (it becomes 4 when it does: kept, not left standing there),
                 // 6 given up waiting for it (as 5: a free one if the game makes it after all)
     int gender, k;
+    int script;         // (a script's character - the mod API, below: named luanpc_<k>, looks like schr / a copy of sent)
+    int refused;        // (its last order wasn't taken: no navigation mesh there - the mod API stops its walk)
+    float cur[3];       // (a script's character: where it is drawn - its skeleton, below - for its goal tolerance)
+    int cur_ok;
+    uint64_t schr;      // (its character hash; 0: the copied placement's own)
+    int sent;           // (the placement to copy, + 1; 0: any townsperson's)
     float at[3];        // where it was made
     uint64_t nav, made_frame, up_frame;
     uint64_t ctrl;      // (its character controller, once seen: ctrl+0x240 kept 0 so the navigator walks it)
@@ -178,14 +184,16 @@ static Own g_own[NOWN];
 static volatile uint64_t g_frame;
 static int g_count;
 
+static volatile uint64_t g_place_seen_ns;  // (the mod API's area_loaded: the last placement the level's load made)
 static int place_hook(Cpu *c, uint64_t addr) {
     if (c->x[30] != PLACE_LOAD_LR) return 0;
     uint64_t e = c->x[2];
+    g_place_seen_ns = plat_now_ns();
     pthread_mutex_lock(&g_lock);
     if (g_mgr != c->x[0]) {
         g_nent = 0, g_level++;
         for (int i = 0; i < NOWN; i++)
-            if (g_own[i].state) LOG("[npc] mpplayer_%d went with the level\n", g_own[i].k), memset(&g_own[i], 0, sizeof g_own[i]);
+            if (g_own[i].state) LOG("[npc] %s_%d went with the level\n", g_own[i].script ? "luanpc" : "mpplayer", g_own[i].k), memset(&g_own[i], 0, sizeof g_own[i]);
         LOG("[npc] the level's NPC manager %llx\n", (unsigned long long)c->x[0]);
     }
     g_mgr = c->x[0];
@@ -289,6 +297,8 @@ static int tol_hook(Cpu *c, uint64_t addr) {
     for (int i = 0; i < NOWN && !ours; i++) ours = g_own[i].nav == nav && g_own[i].state >= 3;
     if (!ours || !guest_ptr(c->x[1])) return 0;
     const float *g = (const float *)(uintptr_t)c->x[1], *p = (const float *)(uintptr_t)(nav + 0x3e0);
+    for (int i = 0; i < NOWN; i++)  // (a script's character: from where it is - +0x3e0 is its last goal by then)
+        if (g_own[i].nav == nav && g_own[i].script && g_own[i].cur_ok) p = g_own[i].cur;
     float dx = g[0] - p[0], dz = g[2] - p[2];
     c->x[0] = dx * dx + dz * dz > 0.35f * 0.35f || fabsf(g[1] - p[1]) > 1.0f;
     return 1;
@@ -345,7 +355,8 @@ static void nav_match(void) {
         if (have_me && fabsf(p[0] - me[0]) < 1.5f && fabsf(p[2] - me[2]) < 1.5f) continue;  // (the player's own)
         for (int i = 0; i < NOWN; i++) {
             Own *o = &g_own[i];
-            if ((o->state != 2 && o->state != 5 && o->state != 6) || fabsf(p[0] - o->at[0]) > 1.0f || fabsf(p[2] - o->at[2]) > 1.0f) continue;
+            float tol = o->script ? 3.0f : 1.0f;  // (a script's spot may be off the navigation mesh: the game puts it on the nearest)
+            if ((o->state != 2 && o->state != 5 && o->state != 6) || fabsf(p[0] - o->at[0]) > tol || fabsf(p[2] - o->at[2]) > tol) continue;
             if (o->state == 6) LOG("[npc] mpplayer_%d came up after all: a free one now\n", o->k);
             o->nav = nav, o->state = o->state == 2 ? 3 : 4, o->order = 0, o->up_frame = g_frame;  // (no order before one is given: an order to where it stands left it unable to walk)
             o->ctrl = ctrl_of(nav);
@@ -353,7 +364,7 @@ static void nav_match(void) {
               o->cc = in_heap(q2 - 0x50) && *(const uint64_t *)(uintptr_t)(q2 - 0x50) == CC_VTABLE ? q2 - 0x50 : 0; }
             o->actl = in_heap(g_navactl[q]) && *(const uint64_t *)(uintptr_t)g_navactl[q] == ANIM_VTABLE ? g_navactl[q] : 0, o->mf = -1;
             o->chr = in_heap(g_navchr[q]) ? g_navchr[q] : 0;
-            LOG("[npc] mpplayer_%d is up: navigator %llx at %.2f %.2f %.2f (%llu frames after asking), controller %llx, animation %llx\n", o->k, (unsigned long long)nav,
+            LOG("[npc] %s_%d is up: navigator %llx at %.2f %.2f %.2f (%llu frames after asking), controller %llx, animation %llx\n", o->script ? "luanpc" : "mpplayer", o->k, (unsigned long long)nav,
                 p[0], p[1], p[2], (unsigned long long)(g_frame - o->made_frame), (unsigned long long)o->ctrl, (unsigned long long)o->actl);
             unfix(o);
             break;
@@ -540,12 +551,25 @@ static void guest_call_saved(Cpu *c, uint64_t fn, uint64_t a0, uint64_t a1, uint
     memcpy(c->x, sx, sizeof sx), memcpy(c->v, sv, sizeof sv), c->nzcv = snzcv;
 }
 
+static int g_mod_copies;  // (copies made for scripts in this level: each takes ~400 KB of HLE memory - capped)
+static uint64_t g_mod_copies_level;
 static void make_one(Cpu *c, Own *o) {
     char name[32];
-    snprintf(name, sizeof name, "mpplayer_%d", o->k);
-    uint64_t chr = o->gender ? CHR_SENPAI_F : CHR_SENPAI_M, ce = 0;
+    snprintf(name, sizeof name, "%s_%d", o->script ? "luanpc" : "mpplayer", o->k);
+    uint64_t chr = o->script ? o->schr : o->gender ? CHR_SENPAI_F : CHR_SENPAI_M, ce = 0;
     const char *like = "?";
+    if (o->script) {
+        if (g_mod_copies_level != g_level) g_mod_copies_level = g_level, g_mod_copies = 0;
+        if (g_mod_copies >= 160) {
+            LOG("[npc] %s: scripts made 160 characters in this level already - no more until the next level\n", name);
+            o->state = 0;
+            return;
+        }
+        g_mod_copies++;
+    }
     pthread_mutex_lock(&g_lock);
+    if (o->script && o->sent > 0 && o->sent <= g_nent)  // (a script asked for that placement's look)
+        ce = copy_entry(g_ent[o->sent - 1].e, name, o->at, chr), like = g_ent[o->sent - 1].name;
     // (a townsperson the level made itself first - "_npc_g" names are the plain ones - then any it made, then any; never
     // a senior's entry: theirs belongs to the story)
     static const char *force = (const char *)1;  // (research LARECOMP_NPC_LIKE=<entry name>: that one)
@@ -577,7 +601,9 @@ static void make_one(Cpu *c, Own *o) {
     uint32_t st;
     memcpy(&st, req, 4);
     o->state = st == 0 ? 2 : 0, o->made_frame = g_frame;
-    LOG("[npc] %s asked for at %.2f %.2f %.2f (a copy of %s, the %s senior): %s\n", name, o->at[0], o->at[1], o->at[2], like, o->gender ? "female" : "male",
+    if (o->script) LOG("[npc] %s asked for at %.2f %.2f %.2f (a copy of %s, character %016llx): %s\n", name, o->at[0], o->at[1], o->at[2], like,
+                       (unsigned long long)chr, st == 0 ? "made" : "refused");
+    else LOG("[npc] %s asked for at %.2f %.2f %.2f (a copy of %s, the %s senior): %s\n", name, o->at[0], o->at[1], o->at[2], like, o->gender ? "female" : "male",
         st == 0 ? "made" : "refused");
 }
 
@@ -1776,9 +1802,11 @@ static int attach_to(Cpu *c, uint64_t owner, uint64_t parent, const char *joint)
 
 // orders need a vec3 in guest memory: one per person, written just before the call
 static float *g_vec[NOWN];
+static void mod_cam(Cpu *c);
 void pla_npc_cam(Cpu *c) {  // (the camera update, the game's thread: hle/warp.c)
     if (!g_mgr) return;
     nav_match();
+    mod_cam(c);
     if (g_npar) par_run(c);
     if (!g_try_done) try_wear(c);
     static int ridelog = -1;  // (research LARECOMP_NPC_RIDELOG=<n>: the player's model owner every n frames)
@@ -1905,8 +1933,18 @@ void pla_npc_cam(Cpu *c) {  // (the camera update, the game's thread: hle/warp.c
         const float *np = (const float *)(uintptr_t)(o->nav + 0x3e0);  // (where its navigator has it now)
         float dx = v[0] - np[0], dz = v[2] - np[2];
         if (nlog < 12 || !ok)
-            nlog++, LOG("[npc] mpplayer_%d sent to %.2f %.2f %.2f (%s, %.1f m from it): %s\n", o->k, v[0], v[1], v[2], o->run ? "run" : "walk", sqrtf(dx * dx + dz * dz),
-                        ok ? "on its way" : "not taken (there already, or no navmesh)");
+            nlog++, LOG("[npc] %s_%d sent to %.2f %.2f %.2f (%s, %.1f m from it): %s\n", o->script ? "luanpc" : "mpplayer", o->k, v[0], v[1], v[2], o->run ? "run" : "walk",
+                        sqrtf(dx * dx + dz * dz), ok ? "on its way" : "not taken (there already, or no navmesh)");
+        if (o->script && !ok) o->refused = 1;
+        if (o->script && ok) {  // (the goal as the navigation mesh has it, +0x250: one inside a building was put on its roof -
+            const float *pg = (const float *)(uintptr_t)(o->nav + 0x250);  //  and the person climbed up there, 2026-11-19)
+            if (fabsf(pg[1] - v[1]) > 2.0f) {
+                LOG("[npc] luanpc_%d: the navigation mesh has %.1f %.1f %.1f %.1f m %s the goal - not walked there\n", o->k, pg[0], pg[1], pg[2],
+                    fabsf(pg[1] - v[1]), pg[1] > v[1] ? "above" : "below");
+                guest_call_saved(c, NAV_STOP, o->nav, 0, 0, 0, 0);
+                o->refused = 1;
+            }
+        }
         if (o->state == 4 && !ok && o->shrink < 3) {  // (walking off: no navmesh that far - a nearer spot the same way)
             o->shrink++, o->order = 1;
             for (int j = 0; j < 3; j += 2) o->dest[j] = np[j] + (o->dest[j] - np[j]) * 0.5f;
@@ -2162,4 +2200,337 @@ static void npc_hooks(void) {
     rt_register_fnhook_at(OWNER_WORLD_FN, world_hook);  // (seated riders drawn on their mount's joint)
     rt_register_fnhook_at(CREATE_MODEL, create_hook), rt_register_fnhook_at(POKE_MODEL_JOB, pjob_hook);
     if (g_dress) rt_register_fnhook_at(NPC_MODEL_JOB, job_hook);
+}
+
+// ---- Characters of the mod API's scripts (runtime/modapi.h, hle/modapi.c): people of our own as above (a copy of a
+// placement the level made, its name luanpc_<k>, its look the character asked for), walked by their navigator. A
+// script's character is a slot that outlives its person: the person is made when the player is in its area (the level
+// it was first made in - Arceus' areas each have their own coordinates) within MOD_RANGE of its spot; a level change
+// takes the person with it (place_hook) and the slot waits to be made again at its last spot, its walk carried on.
+#include "../modapi.h"
+#define MAXMOD 64
+#define MOD_RANGE 60.0f
+typedef struct {
+    int used;
+    uint32_t gen;
+    char model[64], label[32];
+    float at[3], yaw;        // (where it is / is to be made; radians)
+    uint32_t area;           // (its level's area tag - pla_npc_area_tag; 0: the first one it is made in)
+    int own, k, state;       // (its person: g_own index, -1 none; MODNPC_WAITING / COMING / UP)
+    uint64_t asked_frame, up_frame;
+    int walking, run, order; // (on its way to goal; order: a walk to give its navigator)
+    float goal[3];
+    int set, face_n;         // (set: put at set_at at once; face_n: its facing given a few more times - see below)
+    float set_at[3];
+    float last[3];
+    uint64_t moved_frame;
+    int misses, told;
+    uint64_t sk;             // (its skeleton: where it is drawn - hle/pla_world.c)
+    uint64_t asked_sk_frame; // (pla_world.c's frame when it was asked for: its skeleton is first posed after that)
+    int stop;                // (its walk to stop: its navigator stopped, where it stands)
+    int retried;             // (its walk's order given again after getting nowhere)
+    uint64_t order_frame;    // (its last order)
+} ModNpc;
+static ModNpc g_mod[MAXMOD];
+static volatile int g_mods_any;
+static pthread_mutex_t g_mlock = PTHREAD_MUTEX_INITIALIZER;
+static struct { char name[24]; int own, k; uint64_t level; } g_term[16];  // (removed: terminated from the camera update)
+static int g_nterm;
+static volatile uint64_t g_area_id;
+static volatile int g_area_burst;
+
+static ModNpc *mod_of(int h) {
+    int i = (h & 0xff) - 1;
+    if (h <= 0 || i < 0 || i >= MAXMOD) return NULL;
+    ModNpc *m = &g_mod[i];
+    return m->used && (m->gen & 0x3fffff) == ((uint32_t)h >> 8) ? m : NULL;
+}
+static uint64_t mod_chr(const char *model, int *sent) {  // (what it looks like: a hash, a placement's look, a character id)
+    *sent = 0;
+    if (!model || !*model) return 0;
+    if (model[0] == '0' && (model[1] == 'x' || model[1] == 'X')) return strtoull(model, NULL, 16);
+    for (int i = 0; i < g_nent; i++)
+        if (!strcmp(g_ent[i].name, model)) { *sent = i + 1; return g_ent[i].chr; }
+    return fnv(model);
+}
+// (the camera update, the game thread, twice a frame; research LARECOMP_MODNPC_STATS=1: its cost logged every 20 s)
+static void mod_cam_(Cpu *c);
+static void mod_cam(Cpu *c) {
+    static int stats = -1;
+    static uint64_t ns, calls, at;
+    if (stats < 0) stats = getenv("LARECOMP_MODNPC_STATS") != NULL;
+    if (!stats) { mod_cam_(c); return; }
+    uint64_t t0 = plat_now_ns();
+    mod_cam_(c);
+    ns += plat_now_ns() - t0, calls++;
+    if (!at) at = g_frame;
+    if (g_frame - at >= 600) LOG("[npc] cost: scripts' characters %.2f us a frame (%llu calls in %llu frames)\n", (double)ns / (double)(g_frame - at) / 1000.0,
+                                (unsigned long long)calls, (unsigned long long)(g_frame - at)), ns = calls = 0, at = g_frame;
+}
+static void mod_cam_(Cpu *c) {
+    if (g_nterm) {  // (removed ones: TerminateObject by name - as the mounts above)
+        static uint64_t *h;
+        if (!h) h = hle_alloc(16);
+        pthread_mutex_lock(&g_mlock);
+        int n = g_nterm;
+        g_nterm = 0;
+        for (int i = 0; i < n; i++) {
+            if (g_term[i].level != g_level) continue;  // (went with its level already)
+            uint64_t fo = gcall(c, FO_GET, 0, 0, 0, 0);
+            if (in_heap(fo)) h[0] = fnv(g_term[i].name), gcall(c, FO_TERMINATE, fo, (uint64_t)(uintptr_t)h, 0, 0);
+            pthread_mutex_lock(&g_lock);
+            Own *o = &g_own[g_term[i].own];
+            if (o->script && o->k == g_term[i].k) memset(o, 0, sizeof *o);
+            pthread_mutex_unlock(&g_lock);
+            LOG("[npc] %s removed (its script)\n", g_term[i].name);
+        }
+        pthread_mutex_unlock(&g_mlock);
+    }
+    if (!g_mods_any) return;
+    extern bool warp_player_now(float pos[3], float *yaw);
+    float me[3];
+    bool have_me = warp_player_now(me, NULL);
+    uint32_t tag = pla_npc_area_tag();
+    pthread_mutex_lock(&g_mlock);
+    for (int i = 0; i < MAXMOD; i++) {
+        ModNpc *m = &g_mod[i];
+        if (!m->used) continue;
+        Own *o = m->own >= 0 ? &g_own[m->own] : NULL;
+        if (o && (!o->script || o->k != m->k || !o->state)) {  // (its person went with its level)
+            if (m->state == MODNPC_COMING) LOG("[npc] luanpc_%d (%s) wasn't made (refused): asked again later\n", m->k, m->label), m->misses++;
+            else LOG("[npc] luanpc_%d (%s) went with its level: waits at %.1f %.1f %.1f\n", m->k, m->label, m->at[0], m->at[1], m->at[2]);
+            m->own = -1, o = NULL, m->state = MODNPC_WAITING, m->order = m->walking, m->sk = 0;  // (its walk given again once it is back)
+        }
+        if (m->state == MODNPC_WAITING) {
+            if (g_frame % 15 || !have_me || !tag || (m->area && m->area != tag) || !pla_npc_can_make()) continue;
+            float dx = m->at[0] - me[0], dz = m->at[2] - me[2];
+            if (dx * dx + dz * dz > MOD_RANGE * MOD_RANGE) continue;
+            if (m->misses && g_frame - m->asked_frame < (uint64_t)(m->misses < 5 ? m->misses : 5) * 120) continue;
+            pthread_mutex_lock(&g_lock);
+            int sent = 0, slot = -1;
+            uint64_t chr = mod_chr(m->model, &sent);
+            for (int j = NOWN - 1; j >= 0 && slot < 0; j--) if (!g_own[j].state) slot = j;  // (from the top: the shared world's
+                                                                                           //  players take theirs from the bottom)
+            if (slot >= 0) {
+                Own *n = &g_own[slot];
+                memset(n, 0, sizeof *n);
+                n->state = 1, n->script = 1, n->schr = chr, n->sent = sent, n->k = ++g_count, n->level = g_level, n->asked = g_frame;
+                memcpy(n->at, m->at, 12), memcpy(n->dest, m->at, 12);
+                extern uint64_t pla_world_frame_now(void);
+                m->own = slot, m->k = n->k, m->state = MODNPC_COMING, m->asked_frame = g_frame, m->asked_sk_frame = pla_world_frame_now();
+                if (!m->area) m->area = tag;
+            }
+            pthread_mutex_unlock(&g_lock);
+            if (slot < 0 && !m->told++) LOG("[npc] %s waits: every person slot is in use\n", m->label);
+            continue;
+        }
+        if (m->state == MODNPC_COMING) {
+            if (o && o->state == 3) {
+                m->state = MODNPC_UP, m->up_frame = g_frame, m->face_n = 20, m->misses = 0;
+                if (o->nav && *(const uint64_t *)(uintptr_t)o->nav == NAV_VTABLE) memcpy(m->at, (const float *)(uintptr_t)(o->nav + 0x3e0), 12);
+                memcpy(m->last, m->at, 12), m->moved_frame = g_frame;
+                LOG("[npc] luanpc_%d (%s) is up (physics character %llx)\n", m->k, m->label, (unsigned long long)o->cc);
+            } else if (!o || o->state == 6 || g_frame - m->asked_frame > 1200) {
+                LOG("[npc] luanpc_%d (%s) wasn't made: asked again later\n", m->k, m->label);
+                if (o) { pthread_mutex_lock(&g_lock); memset(o, 0, sizeof *o); pthread_mutex_unlock(&g_lock); }
+                m->own = -1, m->state = MODNPC_WAITING, m->misses++;
+            }
+            continue;
+        }
+        // up: where it is drawn - its skeleton as posed (hle/pla_world.c: the person-sized one first posed at its spot after
+        // it was asked for); its facing: the way it moved. (The navigator's +0x3e0 is its goal; its model owner's world
+        // translation a cache nothing keeps up for people the navigator walks; the body objects at its spot other things' -
+        // all 2026-11-19. Its owner's world getter answers the same as the skeleton, but catching the owner through the
+        // entity callback left new people undrawn.)
+        if (!o || !o->nav || *(const uint64_t *)(uintptr_t)o->nav != NAV_VTABLE) continue;
+        extern uint64_t pla_world_skel_near(const float p[3], float r, unsigned minbones, uint64_t since, const uint64_t *skip, int nskip);
+        extern int pla_world_skel_pos(uint64_t sk, float out[3]);
+        float sp[3];
+        if (m->sk && !pla_world_skel_pos(m->sk, sp)) m->sk = 0;
+        if (!m->sk) {
+            uint64_t taken[MAXMOD];
+            int nt = 0;
+            for (int j = 0; j < MAXMOD; j++) if (g_mod[j].used && g_mod[j].sk) taken[nt++] = g_mod[j].sk;
+            if ((m->sk = pla_world_skel_near(m->at, 2.0f, 100, m->asked_sk_frame, taken, nt)))
+                LOG("[npc] luanpc_%d (%s): its skeleton %llx\n", m->k, m->label, (unsigned long long)m->sk);
+        }
+        if (m->sk && pla_world_skel_pos(m->sk, sp)) {
+            float mx = sp[0] - m->at[0], mz = sp[2] - m->at[2];
+            if (mx * mx + mz * mz > 0.0025f) m->yaw = atan2f(mx, mz);
+            memcpy(m->at, sp, 12), memcpy(o->cur, sp, 12), o->cur_ok = 1;
+        }
+        if (o->refused) {  // (its walk's goal has no navigation mesh: it stands)
+            o->refused = 0;
+            if (m->walking) LOG("[npc] luanpc_%d (%s): no way to %.1f %.1f %.1f on the navigation mesh - stops\n", m->k, m->label, m->goal[0], m->goal[1], m->goal[2]);
+            m->walking = 0;
+        }
+        if (m->set) {  // (put somewhere: its physics character warped there, its navigator stopped)
+            m->set = 0, m->walking = 0, m->order = 0;
+            if (o->cc && *(const uint64_t *)(uintptr_t)o->cc == CC_VTABLE) cc_warp(c, o->cc, m->set_at, m->yaw);
+            guest_call_saved(c, NAV_STOP, o->nav, 0, 0, 0, 0);
+            memcpy(m->at, m->set_at, 12), m->face_n = 20;
+        }
+        bool settling = g_frame - m->up_frame < 30;  // (an order given as it comes up comes to nothing: a second later)
+        if (m->order && !settling) {  // (a walk: its navigator's order - given by pla_npc_cam right after this)
+            if (!m->walking) m->moved_frame = g_frame, memcpy(m->last, m->at, 12);  // (a new walk: progress measured from here)
+            m->order = 0, m->walking = 1, m->order_frame = g_frame;
+            memcpy(o->dest, m->goal, 12), o->run = m->run, o->order = 1, o->shrink = 0;
+            o->run_set = 0;  // (its move state given with every order: after a walk's end it stood and took no more - 2026-11-19)
+        } else if (m->stop) {  // (stopped: its navigator, where it stands)
+            m->stop = 0, m->walking = 0;
+            guest_call_saved(c, NAV_STOP, o->nav, 0, 0, 0, 0);
+        } else if (m->walking && m->sk) {
+            float gx = m->goal[0] - m->at[0], gz = m->goal[2] - m->at[2];
+            float lx = m->at[0] - m->last[0], lz = m->at[2] - m->last[2];
+            if (gx * gx + gz * gz < 0.8f * 0.8f) m->walking = 0;  // (there)
+            else if (g_frame - m->order_frame >= 15) m->order = 1;  // (its order again twice a second, as the shared world's
+                                                                    //  persons get theirs: one given once was walked a leg, the
+                                                                    //  next ones taken but not walked - 2026-11-19)
+            else if (lx * lx + lz * lz > 0.3f * 0.3f) memcpy(m->last, m->at, 12), m->moved_frame = g_frame, m->retried = 0;
+            else if (g_frame - m->moved_frame > 45 && m->retried < 4) {  // (not getting anywhere for 1.5 s: its order again - the
+                m->retried++, m->order = 1;                                 //  navigator drops one now and then)
+            } else if (g_frame - m->moved_frame > 45) {  // (after 4 more: no way there on the navigation mesh)
+                LOG("[npc] luanpc_%d (%s) can't get to %.1f %.1f %.1f (stuck %.1f m off): stops\n", m->k, m->label, m->goal[0], m->goal[1], m->goal[2],
+                    sqrtf(gx * gx + gz * gz));
+                m->walking = 0;
+                guest_call_saved(c, NAV_STOP, o->nav, 0, 0, 0, 0);
+            }
+        } else if (m->walking && !m->sk && g_frame - m->order_frame > 240) {
+            m->walking = 0;  // (its skeleton not found - where it is isn't known: its walk taken as done after 8 s)
+        } else if (m->face_n > 0 && o->cc && *(const uint64_t *)(uintptr_t)o->cc == CC_VTABLE) {
+            // (its facing: given for a few frames - its controller updates every 2nd frame and a turn given between two
+            // is overwritten - see puppet_step)
+            m->face_n--;
+            if (!g_fwd_vec) g_fwd_vec = hle_alloc(16);
+            g_fwd_vec[0] = sinf(m->yaw), g_fwd_vec[1] = 0, g_fwd_vec[2] = cosf(m->yaw), g_fwd_vec[3] = 0;
+            guest_call_saved(c, CC_SET_FORWARD, o->cc, (uint64_t)(uintptr_t)g_fwd_vec, 0, 0, 0);
+        }
+    }
+    pthread_mutex_unlock(&g_mlock);
+}
+// (each frame, the render thread: warp.c) a level's people all made -> an area loaded
+void pla_npc_api_frame(uint64_t frame) {
+    g_frame = frame;
+    extern void pla_world_api_frame(uint64_t);
+    pla_world_api_frame(frame);
+    if (g_place_seen_ns && !g_area_burst && plat_now_ns() - g_place_seen_ns < 1000000000ull) g_area_burst = 1;
+    if (g_area_burst && plat_now_ns() - g_place_seen_ns > 1500000000ull) g_area_burst = 0, g_area_id++, LOG("[npc] area loaded (%llu)\n", (unsigned long long)g_area_id);
+}
+
+// ---- the API (hle/modapi.c)
+static int g_api;
+void pla_npc_api_on(void) {
+    if (g_api) return;
+    g_api = 1;
+    rt_register_fnhook_at(PLACE_NPC, place_hook);
+    rt_register_fnhook_at(FACTORY_CREATE, fcreate_hook);
+    rt_register_fnhook_at(NAV_POS_FN, nav_pos_hook);
+    rt_register_fnhook_at(SET_NAVIGATOR, setnav_hook);
+    rt_register_fnhook_at(NAV_OUT_OF_TOL, tol_hook);
+    rt_register_fnhook_at(CHAR_BUILD, build_hook), rt_register_fnhook_at(ANIM_CTOR, actor_hook), rt_register_fnhook_at(NPC_MODEL_CTOR, chr_ctor_hook);
+    extern void warp_api_start(void), pla_world_track_skeletons(void);
+    pla_world_track_skeletons();  // (where each is drawn: its posed skeleton)
+    warp_api_start();
+    LOG("[npc] on: people of scripts' own\n");
+}
+int pla_npc_mod_spawn(const char *model, const float pos[3], float yaw_deg, const char *label) {
+    pthread_mutex_lock(&g_mlock);
+    int h = 0;
+    for (int i = 0; i < MAXMOD && !h; i++) {
+        ModNpc *m = &g_mod[i];
+        if (m->used) continue;
+        uint32_t gen = m->gen + 1;
+        memset(m, 0, sizeof *m);
+        m->used = 1, m->gen = gen, m->own = -1, m->state = MODNPC_WAITING;
+        snprintf(m->model, sizeof m->model, "%s", model ? model : "");
+        snprintf(m->label, sizeof m->label, "%s", label && *label ? label : "npc");
+        memcpy(m->at, pos, 12), m->yaw = yaw_deg * (float)M_PI / 180.0f;
+        h = (int)((gen & 0x3fffff) << 8 | (uint32_t)(i + 1));
+        g_mods_any = 1;
+    }
+    pthread_mutex_unlock(&g_mlock);
+    if (!h) LOG("[npc] scripts: no free slot (%d in use)\n", MAXMOD);
+    return h;
+}
+void pla_npc_mod_remove(int h) {
+    pthread_mutex_lock(&g_mlock);
+    ModNpc *m = mod_of(h);
+    if (m) {
+        if (m->own >= 0 && g_nterm < 16) {
+            snprintf(g_term[g_nterm].name, sizeof g_term[g_nterm].name, "luanpc_%d", m->k);
+            g_term[g_nterm].own = m->own, g_term[g_nterm].k = m->k, g_term[g_nterm].level = g_level, g_nterm++;
+        }
+        uint32_t gen = m->gen;
+        memset(m, 0, sizeof *m);
+        m->gen = gen;
+    }
+    pthread_mutex_unlock(&g_mlock);
+}
+void pla_npc_mod_remove_all(void) {
+    for (int i = 0; i < MAXMOD; i++)
+        if (g_mod[i].used) pla_npc_mod_remove((int)((g_mod[i].gen & 0x3fffff) << 8 | (uint32_t)(i + 1)));
+}
+void pla_npc_mod_walk(int h, const float p[3], int run) {
+    pthread_mutex_lock(&g_mlock);
+    ModNpc *m = mod_of(h);
+    if (m) memcpy(m->goal, p, 12), m->run = run, m->order = 1, m->walking = 0, m->retried = 0;  // (walking once its order is given)
+    pthread_mutex_unlock(&g_mlock);
+}
+void pla_npc_mod_stop(int h) {
+    pthread_mutex_lock(&g_mlock);
+    ModNpc *m = mod_of(h);
+    if (m && (m->walking || m->order)) m->stop = m->state == MODNPC_UP, m->walking = 0, m->order = 0;
+    pthread_mutex_unlock(&g_mlock);
+}
+void pla_npc_mod_set(int h, const float p[3], float yaw_deg) {
+    pthread_mutex_lock(&g_mlock);
+    ModNpc *m = mod_of(h);
+    if (m) {
+        if (yaw_deg < 1e8f) m->yaw = yaw_deg * (float)M_PI / 180.0f;
+        memcpy(m->set_at, p, 12), m->walking = 0, m->order = 0;
+        if (m->state == MODNPC_UP) m->set = 1;
+        else memcpy(m->at, p, 12);  // (not made yet: made there)
+        m->face_n = 20;
+    }
+    pthread_mutex_unlock(&g_mlock);
+}
+int pla_npc_mod_state(int h, float p[3], float *yaw) {
+    pthread_mutex_lock(&g_mlock);
+    ModNpc *m = mod_of(h);
+    int st = 0;
+    if (m) {
+        st = m->state == MODNPC_UP && (m->walking || m->order) ? MODNPC_WALKING : m->state;  // (an order not given yet: walking already)
+        if (p) memcpy(p, m->at, 12);
+        if (yaw) *yaw = m->yaw * 57.29578f;
+    }
+    pthread_mutex_unlock(&g_mlock);
+    return st;
+}
+int pla_npc_mod_models(char *out, int cap) {
+    int n = snprintf(out, (size_t)cap, "any character id (\"tr0036_00_senpai_m\") or hash (\"0x...\"), or a placement of this level for its look:\n");
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < g_nent && n < cap; i++) {
+        char line[160];
+        int l = snprintf(line, sizeof line, "%s - character %016llx%s\n", g_ent[i].name, (unsigned long long)g_ent[i].chr, g_ent[i].made ? "" : " (not made here now)");
+        if (n + l >= cap) break;
+        memcpy(out + n, line, (size_t)l + 1), n += l;
+    }
+    pthread_mutex_unlock(&g_lock);
+    return n < cap ? n : cap - 1;
+}
+uint64_t pla_npc_area(char *name, int cap) {  // (the "areaNN" most of the level's placements are named after)
+    if (name && cap > 0) {
+        name[0] = 0;
+        pthread_mutex_lock(&g_lock);
+        int best = 0;
+        for (int i = 0; i < g_nent && i < 64; i++) {
+            const char *a = strstr(g_ent[i].name, "area");
+            if (!a || a[4] < '0' || a[4] > '9' || a[5] < '0' || a[5] > '9') continue;
+            int cnt = 0;
+            for (int j = 0; j < g_nent && j < 64; j++) { const char *b = strstr(g_ent[j].name, "area"); cnt += b && !strncmp(a, b, 6); }
+            if (cnt > best) best = cnt, snprintf(name, (size_t)cap, "%.6s", a);
+        }
+        pthread_mutex_unlock(&g_lock);
+    }
+    return g_area_id;
 }
