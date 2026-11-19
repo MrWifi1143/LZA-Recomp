@@ -437,6 +437,13 @@ function Npc:anim(name, value, kind)
   return rt.npc_anim(self.id, name, k, v)
 end
 function Npc:trigger(name) return self:anim(name, nil, "t") end
+-- its once-action n: once_action_int n, then once_action_trigger (Z-A characters also wait_int 1 - their route goes
+-- through their default wait)
+function Npc:play_once(n)
+  check_npc(self)
+  if game.name == "za" then self:anim("wait_int", 1) end
+  return self:anim("once_action_int", math.floor(n)) and self:trigger("once_action_trigger")
+end
 -- Z-A: the name the game knows it by (for game.call's FObj_* functions), nil until it is up
 function Npc:object() check_npc(self) return za_obj(self) end
 -- Z-A: one of the game's own animations by number (FObj_Set_Animation: 1 standing ... the events' numbers)
@@ -536,6 +543,17 @@ function pokemon.spawn(t)
   return p
 end
 local function za_poke(p) return p.id < 0 end
+-- (Z-A) its animation's parameters, as a character's n:anim; p:play_once(n): its once-action n (once_action_int n,
+-- then once_action_trigger) - the motion its set has there, or a new one put there with Studio's motionadd
+function Poke:anim(name, value, kind)
+  if self.removed or not za_poke(self) or (rt.api_version or 1) < 3 then return false end
+  local k = kind and kind:sub(1, 1) or (value == nil and "t") or (type(value) == "boolean" and "b")
+    or (math.type(value) == "integer" and "i") or "f"
+  local v = type(value) == "boolean" and (value and 1 or 0) or tonumber(value) or 0
+  return rt.object_anim(self.object, tostring(name), k, v)
+end
+function Poke:trigger(name) return self:anim(name, nil, "t") end
+function Poke:play_once(n) return self:anim("once_action_int", math.floor(n)) and self:trigger("once_action_trigger") end
 function Poke:state()
   if self.removed then return "removed" end
   if za_poke(self) then return STATES[self._st] or "removed" end

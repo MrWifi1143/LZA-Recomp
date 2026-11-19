@@ -100,6 +100,7 @@ spot when the player comes back, carrying on its walk. Removing a handle is the 
 | `n:say(text [, seconds])` | A notice on screen: `Name: text`. |
 | `n:anim(name, value [, kind])` | Set one of its animation's parameters (the game's own: what its animation graph reads to pick a pose). `value` true/false sets a bool, a whole number an int, any other number a float, `nil` fires a trigger (or pass `kind` `"b"`, `"i"`, `"f"`, `"t"`). Returns whether the character has that parameter. Checked: **Z-A** `n:anim("sit_bool", true) n:anim("sit_int", 1)` sits (int 2 another way; back to `false` / `0` stands up). The city's own people also use `speak_bool` + `wait_int` 2 (chatting) and `loop_action_bool`. **Arceus** `n:anim("set_squat_bool", true)` crouches (dressed characters run the player's animation, the others a villager's). In a pose a Z-A character doesn't walk: stand it up first. |
 | `n:trigger(name)` | Fire a trigger parameter (`n:anim(name)`). |
+| `n:play_once(n)` | Its once-action `n`: `once_action_int` n, then `once_action_trigger` (Z-A characters also `wait_int` 1, their route goes through their default wait). What plays is the motion its set has in that state - or a new one put there with Studio (below). |
 | `n:play_anim(id)` | (Z-A) One of the game's own animations by number, as its events play them (`FObj_Set_Animation`: 1 is standing; events use numbers like 2, 20, 174). |
 | `n:object()` | (Z-A) The name the game knows it by (`"luanpc_001"`), for `game.call`'s `FObj_*` commands. `nil` until it is up; it can change when it is made again. |
 | `n:on(event, fn)` | This character's events: `"talk"`, `"near"`, `"far"`, `"arrived"`, `"up"`, `"gone"`. |
@@ -132,6 +133,21 @@ made within a frame or two in the level the player is in.
 | `p:pos()` | Where it is, or `nil` when it isn't in the world. |
 | `p:state()` / `p:valid()` | `"coming"`, `"up"`, `"removed"` (also once its level is gone) / not removed. |
 | `p:remove()` | Gone (Arceus: the game ends it the next frame; Z-A: the framework's own delete). |
+| `p:anim(name, value [, kind])` / `p:trigger(name)` | (Z-A) Its animation's parameters, as a character's `n:anim` - set on its node, found by its name at its next update. |
+| `p:play_once(n)` | (Z-A) Its once-action `n` (`once_action_int` n + `once_action_trigger`): for a Pokémon, `n` 1-10 route to `#0_def01_once_actionNN#` (Studio's `motionstates <model> once_action` lists them). |
+
+**A new motion, played from a script** (Z-A, checked with Pikachu): Studio's rig commands put a new animation in one of
+a model's once-action states, in a mod, and the script plays that state.
+
+```sh
+legends-studio-cli --mod mods/mine/romfs <romfs> motionadd ik_pokemon/data/pm0025/pm0025_00_00/pm0025_00_00.trmdl \
+  myspin spin.glb spin like 00550_glad01 play-any "#0_def01_once_action07#"
+```
+
+```lua
+local p = pokemon.spawn{species = 25, pos = player.ahead(3)}
+timer.after(3, function() p:play_once(7) end)   -- once_action 7 now plays "myspin"
+```
 | `pokemon.all()` | This mod's Pokémon. |
 
 ## Items and the time of day
@@ -165,6 +181,8 @@ game.run("Commands.S6DCE2895AC79F359(Commands.S5DF104B25CC642C7(4), 10)")  -- th
 * `Commands` is the framework's commands class (`C0C062DE5AED06885`). Its members' names are hashed in the game;
   `Commands.Name` in the code is turned into `Commands.S<hash>` for you. Studio (`zalua chunk main`) shows the framework
   with the names it recovered: what each command takes.
+* The natives (`c<hex>.f<hex>`) take what they take: one given the wrong kind of object can crash the game (a `pcall`
+  doesn't catch that).
 * Useful ones: `FObj_Set_Pos(name, x, y, z)`, `FObj_Set_Ang(name, yaw)`, `FObj_Get_Pos(name)`, `FObj_Set_Animation(name, n)`,
   `FObj_Set_Visibility(name, bool)`, `FObj_LookAt_Obj(name, other, "head")`, `FObj_Move_To_PosXYZ_Navi(name, x, y, z)` -
   on any named object: `"Player"`, a character's `n:object()`, a Pokémon's `p.object`, the city's own people.
