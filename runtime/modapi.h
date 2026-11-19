@@ -90,6 +90,9 @@ typedef struct {
     int (*npc_object)(int h, char *out, int cap);
     // The time of day: the hour (0-24) the game's clock is set to at its next frame. 1 asked, 0 not in this game.
     int (*time_set)(float hour);
+    // A message window's own text: reserved line `slot` (0-15) of every message file - label "lza_say_<slot>" (Z-A,
+    // hle/za_script.c) - is this UTF-8 text. 1 set, 0 not in this game.
+    int (*message_text)(int slot, const char *text);
     // (version 3 also: npc_walk_to's run | 2 - Z-A: the game's own navigation walks it, game_script orders the walk)
 } LarecompModApi;
 

@@ -203,8 +203,11 @@ end
 local function script(mod, code, fn)
   if (rt.api_version or 1) < 3 then return nil, "this game build is too old" end
   -- (its first result as text: the game's lua_tolstring takes strings and numbers only)
-  local id = rt.game_script("local Commands = C0C062DE5AED06885\nlocal __r = (function()\n" .. hashed(code) .. "\nend)()\nreturn tostring(__r)")
-  if id == 0 then return nil, game.name == "za" and "too many waiting" or "not in this game" end
+  -- (Z-A: the framework's Commands at hand, its hashed names; Arceus: plain names)
+  local za = game.name == "za"
+  local id = rt.game_script((za and "local Commands = C0C062DE5AED06885\n" or "") .. "local __r = (function()\n" ..
+    (za and hashed(code) or code) .. "\nend)()\nreturn tostring(__r)")
+  if id == 0 then return nil, "not taken (too many waiting, or not in this game)" end
   jobs[id] = {fn = fn, mod = mod}
   return id
 end
@@ -454,6 +457,35 @@ local npc = {}
 function npc.models() return rt.have_api and rt.npc_models() or "" end
 function npc.find(name) for _, n in pairs(npcs) do if n.name == name then return n end end end
 function npc.all() local t = {} for _, n in pairs(npcs) do t[#t + 1] = n end table.sort(t, function(a, b) return a.id < b.id end) return t end
+
+-- ---------------------------------------------------------------- the game's own message window (Z-A)
+-- a line of the script's own text in the window the game's people talk in: reserved labels lza_say_<n> answered by
+-- the runtime (hle/za_script.c), shown from a coroutine as the game's own item window does (its message file loaded,
+-- the window, closed with A). Elsewhere: a notice.
+local say_slot = 0
+local MSG_SHOW = [[local f = CF74EC46ADA8DC783.S3567CE4CD45AC7D3("script/fld_item")
+CF74EC46ADA8DC783.S092ACF6F9CAC2BA2(f)
+while not CF74EC46ADA8DC783.S8EE12659B6952775(f) do Commands.Suspend() end
+Commands.ShowMessageWindow(2, "lza_say_%d", "fld_item")
+Commands.HideMessageWindow()
+CF74EC46ADA8DC783.S34645180A2F21B29("script/fld_item")]]
+function ui.message(text, fn)
+  text = tostring(text)
+  if game.name == "za" and (rt.api_version or 1) >= 3 then
+    say_slot = (say_slot + 1) % 16
+    if rt.message_text(say_slot, text) then
+      local id = run_co(nil, fmt(MSG_SHOW, say_slot), fn)
+      if id then return true end
+    end
+  end
+  rt.notify(text, 4)
+  if fn then fn() end
+  return true
+end
+function ui.say(who, text)
+  local name = type(who) == "table" and who.name or tostring(who)
+  return ui.message(name .. ":\n" .. tostring(text))
+end
 
 -- ---------------------------------------------------------------- items
 local item = {}

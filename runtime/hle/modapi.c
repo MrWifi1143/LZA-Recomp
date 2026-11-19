@@ -37,10 +37,11 @@ static int lua_dirs(char (*dirs)[256], int max) { return mod_lua_dirs(dirs, max)
 static double now(void) { return (double)plat_now_ns() / 1e9; }
 
 int pla_item_give(int item, int n);  // (hle/pla_npc.c: the bag's own add)
-static int script_none(const char *code) { (void)code; return 0; }  // (Arceus: its scripts' own language isn't reached yet)
-static int script_result_none(int id, char *out, int cap) { (void)id, (void)out, (void)cap; return -1; }
+int pla_script(const char *code);  // (hle/pla_script.c: the game's own Lua)
+int pla_script_result(int id, char *out, int cap);
 static int object_none(int h, char *out, int cap) { (void)h, (void)out, (void)cap; return 0; }
 static int time_none(float hour) { (void)hour; return 0; }  // (Arceus: its clock isn't reached yet)
+static int message_none(int slot, const char *text) { (void)slot, (void)text; return 0; }
 static const LarecompModApi g_modapi = {
     .version = LARECOMP_MODAPI_VERSION, .game = "pla", .enable = enable,
     .npc_spawn = pla_npc_mod_spawn, .npc_remove = pla_npc_mod_remove, .npc_remove_all = pla_npc_mod_remove_all,
@@ -51,7 +52,7 @@ static const LarecompModApi g_modapi = {
     .npc_outfit = pla_npc_mod_outfit, .npc_anim = pla_npc_mod_anim,
     .pokemon_spawn = pla_npc_poke_spawn, .pokemon_remove = pla_npc_poke_remove, .pokemon_state = pla_npc_poke_state,
     .game_work = warp_work,
-    .game_script = script_none, .script_result = script_result_none, .item_give = pla_item_give, .npc_object = object_none,
-    .time_set = time_none,
+    .game_script = pla_script, .script_result = pla_script_result, .item_give = pla_item_give, .npc_object = object_none,
+    .time_set = time_none, .message_text = message_none,
 };
 const LarecompModApi *modapi_get(void) { return &g_modapi; }
