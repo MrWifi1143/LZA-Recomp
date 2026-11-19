@@ -19,6 +19,9 @@ void newnpc_mod_set(int h, const float p[3], float yaw_deg);
 int newnpc_mod_state(int h, float p[3], float *yaw);
 int newnpc_mod_models(char *out, int cap);
 uint64_t newnpc_area(char *name, int cap);
+int newnpc_mod_outfit(int h, const char *spec);
+int newnpc_mod_anim(int h, const char *name, int kind, float value);
+int warp_work(const char *name, int set, int64_t value, int64_t *out);
 bool warp_player_now(float pos[3], float *yaw);
 void warp_teleport(const float p[3]);
 uint64_t input_buttons_now(void);
@@ -44,6 +47,12 @@ static int player_pos(float pos[3], float *yaw) {
 }
 static int lua_dirs(char (*dirs)[256], int max) { return mod_lua_dirs(dirs, max); }
 static double now(void) { return (double)plat_now_ns() / 1e9; }
+static int poke_none(int species, const float pos[3], float yaw, int form, int shiny, const char *label) {
+    (void)species, (void)pos, (void)yaw, (void)form, (void)shiny, (void)label;
+    return 0;
+}
+static void poke_remove_none(int h) { (void)h; }
+static int poke_state_none(int h, float pos[3], float *yaw) { (void)h, (void)pos, (void)yaw; return 0; }
 
 static const LarecompModApi g_modapi = {
     .version = LARECOMP_MODAPI_VERSION, .game = "za", .enable = enable,
@@ -52,5 +61,8 @@ static const LarecompModApi g_modapi = {
     .npc_models = newnpc_mod_models,
     .player_pos = player_pos, .player_teleport = warp_teleport,
     .area = newnpc_area, .buttons = input_buttons_now, .notify = menu_notice_for, .mod_lua_dirs = lua_dirs, .now = now,
+    .npc_outfit = newnpc_mod_outfit, .npc_anim = newnpc_mod_anim,
+    .pokemon_spawn = poke_none, .pokemon_remove = poke_remove_none, .pokemon_state = poke_state_none,  // (not in Z-A yet)
+    .game_work = warp_work,
 };
 const LarecompModApi *modapi_get(void) { return &g_modapi; }

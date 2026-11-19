@@ -219,6 +219,34 @@ void warp_frame(uint64_t frame) {  // (each game frame: runtime/hle/input.c)
 #define WORK_SET 0x700092dca0ull
 static int g_story = -1, g_story_all;
 
+// the mod API's game.work: a work by name, read or written in place in the work manager's maps (above: four unordered_maps
+// of {next, hash, key, i32 value +0x18} keyed by FNV-1a 64 of the name) - 0 when the manager isn't up or has no such work
+int warp_work(const char *name, int set, int64_t value, int64_t *out) {
+    uint64_t mgr = *(const uint64_t *)(uintptr_t)WORK_MANAGER_PTR, h = 0xcbf29ce484222645ull;
+    if (mgr - 0x7000000000ull >= 0x617b000ull || !*(const volatile uint32_t *)(uintptr_t)(mgr + 0x200)) return 0;
+    for (const char *q = name; *q; q++) h = (h ^ (uint8_t)*q) * 0x100000001b3ull;
+    static const uint32_t maps[4] = {0xf0, 0x128, 0x160, 0x198};
+    for (int m = 0; m < 4; m++) {
+        uint64_t buckets = 0, nb = 0, n = 0, nh = 0, key = 0;
+        if (!heap_read(mgr + maps[m], &buckets, 8) || !heap_read(mgr + maps[m] + 8, &nb, 8) || !buckets || !nb || nb > (1u << 24)) continue;
+        uint64_t i = (nb & (nb - 1)) == 0 ? h & (nb - 1) : h % nb;
+        if (!heap_read(buckets + i * 8, &n, 8) || !n || !heap_read(n, &n, 8)) continue;
+        for (int guard = 0; n && guard < 4096; guard++) {
+            if (!heap_read(n + 8, &nh, 8) || !heap_read(n + 16, &key, 8)) break;
+            if (key == h) {
+                int32_t v = 0;
+                heap_read(n + 0x18, &v, 4);
+                if (out) *out = v;
+                if (set) *(int32_t *)(uintptr_t)(n + 0x18) = (int32_t)value, LOG("[warp] script: work %s = %lld (was %d)\n", name, (long long)value, v);
+                return 1;
+            }
+            uint64_t bi = (nb & (nb - 1)) == 0 ? nh & (nb - 1) : nh % nb;
+            if (bi != i || !heap_read(n, &n, 8)) break;
+        }
+    }
+    return 0;
+}
+
 void rt_call_original(Cpu *c, uint64_t addr);  // (runtime/fnhook.c: the game's own function, from inside its hook)
 
 // the save's own phase, by the game's getter: false before the work manager is up (its instance pointer 0x7003ec3328,
@@ -653,6 +681,19 @@ void warp_anim_set_move(Cpu *c, uint64_t bb, uint32_t idx, float val, uint64_t s
     uint64_t v = 0;
     if (heap_read(bb, &v, 8) && v == BB_VTABLE) anim_set_float(c, bb, idx, val, scratch);
 }
+static bool anim_index(uint64_t bb, uint64_t tab, uint64_t hash, uint32_t *idx);
+#define BB_SET_INT 0x700010aad4ull
+#define BB_SET_BOOL 0x700010e8b8ull
+// (the mod API's npc:anim) one of a character's animation parameters by its name's hash: kind 'f' float, 'i' int, 'b'
+// bool, 't' trigger (fired) - false: its blackboard has no such parameter
+bool warp_anim_param(Cpu *c, uint64_t node, uint64_t hash, char kind, float val, uint64_t scratch) {
+    uint64_t bb = anim_bb_of_node(node), tab = kind == 'i' ? 0x68 : kind == 'f' ? 0x88 : kind == 'b' ? 0xa8 : 0xc8;
+    uint32_t idx;
+    if (!bb || !anim_index(bb, tab, hash, &idx)) return false;
+    uint64_t fn = kind == 'i' ? BB_SET_INT : kind == 'f' ? BB_SET_FLOAT : kind == 'b' ? BB_SET_BOOL : BB_SET_TRIGGER;
+    anim_set(c, fn, bb, idx, kind == 't' ? 1 : (int32_t)val, val, scratch);
+    return true;
+}
 
 // ---- Sitting, talking, standing in a loop of its own (2026-11-17, Lua: testout/za-mp8/tools/sit.lua, stand.lua). A
 // townsperson's pose is its blackboard too, set once from its placement as it is made (0x700010e6ac / 0x700010a814 -> the
@@ -666,8 +707,6 @@ void warp_anim_set_move(Cpu *c, uint64_t bb, uint32_t idx, float val, uint64_t s
 // dressed one, made from whoever came next, is stood up (stand_in_walk; again if its AI puts it back) and a stand-in let
 // go gets its own values back (stand_in_stop: sits down again where it sat).
 //   LARECOMP_WORLD_POSE=0: as before (neither) - an A/B.
-#define BB_SET_INT 0x700010aad4ull
-#define BB_SET_BOOL 0x700010e8b8ull
 #define POSE_N 10
 static const struct { const char *name; char kind; int32_t neutral; } k_pose[POSE_N] = {
     {"sit_bool", 'b', 0}, {"sit_int", 'i', 0}, {"speak_bool", 'b', 0}, {"wait_int", 'i', 1}, {"idle_int", 'i', 1},
@@ -2710,6 +2749,32 @@ static int dress_hook(Cpu *c, uint64_t addr) {
     uint64_t owner = ((const uint64_t *)(uintptr_t)req)[6];
     int ownk = g_own_used ? newnpc_number(node_of_owner(owner)) : 0;  // (one made for a player: world_own_npc)
     if (!towns && !ownk) return 0;
+    {   // (a script's character the script dressed - the mod API's npc_outfit "player": our player character's parts, as its
+        // make had them. Not its look on top (look_wear_at_make, as the shared world's stand-ins get theirs): one made so
+        // wasn't drawn at all - 2026-11-19; the save's own outfit is in that look, so some pieces differ)
+        extern int newnpc_mod_outfit_of_node(uint64_t node);
+        int lua = towns && !ownk ? newnpc_mod_outfit_of_node(node_of_owner(owner)) : 0;
+        if (lua == 1 && g_npparts) {
+            DressPart lp[25];
+            int ln = 0;
+            pthread_mutex_lock(&g_dress_lock);
+            for (int k = 0; k < g_npparts && ln < 25; k++) lp[ln++] = g_pparts[k];
+            int lbody = g_pbody;
+            pthread_mutex_unlock(&g_dress_lock);
+            for (int k = 0; k < ln; k++) if (!strcmp(lp[k].name, "base")) snprintf(lp[k].name, sizeof lp[k].name, "default");
+            const uint32_t lbase = 8192;
+            uint8_t *d = hle_alloc(16384);
+            memcpy(d, b, lbase);
+            uint32_t vpos = fb_put_parts(d, lbase, lp, ln);
+            uint64_t f15o = (uint64_t)(f15 - b);
+            memcpy(d + f15o, &(uint32_t){vpos - (uint32_t)f15o}, 4);
+            if (f14 && lbody >= 0) d[f14 - b] = (uint8_t)lbody;
+            *(uint64_t *)(uintptr_t)req = (uint64_t)(uintptr_t)d;
+            LOG("[dress] a script's character (%s) dressed in our player's %d parts\n", own.path, ln);
+            rt_call_original(c, addr);
+            return 1;
+        }
+    }
     int body = f14 ? f14[0] : -1;
     DressPart parts[25];
     int np = 0, to_body = -1;
@@ -2826,8 +2891,20 @@ void warp_make_hook_on(void) {
     g_make_api = 1;
     if (!g_make_hooked) g_make_hooked = true, rt_register_fnhook_at(CC_MAKE, cc_make_hook);
 }
+// the mod API (hle/newnpc.c): scripts' characters dressed as they are made - the make hook with the dressing, and the
+// parts fix (no pose hooks: those are the shared world's stand-ins')
+void warp_dress_scripts_on(void) {
+    static bool on;
+    if (on) return;
+    on = true;
+    g_dress_hooked = true;
+    if (!g_make_hooked) g_make_hooked = true, rt_register_fnhook_at(CC_MAKE, cc_make_hook);
+    rt_register_fnhook_at(PART_BY_INDEX, part_index_hook);
+}
 static void dress_hook_on(void) {
-    if (g_dress_hooked) return;
+    static bool done;  // (g_dress_hooked may be on already: scripts' dressing, warp_dress_scripts_on)
+    if (done) return;
+    done = true;
     g_dress_hooked = true;
     if (!g_make_hooked) g_make_hooked = true, rt_register_fnhook_at(CC_MAKE, cc_make_hook);
     rt_register_fnhook_at(PART_BY_INDEX, part_index_hook);

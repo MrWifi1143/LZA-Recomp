@@ -505,6 +505,44 @@ static int r_area(lua_State *s) {
     lua_pushstring(s, n);
     return 2;
 }
+// (version 2 of the mod API: outfits, animation parameters, Pokémon, works)
+static void need_m2(lua_State *s) {
+    need_m(s);
+    if (M->version < 2) luaL_error(s, "this game build's mod API is too old for this (version %d, needs 2): update the game", (int)M->version);
+}
+static int r_npc_outfit(lua_State *s) { need_m2(s); lua_pushboolean(s, M->npc_outfit((int)luaL_checkinteger(s, 1), luaL_checkstring(s, 2))); return 1; }
+static int r_npc_anim(lua_State *s) {
+    need_m2(s);
+    const char *k = luaL_checkstring(s, 3);
+    lua_pushboolean(s, M->npc_anim((int)luaL_checkinteger(s, 1), luaL_checkstring(s, 2), k[0], (float)luaL_optnumber(s, 4, 0)));
+    return 1;
+}
+static int r_poke_spawn(lua_State *s) {
+    need_m2(s);
+    float p[3];
+    opt_pos(s, 2, p);
+    lua_pushinteger(s, M->pokemon_spawn((int)luaL_checkinteger(s, 1), p, (float)luaL_optnumber(s, 5, 0), (int)luaL_optinteger(s, 6, 0),
+                                        lua_toboolean(s, 7), luaL_optstring(s, 8, "")));
+    return 1;
+}
+static int r_poke_remove(lua_State *s) { need_m2(s); M->pokemon_remove((int)luaL_checkinteger(s, 1)); return 0; }
+static int r_poke_state(lua_State *s) {
+    need_m2(s);
+    float p[3] = {0}, yaw = 0;
+    int st = M->pokemon_state((int)luaL_checkinteger(s, 1), p, &yaw);
+    lua_pushinteger(s, st);
+    if (!st) return 1;
+    lua_pushnumber(s, p[0]), lua_pushnumber(s, p[1]), lua_pushnumber(s, p[2]), lua_pushnumber(s, yaw);
+    return 5;
+}
+static int r_work(lua_State *s) {
+    need_m2(s);
+    int64_t v = 0;
+    int set = !lua_isnoneornil(s, 2);
+    if (!M->game_work(luaL_checkstring(s, 1), set, set ? (int64_t)luaL_checkinteger(s, 2) : 0, &v)) return 0;
+    lua_pushinteger(s, (lua_Integer)v);
+    return 1;
+}
 static int r_buttons(lua_State *s) { lua_pushinteger(s, M ? (lua_Integer)M->buttons() : 0); return 1; }
 static int r_notify(lua_State *s) {
     const char *t = luaL_checkstring(s, 1);
@@ -590,6 +628,8 @@ static void new_state(void) {
                                   {"npc_set", r_npc_set}, {"npc_state", r_npc_state}, {"npc_models", r_npc_models}, {"player", r_player},
                                   {"teleport", r_teleport}, {"area", r_area}, {"buttons", r_buttons}, {"notify", r_notify}, {"now", r_now}, {"cpu", r_cpu},
                                   {"stats", r_stats}, {"stats_reset", r_stats_reset}, {"loadfile", r_loadfile}, {"log", l_log},
+                                  {"npc_outfit", r_npc_outfit}, {"npc_anim", r_npc_anim}, {"poke_spawn", r_poke_spawn}, {"poke_remove", r_poke_remove},
+                                  {"poke_state", r_poke_state}, {"work", r_work},
                                   {"trace", l_trace}, {NULL, NULL}};
     uint64_t was = deadline_set(LUA_LOAD_MS);
     if (luaL_loadbufferx(L, k_api_lua, strlen(k_api_lua), "=api.lua", "t")) {
@@ -598,6 +638,7 @@ static void new_state(void) {
     } else {
         luaL_newlib(L, rm);
         lua_pushboolean(L, M != NULL), lua_setfield(L, -2, "have_api");
+        lua_pushinteger(L, M ? (lua_Integer)M->version : 0), lua_setfield(L, -2, "api_version");
         if (pcall_traced(L, 1, 0)) A->log("[lua] api.lua: %s\n", lua_tostring(L, -1)), lua_pop(L, 1);
     }
     g_deadline = was;

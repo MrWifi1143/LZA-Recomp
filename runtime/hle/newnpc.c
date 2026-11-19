@@ -300,8 +300,11 @@ static void do_spawn(Cpu *c, const Req *r) {
         sqrtf((s.at[0] - r->at[0]) * (s.at[0] - r->at[0]) + (s.at[2] - r->at[2]) * (s.at[2] - r->at[2])), r->at[0], r->at[1], r->at[2],
         r->yaw * 57.29578f);
 }
+static volatile int g_anim_pending;
+static void modnpc_anims(Cpu *c);
 static int mgr_hook(Cpu *c, uint64_t addr) {
     (void)addr;
+    if (g_anim_pending) modnpc_anims(c);
     if (!g_nreq) return 0;
     Req r[NREQ];
     pthread_mutex_lock(&g_lock);
@@ -485,6 +488,9 @@ typedef struct {
     int misses, told_none;
     uint64_t want_ns;            // (near, waiting for a station of its look since: after 10 s any townsperson's - any_look)
     int any_look;
+    int outfit;                  // (1: our player character's clothes - npc_outfit "player"; hle/warp.c dress_hook)
+    struct { uint64_t hash; char kind; float v; } anim[8];  // (animation parameters to set - npc_anim, the char manager's update)
+    volatile int nanim;
     // held where scripts put it (walked / set): its node's transform written at each update
     volatile int over, walking, run, drawn_ok;
     float goal[3], from[3], drawn[3], drawn_yaw, want_yaw;
@@ -681,6 +687,8 @@ void newnpc_body(uint64_t b) {
         if (g_over_bodies[j] == b) {
             ModNpc *m = &g_mod[g_over_slot[j]];
             uint64_t v = 0;
+            // (its body - its collision - where it is drawn. Its height isn't the ground's: a townsperson's body follows its
+            // node, no physics under it - tried 2026-11-19, a walk to a spot 2.5 m up rose with it)
             if (m->used && m->body == b && m->drawn_ok && rd(b, &v, 8) && v == BODY_VTABLE) memcpy((void *)(uintptr_t)(b + 0x90), m->drawn, 12);
             return;
         }
@@ -821,6 +829,8 @@ void newnpc_api_on(void) {
     void warp_make_hook_on(void), warp_follow_player(void);
     warp_make_hook_on();
     warp_follow_player();
+    void warp_dress_scripts_on(void);
+    warp_dress_scripts_on();  // (npc_outfit: our player's parts kept as it is made, scripts' characters dressed as made)
     LOG("[modnpc] on: townspeople of scripts' own\n");
 }
 int newnpc_mod_spawn(const char *model, const float pos[3], float yaw_deg, const char *label) {
@@ -927,4 +937,54 @@ int newnpc_mod_models(char *out, int cap) {
 uint64_t newnpc_area(char *name, int cap) {
     if (name && cap > 0) snprintf(name, (size_t)cap, "%s", g_area_name);
     return g_area_id;
+}
+
+// ---- version 2: outfits, animation parameters
+int newnpc_mod_outfit(int h, const char *spec) {
+    pthread_mutex_lock(&g_mlock);
+    ModNpc *m = mod_of(h);
+    int ok = m && m->state == MODNPC_WAITING && spec && !strcmp(spec, "player");
+    if (ok) m->outfit = 1;
+    else if (m && spec) LOG("[modnpc] %s: outfit \"%s\" - Z-A has \"player\" (our player character's clothes) only\n", m->label, spec);
+    pthread_mutex_unlock(&g_mlock);
+    return ok;
+}
+int newnpc_mod_outfit_of_node(uint64_t node) {  // (hle/warp.c dress_hook, as a character is made)
+    uint64_t np = 0;
+    char nm[16] = "";
+    int k;
+    if (!rd(node + 0x2b8, &np, 8) || !rd(np, nm, 15)) return 0;
+    nm[15] = 0;
+    if (sscanf(nm, "luanpc_%d", &k) != 1) return 0;
+    int r = 0;
+    pthread_mutex_lock(&g_mlock);
+    for (int i = 0; i < MAXMOD; i++)
+        if (g_mod[i].used && g_mod[i].k == k) r = g_mod[i].outfit;
+    pthread_mutex_unlock(&g_mlock);
+    return r;
+}
+int newnpc_mod_anim(int h, const char *name, int kind, float value) {
+    pthread_mutex_lock(&g_mlock);
+    ModNpc *m = mod_of(h);
+    int ok = m && m->nanim < 8;
+    if (ok) m->anim[m->nanim].hash = fnv(name), m->anim[m->nanim].kind = (char)kind, m->anim[m->nanim].v = value, m->nanim++, g_anim_pending = 1;
+    pthread_mutex_unlock(&g_mlock);
+    return ok;
+}
+static void modnpc_anims(Cpu *c) {  // (the character manager's update: the game thread)
+    bool warp_anim_param(Cpu *c, uint64_t node, uint64_t hash, char kind, float val, uint64_t scratch);
+    pthread_mutex_lock(&g_mlock);
+    int left = 0;
+    for (int i = 0; i < MAXMOD; i++) {
+        ModNpc *m = &g_mod[i];
+        if (!m->used || !m->nanim) continue;
+        if (m->state != MODNPC_UP || !node_is(m->node, m->k)) { left = 1; continue; }  // (set once it is up)
+        if (!m->scratch) m->scratch = (uint64_t)(uintptr_t)hle_alloc(16);
+        for (int k = 0; k < m->nanim; k++)
+            if (!warp_anim_param(c, m->node, m->anim[k].hash, m->anim[k].kind, m->anim[k].v, m->scratch))
+                LOG("[modnpc] %s: its animation has no such parameter (%c %016llx)\n", m->label, m->anim[k].kind, (unsigned long long)m->anim[k].hash);
+        m->nanim = 0;
+    }
+    g_anim_pending = left;
+    pthread_mutex_unlock(&g_mlock);
 }
