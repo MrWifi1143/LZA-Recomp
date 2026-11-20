@@ -70,6 +70,7 @@ static void merge(GameUiSpec *d, const GameUiSpec *s) {
     d->has |= h;
 }
 
+static void clones_unset(const char *layout, int owner);
 int gameui_set(const char *layout, const char *pane, const GameUiSpec *s, int owner) {
     if (!layout || !*layout || !s || owner < 0 || owner >= GUI_OWNERS) return 0;
     if (!pane) pane = "";
@@ -98,6 +99,7 @@ void gameui_unset(const char *layout, const char *pane, int owner) {
         if (!drop) g_rule[k++] = *r;
     }
     if (k != g_nrule) g_nrule = k, g_gen++;
+    if (!pane) clones_unset(layout, owner), g_gen++;
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -162,6 +164,8 @@ typedef struct {
     char lname[48];
     float lw, lh;
     uint64_t frame;            // (calculated last at)
+    float kx, ky;              // (its shape on screen, last calculated; wide: its projection made that wide)
+    bool wide;
     uint32_t gen;
     bool has_lay;              // an edit of the layout itself
     GameUiSpec ls;             // (merged)
@@ -245,6 +249,7 @@ static void collect(Lay *l, uint64_t p, const Rule *const *rs, int nr, int depth
 }
 
 static void give_back_text(PaneEdit *e);
+static void collect_special(Lay *l, const Rule *const *rs, int nr);
 // the edits for this layout found again (an edit changed, or its panes were made anew)
 static uint64_t g_resolves;
 static void resolve(Lay *l) {
@@ -273,6 +278,7 @@ static void resolve(Lay *l) {
     for (int i = 0; i < nr; i++) copy[i] = *rs[i], cp[i] = &copy[i];
     pthread_mutex_unlock(&g_lock);
     if (l->root) collect(l, l->root, cp, nr, 0);
+    collect_special(l, cp, nr);
     bool pane_fit = false;
     for (int k = 0; k < l->npe; k++) pane_fit |= (l->pe[k].s.has & (GUI_ANCHOR | GUI_FILL | GUI_FOLLOW)) != 0;
     l->mode = (l->ls.has & GUI_MODE) ? l->ls.mode : pane_fit ? GUI_MODE_WIDE : GUI_MODE_BOX;
@@ -505,6 +511,7 @@ static int calc_hook(Cpu *c, uint64_t addr) {
     float kx, ky;
     screen_k(di, l->lw, l->lh, &kx, &ky);
     bool wide = l->mode == GUI_MODE_WIDE && (kx > 1 || ky > 1);
+    l->kx = kx, l->ky = ky, l->wide = wide;
     for (int k = 0; k < l->npe; k++) edit_on(l, &l->pe[k], kx, ky, wide);
     uint8_t rflag = b8(root)[0x58], ralpha = b8(root)[0x59];
     if (l->has_lay && (l->ls.has & GUI_HIDE)) b8(root)[0x58] = l->ls.hide ? (uint8_t)(rflag & ~1) : (uint8_t)(rflag | 1);
@@ -624,10 +631,166 @@ int gameui_layouts(char *out, int cap) {
     return len;
 }
 
-// the game's pane-tree copy isn't wired yet in either game: a new pane is refused (0)
+// ---------------------------------------------------------------- copies and images (Pane::Draw)
+// A copy of a pane is the pane drawn once more right after itself, moved / scaled by the renderer (its draws' viewport:
+// nvn/vulkan/exec.c) - the game's pane-tree copy (nn::ui2d's LayoutPaneFactory clone, 0x700262f270 in Z-A) would need
+// each new pane's GPU constants made with the layout's, which a running layout can't take. So a copy shows what its
+// source shows (its text, its animation), wherever it is put. An image: the texture a pane draws with is replaced by
+// a .png / .dds file (as a texture pack does it - everywhere that texture is used). Both need Pane::Draw hooked:
+// registered the first time an edit asks for one (each pane drawn then costs a lookup).
+#define NCLONE 128
+typedef struct { char layout[48], src[48], name[48]; int owner; } CloneRule;
+static CloneRule g_clone[NCLONE];
+static int g_nclone;
+#define NIMG 64
+static char g_img[NIMG][200];
+static int g_nimg;
+const char *gameui_image_path(uint32_t id) { return id >= 1 && id <= (uint32_t)g_nimg ? g_img[id - 1] : NULL; }
+static uint32_t image_id(const char *path) {  // (under g_lay_lock)
+    for (int i = 0; i < g_nimg; i++)
+        if (!strcmp(g_img[i], path)) return (uint32_t)i + 1;
+    if (g_nimg >= NIMG) return 0;
+    snprintf(g_img[g_nimg], sizeof g_img[0], "%s", path);
+    return (uint32_t)++g_nimg;
+}
+#define NSPEC 512
+#define NCOPY 8
+typedef struct {
+    uint64_t pane;
+    Lay *lay;
+    uint32_t img;
+    int ncopy;
+    struct { float x, y, s; bool hide; } copy[NCOPY];
+} Special;
+static Special g_spec[NSPEC];  // (open addressing by pane; written under g_lay_lock, read by the draw hook as it is)
+static bool g_pdraw_on;
+static int pdraw_hook(Cpu *c, uint64_t addr);
+static Special *spec_find(uint64_t p) {
+    unsigned h = (unsigned)((p >> 4) * 0x9E3779B1u) % NSPEC;
+    for (int i = 0; i < 16; i++) {
+        Special *s = &g_spec[(h + i) % NSPEC];
+        if (s->pane == p) return s;
+        if (!s->pane) return NULL;
+    }
+    return NULL;
+}
+static Special *spec_add(uint64_t p, Lay *l) {
+    unsigned h = (unsigned)((p >> 4) * 0x9E3779B1u) % NSPEC;
+    for (int i = 0; i < 16; i++) {
+        Special *s = &g_spec[(h + i) % NSPEC];
+        if (s->pane == p) return s;
+        if (!s->pane || s->pane == 1) {
+            memset(s, 0, sizeof *s);
+            s->lay = l;
+            __atomic_store_n(&s->pane, p, __ATOMIC_RELEASE);
+            if (!g_pdraw_on && G.pane_draw) g_pdraw_on = true, rt_register_fnhook_at(G.pane_draw, pdraw_hook);
+            return s;
+        }
+    }
+    return NULL;
+}
+static void spec_drop(Lay *l) {  // (a layout's: looked at again)
+    for (int i = 0; i < NSPEC; i++)
+        if (g_spec[i].pane > 1 && g_spec[i].lay == l) g_spec[i].img = 0, g_spec[i].ncopy = 0, g_spec[i].pane = 1;  // (1: a tombstone)
+}
+// (resolve: the copies and images of this layout)
+static void collect_special(Lay *l, const Rule *const *rs, int nr) {
+    spec_drop(l);
+    for (int k = 0; k < l->npe; k++)
+        if ((l->pe[k].s.has & GUI_IMAGE) && l->pe[k].s.image[0]) {
+            Special *s = spec_add(l->pe[k].pane, l);
+            if (s) s->img = image_id(l->pe[k].s.image);
+        }
+    static CloneRule mine[NCLONE];
+    int nmine = 0;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < g_nclone; i++)
+        if (!strcmp(g_clone[i].layout, l->lname)) mine[nmine++] = g_clone[i];
+    pthread_mutex_unlock(&g_lock);
+    for (int i = 0; i < nmine; i++) {
+        CloneRule *cr = &mine[i];
+        GameUiSpec cs;  // (the copy's own edits: rules for its name)
+        memset(&cs, 0, sizeof cs);
+        for (int r = 0; r < nr; r++)
+            if (!strcmp(rs[r]->pane, cr->name)) merge(&cs, &rs[r]->s);
+        uint64_t stack[256];
+        int sp = 0;
+        if (l->root) stack[sp++] = l->root;
+        while (sp) {
+            uint64_t p = stack[--sp];
+            if (pane_matches(p, cr->src)) {
+                Special *s = spec_add(p, l);
+                if (s && s->ncopy < NCOPY) {
+                    s->copy[s->ncopy].x = (cs.has & GUI_X) ? cs.x : 0, s->copy[s->ncopy].y = (cs.has & GUI_Y) ? cs.y : 0;
+                    s->copy[s->ncopy].s = (cs.has & GUI_SX) ? cs.sx : 1, s->copy[s->ncopy].hide = (cs.has & GUI_HIDE) && cs.hide;
+                    s->ncopy++;
+                }
+                continue;  // (not its own panes again)
+            }
+            FOR_CHILDREN(p, c) if (sp < 256) stack[sp++] = c;
+        }
+    }
+}
+
+static __thread uint32_t t_img, t_ver;
+static __thread int t_copy;
+static __thread float t_cf[5];
+uint32_t gameui_draw_extra(uint32_t *img, int *copy, float f[5]) {
+    *img = t_img, *copy = t_copy;
+    memcpy(f, t_cf, sizeof t_cf);
+    return t_ver;
+}
+static int pdraw_hook(Cpu *c, uint64_t addr) {
+    uint64_t p = c->x[0];
+    Special *s = spec_find(p);
+    if (!s || (!s->img && !s->ncopy)) return 0;
+    uint64_t sx[8];
+    memcpy(sx, c->x, sizeof sx);
+    uint32_t was = t_img;
+    if (s->img) t_img = s->img, t_ver++;
+    rt_call_original(c, addr);
+    if (s->img) t_img = was, t_ver++;
+    Lay *l = s->lay;
+    float hw = l && l->lw > 0 ? l->lw * 0.5f : 960, hh = l && l->lh > 0 ? l->lh * 0.5f : 540;
+    float kx = l && l->wide ? l->kx : 1, ky = l && l->wide ? l->ky : 1;
+    for (int k = 0; k < s->ncopy; k++) {
+        if (s->copy[k].hide) continue;
+        memcpy(c->x, sx, sizeof sx);
+        t_copy = 1;
+        t_cf[0] = s->copy[k].x / hw / kx, t_cf[1] = s->copy[k].y / hh / ky, t_cf[2] = s->copy[k].s;
+        t_cf[3] = rdf(p + 0x7c) / hw / kx, t_cf[4] = rdf(p + 0x8c) / hh / ky;  // (its centre: its matrix's place)
+        t_ver++;
+        if (s->img) t_img = s->img;
+        rt_call_original(c, addr);
+        t_copy = 0, t_img = was, t_ver++;
+    }
+    return 1;
+}
+
 int gameui_clone(const char *layout, const char *src, const char *name, int owner) {
-    (void)layout, (void)src, (void)name, (void)owner;
-    return 0;
+    if (!layout || !src || !name || !*name || !G.pane_draw) return 0;
+    pthread_mutex_lock(&g_lock);
+    int ok = 0;
+    for (int i = 0; i < g_nclone && !ok; i++)
+        if (g_clone[i].owner == owner && !strcmp(g_clone[i].layout, layout) && !strcmp(g_clone[i].name, name)) {
+            snprintf(g_clone[i].src, sizeof g_clone[i].src, "%s", src);
+            ok = 1;
+        }
+    if (!ok && g_nclone < NCLONE) {
+        CloneRule *r = &g_clone[g_nclone++];
+        snprintf(r->layout, sizeof r->layout, "%s", layout), snprintf(r->src, sizeof r->src, "%s", src);
+        snprintf(r->name, sizeof r->name, "%s", name), r->owner = owner;
+        ok = 1;
+    }
+    if (ok) g_gen++;
+    pthread_mutex_unlock(&g_lock);
+    return ok;
+}
+static void clones_unset(const char *layout, int owner) {  // (under g_lock)
+    int k = 0;
+    for (int i = 0; i < g_nclone; i++)
+        if (!(g_clone[i].owner == owner && (!layout || !strcmp(g_clone[i].layout, layout)))) g_clone[k++] = g_clone[i];
+    g_nclone = k;
 }
 
 // ---------------------------------------------------------------- mods' data: mods/<name>/ui/<layout>.ini
@@ -695,6 +858,12 @@ static int load_ini(const char *path, const char *layout) {
         if (*v == '"' && strlen(v) >= 2 && v[strlen(v) - 1] == '"') v[strlen(v) - 1] = 0, v++;
         for (char *q = k; *q; q++) *q = (char)tolower((unsigned char)*q);
         if (!strcmp(k, "clone")) { FLUSH(); gameui_clone(layout, v, pane, GUI_OWNER_DATA); continue; }
+        char full[512];
+        if (!strcmp(k, "image") && *v && *v != '/') {  // (a file beside the .ini)
+            const char *sl = strrchr(path, '/');
+            snprintf(full, sizeof full, "%.*s/%s", sl ? (int)(sl - path) : 1, sl ? path : ".", v);
+            v = full;
+        }
         if (!gameui_spec_kv(&s, k, v)) LOG("[gameui] %s: unknown key \"%s\"\n", path, k);
     }
     FLUSH();
@@ -792,6 +961,9 @@ static const Builtin k_wide_za[] = {
     {"btl_app_focus_00", "", "mode=wide"},
     {"btl_app_focus_00", "RootPane/all", "follow=1"},
     {"hud_guide_00", "", "anchor=right"},
+    // (battles: the sent-out Pokemon's plate left with the party, the move palette right)
+    {"btl_app_pokeplate_00", "", "anchor=left"},
+    {"btl_app_waza_00", "", "anchor=right"},
     // (the map: its space as wide as the screen - more of the map's icons; the header and shading across it)
     {"map_top_00", "", "mode=wide"},
     {"map_top_00", "N_header_00/P_header_*", "fill=1"},
@@ -812,6 +984,21 @@ static const Builtin k_wide_pla[] = {
     // (the quest and request markers over the world: placed by the game for a 16:9 screen - spread to the real one)
     {"fieldinfo_qicon_00", "", "mode=wide"},
     {"fieldinfo_qicon_00", "N_qicon_*/L_qicon_*", "follow=1"},
+    {"pokeget_item_change_00", "", "mode=wide"},  // (the item / party wheel, bottom right)
+    {"pokeget_item_change_00", "all/N_pos_00", "anchor=right"},
+    // (battles: the letterbox bars across the screen, the player's plate left, the commands right, the plates over the
+    // Pokemon spread to the real screen)
+    {"battle_cinema_mask_00", "", "mode=wide"},
+    {"battle_cinema_mask_00", "P_0*", "fill=1"},
+    {"battle_top_02", "", "mode=wide"},
+    {"battle_top_02", "wake/*", "anchor=auto"},
+    {"battle_top_03", "", "mode=wide"},
+    {"battle_top_03", "N_plate_prio_*/L_enemy_*", "follow=1"},
+    {"battle_top_03", "all/P_target_cursor_00", "follow=1"},
+    {"battle_command_03", "", "mode=wide"},
+    {"battle_command_03", "all/wake", "anchor=right"},
+    {"battle_command_waza_00", "", "mode=wide"},
+    {"battle_command_waza_00", "wake/A_alignment_00", "anchor=right"},
     {NULL, NULL, NULL},
 };
 static void builtin_wide(void) {

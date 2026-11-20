@@ -229,6 +229,12 @@ static TexLoaded *load_file(const Ent *e) {
     return r;
 }
 
+TexLoaded *texpack_load_path(const char *path) {
+    size_t n = strlen(path);
+    Ent e = {.key = 0, .path = (char *)path, .dds = n > 4 && (!strcmp(path + n - 4, ".dds") || !strcmp(path + n - 4, ".DDS"))};
+    return load_file(&e);
+}
+
 // ---- the loader thread: keys asked for (texpack_request) in, loaded files out (texpack_take)
 #define QMAX 4096
 static SDL_Mutex *g_lock;

@@ -753,6 +753,9 @@ static struct {
     uint64_t obj;       // frame interpolation: the game object the current draws belong to (CMD_OBJECT), 0 = none
     uint32_t obj_draw;  // draws of that object so far in this run of it
     uint32_t ui;        // the interface layout being drawn, fitted by the game layer (CMD_UI, runtime/gameui.h): 0 none
+    uint32_t ui_img;    // (its pane's image: runtime/hle/gameui.c's id, 0 none)
+    int ui_copy;        // (a copy of a pane drawn again: ui_cf = offset x y, scale, the pane's centre x y; -1..1 space)
+    float ui_cf[5];
     bool xfb_active, raster_discard;  // transform feedback (CMD_XFB_*), SetRasterizerDiscard
     bool depth_clamp;                 // SetDepthClamp (a pipeline key bit)
     uint64_t xfb_addr[4], xfb_size[4];
@@ -4696,6 +4699,16 @@ static void draw_(CmdRec *r, bool indexed) {
     PROF_ADD(prof_sets);
     VkDescriptorImageInfo fii[64];
     uint64_t prof_tx_ = prof ? SDL_GetTicksNS() : 0;
+    if (st.ui_img && pr->fi->ntex > 0 && st.tpool) {  // (a game UI pane's image: its first texture replaced - runtime/hle/gameui.c)
+        extern void vk_texture_gameui_image(NvnTexture *t, uint32_t img);
+        int slot = ((int)pr->fi->tex[0].handle_offset - 0x20) / 8;
+        uint64_t h = slot >= 0 && slot < 32 ? st.tex[1][slot] : 0;
+        uint32_t tic = h & 0xFFFFF;
+        if (h && tic < (uint32_t)st.tpool->count) {
+            NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
+            if (e->tex) vk_texture_gameui_image(e->tex, st.ui_img);
+        }
+    }
     for (int i = 0; i < pr->fi->ntex && i < 64; i++) {
         float sc[2]; uint32_t wh[2];
         texture_info(1, pr->fi, i, &fii[i], sc, wh);
@@ -4815,8 +4828,15 @@ static void draw_(CmdRec *r, bool indexed) {
         if (overlay) vp_ox -= g_plugin_overlay_px;  // (pixels of the image as drawn, as vp_ox)
     }
     {
-        float vx = vp[0] * vp_sx + vp_ox, vw = vp[2] * vp_sx;
-        set_viewport(vx, vp[1] * vp_sy + vp_oy, vw, vp[3] * vp_sy, zn, zf);
+        float vx = vp[0] * vp_sx + vp_ox, vw = vp[2] * vp_sx, vy = vp[1] * vp_sy + vp_oy, vh = vp[3] * vp_sy;
+        if (st.ui_copy) {  // (a copy of a game UI pane: its draws again, moved and scaled about the pane's centre)
+            float sc = st.ui_cf[2] > 0 ? st.ui_cf[2] : 1;
+            float px = vx + (st.ui_cf[3] + 1) * 0.5f * vw, py = vy + (1 - st.ui_cf[4]) * 0.5f * vh;  // (layout y up)
+            vx = px + (vx - px) * sc + st.ui_cf[0] * 0.5f * vw;
+            vy = py + (vy - py) * sc - st.ui_cf[1] * 0.5f * vh;
+            vw *= sc, vh *= sc;
+        }
+        set_viewport(vx, vy, vw, vh, zn, zf);
         if (g_debug_frame) {
             VkRect2D sr = scissor_rect();
             LOG("[draw]   vp %.2f %.2f %.2f %.2f (fs hash %016llx) scissor %d %d %u %u | guest sc %d %d %d %d | pass %ux%u s %.4f %.4f\n",
@@ -5783,7 +5803,7 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
 // ================================================================== executor (renderer.m exec_list)
 static void exec_list(uint64_t handle, int depth) {
     uint64_t p = handle;
-    if (depth == 0) st.obj = 0, st.obj_draw = 0, st.ui = 0;  // (a submitted list starts with no object; its called lists inherit)
+    if (depth == 0) st.obj = 0, st.obj_draw = 0, st.ui = 0, st.ui_img = 0, st.ui_copy = 0;  // (a submitted list starts with no object; its called lists inherit)
     for (int guard = 0; guard < 10000000; guard++) {
         CmdRec *r = (CmdRec *)(uintptr_t)p;
         // (the records were written by a game thread on another core: fetch ahead, each one was a cache miss here)
@@ -5800,7 +5820,10 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_XFB_BIND: if (r->x[0] < 4) { st.xfb_addr[r->x[0]] = r->x[1]; st.xfb_size[r->x[0]] = r->x[2]; } break;
         case CMD_SET_RASTER_DISCARD: st.raster_discard = r->x[0] != 0; break;
         case CMD_SET_DEPTH_CLAMP: st.depth_clamp = r->x[0] != 0; break;
-        case CMD_UI: st.ui = (uint32_t)r->x[0]; break;
+        case CMD_UI:
+            st.ui = (uint32_t)r->x[0], st.ui_img = (uint32_t)r->x[1], st.ui_copy = (int)r->x[2];
+            memcpy(st.ui_cf, r->f, 16), memcpy(&st.ui_cf[4], &r->x[3], 4);
+            break;
         case CMD_OBJECT: st.obj = r->x[0]; st.obj_draw = 0; { static int d; if (ENV("LARECOMP_OBJDBG") && vk_frame_counter() == 1450 && d++ < 80) LOG("[objdbg] depth %d object %llx\n", depth,(unsigned long long)r->x[0]); } break;
         case CMD_JUMP: p = r->x[0]; continue;
         case CMD_CALL: {

@@ -114,6 +114,7 @@ typedef struct {
     void *last_prog;   // (research, LARECOMP_LOG_XFB) the host program last bound while recording
     uint8_t xfb_active;
     uint32_t ui_mode;  // the game's interface layout the list's last CMD_UI named (runtime/gameui.h gameui_draw_mode)
+    uint32_t ui_ver;   // (and the image / copy it named: gameui_draw_extra's number)
 } NvnCmdBuf;
 
 // One recorded command: header, the call's integer and float arguments, then copied data.

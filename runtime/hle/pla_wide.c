@@ -65,6 +65,7 @@ static void pla_gameui_init(void) {
         .lay_name = 0x30, .di_proj = 0x10, .di_target = 0,
         .vt = {0x700404be40ull, 0x700404c0a0ull, 0x700404c2e8ull, 0x700404c648ull, 0x700404bf78ull, 0x700404b3d8ull,
                0x700404b248ull, 0, 0x700404b510ull},
+        .pane_draw = 0x7000143ed8ull,
     };
     gameui_init(&g);
 }

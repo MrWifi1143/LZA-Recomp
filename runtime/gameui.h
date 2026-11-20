@@ -56,7 +56,7 @@ typedef struct {
     float x, y, sx, sy, alpha, w, h;
     uint8_t hide, anchor, mode, fill, follow;
     char text[256];         // UTF-8
-    char image[64];
+    char image[200];        // (a .png / .dds: a path from the game folder)
 } GameUiSpec;
 
 enum { GUI_OWNER_BUILTIN = 0, GUI_OWNER_DATA = 1, GUI_OWNER_SCRIPT = 2, GUI_OWNERS };
@@ -95,11 +95,16 @@ typedef struct {
     uint32_t tb_buf, tb_cap, tb_len;  // TextBox: its text (char16_t*), the buffer's length, the text's (uint16)
     uint32_t tb_dirty;           // TextBox: the byte whose bit tb_dirty_bit says "lay the text out again"
     uint8_t tb_dirty_bit;
-    uint64_t clone_tree;         // (0: none) the game's pane-tree copy, Layout::ClonePaneTree(src, device, ...)
+    uint64_t clone_tree;         // (unused: the game's own pane-tree copy isn't used - copies are drawn again, below)
+    uint64_t pane_draw;          // nn::ui2d::Pane::Draw(this, DrawInfo&, CommandBuffer&) - every pane type's (images, copies)
 } GameUiGame;
 void gameui_init(const GameUiGame *g);
 // The screen's shape for the interface: wider than 16:9 by k (1: 16:9 or narrower). Set by each game's ultrawide code.
 void gameui_set_screen(float k);
+// (cmdbuf.c) what else the draws recorded now carry - a pane's image (id, gameui_image_path) and a copy's placement
+// (f: x / y offset and scale in the layout's projected space -1..1, the pane's centre x / y there); changes number v
+uint32_t gameui_draw_extra(uint32_t *img, int *copy, float f[5]);
+const char *gameui_image_path(uint32_t id);  // (nvn/vulkan: the file an image id names; NULL none)
 // (cmdbuf.c) the fitting of the layout being drawn on this thread (0 none - not a layout; 1 + GUI_MODE_*, high byte
 // the box's anchor): recorded before the draws as CMD_UI, read by nvn/vulkan/exec.c draw_
 uint32_t gameui_draw_mode(void);
