@@ -662,10 +662,10 @@ header across it, a battle's plate goes left and the move palette right; Arceus'
 nearest (commands and button hints left, the item and party wheel right), its quest markers are spread out, and in a
 battle the letterbox bars cross the whole screen, the player's plate goes left, the commands right and the plates over
 the Pokémon follow them. Every other layout stays in the middle 16:9 box; a pane as
-big as the whole layout (a fade, a menu's dimming, a blurred backdrop) covers the whole screen, and so does one across
-its whole width (a band: Z-A's menu tint, Arceus' tab and guide bars) - told by the pane's own shape, so sheets like
-Z-A's Settings keep their proportions. A pane that ends at the 16:9 layout's left or right edge (a header tab, a side
-panel, a guide line, a header bar) has its edge continued to the real screen's edge; a narrow upright strip there (an
+big as the whole layout (a fade, a menu's dimming, a blurred backdrop) covers the whole screen - told by the pane's own
+shape, so sheets like Z-A's Settings keep their proportions. A pane across its whole width (a band: Z-A's menu tint,
+Arceus' tab and guide bars) or ending at its left or right edge (a header tab, a side panel, a guide line, a header bar)
+stays where it is with its edges continued to the real screen's edges, so what is drawn in it stays in place; a narrow upright strip there (an
 accent bar) goes to the screen's edge instead. `fill = 0` on a layout (`[layout]` in a mod's ini) keeps all of its panes
 in the box - Arceus' title has it built in. `LARECOMP_GAMEUI_NOWIDE=1` leaves the runtime's own
 edits out; `LARECOMP_GAMEUI=0` all of it (research).
