@@ -50,6 +50,9 @@ typedef struct {
     // where party slot's data is, as found through the game's own party (Z-A: its script objects - world.lua); slot -1:
     // addr is the party's count. 1 taken (the data there checks out), 0 not
     int (*pkm_party_at)(int slot, uint64_t addr);
+    // a species' growth rate (0 medium fast, 1 erratic, 2 fluctuating, 3 medium slow, 4 fast, 5 slow), read from the
+    // game's own personal table (Arceus; Z-A packs its romfs: -1), -1 not known
+    int (*pkm_growth)(int species, int form);
 
     // ---- battles: 0 none, 1 a battle is on; kind: 1 wild, 2 trainer, 0 not known. battle_result: the last one's end
     // (0 none yet, 1 won, 2 lost, 3 ran / caught / other) and a count that changes with each battle that ends

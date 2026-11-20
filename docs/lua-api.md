@@ -616,7 +616,10 @@ on("chat", function(from, text) log(from, "said", text) end)
 | `chat.say(text)` | A chat line: a speech bubble over our player here, and over our stand-in on everyone else's screen; the `chat` event fires there. One line a second. |
 | `chat` event | `(from, text)`: a line heard (its bubble is shown by the runtime, scripts or not). |
 
-Console: `chat <text>`, `players`.
+Console: `chat <text>`, `players`. **The chat key**: T on the keyboard, or L + ZL held on a controller, while the shared
+world is on: the runtime's text dialog (the on-screen keyboard with a controller - `input.text`), and what was typed is
+said. `chat.key(false)` switches the key off (a mod using T itself), `chat.prompt()` opens the dialog from a script.
+Checked with two Z-A copies: T on one, the line over its stand-in on the other (`zaKey-chat-grid.png`).
 
 * **Caps**: a message is at most 1024 bytes (name and data packed); each copy sends at most 30 messages and 8 KB a
   second (bursts of 60 / 16 KB), and takes no more than that from any one player (more is dropped, logged once a minute).
@@ -647,10 +650,11 @@ Console: `chat <text>`, `players`.
 | `player.anim_loop(n [, false])`, `player.pose(n [, false])` | **Arceus**: `LoopAction(n)` (9 looking at the phone) / `PhotoPoseAction(n)` (1-15) and back. **Z-A**: the same animation held / `FObj_Reset_AnimationAll`. |
 | `player.face_expression(name)` | **Z-A**: `"smile"`, `"serious"`, `"sad"`... |
 | `player.dismount()`, `player.riding(fn)` | **Arceus**: off the ride Pokémon (the ride manager's `StopRide`, as every event does) / `fn(true)` while riding. |
-| `player.speed(k)` | Not found in either game yet: returns false. |
+| `player.speed(k)` | How fast the player moves, times k (0-10]. **Arceus**: the player's animation controller's master speed (`SetAnimationMasterSpeed`): the walk and run carry the player by their root motion, so faster steps go further - checked 1x 8.4 m, 2x 19.7 m in the same 2 s of stick; all the player's animations play that much faster. A reload puts 1 back. **Z-A**: false - not found (its commands have no speed; tried 2026-11-19: no animation-rate or move-speed command in the framework). |
 
 Input is held in the runtime (`hle/input.c` asks `world_input_filter`, `hle/worldcommon.c`): a reload of the scripts
-lets the player go. Checked: Z-A frozen, a test's stick push moved nothing; unfrozen it moved 4.5 m; `player.walk(0, 1)`
+lets the player go. Windows: both games' exes and `legendslua.dll` booted under Wine with the test mod (party, box levels, traces, `player.speed`,
+`battle_start`, an effect: `wine-pla-world.png`, `wine-pla-battle.png`, `wine-za-world.png`). Checked: Z-A frozen, a test's stick push moved nothing; unfrozen it moved 4.5 m; `player.walk(0, 1)`
 walked on. **Mounting** from a script: the only path (the ride manager's `StartOdoshishiRide`, Wyrdeer) hung Arceus when
 called from the field script's state - left out.
 
@@ -746,7 +750,11 @@ PokeCrypto; the layouts from PKHeX's PA9 / PA8).
   (checked: renamed in the box screen). Checked (`za13-boxes.png`, `za14-edit-grid.png`): a shiny Pikachu Lv 12 given
   into box 1 (the game worked out its stats: 31/31 HP, its moves Thunder Shock + Tail Whip), an Eevee renamed with new
   moves, the party's Totodile renamed.
-* **Arceus**: boxes are the stored format (no level in a box - the EXP is). The party the game plays with is its own
+* **Arceus**: boxes are the stored format (no level in a box - the EXP is): a box Pokémon's `level` is its EXP on its
+  species' growth curve (`m.growth`), the curve read from the game's own personal table in its romfs
+  (`bin/pml/personal/personal_data_total.perbin`, read once by the runtime: `hle/worldcommon.c`; 1,276 species / forms) -
+  checked against the game's own `PokemonCommand.GetLevel` for every box slot of the test save (all equal; under Wine too).
+  `pokemon.give` uses the same curves. The party the game plays with is its own
   objects; the save's party block (`[[main+42BA6B0]+200]+68`, 6 x 0x178) is written when the game saves, so a party
   member's names, IVs and trainer come from there and what changes in play (species, form, level, HP, max HP, shiny,
   alpha, moves) from the game's `PokemonCommand` reads (every 3 s once used; `m.live`). `m:set` on a party member takes
@@ -758,12 +766,21 @@ PokeCrypto; the layouts from PKHeX's PA9 / PA8).
 
 | | |
 |---|---|
-| `battle.wild(id [, {pos, yaw, field, mode}])` | **Arceus**: a wild battle against one of the game's event encounters (`bin/pokemon/data/poke_event_encount.bin`: `"aipom01"` Aipom Lv 30, `"yukimenoko01"` Froslass Lv 55, the Mount Coronet `mut_*` ones...), started as its events start theirs (`AppCommand.ExecuteEventCommand("call_wild_battle", ...)`), where the player stands. Checked: an Aipom Lv 30 battle in the Jubilife training ground (`pla3-battle-grid.png`). **Z-A**: false - its battles start from its C++ triggers. |
-| `battle_start` / `battle_end` events, `battle.active()`, `battle.last()` | Fire when the runtime knows a battle state: **not found yet in either game** (the API is there; nothing fires). |
+| `battle.wild(id [, {pos, yaw, field, mode}])` | **Arceus**: a wild battle against one of the game's event encounters (`bin/pokemon/data/poke_event_encount.bin`: `"aipom01"` Aipom Lv 30, `"yukimenoko01"` Froslass Lv 55, the Mount Coronet `mut_*` ones...), started as its events start theirs (`AppCommand.ExecuteEventCommand("call_wild_battle", ...)`), where the player stands. Checked (`pla3-battle-grid.png`). These are challenge battles: the player can't run from them. **Z-A**: false - its battles start from its C++ triggers. |
+| `battle_start` event | `{kind}` - a battle began (kind `"unknown"`: not told apart yet). |
+| `battle_end` event | `{result, party_hp}` - it ended. `result`: `"caught"` (a Pokémon more in the party or the boxes than at its start), `"lost"` (the whole party fainted), else `"other"` (won or ran: the game keeps no result a script can read for a battle no event of its own started). |
+| `battle.active()` / `battle.last()` | A battle on now / the last one's result. |
 
-Arceus' battle doesn't run Lua of its own (the field script's state runs on, the same calls in and out of a battle).
-The game hands a battle's result to the event that runs after it (trigger work 0, `1` won), which a script-started
-battle doesn't have.
+**How a battle is seen (Arceus)**: the game's C++, not its Lua (its Lua runs on through a battle: the same calls in and
+out). Profiling which of the game's functions run in a window of 60 frames (the runtime's `LARECOMP_FNPROF_LIVE`) in the
+field and through a battle (its start, its turns, its menus - the satchel, a Pokémon's summary) gave about 100 that run
+exactly once a frame from the battle's first moments to its end and never in the field; the runtime hooks one of them
+(0x7000898db0, `hle/worldapi.c`) once a script asks: a battle is on while it ran within the last half second. Checked:
+`battle_start` fired as the scripted Aipom battle began, its satchel and summary screens kept it on, under Wine too.
+The end of a battle wasn't reached in the tests (a challenge battle can't be run from, and losing it by pad automation
+didn't finish - the end is that function stopping; the result's check runs 1.5 s after). The profile windows are kept
+(`testout/lua-world/fnprof-pla`). **Z-A**: not found - no battle could be started in the test save (its battles come from
+wild zones and trainers' triggers; the test save stands in a plaza).
 
 ## Weather: `weather`
 
@@ -771,13 +788,21 @@ battle doesn't have.
 |---|---|
 | `weather.get(fn)` | **Z-A**: `fn(id)` - the weather its getter reports (`c4B6212B8.f6362F6BB()`: 0 clear, 2 rain...). **Arceus**: `fn(nil)`. |
 | `weather.is(name, fn)` | **Z-A**: its own check (`IsCheckWeather("rain" / "storm")`). |
-| `weather.set(id)` | false: no setter found yet. |
+| `weather.set(id)` | false: no setter found. |
 
-What's known: Z-A's framework weather calls (`FixWeather`, `SyncWeather`, `ResetWeather`) are empty, and the visible
-weather doesn't follow the index its getter reads; a rain look a script can make is the weather effect itself
-(`world.effect{path = "field/weather/et001/et001_rain_wide_range"}`). Arceus' scripts set no weather; its save flags
-`FSYS_FORCE_WEATHER_ENABLE`, `FSYS_WEATHER_DISABLE_RAINY` / `_SNOW` / `_CLOUDY` / `_SPECIAL` (`game.work("flag:...")`)
-are read by the game's C++ (when they take effect is untested).
+What was traced (2026-11-19):
+* **Z-A**: its framework's weather calls (`FixWeather`, `SyncWeather`, `ResetWeather`, `BeginSyncWeather` - a seed and a
+  lottery result) are empty in the Lua, and no event sets weather (its story's special scenes fix a light instead:
+  `FixLightWithPriority(10, "light/spl/...trlgt", 0)`). The getter's path: native 0x7002761dc0 -> 0x700299af90 -> the
+  time manager's handle (0x700090de20) -> environment `+0x40` -> 0x7002d92a18 -> the current weather record (0x7002d93e40)
+  `+0x10`. What reads that index for the sky and the rain isn't found (setting it changed only what's reported). A rain
+  look a script can make: `world.effect{path = "field/weather/et001/et001_rain_wide_range"}`.
+* **Arceus**: its scripts have no weather calls; the strings the weather has in the game are its shaders' parameters
+  (`GlobalWeatherScale`, `EnableWeatherLayer`), its wet / snow looks and its weather particles - and loading one of those
+  particles (`ef_weather_03_camfix_01.ptcl`) as an effect **crashed the game** (they need the weather system's resources:
+  don't). `bin/field/weather/weather_table.bin`, named in the game, isn't in its romfs; each area has a
+  `local_weather.bin`. Save flags `FSYS_FORCE_WEATHER_ENABLE`, `FSYS_WEATHER_DISABLE_*` exist (`game.work("flag:...")`),
+  read by its C++ - untested.
 
 ## The world's cost
 
@@ -792,6 +817,7 @@ handlers, a message and a party read every second, console commands), `lua.stats
 |---|---|
 | Z-A, 60 fps, the shared world on (a copy hearing itself) | 8.4 us on average (most 176 us: a frame with a message decoded and the party job's answer) |
 | Arceus, 30 fps | 19 us on average (most 542 us: a party read - the save's party block decrypted, 6 slots) |
+| Windows builds under Wine (the same test mod; the v6 overlay merged in): Arceus / Z-A | 48 / 39 us (most 436 / 451 us) |
 
 The runtime side: a script message costs its pieces' sends (80 bytes each) and, heard, a copy into the queue; held input
 is one test in the controller read. A frame is 16,700 us at 60 fps: the world part is 0.05-0.1% of it.

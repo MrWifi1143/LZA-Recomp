@@ -124,6 +124,13 @@ static int w_party_at(lua_State *s) {  // (slot 0-5 | -1 count, address)
     lua_pushboolean(s, W->pkm_party_at((int)luaL_checkinteger(s, 1), (uint64_t)luaL_checkinteger(s, 2)));
     return 1;
 }
+static int w_growth(lua_State *s) {  // (species, form) -> 0-5, nil not known
+    if (!W || W->version < 1 || !W->pkm_growth) return 0;
+    int g = W->pkm_growth((int)luaL_checkinteger(s, 1), (int)luaL_optinteger(s, 2, 0));
+    if (g < 0) return 0;
+    lua_pushinteger(s, g);
+    return 1;
+}
 // ---- battles
 static int w_battle(lua_State *s) {
     int kind = 0, on = W ? W->battle_state(&kind) : 0;
@@ -159,7 +166,7 @@ static void world_open(lua_State *s) {
     static const luaL_Reg wm[] = {{"net_up", w_net_up}, {"net_self", w_net_self}, {"net_send", w_net_send}, {"net_recv", w_net_recv},
                                   {"players", w_players}, {"chat_send", w_chat_send}, {"chat_recv", w_chat_recv},
                                   {"bubble_over", w_bubble_over}, {"input_hold", w_input_hold}, {"input_stick", w_input_stick},
-                                  {"speed", w_speed}, {"pkm_read", w_pkm_read}, {"pkm_write", w_pkm_write}, {"pkm_info", w_pkm_info}, {"party_at", w_party_at},
+                                  {"speed", w_speed}, {"pkm_read", w_pkm_read}, {"pkm_write", w_pkm_write}, {"pkm_info", w_pkm_info}, {"party_at", w_party_at}, {"growth", w_growth},
                                   {"battle", w_battle}, {"weather", w_weather},
                                   {"weather_name", w_weather_name}, {NULL, NULL}};
     if (luaL_loadbufferx(s, k_world_lua, strlen(k_world_lua), "=world.lua", "t")) {

@@ -91,12 +91,15 @@ static int weather_set_none(int id) { (void)id; return 0; }
 static int weather_get_none(void) { return -1; }
 static int weather_name_none(int id, char *out, int cap) { (void)id; if (cap > 0) out[0] = 0; return 0; }
 
+int world_growth(const char *path, int species, int form);
+static int growth(int species, int form) { return world_growth(NULL, species, form); }
+
 static const LarecompWorldApi g_api = {
     .version = LARECOMP_WORLDAPI_VERSION, .game = "za",
     .net_up = luanet_up, .net_self = luanet_self, .net_send = luanet_send, .net_recv = luanet_recv, .players = luanet_players,
     .chat_send = luanet_chat_send, .chat_recv = luanet_chat_recv, .bubble_over = luanet_bubble_over,
     .input_hold = world_input_hold, .input_stick = world_input_stick, .player_speed = speed_none,
-    .pkm_read = world_pkm_read, .pkm_write = world_pkm_write, .pkm_info = pkm_info, .pkm_party_at = party_at,
+    .pkm_read = world_pkm_read, .pkm_write = world_pkm_write, .pkm_info = pkm_info, .pkm_party_at = party_at, .pkm_growth = growth,
     .battle_state = battle_none, .battle_result = result_none,
     .weather_set = weather_set_none, .weather_get = weather_get_none, .weather_name = weather_name_none,
 };
