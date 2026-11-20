@@ -31,6 +31,15 @@ static struct {
 } g_cam;
 static pthread_mutex_t g_cam_lock = PTHREAD_MUTEX_INITIALIZER;
 
+// (the camera is followed while something places itself with it: a bubble, a positional sound, a script's to_screen -
+// each game's camera hook feeds bubble_camera then; scene_camera_on (hle/modapi.c) switches a game's hook on)
+volatile int g_scene_cam_wanted;
+void scene_camera_on(void);
+void scene_camera_want(void) {
+    if (g_scene_cam_wanted) return;
+    g_scene_cam_wanted = 1;
+    scene_camera_on();
+}
 static double now_s(void) { return (double)plat_now_ns() / 1e9; }
 
 static float default_height(int kind) {
@@ -82,6 +91,7 @@ static bool same_target(const BubbleTarget *a, const BubbleTarget *b) {
 
 int bubble_show(const BubbleTarget *t, const char *utf8, float seconds) {
     if (!t || !utf8 || (t->kind == BUBBLE_FN && !t->where)) return 0;
+    scene_camera_want();
     char text[sizeof g_b[0].text];
     int chars = clean_text(text, sizeof text, utf8);
     if (!text[0]) return 0;
@@ -106,7 +116,11 @@ int bubble_show(const BubbleTarget *t, const char *utf8, float seconds) {
     } else if (now - b->t0 > FADE_IN) b->t0 = now - FADE_IN;  // (a new line over it: no fade in again)
     b->t = *t;
     b->t.object[sizeof b->t.object - 1] = 0;
-    if (!(b->t.height > 0) && b->t.kind != BUBBLE_POS) b->t.height = default_height(t->kind);
+    if (!(b->t.height > 0) && b->t.kind != BUBBLE_POS) {
+        float bubble_game_height(int kind);  // (each game's people: hle/modapi.c; 0 the default)
+        float gh = bubble_game_height(t->kind);
+        b->t.height = gh > 0 ? gh : default_height(t->kind);
+    }
     memcpy(b->text, text, sizeof text);
     b->t1 = now + seconds;
     int id = b->id;
@@ -153,6 +167,30 @@ void bubble_camera(const float *e) {
 }
 
 static float dot3(const float *a, const float *b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+
+// the scene camera's eye and right (positional sounds: hle/modsound.c); 0 none yet
+int bubble_camera_get(float eye[3], float right[3]) {
+    pthread_mutex_lock(&g_cam_lock);
+    int ok = g_cam.ok;
+    if (ok) memcpy(eye, g_cam.eye, 12), memcpy(right, g_cam.X, 12);
+    pthread_mutex_unlock(&g_cam_lock);
+    return ok;
+}
+// a point of the world on a w x h overlay (the mod API's hud_to_screen): 1 in front of the camera (out: x, y, and the
+// metres away), 0 behind it / no camera yet
+int bubble_world_to_screen(const float p[3], float w, float h, float out[3]) {
+    scene_camera_want();
+    pthread_mutex_lock(&g_cam_lock);
+    __typeof__(g_cam) cam = g_cam;
+    pthread_mutex_unlock(&g_cam_lock);
+    if (!cam.ok) return 0;
+    float d[3] = {p[0] - cam.eye[0], p[1] - cam.eye[1], p[2] - cam.eye[2]}, zc = dot3(d, cam.Z);
+    if (zc > -0.05f) return 0;
+    float vw = fminf(w, h * cam.aspect), vh = vw / cam.aspect, vx = (w - vw) * 0.5f, vy = (h - vh) * 0.5f;
+    float nx = dot3(d, cam.X) / (-zc * cam.tan_half * cam.aspect), ny = dot3(d, cam.Y) / (-zc * cam.tan_half);
+    out[0] = vx + (nx * 0.5f + 0.5f) * vw, out[1] = vy + (0.5f - ny * 0.5f) * vh, out[2] = sqrtf(dot3(d, d));
+    return 1;
+}
 
 int bubble_draw_list(BubbleDraw *out, int max, float w, float h) {
     if (!g_n) return 0;

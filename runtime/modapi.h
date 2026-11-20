@@ -10,8 +10,9 @@
 #pragma once
 #include <stdint.h>
 
-#define LARECOMP_MODAPI_VERSION 5  // (2: npc_outfit, npc_anim, pokemon_*, game_work; 3: game_script, item_give, npc_object;
-                                   //  4: npc_talk, npc_talked; 5: bubble, bubble_hide)
+#define LARECOMP_MODAPI_VERSION 6  // (2: npc_outfit, npc_anim, pokemon_*, game_work; 3: game_script, item_give, npc_object;
+                                   //  4: npc_talk, npc_talked; 5: bubble, bubble_hide; 6: hud_*, input_*,
+                                   //  text_prompt*, sound_*, save_id)
 
 // npc_state answers
 enum {
@@ -113,6 +114,35 @@ typedef struct {
     // (0 none); a bubble already over that target is replaced. bubble_hide(id) fades it out; id 0: every script's.
     int (*bubble)(int kind, int handle, const char *object, const float pos[3], float height, const char *text, float seconds);
     int (*bubble_hide)(int id);
+
+    // ---- version 6 (lua-za / lua-pla 2026-11-20: scripts' overlay, keyboard / mouse, sounds, storage - runtime/hud.h,
+    // runtime/modapi_ext.h; the same in both games)
+    // The overlay: this frame's draw list (HudCmd x n, their text) replaces the last; its size (w, h, the game's 16:9
+    // interface box x, y, w, h); a text's size; an image file's id (0 not read; out its w, h); a point of the world on
+    // the overlay (1 in front of the camera: out x, y, metres)
+    void (*hud_submit)(const void *cmds, int n, const char *text, int text_len);
+    void (*hud_size)(float out[6]);
+    void (*hud_measure)(const char *text, int len, float size, float wrap, float out[2]);
+    int (*hud_image)(const char *path, int out_wh[2]);
+    int (*hud_to_screen)(const float pos[3], float out[3]);
+    // Keyboard and mouse: a script's menu holds the game's input (1) or lets go (0); events since the last call
+    // (HudInputEvent); the pointer (x, y in overlay pixels, buttons: 1 left 2 right 4 middle)
+    void (*input_grab)(int on);
+    int (*input_events)(void *out, int max);
+    void (*input_mouse)(float out[3]);
+    // Text typed in the runtime's dialog (a keyboard, or the on-screen one with a controller): opened (1; 0 one is up);
+    // poll: 0 typing, 1 confirmed (out), -1 cancelled, -2 none open
+    int (*text_prompt)(const char *title, const char *text, int max_chars);
+    int (*text_prompt_poll)(char *out, int cap);
+    // A mod's sounds (.wav / .ogg): load -> id; play (pos NULL: 2D; range metres) -> voice; stop (0: all); set volume /
+    // position (volume < 0: kept); playing
+    int (*sound_load)(const char *path);
+    int (*sound_play)(int id, float volume, float pitch, const float pos[3], float range, int loop);
+    void (*sound_stop)(int voice);
+    void (*sound_set)(int voice, float volume, const float pos[3]);
+    int (*sound_playing)(int voice);
+    // The save the game has (scripts' storage per save): its folder's name ("save_0"), "" none
+    int (*save_id)(char *out, int cap);
 } LarecompModApi;
 
 // ---- runtime side

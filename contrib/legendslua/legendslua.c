@@ -637,6 +637,27 @@ static const char k_api_lua[] = {
 #pragma clang diagnostic pop
     , 0};
 
+// ---- the mod API's version 6 (the overlay, input, sounds, files, storage) and its Lua: run after api.lua with the same
+// rt table (hud.lua: draw / hud / input / sound / storage / files; gui.lua: menus)
+#include "ext.c"
+static const char k_hud_lua[] = {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wc23-extensions"
+#embed "hud.lua"
+#pragma clang diagnostic pop
+    , 0};
+static const char k_gui_lua[] = {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wc23-extensions"
+#embed "gui.lua"
+#pragma clang diagnostic pop
+    , 0};
+static void ext_lua(const char *name, const char *code) {  // (the rt table at the top of the stack stays)
+    if (luaL_loadbufferx(L, code, strlen(code), name, "t")) { A->log("[lua] %s: %s\n", name + 1, lua_tostring(L, -1)), lua_pop(L, 1); return; }
+    lua_pushvalue(L, -2);
+    if (pcall_traced(L, 1, 0)) A->log("[lua] %s: %s\n", name + 1, lua_tostring(L, -1)), lua_pop(L, 1);
+}
+
 static void new_state(void) {
     g_mem = 0;
     L = lua_newstate(l_alloc, NULL);
@@ -697,7 +718,15 @@ static void new_state(void) {
         luaL_newlib(L, rm);
         lua_pushboolean(L, M != NULL), lua_setfield(L, -2, "have_api");
         lua_pushinteger(L, M ? (lua_Integer)M->version : 0), lua_setfield(L, -2, "api_version");
+        ext_register(L);
+        lua_pushvalue(L, -1);
+        lua_insert(L, -3);  // (a copy of rt kept under the chunk for the extensions)
         if (pcall_traced(L, 1, 0)) A->log("[lua] api.lua: %s\n", lua_tostring(L, -1)), lua_pop(L, 1);
+        else {
+            ext_lua("=hud.lua", k_hud_lua);
+            ext_lua("=gui.lua", k_gui_lua);
+        }
+        lua_pop(L, 1);
     }
     g_deadline = was;
 }
@@ -817,6 +846,7 @@ static void *watcher(void *arg) {
 #else
         usleep(500000);
 #endif
+        ext_flush_writes();  // (scripts' storage / files: hud.lua)
         if (!g_watch_on) continue;
         long long st = scan_all(NULL);
         if (g_stamp != -1 && st != g_stamp) g_reload = 1;

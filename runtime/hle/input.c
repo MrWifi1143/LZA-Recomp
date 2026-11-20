@@ -131,6 +131,9 @@ static void mouse_release(void) {
     recompute_keyboard();
 }
 
+// (a script's menu took the input - runtime/hle/scriptinput.c, the window's thread: a held mouse is let go)
+void input_mouse_let_go(void) { if (mouse_win) mouse_release(); }
+
 // The game window's focus (its events here), for Settings.background: muted (services/audio.c) or paused at the next
 // present (nvn/objects.c) while another window has it. LARECOMP_LIVE's dir file "unfocused" (0 / 1) stands in (tests).
 static _Atomic int g_unfocused;
@@ -744,6 +747,8 @@ void input_frame(uint64_t frame) {
     warp_frame(frame);
     extern void plugins_game_frame(uint64_t frame);  // (runtime/plugin.h hooks.game_frame)
     plugins_game_frame(frame);
+    extern void scriptinput_live_poll(uint64_t frame);  // (testing: <live>/sdl - window events, hle/scriptinput.c)
+    scriptinput_live_poll(frame);
     {   // LARECOMP_LIVE=<dir> (testing): steered while it runs - lines appended to <dir>/cmd, "<frames> <keys>" with keys
         // LARECOMP_INPUT's names joined by '+' (A, STICK_UP, STICK_45 = left stick at 45 degrees, RSTICK_LEFT...; "-": none),
         // run one after another; <dir>/state says the frame and what's left (screenshots: <dir>/shot, nvn/vulkan/device.c)
@@ -998,11 +1003,13 @@ static void fill_state(Cpu *c) {
         g_watch_hi = c->x[1] - 8 - 0x98 + hi;
         LOG("[input] watching controller object %llx\n", c->x[1] - 8);
     }
-    bool menu = menu_input_captured();  // the overlay menu / name entry has the controls (typing there isn't for the game)
+    extern bool scriptinput_grabbed(void);  // (runtime/hle/scriptinput.c: a script's menu holds the input too)
+    bool menu = menu_input_captured() || scriptinput_grabbed();  // the overlay menu / name entry has the controls (typing there isn't for the game)
     bool input_pad_finger_on(void);
     const uint64_t zr = input_pad_finger_on() ? 1ull << BTN_ZR : 0;  // (with the finger on, the controller's ZR touches)
     if (wheel_until[0] || wheel_until[1]) recompute_keyboard();  // (a wheel notch's binding lets go by time)
-    uint64_t b = menu ? script_buttons & ~zr : key_buttons | plugin_buttons | ((pad_buttons | script_buttons) & ~zr);
+    bool grab = scriptinput_grabbed();  // (a script's menu: the test harness' buttons - <live>/cmd - are its too)
+    uint64_t b = menu ? (grab ? 0 : script_buttons & ~zr) : key_buttons | plugin_buttons | ((pad_buttons | script_buttons) & ~zr);
     {
         uint64_t menu_mouse_buttons(Cpu *c);  // (runtime/hle/menu_mouse.c: the mouse in the game's menus)
         uint64_t m = menu_mouse_buttons(c);
@@ -1016,10 +1023,10 @@ static void fill_state(Cpu *c) {
         if (g_inject_plus > 0) { until = renderer_game_frame() + 10; g_inject_plus = 0; }
         if (renderer_game_frame() < until) b |= 1ull << BTN_PLUS;
     }
-    int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx + plugin_lx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly + plugin_ly) + script_ly);
+    int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx + plugin_lx) + (grab ? 0 : script_lx)), ly = clamp_axis((menu ? 0 : key_ly + pad_ly + plugin_ly) + (grab ? 0 : script_ly));
     int32_t mrx = 0, mry = 0;
     mouse_stick(&mrx, &mry);
-    int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx + plugin_rx + mrx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry + plugin_ry + mry) + script_ry);
+    int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx + plugin_rx + mrx) + (grab ? 0 : script_rx)), ry = clamp_axis((menu ? 0 : key_ry + pad_ry + plugin_ry + mry) + (grab ? 0 : script_ry));
     // d-pad / arrow keys walk (setting) while the stick is at rest. "At rest" has a dead zone: a controller's stick
     // never reads exactly 0 (a DualSense rests at a few hundred), which used to turn the d-pad off altogether.
     if (!menu && g_settings.dpad_move && (int64_t)lx * lx + (int64_t)ly * ly < 8000ll * 8000) {
@@ -1137,7 +1144,8 @@ static bool touch_now(int32_t *x, int32_t *y) {
     }
     if (pad_finger(x, y)) return true;
     *x = touch_x, *y = touch_y;
-    return touch_down && !menu_input_captured();
+    extern bool scriptinput_grabbed(void);
+    return touch_down && !menu_input_captured() && !scriptinput_grabbed();
 }
 // The controller as a finger (a controller has no touch screen, and Play with Eevee pets with one): the right stick
 // moves it over the screen - the overlay draws it (runtime/ui/menu.mm) - and ZR held touches there. ZR then doesn't
@@ -1167,7 +1175,8 @@ static bool pad_finger(int32_t *x, int32_t *y) {
         finger_y = finger_y < 0 ? 0 : finger_y > TOUCH_H - 1 ? TOUCH_H - 1 : finger_y;
         finger_seen_ns = now;
     }
-    bool down = ((pad_buttons | script_buttons) >> BTN_ZR & 1) && !menu_input_captured();
+    extern bool scriptinput_grabbed(void);
+    bool down = ((pad_buttons | script_buttons) >> BTN_ZR & 1) && !menu_input_captured() && !scriptinput_grabbed();
     if (down) finger_seen_ns = now;
     finger_down = down;
     *x = (int32_t)finger_x, *y = (int32_t)finger_y;

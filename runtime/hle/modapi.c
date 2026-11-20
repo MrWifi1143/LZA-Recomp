@@ -7,6 +7,7 @@
 
 #include "../hle.h"
 #include "../modapi.h"
+#include "../modapi_ext.h"
 #include "../mods.h"
 #include "../platform.h"
 
@@ -58,6 +59,9 @@ int bubble_target_where(const BubbleTarget *t, float feet[3]) {
     default: return -1;  // (Arceus: no objects by name)
     }
 }
+// (Arceus' people are shorter than Z-A's: the player ~1.5 m, its villagers ~1.7 m - a bubble's tail over the head)
+void scene_camera_on(void) {}  // (the camera hook runs anyway: hle/warp.c)
+float bubble_game_height(int kind) { return kind == BUBBLE_PLAYER ? 1.7f : kind == BUBBLE_NPC ? 1.9f : 0.0f; }
 static int bubble_api(int kind, int handle, const char *object, const float pos[3], float height, const char *text, float seconds) {
     BubbleTarget t = {.kind = kind, .handle = handle, .height = height, .owner = BUBBLE_OWNER_SCRIPT};
     if (kind < BUBBLE_POS || kind > BUBBLE_POKEMON) return 0;
@@ -83,5 +87,6 @@ static const LarecompModApi g_modapi = {
     .time_set = pla_time_set, .message_text = message_none, .object_anim = pla_npc_object_anim,
     .npc_talk = pla_npc_mod_talk, .npc_talked = pla_npc_mod_talked,
     .bubble = bubble_api, .bubble_hide = bubble_hide_api,
+    LARECOMP_MODAPI_V6,
 };
 const LarecompModApi *modapi_get(void) { return &g_modapi; }
