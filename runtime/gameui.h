@@ -39,7 +39,9 @@ enum {
     GUI_W = 1 << 12,      // w / h: its size set (layout units)
     GUI_H = 1 << 13,
 };
-enum { GUI_ANCHOR_LEFT = 1, GUI_ANCHOR_RIGHT = 2, GUI_ANCHOR_TOP = 4, GUI_ANCHOR_BOTTOM = 8 };
+enum { GUI_ANCHOR_LEFT = 1, GUI_ANCHOR_RIGHT = 2, GUI_ANCHOR_TOP = 4, GUI_ANCHOR_BOTTOM = 8,
+       GUI_ANCHOR_AUTO = 16 };  // (auto: to the edge it is nearest - what is shown of it left of a fifth of the layout
+                                // from the middle goes left, right of it right, else stays; each frame)
 // A layout on a screen wider (or taller) than 16:9
 enum {
     GUI_MODE_BOX = 0,      // (default) the whole layout in a 16:9 box in the middle of the screen; anchor on the

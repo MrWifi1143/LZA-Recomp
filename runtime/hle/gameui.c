@@ -151,6 +151,9 @@ typedef struct {
     GameUiSpec s;
     float t[3], sc[2], sz[2];  // (what the game had: put back after Calculate)
     uint8_t flag, alpha;
+    float last_dx;             // (the anchor's move last frame: its matrix has it)
+    uint8_t auto_side;         // (anchor auto: the edge found - looked at again every 15 frames)
+    uint64_t auto_at;
     uint16_t game_text[128];   // (its text before ours: given back when the edit goes)
     int16_t game_len;          // (-1: not taken)
 } PaneEdit;
@@ -368,6 +371,25 @@ static void parent_xf(uint64_t p, float *sx, float *sy, float *tx, float *ty) {
     *tx = rdf(par + 0x7c), *ty = rdf(par + 0x8c);
 }
 
+// the middle (x, layout units) of what is shown of a pane and its panes (their matrices from the last frame): 0 none
+static bool shown_centre(uint64_t p, float *x) {
+    float lo = 1e9f, hi = -1e9f;
+    uint64_t stack[256];
+    int sp = 0, n = 0;
+    stack[sp++] = p;
+    while (sp && n < 600) {
+        uint64_t q = stack[--sp];
+        n++;
+        if (!(b8(q)[0x58] & 0x80)) continue;  // (not shown: nor what is under it)
+        float w = fabsf(rdf(q + 0x50) * rdf(q + 0x70)), cx = rdf(q + 0x7c);
+        if (w > 1 && w < 1900) lo = fminf(lo, cx - w * 0.5f), hi = fmaxf(hi, cx + w * 0.5f);
+        FOR_CHILDREN(q, c) if (sp < 256) stack[sp++] = c;
+    }
+    if (lo > hi) return false;
+    *x = (lo + hi) * 0.5f;
+    return true;
+}
+
 static void edit_on(Lay *l, PaneEdit *e, float kx, float ky, bool wide) {
     uint64_t p = e->pane;
     const GameUiSpec *s = &e->s;
@@ -384,10 +406,26 @@ static void edit_on(Lay *l, PaneEdit *e, float kx, float ky, bool wide) {
         float gx = ptx + psx * t0, gy = pty + psy * t1;
         dx += gx * (kx - 1), dy += gy * (ky - 1);
     }
+    float adx = 0;
     if (wide && (s->has & GUI_ANCHOR)) {
         float ex = l->lw * (kx - 1) * 0.5f, ey = l->lh * (ky - 1) * 0.5f;
-        if (s->anchor & GUI_ANCHOR_LEFT) dx -= ex;
-        if (s->anchor & GUI_ANCHOR_RIGHT) dx += ex;
+        uint8_t a = s->anchor;
+        if (a & GUI_ANCHOR_AUTO) {  // (where what is shown of it was last frame, without our move)
+            uint64_t now = l->frame;
+            if (now - e->auto_at >= 15 || now < e->auto_at) {
+                float x;
+                e->auto_at = now;
+                e->auto_side = 0;
+                if (shown_centre(p, &x)) {
+                    x -= e->last_dx;
+                    e->auto_side = x < -l->lw * 0.2f ? GUI_ANCHOR_LEFT : x > l->lw * 0.2f ? GUI_ANCHOR_RIGHT : 0;
+                }
+            }
+            a |= e->auto_side;
+        }
+        if (a & GUI_ANCHOR_LEFT) adx -= ex;
+        if (a & GUI_ANCHOR_RIGHT) adx += ex;
+        dx += adx;
         if (s->anchor & GUI_ANCHOR_TOP) dy += ey;
         if (s->anchor & GUI_ANCHOR_BOTTOM) dy -= ey;
     }
@@ -395,6 +433,8 @@ static void edit_on(Lay *l, PaneEdit *e, float kx, float ky, bool wide) {
         wrf(p + 0x30, t0 + dx / psx), wrf(p + 0x34, t1 + dy / psy);
         moved = true;
     }
+    if (adx != e->last_dx) moved = true;  // (an auto anchor let go: made again where the game has it)
+    e->last_dx = adx;
     float sx = e->sc[0], sy = e->sc[1];
     if (s->has & GUI_SX) sx *= s->sx;
     if (s->has & GUI_SY) sy *= s->sy;
@@ -617,7 +657,8 @@ int gameui_spec_kv(GameUiSpec *s, const char *k, const char *v) {
         s->has |= GUI_MODE;
     } else if (!strcmp(k, "anchor")) {
         s->anchor = (strstr(v, "left") ? GUI_ANCHOR_LEFT : 0) | (strstr(v, "right") ? GUI_ANCHOR_RIGHT : 0) |
-                    (strstr(v, "top") ? GUI_ANCHOR_TOP : 0) | (strstr(v, "bottom") ? GUI_ANCHOR_BOTTOM : 0);
+                    (strstr(v, "top") ? GUI_ANCHOR_TOP : 0) | (strstr(v, "bottom") ? GUI_ANCHOR_BOTTOM : 0) |
+                    (strstr(v, "auto") ? GUI_ANCHOR_AUTO : 0);
         s->has |= GUI_ANCHOR;
     } else return 0;
     return 1;
@@ -763,6 +804,14 @@ static const Builtin k_wide_za[] = {
     {NULL, NULL, NULL},
 };
 static const Builtin k_wide_pla[] = {
+    // (the field's HUD: each part to the edge it is nearest - the satchel and commands left, the party right...)
+    {"fieldinfo_00", "RootPane/all/*", "anchor=auto"},
+    {"fieldinfo_02", "RootPane/all/*", "anchor=auto"},
+    {"fieldinfo_03", "RootPane/*", "anchor=auto"},
+    {"fieldinfo_05", "RootPane/all/*", "anchor=auto"},
+    // (the quest and request markers over the world: placed by the game for a 16:9 screen - spread to the real one)
+    {"fieldinfo_qicon_00", "", "mode=wide"},
+    {"fieldinfo_qicon_00", "N_qicon_*/L_qicon_*", "follow=1"},
     {NULL, NULL, NULL},
 };
 static void builtin_wide(void) {
@@ -791,6 +840,7 @@ void gameui_set_screen(float k) {
 
 void gameui_init(const GameUiGame *g) {
     if (g_on || !g || !g->layout_calc) return;
+    if (ENV("LARECOMP_GAMEUI") && atoi(ENV("LARECOMP_GAMEUI")) == 0) return;  // (research: none of this)
     G = *g;
     g_on = true;
     rt_register_fnhook_at(G.layout_calc, calc_hook);
