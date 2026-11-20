@@ -664,6 +664,7 @@ static int r_loadfile(lua_State *s) {
 }
 
 #include "world.c"  // (the world side: net, party, battles, the player held... - world.lua on top)
+#include "questlib.c"  // (the quest library: lib/quest.lua)
 
 static const char k_api_lua[] = {
 #pragma clang diagnostic push
@@ -763,6 +764,7 @@ static void new_state(void) {
             ext_lua("=hud.lua", k_hud_lua);
             ext_lua("=gui.lua", k_gui_lua);
             world_open(L);
+            quest_open(L);
         }
         lua_pop(L, 1);
     }
