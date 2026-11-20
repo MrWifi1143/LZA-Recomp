@@ -52,6 +52,17 @@ void *hle_alloc(uint64_t size);
 #define AWAY_Y (-500.0f)                 // (where a removed one is put: under the street)
 #define MAXNEW 256
 #define MAXDATA 64
+// S, the station call's block (x5; x3 = S + 8, x4 = S + 0x40), of which we copy the first 0x300 bytes. The spawn reads
+// much more of it: the struct at x4 goes on past +0x9c0 (a byte vector at +0x9a0..+0x9b8 with its allocator: empty in the
+// game's own calls) and S + 0x1e48 holds an optional object (called through when not 0) - S lives in the caller's frame
+// (0x7000653a8c: 0x20d0 bytes, S at sp+0x90, so up to S + 0x2040). Our copy was a 0x300-byte block, so the game read the
+// rest from whatever followed it in the HLE heap: zero while nothing had been allocated there yet (it worked), else a
+// vector with an end and no allocator -> the allocator call through 0 crashed (signal 11 in f_7000005388 from
+// 0x7000454b54, the spawn 0x70005e92ec; seen after a day / night change, 2026-11-20) - or an "object" called through 0
+// (0x700041b858). Now the block is SNAP_ROOM long, zero past the copied part: what the game reads there is always what
+// it was in the calls that worked. (The caller's own values there - floats, the object - aren't copied: frame-bound.)
+#define SNAP_S 0x300
+#define SNAP_ROOM 0x2040
 
 typedef struct {
     uint64_t x0, x1, x6, x1_hash;
@@ -95,6 +106,19 @@ static void name_of(uint64_t ns, char *o, size_t n) {  // (a name struct {hash, 
     if (rd(ns + 8, &p, 8) && rd(ns + 0x10, &len, 8) && p && len < n) memcpy(o, (const void *)(uintptr_t)p, len), o[len] = 0;
 }
 
+// (research: LARECOMP_NEWNPC_ROOM=<bytes> makes each spawn's block that long - 0x300 is the old one; LARECOMP_NEWNPC_FILL=1
+// puts a block of non-zero bytes in the HLE heap right after each spawn's copies, as another thread's allocation landing
+// there during the call: with the old block that crashes every spawn - the crash made reliable)
+static size_t room(void) {
+    static size_t n;
+    if (!n) {
+        const char *e = getenv("LARECOMP_NEWNPC_ROOM");
+        n = e && strtoul(e, NULL, 0) >= SNAP_S && strtoul(e, NULL, 0) <= SNAP_ROOM ? strtoul(e, NULL, 0) : SNAP_ROOM;
+        if (n != SNAP_ROOM) LOG("[newnpc] research: each spawn's station block 0x%zx bytes\n", n);
+    }
+    return n;
+}
+
 // ---- keeping station spawns
 static void area_seen(const char *data);  // (the mod API's area_loaded: a batch of station people made - below)
 static int spawn_hook(Cpu *c, uint64_t addr) {
@@ -110,11 +134,11 @@ static int spawn_hook(Cpu *c, uint64_t addr) {
     for (; i < g_nsnaps; i++) if (!strcmp(g_snaps[i].data, data)) break;
     if (i == g_nsnaps) {
         if (g_nsnaps == MAXDATA) i = (int)(fnv(data) % MAXDATA); else g_nsnaps++;
-        g_snaps[i].name = hle_alloc(0x40), g_snaps[i].blk = hle_alloc(0x300), g_snaps[i].ents = hle_alloc(0xc0 * 16);
+        g_snaps[i].name = hle_alloc(0x40), g_snaps[i].blk = hle_alloc(SNAP_S), g_snaps[i].ents = hle_alloc(0xc0 * 16);
     }
     Snap *s = &g_snaps[i];
     memcpy(s->name, (const void *)(uintptr_t)c->x[2], 0x40);
-    memcpy(s->blk, (const void *)(uintptr_t)c->x[5], 0x300);
+    memcpy(s->blk, (const void *)(uintptr_t)c->x[5], SNAP_S);
     // (S+0x1a0: the parameter entries - {u64 hash, value name struct, ...}, in the caller's heap, freed after the call:
     // copied too. An entry's optional values - flags +0x68 / +0xa0 / +0xb0 - hold callables and heap blocks of the
     // caller: a copy made later called a dead one (2026-11-16). Dropped: the entries keep only their names)
@@ -267,11 +291,11 @@ static void do_spawn(Cpu *c, const Req *r) {
     else g_req_snap[r->k % MAXNEW] = found + 1;
     char *name = hle_alloc(32);
     snprintf(name, 32, "%s_%03d", r->mod ? "luanpc" : "newnpc", r->k);
-    uint8_t *nm = hle_alloc(0x40), *blk = hle_alloc(0x300), *out = hle_alloc(32);
+    uint8_t *nm = hle_alloc(0x40), *blk = hle_alloc(room()), *out = hle_alloc(32);  // (zeroed past S's copy)
     memcpy(nm, s.name, 0x40);
     uint64_t h = fnv(name), p = (uint64_t)(uintptr_t)name, len = strlen(name), z = 0;
     memcpy(nm, &h, 8), memcpy(nm + 8, &p, 8), memcpy(nm + 0x10, &len, 8), memcpy(nm + 0x18, &z, 8);
-    memcpy(blk, s.blk, 0x300);
+    memcpy(blk, s.blk, SNAP_S);
     uint64_t b = 0, e = 0;
     if (s.nent) {  // (its own copy of the entries: the game may take them over - less the ones dropped, newnpc_drop)
         uint8_t *ents = hle_alloc(0xc0 * (uint64_t)s.nent);
@@ -299,6 +323,12 @@ static void do_spawn(Cpu *c, const Req *r) {
         }
     }
     memcpy(blk + 0x1a0, &b, 8), memcpy(blk + 0x1a8, &e, 8), memcpy(blk + 0x1b0, &e, 8);
+    static int fill = -1;
+    if (fill < 0) fill = getenv("LARECOMP_NEWNPC_FILL") && atoi(getenv("LARECOMP_NEWNPC_FILL"));
+    if (fill) {  // (as a vector would look: {begin, end = begin + 0x550, cap, allocator 0} again and again, 32-byte aligned)
+        uint64_t *f = hle_alloc(0x1000);
+        for (int k = 0; k < 0x1000 / 8; k += 4) f[k] = (uint64_t)(uintptr_t)f, f[k + 1] = f[k + 2] = (uint64_t)(uintptr_t)f + 0x550, f[k + 3] = 0;
+    }
     float *t = (float *)(blk + 0x40 + 0x30), *q = (float *)(blk + 0x40 + 0x20);
     t[0] = r->at[0], t[1] = r->at[1], t[2] = r->at[2];
     q[0] = 0, q[1] = sinf(r->yaw / 2), q[2] = 0, q[3] = cosf(r->yaw / 2);
