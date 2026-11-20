@@ -303,6 +303,68 @@ static int x_file_write_later(lua_State *s) {  // (absolute path, text): written
     pthread_mutex_unlock(&g_wq_lock);
     return 0;
 }
+// ---- scripts' per-save values follow the game's save (the mod API's version 8): staged here - outside the Lua state, so
+// a reload of the scripts keeps them - and handed to the watcher's write queue only when the game commits its save
+// (storage's tick sees save_commits change and calls stage_commit). Quit without saving: never written.
+#define NSTAGE 64
+static struct { char path[1024]; char *data; size_t len; } g_stage[NSTAGE];
+static int g_nstage;
+static pthread_mutex_t g_stage_lock = PTHREAD_MUTEX_INITIALIZER;
+static int x_save_commits(lua_State *s) { lua_pushinteger(s, M && M->version >= 8 ? (lua_Integer)M->save_commits() : -1); return 1; }
+static int x_save_path(lua_State *s) {
+    char p[1100] = "";
+    if (M && M->version >= 8) M->save_path(p, sizeof p);
+    lua_pushstring(s, p);
+    return 1;
+}
+static int x_file_stage(lua_State *s) {  // (absolute path, text): kept until the game commits its save (the same path: the newest)
+    const char *p = luaL_checkstring(s, 1);
+    size_t len;
+    const char *d = luaL_checklstring(s, 2, &len);
+    if (len > (16u << 20)) return luaL_error(s, "file too big (16 MB at most)");
+    char *copy = malloc(len ? len : 1);
+    if (!copy) return luaL_error(s, "out of memory");
+    memcpy(copy, d, len);
+    pthread_mutex_lock(&g_stage_lock);
+    int i = 0;
+    while (i < g_nstage && strcmp(g_stage[i].path, p)) i++;
+    if (i == g_nstage && g_nstage == NSTAGE) { pthread_mutex_unlock(&g_stage_lock); free(copy); return luaL_error(s, "too many files waiting for the save"); }
+    if (i == g_nstage) g_nstage++, snprintf(g_stage[i].path, sizeof g_stage[i].path, "%s", p);
+    else free(g_stage[i].data);
+    g_stage[i].data = copy, g_stage[i].len = len;
+    pthread_mutex_unlock(&g_stage_lock);
+    return 0;
+}
+static int x_file_staged(lua_State *s) {  // (absolute path) -> what is staged for it | nil
+    const char *p = luaL_checkstring(s, 1);
+    pthread_mutex_lock(&g_stage_lock);
+    int found = 0;
+    for (int i = 0; i < g_nstage; i++)
+        if (!strcmp(g_stage[i].path, p)) { lua_pushlstring(s, g_stage[i].data, g_stage[i].len); found = 1; break; }
+    pthread_mutex_unlock(&g_stage_lock);
+    if (!found) lua_pushnil(s);
+    return 1;
+}
+static int x_stage_commit(lua_State *s) {  // the staged files into the write queue (the game saved): how many
+    pthread_mutex_lock(&g_stage_lock);
+    int n = 0;
+    for (int i = 0; i < g_nstage; i++) {
+        pthread_mutex_lock(&g_wq_lock);
+        int k = 0;
+        while (k < g_nwq && strcmp(g_wq[k].path, g_stage[i].path)) k++;
+        if (k == g_nwq && g_nwq == NWRITE) { pthread_mutex_unlock(&g_wq_lock); break; }  // (the rest stays staged)
+        if (k == g_nwq) g_nwq++, snprintf(g_wq[k].path, sizeof g_wq[k].path, "%s", g_stage[i].path);
+        else free(g_wq[k].data);
+        g_wq[k].data = g_stage[i].data, g_wq[k].len = g_stage[i].len;
+        pthread_mutex_unlock(&g_wq_lock);
+        g_stage[i].data = NULL, n++;
+    }
+    memmove(&g_stage[0], &g_stage[n], (size_t)(g_nstage - n) * sizeof g_stage[0]);
+    g_nstage -= n;
+    pthread_mutex_unlock(&g_stage_lock);
+    lua_pushinteger(s, n);
+    return 1;
+}
 static void mkdirs(const char *path) {  // (the folders of a file's path)
     char p[1024];
     snprintf(p, sizeof p, "%s", path);
@@ -356,7 +418,8 @@ static void ext_register(lua_State *s) {  // (into the table at the top of the s
         {"input_mouse", x_input_mouse}, {"text_prompt", x_text_prompt}, {"text_prompt_poll", x_text_prompt_poll},
         {"sound_load", x_sound_load}, {"sound_play", x_sound_play}, {"sound_stop", x_sound_stop}, {"sound_set", x_sound_set},
         {"sound_playing", x_sound_playing}, {"save_id", x_save_id}, {"file_read", x_file_read}, {"file_exists", x_file_exists},
-        {"file_write_later", x_file_write_later}, {NULL, NULL}};
+        {"file_write_later", x_file_write_later}, {"save_commits", x_save_commits}, {"save_path", x_save_path},
+        {"file_stage", x_file_stage}, {"file_staged", x_file_staged}, {"stage_commit", x_stage_commit}, {NULL, NULL}};
     luaL_setfuncs(s, r, 0);
     lua_pushstring(s, A->data_root()), lua_setfield(s, -2, "data_root");
 }

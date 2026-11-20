@@ -124,6 +124,7 @@ static const LarecompModApi g_modapi = {
     .npc_talk = talk_none, .npc_talked = talked_none,
     .bubble = bubble_api, .bubble_hide = bubble_hide_api,
     LARECOMP_MODAPI_V6,
+    LARECOMP_MODAPI_V8,
     .ui_set = gameui_api_set, .ui_unset = gameui_api_unset, .ui_layouts = gameui_layouts, .ui_panes = gameui_panes,
     .ui_text = gameui_text, .ui_clone = gameui_api_clone,
 };

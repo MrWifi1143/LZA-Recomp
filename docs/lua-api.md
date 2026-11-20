@@ -176,7 +176,7 @@ game.run("Commands.S6DCE2895AC79F359(Commands.S5DF104B25CC642C7(4), 10)")  -- th
 |---|---|
 | `game.script(code [, fn])` | Runs `code` once in the game's Lua; `fn(result, err)` gets what it returned, as text (`"nil"` for nothing). |
 | `game.call(name, args... [, fn])` | Calls one function with these arguments (numbers, strings, booleans, `{x, y, z}` / `vec`, lists). A list result comes back as its items with spaces between. |
-| `game.run(code [, fn])` | Runs `code` as a coroutine, resumed once a frame until it ends: for what waits (the message windows, `Wait_Time`, fades). |
+| `game.run(code [, fn])` | Runs `code` as a coroutine, resumed once a frame until it ends: for what waits (the message windows, `Wait_Time`, fades). `fn("done")` once it has ended (a message window: after A closed it), `fn(nil, err)` if it failed. |
 | `game.hash(name)` | The game's name for a member: `"S"` + its FNV-1a 64 in hex. |
 
 * `Commands` is the framework's commands class (`C0C062DE5AED06885`). Its members' names are hashed in the game;
@@ -559,10 +559,10 @@ storage.global.set("first_run", false)  -- kept for the mod, whatever the save
 
 | | |
 |---|---|
-| `storage.get(key [, default])` / `storage.set(key, value)` | Values: strings, numbers, true / false, tables of those (nested; no loops). Written half a second after a change, by a thread of the plugin's (not the game's), to `<game folder>/moddata/<mod>/<save>.lua`. |
+| `storage.get(key [, default])` / `storage.set(key, value)` | Values: strings, numbers, true / false, tables of those (nested; no loops). **They follow the game's save** (API version 8): kept in the save's own folder (`<save root>/save_<n>/lzr_moddata/<mod>.lua`) and written only when the game saves (its save's commit), by a thread of the plugin's. Quit without saving and they are what they were at the last save - like everything else the game keeps; copy an older save folder back and its values come with it (also Legends Studio's Play, which plays on a copy, and an online account's save sync, which carries the folder). Until the game saves, changes are held by the plugin (a reload of the scripts keeps them). A value from before version 8 (`<game folder>/moddata/<mod>/<save>.lua`) is read once if the save has none. |
 | `storage.all()` | The whole table (change it in place, then `storage.save()`). |
 | `storage.slot()` | Which save it's kept for (`"save_0"`). |
-| `storage.global.*` | The same, for the mod as a whole (`moddata/<mod>/_mod.lua`). |
+| `storage.global.*` | The same, for the mod as a whole (`moddata/<mod>/_mod.lua`), written half a second after a change whatever the game does (settings, not progress). |
 | `files.read(path)` / `files.exists(path)` | A file of the mod's own folder (`"data/levels.txt"`; no `..`): its text, `nil` when missing. |
 
 ### From the runtime
@@ -1003,9 +1003,9 @@ quest.define{
   The quest tracked is the last one that moved (or the one picked in the journal).
 * **The journal**: J on the keyboard, R + d-pad down on a controller, `quest journal` in the console, `quest.journal()`
   - the quests on now (pick one to track it), the ones done, the tracker on / off.
-* **Progress** is the mod's storage (`moddata/<mod>/<save>.lua`, `quest.<id>`): `s` none / active / ready / done, the
-  step, and a step's own values (spots found, a catch's starting count, a wait's time left). It is kept as it changes,
-  not when the game saves.
+* **Progress** is the mod's per-save storage (`quest.<id>` in `save_<n>/lzr_moddata/<mod>.lua`): `s` none / active / ready / done, the
+  step, and a step's own values (spots found, a catch's starting count, a wait's time left). It is written when the
+  game saves, with the rewards it gave: quit without saving and the quest is back where the save has it.
 * **Notices**: "New quest: ...", each objective as it comes, "Found ... (2/3)", "Quest complete: ...".
 
 | | |
@@ -1036,4 +1036,10 @@ reload).
   once accepted, 255 when done (the copied request's own reward set to 0: nothing extra given).
 * Not working: a character copied from a placement whose character has no navigator (Arceus `area01_npc_senior`) is
   never made (the runtime asks again forever) - leave `model` empty or use another.
-Shots and logs: `testout/quests/` (final-za, final-pla).
+* Following the save (2026-11-20, API version 8), both games: the quest saved part way (Z-A's menu Save Progress,
+  Arceus' trainer card Save), finished with its rewards, the game quit without saving: back at the saved step, the
+  rewards gone (Arceus: Poké Balls 8, money 4,367, no Eevee; Z-A: no Pikachu); finished and saved, then quit: done, with
+  the rewards (Arceus: 10, 4,867, the Eevee; Z-A: the Pikachu in box 1), the journal saying so.
+* Z-A: once, a quest character made at night with the nearest townsperson's look (its station gone) crashed the game in
+  its spawn (`newnpc`, guest 0x70005e92ec); not reproduced, not traced.
+Shots and logs: `testout/quests/` (final-za, final-pla, fix-za, fix-pla).

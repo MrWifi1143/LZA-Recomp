@@ -181,9 +181,13 @@ function Voice:playing() return rt.sound_playing(self.id) end
 function Voice:set_volume(v) rt.sound_set(self.id, v) end
 function Voice:set_pos(p) p = vec(p) rt.sound_set(self.id, nil, p.x, p.y, p.z) end
 
--- storage: a mod's values kept per save (the save the game has: <game folder>/moddata/<mod>/<save>.lua), and for the
--- whole mod (storage.global); a Lua table written half a second after a change (strings, numbers, true/false, tables)
+-- storage: a mod's values kept per save, and for the whole mod (storage.global): a Lua table (strings, numbers,
+-- true/false, tables). Per save they follow the game's save (the mod API's version 8): kept in the save's own folder
+-- (<save>/lzr_moddata/<mod>.lua), staged as they change and written only when the game commits its save - quit without
+-- saving and they are as the save is; load an older save and its values come with it. storage.global
+-- (<game folder>/moddata/<mod>/_mod.lua) is written half a second after a change, whatever the game does.
 local stores = {}
+local FOLLOW = (rt.api_version or 0) >= 8
 local function ser(v, depth, seen)
   local t = type(v)
   if t == "string" then return fmt("%q", v)
@@ -213,32 +217,51 @@ local function current_save()  -- (looked up once a second at most)
   if t - save_id_at > 1 then save_id_at, save_id = t, rt.save_id() end
   return save_id ~= "" and save_id or "default"
 end
+local save_path, save_path_at = "", -10
 local function store_for(mod, global)
   local slot = global and "_mod" or current_save()
   local key = mod.name .. "/" .. slot
   local s = stores[key]
   if s then return s end
-  local path = rt.data_root .. "/moddata/" .. mod.name .. "/" .. slot .. ".lua"
+  local legacy = rt.data_root .. "/moddata/" .. mod.name .. "/" .. slot .. ".lua"
+  local path, staged = legacy, false
+  if not global and FOLLOW then
+    local t = rt.now()
+    if t - save_path_at > 1 then save_path_at, save_path = t, rt.save_path() end
+    if save_path ~= "" then path, staged = save_path .. "/lzr_moddata/" .. mod.name .. ".lua", true end
+  end
   local data = {}
-  local text = rt.file_read(path, 16 << 20)
+  -- (what an earlier load of the scripts staged and the game hasn't saved yet; else the save's; else the old place's)
+  local text = staged and (rt.file_staged(path) or rt.file_read(path, 16 << 20) or rt.file_read(legacy, 16 << 20)) or rt.file_read(path, 16 << 20)
   if text then
     local chunk = load("return " .. text, "=" .. path, "t", {})
     local ok, v = false, nil
     if chunk then ok, v = pcall(chunk) end
     if ok and type(v) == "table" then data = v else report(mod, "storage", "the saved values in " .. path .. " couldn't be read: started empty") end
   end
-  s = {path = path, data = data, dirty = false, mod = mod}
+  s = {path = path, data = data, dirty = false, mod = mod, staged = staged}
   stores[key] = s
   return s
 end
+local function store_out(s)  -- (a changed table: staged for the save, or written)
+  s.dirty = false
+  local ok, text = pcall(ser, s.data, 0, {})
+  if not ok then report(s.mod, "storage", text) return end
+  if s.staged then rt.file_stage(s.path, text) else rt.file_write_later(s.path, text) end
+end
+local commits
 G.__storage_tick = function()
   local t = rt.now()
   for _, s in pairs(stores) do
-    if s.dirty and t - s.dirty_at > 0.5 then
-      s.dirty = false
-      local ok, text = pcall(ser, s.data, 0, {})
-      if ok then rt.file_write_later(s.path, text) else report(s.mod, "storage", text) end
+    if s.dirty and t - s.dirty_at > 0.5 then store_out(s) end
+  end
+  if FOLLOW then  -- (the game saved: what is staged is written, what changed since too)
+    local c = rt.save_commits()
+    if commits and c ~= commits then
+      for _, s in pairs(stores) do if s.dirty and s.staged then store_out(s) end end
+      rt.stage_commit()
     end
+    commits = c
   end
 end
 local function storage_api(mod, global)
