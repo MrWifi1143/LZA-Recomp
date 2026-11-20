@@ -1040,6 +1040,11 @@ reload).
   Arceus' trainer card Save), finished with its rewards, the game quit without saving: back at the saved step, the
   rewards gone (Arceus: Poké Balls 8, money 4,367, no Eevee; Z-A: no Pikachu); finished and saved, then quit: done, with
   the rewards (Arceus: 10, 4,867, the Eevee; Z-A: the Pikachu in box 1), the journal saying so.
-* Z-A: once, a quest character made at night with the nearest townsperson's look (its station gone) crashed the game in
-  its spawn (`newnpc`, guest 0x70005e92ec); not reproduced, not traced.
+* Z-A: the crash seen once in a quest character's spawn after a night change (guest 0x70005e92ec) is FIXED (2026-11-20,
+  `hle/newnpc.c`): the spawn read past the runtime's 0x300-byte copy of the station block into whatever followed it in
+  the HLE heap; the block is now 0x2040 bytes, zero past the copy (made reliable with `LARECOMP_NEWNPC_ROOM=0x300
+  LARECOMP_NEWNPC_FILL=1`; 121 spawns across 12 day / night changes after the fix).
+* Z-A Windows build (under Wine): turning or moving a script character (`n:face_player()`, the quest's talk) crashed it
+  (exception c0000005 accessing 0 in the exe's own code, every time) - the same on the old block size, so not the fix
+  above; Linux is fine. Open (the quest example boots and its giver is made; Arceus' Windows build plays the quest).
 Shots and logs: `testout/quests/` (final-za, final-pla, fix-za, fix-pla).
