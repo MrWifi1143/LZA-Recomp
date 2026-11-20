@@ -231,40 +231,67 @@ local function script(mod, code, fn, keep)
   return id
 end
 local function jobs_poll()
+  -- (the answers gathered first, the callbacks run after: a callback may start another job - a new key in jobs while
+  -- pairs went through it broke the walk, "invalid key to 'next'")
+  local done
   for id, j in pairs(jobs) do
     local st, out = rt.script_result(id)
     if st ~= 0 then
       jobs[id] = nil
-      if st == 2 and not j.fn then report(j.mod, "game.script", out) end
-      if j.fn then run({fn = j.fn, mod = j.mod}, "game.script", st == 1 and out or nil, st ~= 1 and out or nil) end
+      done = done or {}
+      done[#done + 1] = {j, st, out}
     end
+  end
+  if not done then return end
+  for _, d in ipairs(done) do
+    local j, st, out = d[1], d[2], d[3]
+    if st == 2 and not j.fn then report(j.mod, "game.script", out) end
+    if j.fn then run({fn = j.fn, mod = j.mod}, "game.script", st == 1 and out or nil, st ~= 1 and out or nil) end
   end
 end
 -- a job that waits (message windows, Wait_Time: the framework's Suspend yields): run as a coroutine in the game's Lua,
--- resumed once a frame until it ends (game.run)
+-- resumed once a frame until it ends (game.run). fn(result, err) runs when it has ENDED (a message window: after A
+-- closed it): each coroutine has a number; the frame's resume job answers "<alive> <ended numbers>[ <error>]" (an
+-- ended one's number with a "!" when it failed)
 local co_alive = false
 local co_job = nil
-local CO_TICK = "local n, t = 0, __LZA_CO or {} for i = #t, 1, -1 do local co = t[i] local ok, e = coroutine.resume(co) " ..
-  "if coroutine.status(co) == 'dead' then table.remove(t, i) if not ok then __LZA_ERR = tostring(e) end else n = n + 1 end end " ..
-  "local e = __LZA_ERR __LZA_ERR = nil return n .. (e and (' ' .. e) or '')"
+local co_waiting = {}  -- (number -> {fn, mod})
+local co_next = 0
+local CO_TICK = "local n, t, d = 0, __LZA_CO or {}, {} for i = #t, 1, -1 do local c = t[i] local ok, e = coroutine.resume(c[1]) " ..
+  "if coroutine.status(c[1]) == 'dead' then table.remove(t, i) d[#d + 1] = c[2] .. (ok and '' or '!') if not ok then __LZA_ERR = tostring(e) end " ..
+  "else n = n + 1 end end local e = __LZA_ERR __LZA_ERR = nil return n .. ' ' .. (#d > 0 and table.concat(d, ',') or '-') .. (e and (' ' .. e) or '')"
+local function co_ended(cid, err)
+  local w = co_waiting[cid]
+  co_waiting[cid] = nil
+  if w and w.fn then run({fn = w.fn, mod = w.mod}, "game.run", err == nil and "done" or nil, err) end
+end
 local function run_co(mod, code, fn)
   local za = game.name == "za"
+  co_next = co_next + 1
+  local cid = co_next
   local body = za and (ZA_HELD .. "__LZA_CO = __LZA_CO or {} local co = coroutine.create(function()\nlocal __h = __LZA_HELD()\n" ..
     "local __ok, __e = pcall(function()\n" .. code .. "\nend)\n__LZA_LETGO(__h)\nif not __ok then error(__e, 0) end\nend)")
     or ("__LZA_CO = __LZA_CO or {} local co = coroutine.create(function()\n" .. code .. "\nend)")
-  local id, err = script(mod, body .. " local ok, e = coroutine.resume(co) if coroutine.status(co) ~= 'dead' then __LZA_CO[#__LZA_CO + 1] = co end " ..
-    "if not ok then error(e, 0) end return 'started'", fn, true)
-  if id then co_alive = true end
+  co_waiting[cid] = {fn = fn, mod = mod}
+  local id, err = script(mod, body .. " local ok, e = coroutine.resume(co) if coroutine.status(co) ~= 'dead' then __LZA_CO[#__LZA_CO + 1] = {co, " ..
+    cid .. "} return 'started' end if not ok then error(e, 0) end return 'done'", function(r, e)
+      if e or r == "done" then co_ended(cid, e) else co_alive = true end  -- (ended at its first resume - or failed)
+    end, true)
+  if id then co_alive = true else co_waiting[cid] = nil end
   return id, err
 end
 local function co_tick()
   if not co_alive or co_job then return end
   co_job = script(nil, CO_TICK, function(r, e)
     co_job = nil
-    local n, msg = (r or ""):match("^(%d+)%s*(.*)$")
+    local n, ended, msg = (r or ""):match("^(%d+) (%S+)%s*(.*)$")
     co_alive = (tonumber(n) or 0) > 0
     if msg and msg ~= "" then rt.log("game.run: " .. msg) end
     if e then rt.log("game.run: " .. e) co_alive = false end
+    for c in (ended or "-"):gmatch("[^,]+") do
+      local num, bad = c:match("^(%d+)(!?)$")
+      if num then co_ended(tonumber(num), bad == "!" and (msg ~= "" and msg or "failed") or nil) end
+    end
   end, true)  -- (keep: the coroutines let go of what they took at their own end)
 end
 local function call_code(fname, args)
@@ -506,7 +533,7 @@ CF74EC46ADA8DC783.S34645180A2F21B29("script/fld_item")]]
 function ui.message(text, fn)
   text = tostring(text)
   if game.name == "za" and (rt.api_version or 1) >= 3 then
-    say_slot = (say_slot + 1) % 16
+    say_slot = (say_slot + 1) % 8  -- (lza_say_0..7: 8..15 are the quest library's talks)
     if rt.message_text(say_slot, text) then
       local id = run_co(nil, fmt(MSG_SHOW, say_slot), fn)
       if id then return true end

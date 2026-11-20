@@ -21,9 +21,6 @@ local tracked             -- (the quest the tracker shows)
 local show_tracker = true
 local draw_id, poll_id, talk_tick_id
 local function every(sec, fn) return G.timer.every(sec, fn) end
--- (a game.script answer's callback runs while the plugin goes through its jobs: what starts new jobs - talk, rewards,
--- the next step - waits for the next frame)
-local function later(fn) return G.timer.after(0, fn) end
 
 local C = {panel = 0x101420d8, edge = 0xeec25499, title = 0xeec254ff, text = 0xeef0f5ff, dim = 0xaab1c3ff,
            mark = 0xeec254ff, mark_dark = 0x1a1d27ff, done = 0x6fd27aff, spot = 0x7fd8ffff}
@@ -84,19 +81,16 @@ local function overlay_say(name, lines_, fn)
   if not talk_tick_id then talk_tick_id = G.on("tick", function() talk_input() end) end  -- (A read every frame while it's up)
 end
 -- Z-A: the game's own message window, every page of a talk in one coroutine of the game's (its text in the runtime's
--- reserved labels lza_say_8..15), which sets __LQ_SEQ at its end: asked a few times a second, that is when fn() runs
--- (game.run's own callback comes as the coroutine starts)
+-- reserved labels lza_say_8..15; ui.message keeps to 0..7); game.run's callback comes once A closed the last page
 local ZA_TALK = [[local f = CF74EC46ADA8DC783.S3567CE4CD45AC7D3("script/fld_item")
 CF74EC46ADA8DC783.S092ACF6F9CAC2BA2(f)
 while not CF74EC46ADA8DC783.S8EE12659B6952775(f) do Commands.Suspend() end
 %s
 Commands.HideMessageWindow()
-CF74EC46ADA8DC783.S34645180A2F21B29("script/fld_item")
-__LQ_SEQ = %d]]
-local za_seq, za_slot = 0, 0
+CF74EC46ADA8DC783.S34645180A2F21B29("script/fld_item")]]
+local za_slot = 0
 local function za_talk(q, pages, fn)
-  za_seq = za_seq + 1
-  local seq, shows = za_seq, {}
+  local shows = {}
   for i, page in ipairs(pages) do
     if i > 8 then break end
     local slot = 8 + za_slot
@@ -104,18 +98,7 @@ local function za_talk(q, pages, fn)
     rt.message_text(slot, page)
     shows[#shows + 1] = fmt("Commands.ShowMessageWindow(2, \"lza_say_%d\", \"fld_item\")", slot)
   end
-  local ok = q.env.game.run(fmt(ZA_TALK, table.concat(shows, "\n"), seq))
-  if not ok then fn() return end
-  local t0, asking, id = now(), false, nil
-  id = every(0.15, function()
-    if asking then return end
-    if now() - t0 > 600 then G.timer.cancel(id) fn() return end  -- (never closed: let go after ten minutes)
-    asking = true
-    q.env.game.script("return __LQ_SEQ or 0", function(r)
-      asking = false
-      if (tonumber(r) or 0) >= seq and id then G.timer.cancel(id) id = nil later(fn) end
-    end)
-  end)
+  if not q.env.game.run(fmt(ZA_TALK, table.concat(shows, "\n")), function() fn() end) then fn() end
 end
 -- say(q, who, lines, fn): each line in turn (A after each), then fn()
 local function say(q, who, lines_, fn)
@@ -328,7 +311,7 @@ K.item = {
       return true
     end
     busy = true
-    q.env.game.script(fmt(GET_ITEM, st.item), function(res) later(function()
+    q.env.game.script(fmt(GET_ITEM, st.item), function(res)
       busy = false
       local have = tonumber(res) or 0
       if have >= (st.count or 1) then
@@ -337,7 +320,7 @@ K.item = {
       else
         say(q, n, st.missing or fmt("You have %d. Bring me %d.", have, st.count or 1))
       end
-    end) end)
+    end)
     return true
   end,
   target = function(q, st) return npc_pos(q, st.npc) end,
@@ -474,7 +457,7 @@ local function give_rewards(q)
         else report(q, "reward Pokémon", ok and why or b) end
       end
     end
-    pcall(G.party.refresh, function() later(function() give(5) end) end)
+    pcall(G.party.refresh, function() give(5) end)
   end
   if rw.money and rw.money > 0 then
     if ZA then report(q, "reward money", "Z-A: no money command found - left out")
