@@ -19,3 +19,6 @@ bool texpack_has(uint64_t key);        // it has a replacement for that key
 void texpack_request(uint64_t key);    // queued for the loader thread
 bool texpack_take(uint64_t key, TexLoaded **out);  // the loader is done with it: *out the file, NULL if unreadable
 void texpack_free(TexLoaded *r);
+
+// A file read now (game UI images, runtime/hle/gameui.c): a .dds (BC7 / BC5 / BC4) or a .png; NULL unreadable
+TexLoaded *texpack_load_path(const char *path);

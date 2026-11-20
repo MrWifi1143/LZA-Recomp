@@ -365,6 +365,7 @@ static void za_gameui_init(void) {
         .game = "za", .layout_calc = 0x7002634188ull, .layout_draw = 0x7002634720ull,
         .lay_name = 0x30, .di_proj = 0x10, .di_target = 0x138,
         .vt = {0x7003c93b08ull, 0x7003c93db8ull, 0x7003c94028ull, 0x7003c943b0ull, 0x7003c93c68ull, 0, 0, 0, 0x7003c931b8ull},
+        .pane_draw = 0x7002644c40ull,
     };
     gameui_init(&g);
 }
