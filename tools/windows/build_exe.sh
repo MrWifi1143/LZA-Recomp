@@ -16,7 +16,7 @@ eval "$(echo "$LINK" | sed 's|-Wl,--export-all-symbols -Wl,--out-implib,build/wi
 L=$(grep "lld-link" $W/zlink_$EXE.log | head -1 | sed 's|^.*lld-link |lld-link |')
 # (-SUBSYSTEM:windows: a windowed program - no console window, its log in lasrecomp.log next to the exe. Without it
 # the releases up to 1.0.0 were console programs: double-clicked, the log went to a console window that closed with a crash)
-L=$(echo "$L" | sed -E "s| -SUBSYSTEM:[^ ]*||I; s|$| -SUBSYSTEM:windows|; s| -DEBUG||; s| -PDB:[^ ]*||; s| -PDBALTPATH:[^ ]*||; s| -IMPLIB:[^ ]*| -IMPLIB:build/win/lasrecomp.dll.a -export-all-symbols|; s| -OUT:[^ ]*| -OUT:build/win/$EXE.exe|")
+L=$(echo "$L" | sed -E "s| -SUBSYSTEM:[^ ]*||I; s|$| -SUBSYSTEM:windows|; s| -DEBUG||; s| -PDB:[^ ]*||; s| -PDBALTPATH:[^ ]*||; s| -IMPLIB:[^ ]*| -IMPLIB:build/win/lasrecomp.dll.a -export-all-symbols|; s| -OUT:[^ ]*| -OUT:build/win/$EXE.exe -MAP:build/win/$EXE.map|")  # (the map: host frames of a crash report named)
 "$W/zig-linux/zig" $L
 ! llvm-nm build/win/$EXE.exe 2>/dev/null | grep -q ' f_70'  # (no game code inside)
 ls -la build/win/$EXE.exe build/win/lasrecomp.dll.a

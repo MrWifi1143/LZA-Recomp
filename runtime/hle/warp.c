@@ -614,6 +614,7 @@ static bool anim_float_index(uint64_t bb, uint64_t hash, uint32_t *idx) {
 // blackboard's setters - x2 the int / bool, s0 the float. t_ours: the setters' hooks below let our own sets through)
 static __thread int t_ours;
 static void anim_set(Cpu *c, uint64_t fn, uint64_t bb, uint32_t idx, int32_t ival, float val, uint64_t scratch) {
+    if (!scratch) return;  // (never write the key to address 0: hle/newnpc.c's race, 2026-11-20)
     uint64_t sx[32], snzcv = c->nzcv;
     __uint128_t sv[32];
     memcpy(sx, c->x, sizeof sx), memcpy(sv, c->v, sizeof sv);
@@ -679,7 +680,7 @@ uint64_t warp_anim_bb(uint64_t node) { return anim_bb_of_node(node); }
 bool warp_anim_move_index(uint64_t bb, uint32_t *idx) { return anim_float_index(bb, HASH_MOVE, idx); }
 void warp_anim_set_move(Cpu *c, uint64_t bb, uint32_t idx, float val, uint64_t scratch) {
     uint64_t v = 0;
-    if (heap_read(bb, &v, 8) && v == BB_VTABLE) anim_set_float(c, bb, idx, val, scratch);
+    if (scratch && heap_read(bb, &v, 8) && v == BB_VTABLE) anim_set_float(c, bb, idx, val, scratch);
 }
 static bool anim_index(uint64_t bb, uint64_t tab, uint64_t hash, uint32_t *idx);
 #define BB_SET_INT 0x700010aad4ull

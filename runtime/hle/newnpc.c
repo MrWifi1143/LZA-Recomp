@@ -705,18 +705,31 @@ static void modnpc_move(Cpu *c, ModNpc *m, uint64_t n) {
     memcpy(m->at, m->drawn, 12), m->yaw = m->drawn_yaw;
     // its walk: "move" 0.5 / 1 while walking, 0 standing - given on a change and again every second (its own AI sets its
     // own when it changes state)
-    if (!m->move_ok && now - m->bb_ns > 500000000ull) {
+    // (a node is updated by more than one of the game's threads, so this can run twice at once for one character: its
+    // scratch is made before move_ok says it may be used, and read once - move_ok set first left a window in which the
+    // other thread passed a scratch of 0 and the setter wrote to address 0: the Windows build crashed at the first turn
+    // or walk of a script character, its slow mutex in hle_alloc holding the window open - 2026-11-20)
+    if (!__atomic_load_n(&m->move_ok, __ATOMIC_ACQUIRE) && now - m->bb_ns > 500000000ull) {
         uint64_t warp_anim_bb(uint64_t node);
         bool warp_anim_move_index(uint64_t bb, uint32_t *idx);
-        m->bb_ns = now, m->bb = warp_anim_bb(n);
-        m->move_ok = m->bb && warp_anim_move_index(m->bb, &m->move_idx);
-        if (m->move_ok && !m->scratch) m->scratch = (uint64_t)(uintptr_t)hle_alloc(16);
+        m->bb_ns = now;
+        uint64_t bb = warp_anim_bb(n);
+        uint32_t idx = 0;
+        if (bb && warp_anim_move_index(bb, &idx)) {
+            if (!__atomic_load_n(&m->scratch, __ATOMIC_ACQUIRE)) {
+                uint64_t z = 0, sc = (uint64_t)(uintptr_t)hle_alloc(16);
+                __atomic_compare_exchange_n(&m->scratch, &z, sc, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);  // (one wins)
+            }
+            m->bb = bb, m->move_idx = idx;
+            __atomic_store_n(&m->move_ok, 1, __ATOMIC_RELEASE);
+        }
     }
     float want = m->walking ? (m->run ? 1.0f : 0.5f) : 0.0f;
-    if (m->move_ok && (want != m->move_given || now - m->move_ns > 1000000000ull)) {
+    uint64_t sc = __atomic_load_n(&m->scratch, __ATOMIC_ACQUIRE);
+    if (__atomic_load_n(&m->move_ok, __ATOMIC_ACQUIRE) && sc && (want != m->move_given || now - m->move_ns > 1000000000ull)) {
         void warp_anim_set_move(Cpu *c, uint64_t bb, uint32_t idx, float val, uint64_t scratch);
-        warp_anim_set_move(c, m->bb, m->move_idx, want, m->scratch);
         m->move_given = want, m->move_ns = now;
+        warp_anim_set_move(c, m->bb, m->move_idx, want, sc);
     }
 }
 // (research LARECOMP_MODNPC_STATS=1: what the node hook and the frame's bookkeeping cost, logged every 10 s)
@@ -1166,7 +1179,10 @@ static void modnpc_anims(Cpu *c) {  // (the character manager's update: the game
         ModNpc *m = &g_mod[i];
         if (!m->used || !m->nanim) continue;
         if (m->state != MODNPC_UP || !node_is(m->node, m->k)) { left = 1; continue; }  // (set once it is up)
-        if (!m->scratch) m->scratch = (uint64_t)(uintptr_t)hle_alloc(16);
+        if (!__atomic_load_n(&m->scratch, __ATOMIC_ACQUIRE)) {  // (as modnpc_move: one scratch, made once)
+            uint64_t z = 0, sc = (uint64_t)(uintptr_t)hle_alloc(16);
+            __atomic_compare_exchange_n(&m->scratch, &z, sc, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        }
         for (int k = 0; k < m->nanim; k++)
             if (!warp_anim_param(c, m->node, m->anim[k].hash, m->anim[k].kind, m->anim[k].v, m->scratch))
                 LOG("[modnpc] %s: its animation has no such parameter (%c %016llx)\n", m->label, m->anim[k].kind, (unsigned long long)m->anim[k].hash);
