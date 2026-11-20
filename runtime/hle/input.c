@@ -1035,6 +1035,10 @@ static void fill_state(Cpu *c) {
         if (pla_input_tick()) held = b;
         else b = held;
     }
+    {   // (a script holding the player still / walking them - the world API's input_hold / input_stick, hle/worldcommon.c)
+        void world_input_filter(uint64_t *b, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry);
+        if (!menu) world_input_filter(&b, &lx, &ly, &rx, &ry);
+    }
     // stick directions also appear as buttons (bits 16-23)
     if (lx < -16000) b |= 1ull << 16;
     if (ly > 16000) b |= 1ull << 17;

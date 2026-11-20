@@ -915,3 +915,13 @@ G.vec = vec
 G.lua = {stats = rt.stats, stats_reset = rt.stats_reset}
 game.time = rt.now   -- (seconds, a steady clock)
 game.cpu = rt.cpu    -- (this thread's CPU seconds: profiling a script)
+
+-- ---------------------------------------------------------------- the world side (world.lua: net, party, battles...)
+-- api.lua's own parts handed to world.lua, which runs right after this in the same state and takes them (it adds its
+-- tables to each mod's globals by wrapping api_for, its work to __tick / __unload)
+G.__world_parts = {
+  rt = rt, vec = vec, is_vec = is_vec, player = player, ui = ui, on = on, off = off, emit = emit, emit_to = emit_to,
+  has = has, run = run, report = report, tell_once = tell_once, timer_add = timer_add, script = script, run_co = run_co,
+  lit = lit, fnv64 = fnv64, Npc = Npc, Poke = Poke, npcs = npcs, pokes = pokes, shared = shared, cmd_add = cmd_add,
+  api_for = function(f) local was = api_for if f then api_for = f end return was end,
+}

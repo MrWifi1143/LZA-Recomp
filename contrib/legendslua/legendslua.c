@@ -630,6 +630,8 @@ static int r_loadfile(lua_State *s) {
     return 1;
 }
 
+#include "world.c"  // (the world side: net, party, battles, the player held... - world.lua on top)
+
 static const char k_api_lua[] = {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wc23-extensions"
@@ -698,6 +700,7 @@ static void new_state(void) {
         lua_pushboolean(L, M != NULL), lua_setfield(L, -2, "have_api");
         lua_pushinteger(L, M ? (lua_Integer)M->version : 0), lua_setfield(L, -2, "api_version");
         if (pcall_traced(L, 1, 0)) A->log("[lua] api.lua: %s\n", lua_tostring(L, -1)), lua_pop(L, 1);
+        else world_open(L);
     }
     g_deadline = was;
 }

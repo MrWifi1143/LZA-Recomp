@@ -473,6 +473,11 @@ static void world_tick(uint64_t frame) {
         uint64_t from;
         int n;
         while ((n = w_recv(&from, b, sizeof b)) > 0) {
+            if (n > 2 && b[0] == 'L' && b[1] == '1') {  // (a script message's piece / a chat line's: hle/luanet.c)
+                void luanet_heard(uint64_t from, const uint8_t *b, int n);
+                luanet_heard(from, b + 2, n - 2);
+                continue;
+            }
             if (n >= 5 && b[0] == 'O' && b[1] == '1') {  // (an outfit: kept for when they get a person, put on theirs)
                 uint64_t fit[12];
                 uint16_t mask;
@@ -975,4 +980,50 @@ int pla_world_skel_pos(uint64_t sk, float out[3]) {  // (0: not posed lately - g
         if (g_sk[i].sk == sk && f - g_sk[i].frame < 60) { out[0] = g_sk[i].p[0], out[1] = g_sk[i].p[1], out[2] = g_sk[i].p[2]; return 1; }
     }
     return 0;
+}
+
+// ---- For scripts (hle/luanet.c: the world API's net / players / chat): a script message's piece travels as 'L' '1' +
+// up to 80 bytes (luanet's piece) through the relay, as the rest; who sent it is the relay's word (the server's id).
+#include "../worldapi.h"
+int world_net_up(void) { return w_send && w_avail && w_avail(); }
+uint64_t world_self_id(void) {
+    static uint64_t (*self)(void);
+    static bool looked;
+    if (!looked) looked = true, self = (uint64_t (*)(void))plugins_symbol("larecomp_world_self");
+    return self ? self() : 0;
+}
+void world_net_send(const uint8_t *body, int n) {
+    if (n <= 0 || n > 80 || !world_net_up()) return;
+    uint8_t b[96] = {'L', '1'};
+    memcpy(b + 2, body, (size_t)n);
+    w_send(b, 2 + (size_t)n);
+}
+// where a player's person is drawn (their person up: where it was sent - it walks there, dressed ones follow exactly)
+static bool peer_person(const Peer *p, float out[3]) {
+    extern int pla_npc_state(int), pla_npc_pos(int, float *);
+    if (p->own < 0 || !p->own_up || pla_npc_state(p->own) < 3) return false;
+    if (!pla_npc_pos(p->own, out)) memcpy(out, p->tgt, 12);
+    return true;
+}
+int world_players_list(LarecompPlayer *out, int max) {
+    int n = 0;
+    uint64_t now = plat_now_ns();
+    for (int i = 0; i < MAXPEER && n < max; i++) {
+        const Peer *p = &g_peers[i];
+        if (!p->have || now - p->heard_ns > 5000000000ull) continue;
+        LarecompPlayer *o = &out[n++];
+        o->id = p->id, o->yaw = p->tgt[3] * 57.29578f;
+        memcpy(o->pos, p->tgt, 12);
+        o->standin = peer_person(p, o->pos);
+        o->dist = g_me_frame ? sqrtf((o->pos[0] - g_me[0]) * (o->pos[0] - g_me[0]) + (o->pos[2] - g_me[2]) * (o->pos[2] - g_me[2])) : -1;
+    }
+    return n;
+}
+int world_player_feet(uint64_t id, float feet[3]) {
+    for (int i = 0; i < MAXPEER; i++) {
+        const Peer *p = &g_peers[i];
+        if (!p->have || p->id != id) continue;
+        return peer_person(p, feet) ? 1 : 0;
+    }
+    return -1;
 }
