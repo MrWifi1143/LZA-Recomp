@@ -4383,9 +4383,9 @@ static uint64_t prof_tp_;
 // Known by their first instructions: c[3][0x210] / c[3][0x214] loaded at pc 0x8 / 0x18, the FFMAs with c[3][0x218] /
 // c[3][0x21c] soon after (registers and places vary; the same in Z-A and Arceus). A pane that covers the whole layout -
 // the screen fades, a menu's dimming of the world - is drawn over the whole image instead of the box (the sides went
-// undimmed), and so is one across the layout's whole width on a wider screen (a menu's tint bands, header and footer
-// bars). One that ends at the layout's left or right edge (a header tab, a side panel, a guide line) has its edge
-// continued to the image's edge (ui_extend_edges). Contents stay in the box.
+// undimmed). One across the layout's whole width (a menu's tint bands, header and footer bars) or ending at its left or
+// right edge (a header tab, a side panel, a guide line) stays in the box with its edges continued to the image's edges
+// (ui_extend_edges). Contents stay in the box.
 static bool layout_vs(uint64_t code) {
     static struct { uint64_t code; bool yes; } cache[256];
     uint32_t h = (uint32_t)((code >> 4) * 0x9E3779B1u) >> 24;
@@ -4801,6 +4801,13 @@ static void draw_(CmdRec *r, bool indexed) {
         float bw_ = fminf(img_w, img_h * (16.0f / 9.0f)), bh_ = fminf(img_h, img_w * (9.0f / 16.0f));
         int ui_mode = (int)(st.ui & 0xff) - 1, ui_anchor = (int)(st.ui >> 8) & 0xff;
         if (ui_mode >= 0) composite = reads_scene;  // (a layout's pane: its shape tells - below - not the quad guesses)
+        if (ui_mode == 0 && composite) {
+            // (a pane that reads a screen-sized image is a backdrop - the blurred capture behind a menu - only when it is as
+            // big as the layout: Arceus' satchel grid icons read a screen-sized mask (its scissor) and were drawn
+            // stretched over the whole image, two of them left of the 16:9 box)
+            float lo[2], hi[2];
+            if (layout_pane_rect(lo, hi) && !(lo[0] <= -0.99f && hi[0] >= 0.99f && lo[1] <= -0.99f && hi[1] >= 0.99f)) composite = false;
+        }
         if (ui_mode >= 0 && !composite) {
             // A layout the game layer fits itself (runtime/hle/gameui.c; modes as gameui.h's GUI_MODE_*): 0 the box,
             // moved to the edge it is anchored at; 1 "wide" - its projection already as wide as the image: the whole
@@ -4817,9 +4824,10 @@ static void draw_(CmdRec *r, bool indexed) {
                 bool rect = !keep && layout_pane_rect(lo, hi);
                 bool spans_x = rect && lo[0] <= -0.99f && hi[0] >= 0.99f, spans_y = rect && lo[1] <= -0.99f && hi[1] >= 0.99f;
                 // (a pane as big as the layout - a fade, a dimming - covers the whole image; so does one across its whole
-                // width on a wider screen - a band: a header, a footer, a menu's tint over the top or bottom half - or its
-                // whole height on a taller one: the box's sides went without them)
-                if ((spans_x && spans_y) || (spans_x && kx > 1.001f && !(ui_anchor & 3)) || (spans_y && ky > 1.001f && !(ui_anchor & 12))) {
+                // height on a taller screen. One across its whole width on a wider screen - a band: a header bar, a menu's
+                // tint over the top or bottom half - stays in the box and has both edges continued (below): an ornament
+                // in the bar - Arceus' tab bar diamond - stays where it was, next to its title)
+                if ((spans_x && spans_y) || (spans_y && ky > 1.001f && !(ui_anchor & 12))) {
                     composite = true;
                 } else {
                     vp_sx = bw_ / rt0->width, vp_sy = bh_ / rt0->height;
