@@ -1694,6 +1694,10 @@ int ui_run(void) {
                 if (bind_capture_event(&e)) continue;
             }
             if (menu_handle_event(&e)) continue;
+            {   // (scripts' keyboard / mouse: runtime/hle/scriptinput.c - a script's menu keeps the mouse from the game)
+                extern bool scriptinput_event(const SDL_Event *e);
+                if (scriptinput_event(&e)) continue;
+            }
             input_handle_event(&e);
         }
         menu_apply_window_requests(window);

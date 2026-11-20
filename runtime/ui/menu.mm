@@ -130,10 +130,12 @@ static ImGuiKey key_from_pad(Uint8 b) {
 // they last used a controller.
 static std::atomic<int> g_kbd{0};  // 1 open, 2 confirmed, 3 cancelled
 static std::atomic<bool> g_last_pad{false};
-static char g_kbd_text[96];
+static char g_kbd_text[512];  // (a script's text prompt may take up to 120 characters: menu_text_prompt)
 static int g_kbd_max = 8;
 static char g_kbd_title[256];  // (the game's heading for it: swkbd.c)
+static std::atomic<bool> g_kbd_script{false};  // (the dialog is a script's text prompt: menu_text_prompt, not the game's)
 static bool capturing() { return g_open.load() || g_kbd.load() == 1; }
+extern "C" bool scriptinput_grabbed(void);  // (runtime/hle/scriptinput.c: a script's menu has the input)
 // The game gets no input while this is true (runtime/hle/input.c): the question or the name entry is up.
 extern "C" bool menu_input_captured(void) { return capturing(); }
 
@@ -153,7 +155,7 @@ bool menu_handle_event(const SDL_Event *e) {
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN:
         if (!e->key.repeat && (e->key.scancode == SDL_SCANCODE_F1 ||
-                               (e->key.scancode == SDL_SCANCODE_ESCAPE && !g_open.load()))) {
+                               (e->key.scancode == SDL_SCANCODE_ESCAPE && !g_open.load() && !(scriptinput_grabbed() && !typing)))) {
             if (!typing) set_open(!g_open.load());  // (Esc with the question up goes to it below: "Não")
             return true;
         }
@@ -281,6 +283,13 @@ static void style_init(void) {
     c[ImGuiCol_NavCursor] = gold;
 }
 
+// scripts' overlay (runtime/ui/hud.mm): their fonts, draw list and the frame's size
+void hud_fonts_merge(ImGuiIO &io, ImFont *into, float size);
+void hud_fonts_ready(ImFont *font, ImFont *big);
+bool hud_wanted(void);
+void hud_frame_size(float w, float h);
+void hud_render(ImGuiIO &io, float scale);
+
 static void init(void) {
     IMGUI_CHECKVERSION();
     pick_menu_language();
@@ -292,7 +301,8 @@ static void init(void) {
     io.IniFilename = NULL;
     ImFontConfig cfg;
     cfg.OversampleH = 2;
-    static const ImWchar ranges[] = {0x20, 0xFF, 0x400, 0x45F, 0};  // (Latin-1: Portuguese accents; Cyrillic)
+    static const ImWchar ranges[] = {0x20, 0xFF, 0x400, 0x45F, 0x2010, 0x205E, 0x20AC, 0x20AC, 0x2122, 0x2122, 0};  // (Latin-1:
+    // Portuguese accents; Cyrillic; dashes, quotes, ellipsis, euro)
     const char *paths[] = {"C:/Windows/Fonts/segoeui.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                            "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"};
     for (const char *p : paths) {
@@ -302,6 +312,7 @@ static void init(void) {
         g_font_big = io.Fonts->AddFontFromFileTTF(p, 56, &cfg, ranges);
         break;
     }
+    hud_fonts_merge(io, g_font, 34);  // (Japanese / Chinese and emoji for scripts' text and speech bubbles: runtime/ui/hud.mm)
     char baloo[1024];
     if (rt_resource("Baloo2-SemiBold.ttf", "third_party/fonts/Baloo2/Baloo2-SemiBold.ttf", baloo, sizeof baloo))
         g_menu_font = io.Fonts->AddFontFromFileTTF(baloo, 39, &cfg, ranges);
@@ -334,6 +345,7 @@ static void drain_events(ImGuiIO &io) {
 RT_ON_RESET(menu_reset) {
     set_open(false);
     g_kbd = 0;
+    g_kbd_script = false;
     osk_cancel();
     pthread_mutex_lock(&q_lock);
     q_events.clear();
@@ -486,6 +498,46 @@ static void update_notice_once(void) {
     fprintf(stderr, "[update] told in the game: %s\n", t);
 }
 
+// A script's text prompt (the mod API's text_prompt: Lua input.text): the name entry's dialog - typed with a keyboard,
+// the on-screen keyboard with a controller - without holding the game up. 1 opened, 0 busy (another one is up).
+extern "C" int menu_text_prompt(const char *title, const char *text, int max_chars) {
+    int idle = 0;
+    if (!g_kbd.compare_exchange_strong(idle, 4)) return 0;  // (4: being set up)
+    snprintf(g_kbd_text, sizeof g_kbd_text, "%s", text ? text : "");
+    snprintf(g_kbd_title, sizeof g_kbd_title, "%s", title ? title : "");
+    g_kbd_max = max_chars > 0 && max_chars <= 120 ? max_chars : 60;
+    if ((int)strlen(g_kbd_text) > g_kbd_max) g_kbd_text[g_kbd_max] = 0;
+    g_kbd_script = true;
+    g_kbd = 1;
+    return 1;
+}
+// 0 still typing, 1 confirmed (out: the text), -1 cancelled, -2 no prompt of a script's
+extern "C" int menu_text_prompt_poll(char *out, int cap) {
+    if (!g_kbd_script.load()) return -2;
+    {   // (testing) LARECOMP_LIVE=<dir>: <dir>/kbd answers the open prompt with its first line ("" / "\x1b": cancelled)
+        static const char *dir = (const char *)1;
+        if (dir == (const char *)1) dir = getenv("LARECOMP_LIVE");
+        char p[1100], line[512];
+        if (dir && g_kbd.load() == 1) {
+            snprintf(p, sizeof p, "%s/kbd", dir);
+            if (FILE *f = fopen(p, "r")) {
+                if (!fgets(line, sizeof line, f)) line[0] = 0;
+                fclose(f);
+                remove(p);
+                line[strcspn(line, "\r\n")] = 0;
+                if (line[0] && line[0] != 0x1b) snprintf(g_kbd_text, sizeof g_kbd_text, "%s", line), g_kbd = 2;
+                else g_kbd = 3;
+            }
+        }
+    }
+    int k = g_kbd.load();
+    if (k == 1 || k == 4) return 0;
+    g_kbd_script = false;
+    if (k == 2 && out) snprintf(out, (size_t)cap, "%s", g_kbd_text);
+    g_kbd = 0;
+    return k == 2 ? 1 : -1;
+}
+
 // Speech bubbles over characters (runtime/bubble.h): a white box with a tail at the spot bubble_draw_list gives, the
 // text wrapped and centred (about 26 characters a line), the townspeople's look. Boxes that would overlap are stacked:
 // the nearer one keeps its place, the farther one goes above it (its tail then a thin line down to its character).
@@ -558,8 +610,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     float fx, fy;
     bool fdown, finger = !open && input_finger_cursor(&fx, &fy, &fdown);
     update_notice_once();
-    bool notice = SDL_GetTicks() < g_notice_until.load(), bubbles = bubble_count() > 0;
-    if (!open && !kbd && !g_settings.show_fps && !finger && !notice && !bubbles) {
+    bool notice = SDL_GetTicks() < g_notice_until.load(), bubbles = bubble_count() > 0, hud = hud_wanted();
+    if (!open && !kbd && !g_settings.show_fps && !finger && !notice && !bubbles && !hud) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
@@ -587,7 +639,10 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     }
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
+    hud_frame_size((float)target_w, (float)target_h);
     if (bubbles) bubbles_draw(io, scale);
+    if (hud) hud_render(io, scale);
+    hud_fonts_ready(g_font, g_font_big);  // (built by now: scripts may measure text)
 
     if (notice) {
         ImGui::SetNextWindowPos(ImVec2(16 * scale, io.DisplaySize.y - 16 * scale), 0, ImVec2(0, 1));

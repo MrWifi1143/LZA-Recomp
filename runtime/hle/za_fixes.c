@@ -311,7 +311,8 @@ static void bubble_cam(uint64_t cam) {
     extern int bubble_count(void);
     extern void bubble_camera(const float *eye);
     extern bool warp_player_now(float pos[3], float *yaw);
-    if (!bubble_count()) return;
+    extern volatile int g_scene_cam_wanted;  // (also positional sounds, scripts' to_screen: hle/bubble.c)
+    if (!bubble_count() && !g_scene_cam_wanted) return;
     const float *t = (const float *)(uintptr_t)(cam + 0x280);
     float p[3];
     if (!warp_player_now(p, NULL)) return;
