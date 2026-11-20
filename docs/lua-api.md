@@ -460,11 +460,13 @@ playing (CLI: `uilayouts [filter]`, `uipanes <layout>`).
   | `fill` | stretched over the whole screen's width (a backdrop); on the layout itself `fill = false`: none of its panes is |
   | `follow` | a pane the game places over something in the world (a marker over a character): its place spread to the real screen's width |
   | `mode` | (the layout) on a screen wider than 16:9: `box` (default: the 16:9 box in the middle), `wide` (as wide as the screen: panes where they were, the anchored ones at the edges; set by itself when a pane is anchored), `stretch` (stretched across, as the game itself would) |
-  | `image` | accepted, not done yet (a Picture's texture: replace the texture itself with a texture pack - `texpack/`) |
+  | `image` | a `.png` / `.dds` file (from the game folder; in a mod's `.ini`, beside it): the texture the pane draws with first becomes the file's. As a texture pack replaces a texture: everywhere that texture is used. The pane's material decides the colours - many HUD icons are masks tinted by their material, so a picture shows as their shape |
 
 * **Who wins**: a script's edits beat a mod's data, which beat the runtime's own; a reload takes the scripts' back.
-* `gameui.clone(layout, src, name, {...})` (a new pane, a copy of `src`) is in the API but answers `false`: the games'
-  pane-tree copy isn't wired yet.
+* `gameui.clone(layout, src, name, {x =, y =, scale =, hide =})`: a new pane - `src` (and what is under it) drawn once
+  more, moved / scaled about its own centre. The copy shows what its source shows (its text, its animation); edit it
+  later with `gameui.set(layout, name, {...})` (`x`, `y`, `scale`, `hide`). In an `.ini`: a section named for the copy
+  with `clone = <src>`. (Not a new pane in the game's tree: a running layout has no GPU constants for one.)
 
 ### A UI mod without code
 
@@ -487,8 +489,10 @@ within two seconds when one changes, while the game runs.
 With **Aspect ratio: Fill the window** on a screen wider than 16:9, the runtime itself edits a few layouts (its own,
 lowest-priority edits): Z-A's minimap and party bar go to the left edge, the field's markers and the aiming reticle
 (placed by the game over things in the world) are spread to the real screen, the map is as wide as the screen with its
-header across it; Arceus' field HUD parts go to the edge each is nearest (commands and button hints left, the item and
-party wheel right) and its quest markers are spread out. Every other layout stays in the middle 16:9 box; a pane as
+header across it, a battle's plate goes left and the move palette right; Arceus' field HUD parts go to the edge each is
+nearest (commands and button hints left, the item and party wheel right), its quest markers are spread out, and in a
+battle the letterbox bars cross the whole screen, the player's plate goes left, the commands right and the plates over
+the Pokémon follow them. Every other layout stays in the middle 16:9 box; a pane as
 big as the whole layout (a fade, a menu's dimming, a blurred backdrop) covers the whole screen - told by the pane's own
 shape, so sheets like Z-A's Settings keep their proportions. `LARECOMP_GAMEUI_NOWIDE=1` leaves the runtime's own
 edits out; `LARECOMP_GAMEUI=0` all of it (research).
