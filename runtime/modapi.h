@@ -10,9 +10,9 @@
 #pragma once
 #include <stdint.h>
 
-#define LARECOMP_MODAPI_VERSION 6  // (2: npc_outfit, npc_anim, pokemon_*, game_work; 3: game_script, item_give, npc_object;
+#define LARECOMP_MODAPI_VERSION 7  // (2: npc_outfit, npc_anim, pokemon_*, game_work; 3: game_script, item_give, npc_object;
                                    //  4: npc_talk, npc_talked; 5: bubble, bubble_hide; 6: hud_*, input_*,
-                                   //  text_prompt*, sound_*, save_id)
+                                   //  text_prompt*, sound_*, save_id; 7: ui_* - the game's interface)
 
 // npc_state answers
 enum {
@@ -143,6 +143,21 @@ typedef struct {
     int (*sound_playing)(int voice);
     // The save the game has (scripts' storage per save): its folder's name ("save_0"), "" none
     int (*save_id)(char *out, int cap);
+
+    // ---- version 7 (ui-za / ui-pla 2026-11-19, numbered 6 on those branches; the same in both games)
+    // The game's own interface layouts (runtime/gameui.h, hle/gameui.c): a pane of a layout edited, one key at a time -
+    // the keys of a mod's ui/<layout>.ini (x y sx sy scale w h alpha hide show anchor mode fill follow text image); pane
+    // "" the layout itself. 1 taken, 0 not (an unknown key, the table full). A script's edits beat a mod's data and the
+    // runtime's own; ui_unset drops a script's edits of that pane (pane NULL: of the layout; layout NULL: all of them).
+    int (*ui_set)(const char *layout, const char *pane, const char *key, const char *value);
+    void (*ui_unset)(const char *layout, const char *pane);
+    // What is on screen: the layouts ("<name> <panes> <w>x<h>" a line), a layout's panes ("<depth> <name> <type> <x> <y>
+    // <w> <h> <shown>" a line, tree order), a TextBox's text (UTF-8). Answer the length, -1: no such layout on screen.
+    int (*ui_layouts)(char *out, int cap);
+    int (*ui_panes)(const char *layout, char *out, int cap);
+    int (*ui_text)(const char *layout, const char *pane, char *out, int cap);
+    // A new pane, a copy of src (with what is under it) named name; 1 asked, 0 not (gameui_clone)
+    int (*ui_clone)(const char *layout, const char *src, const char *name);
 } LarecompModApi;
 
 // ---- runtime side

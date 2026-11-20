@@ -6,6 +6,7 @@
 //   mods/<name>/lua/*.lua                                  scripts (contrib/legendslua: Legends Lua is loaded for them)
 //   mods/<name>/mod.ini                                    recomp features the mod turns on (key = value lines:
 //                                                           plant_density, plant_spread, tree_patch - Lush Foliage)
+//   mods/<name>/ui/<layout>.ini                            the game's interface edited (runtime/gameui.h)
 //   mods/<name>/atmosphere/contents/<title id>/romfs/...   (or any folder holding a romfs/ up to 4 levels down:
 //                                                           a download unpacked as it came)
 #pragma once

@@ -73,6 +73,11 @@ static int bubble_hide_api(int id) {
     if (id == 0) { bubble_clear(BUBBLE_OWNER_SCRIPT); return 1; }
     return bubble_hide(id);
 }
+// the game's interface (runtime/gameui.h; hle/gameui.c - the same in both games)
+int gameui_api_set(const char *layout, const char *pane, const char *key, const char *value);
+void gameui_api_unset(const char *layout, const char *pane);
+int gameui_api_clone(const char *layout, const char *src, const char *name);
+#include "../gameui.h"
 static const LarecompModApi g_modapi = {
     .version = LARECOMP_MODAPI_VERSION, .game = "pla", .enable = enable,
     .npc_spawn = pla_npc_mod_spawn, .npc_remove = pla_npc_mod_remove, .npc_remove_all = pla_npc_mod_remove_all,
@@ -88,5 +93,7 @@ static const LarecompModApi g_modapi = {
     .npc_talk = pla_npc_mod_talk, .npc_talked = pla_npc_mod_talked,
     .bubble = bubble_api, .bubble_hide = bubble_hide_api,
     LARECOMP_MODAPI_V6,
+    .ui_set = gameui_api_set, .ui_unset = gameui_api_unset, .ui_layouts = gameui_layouts, .ui_panes = gameui_panes,
+    .ui_text = gameui_text, .ui_clone = gameui_api_clone,
 };
 const LarecompModApi *modapi_get(void) { return &g_modapi; }

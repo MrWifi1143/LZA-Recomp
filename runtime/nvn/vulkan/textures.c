@@ -683,6 +683,24 @@ static bool texpack_apply(TexBackend *b, const TexLoaded *r) {
     return true;
 }
 
+// A game UI image (runtime/hle/gameui.c "image"): the texture a pane draws with becomes this file's - as a texture
+// pack's replacement does (everywhere the texture is used), read on this thread the first time (small UI pictures)
+const char *gameui_image_path(uint32_t id);
+void vk_texture_gameui_image(NvnTexture *t, uint32_t img) {
+    static struct { NvnTexture *t; uint32_t img; } done[64];
+    for (int i = 0; i < 64; i++)
+        if (done[i].t == t && done[i].img == img) return;
+    TexBackend *b = t ? (TexBackend *)t->backend : NULL;
+    const char *path = gameui_image_path(img);
+    if (!b || !path) return;
+    TexLoaded *r = texpack_load_path(path);
+    bool ok = r && texpack_apply(b, r);
+    texpack_free(r);
+    static int n;
+    LOG("[gameui] image %s on texture %ux%u: %s\n", path, t->width, t->height, ok ? "put" : "not taken (unreadable?)");
+    done[n++ & 63].t = t, done[(n - 1) & 63].img = img;
+}
+
 static void upload_texture(NvnTexture *t, TexBackend *b) {
     // (its replacement read by now? the game's own until then.) At most LARECOMP_TEXPACK_BUDGET_MB (8) of replacements
     // go in a frame, at least one: each is a new image and all its levels copied on this thread - many done at once
