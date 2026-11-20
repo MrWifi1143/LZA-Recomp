@@ -3,6 +3,7 @@
 // the save's id (hle/modapi_ext.c). LARECOMP_MODAPI_V6 goes in each game's LarecompModApi initializer.
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 
 void hud_submit(const void *cmds, int n, const char *text, int text_len);
 void hud_size(float out[6]);
@@ -20,6 +21,9 @@ void modsound_stop(int voice);
 void modsound_set(int voice, float volume, const float pos[3]);
 int modsound_playing(int voice);
 int modapi_save_id(char *out, int cap);
+uint32_t modapi_save_commits(void);
+int modapi_save_path(char *out, int cap);
+void modapi_save_committed(void);  // (services/fs.c: the game committed its save)
 
 #define LARECOMP_MODAPI_V6                                                                                                 \
     .hud_submit = hud_submit, .hud_size = hud_size, .hud_measure = hud_measure, .hud_image = hud_image,                    \
@@ -27,3 +31,5 @@ int modapi_save_id(char *out, int cap);
     .input_mouse = scriptinput_mouse, .text_prompt = menu_text_prompt, .text_prompt_poll = menu_text_prompt_poll,           \
     .sound_load = modsound_load, .sound_play = modsound_play, .sound_stop = modsound_stop, .sound_set = modsound_set,      \
     .sound_playing = modsound_playing, .save_id = modapi_save_id
+// (version 8: in each game's initializer after LARECOMP_MODAPI_V6)
+#define LARECOMP_MODAPI_V8 .save_commits = modapi_save_commits, .save_path = modapi_save_path

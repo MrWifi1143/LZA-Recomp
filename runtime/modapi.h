@@ -10,9 +10,10 @@
 #pragma once
 #include <stdint.h>
 
-#define LARECOMP_MODAPI_VERSION 7  // (2: npc_outfit, npc_anim, pokemon_*, game_work; 3: game_script, item_give, npc_object;
+#define LARECOMP_MODAPI_VERSION 8  // (2: npc_outfit, npc_anim, pokemon_*, game_work; 3: game_script, item_give, npc_object;
                                    //  4: npc_talk, npc_talked; 5: bubble, bubble_hide; 6: hud_*, input_*,
-                                   //  text_prompt*, sound_*, save_id; 7: ui_* - the game's interface)
+                                   //  text_prompt*, sound_*, save_id; 7: ui_* - the game's interface;
+                                   //  8: save_commits, save_path - scripts' per-save values follow the game's save)
 
 // npc_state answers
 enum {
@@ -158,6 +159,14 @@ typedef struct {
     int (*ui_text)(const char *layout, const char *pane, char *out, int cap);
     // A new pane, a copy of src (with what is under it) named name; 1 asked, 0 not (gameui_clone)
     int (*ui_clone)(const char *layout, const char *src, const char *name);
+
+    // ---- version 8 (2026-11-20, the same in both games: runtime/hle/modapi_ext.c)
+    // Scripts' per-save values follow the game's save: they are written when the game commits its save (fs.c's IFileSystem
+    // Commit), into the save's own folder. save_commits: how many times the game has committed its save since it started;
+    // save_path: the save's folder (the newest save_<n> under the save root - LARECOMP_SAVE_DIR or <data root>/save -,
+    // its whole path), "" none yet.
+    uint32_t (*save_commits)(void);
+    int (*save_path)(char *out, int cap);
 } LarecompModApi;
 
 // ---- runtime side
