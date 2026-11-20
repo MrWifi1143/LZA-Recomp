@@ -916,6 +916,74 @@ G.lua = {stats = rt.stats, stats_reset = rt.stats_reset}
 game.time = rt.now   -- (seconds, a steady clock)
 game.cpu = rt.cpu    -- (this thread's CPU seconds: profiling a script)
 
+-- ---------------------------------------------------------------- the game's interface: gameui
+-- The game's own layouts (runtime/gameui.h): any pane moved, scaled, hidden, faded, anchored to the screen's edges, its
+-- text changed. gameui.layouts() / gameui.panes(layout) show what is on screen now (layout and pane names), gameui.set
+-- edits, gameui.reset takes a script's edits back. A reload takes them all back. (The mod API's version 7.)
+local gameui = {}
+local function ui_have() return rt.api_version and rt.api_version >= 7 end
+function gameui.layouts()
+  local out = {}
+  local t = ui_have() and rt.ui_layouts() or nil
+  for line in (t or ""):gmatch("[^\n]+") do
+    local name, n, w, h = line:match("^(%S+) (%d+) ([%d.]+)x([%d.]+)")
+    if name then out[#out + 1] = {name = name, panes = tonumber(n), w = tonumber(w), h = tonumber(h)} end
+  end
+  table.sort(out, function(a, b) return a.name < b.name end)
+  return out
+end
+function gameui.panes(layout)
+  if type(layout) ~= "string" then error("gameui.panes(layout): a layout's name (gameui.layouts())", 2) end
+  local t = ui_have() and rt.ui_panes(layout) or nil
+  if not t then return nil end
+  local out = {}
+  for line in t:gmatch("[^\n]+") do
+    local d, name, ty, x, y, w, h, shown = line:match("^(%d+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%d)")
+    if d then
+      out[#out + 1] = {depth = tonumber(d), name = name, type = ty, x = tonumber(x), y = tonumber(y), w = tonumber(w),
+                       h = tonumber(h), shown = shown == "1"}
+    end
+  end
+  return out
+end
+local ui_keys = {x = 1, y = 1, sx = 1, sy = 1, scale = 1, w = 1, h = 1, alpha = 1, hide = 1, show = 1, anchor = 1, mode = 1,
+                 fill = 1, follow = 1, text = 1, image = 1}
+-- gameui.set(layout, pane, {x=, y=, scale=, sx=, sy=, w=, h=, alpha=, hide=, anchor=, mode=, fill=, follow=, text=, image=})
+-- (pane nil or "": the layout itself)
+function gameui.set(layout, pane, t)
+  if type(layout) ~= "string" then error("gameui.set(layout, pane, {...}): a layout's name first", 2) end
+  if type(pane) == "table" and t == nil then pane, t = "", pane end
+  if type(t) ~= "table" then error("gameui.set(layout, pane, {...}): what to change, as a table", 2) end
+  if not ui_have() then return false end
+  local ok = true
+  for k, v in pairs(t) do
+    if not ui_keys[k] then error("gameui.set: no key \"" .. tostring(k) .. "\" (x y sx sy scale w h alpha hide show anchor mode fill follow text image)", 2) end
+    if type(v) == "boolean" then v = v and "1" or "0" end
+    if type(v) == "table" then v = table.concat(v, " ") end  -- (anchor = {"left", "top"})
+    ok = rt.ui_set(layout, pane or "", k, tostring(v)) and ok
+  end
+  return ok
+end
+function gameui.reset(layout, pane) if ui_have() then rt.ui_unset(layout, pane) end end
+function gameui.text(layout, pane) return ui_have() and rt.ui_text(layout, pane) or nil end
+function gameui.clone(layout, src, name, t)
+  if not ui_have() or not rt.ui_clone(layout, src, name) then return false end
+  if t then gameui.set(layout, name, t) end
+  return true
+end
+cmd_add(shared, "ui", function(layout)
+  if not layout then
+    for _, l in ipairs(gameui.layouts()) do print(fmt("%-36s %4d panes  %gx%g", l.name, l.panes, l.w, l.h)) end
+    return
+  end
+  local ps = gameui.panes(layout)
+  if not ps then print("no layout \"" .. layout .. "\" on screen (ui: the layouts)") return end
+  for _, p in ipairs(ps) do
+    print(fmt("%s%-24s %-8s %7.1f %7.1f  %6.1f x %-6.1f%s", string.rep("  ", p.depth), p.name, p.type, p.x, p.y, p.w, p.h, p.shown and "" or "  (hidden)"))
+  end
+end, "ui [layout]: the game's interface layouts on screen, or one's panes")
+G.gameui = gameui
+
 -- ---------------------------------------------------------------- the world side (world.lua: net, party, battles...)
 -- api.lua's own parts handed to world.lua, which runs right after this in the same state and takes them (it adds its
 -- tables to each mod's globals by wrapping api_for, its work to __tick / __unload)

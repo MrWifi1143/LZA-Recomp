@@ -103,6 +103,11 @@ static int bubble_hide_api(int id) {
 // the Talk prompt: Z-A's townspeople have none (a script's talk is A pressed by one - contrib/legendslua/api.lua)
 static int talk_none(int h, int on) { (void)h, (void)on; return 0; }
 static int talked_none(void) { return 0; }
+// the game's interface (runtime/gameui.h; hle/gameui.c - the same in both games)
+int gameui_api_set(const char *layout, const char *pane, const char *key, const char *value);
+void gameui_api_unset(const char *layout, const char *pane);
+int gameui_api_clone(const char *layout, const char *src, const char *name);
+#include "../gameui.h"
 static const LarecompModApi g_modapi = {
     .version = LARECOMP_MODAPI_VERSION, .game = "za", .enable = enable,
     .npc_spawn = newnpc_mod_spawn, .npc_remove = newnpc_mod_remove, .npc_remove_all = newnpc_mod_remove_all,
@@ -119,5 +124,7 @@ static const LarecompModApi g_modapi = {
     .npc_talk = talk_none, .npc_talked = talked_none,
     .bubble = bubble_api, .bubble_hide = bubble_hide_api,
     LARECOMP_MODAPI_V6,
+    .ui_set = gameui_api_set, .ui_unset = gameui_api_unset, .ui_layouts = gameui_layouts, .ui_panes = gameui_panes,
+    .ui_text = gameui_text, .ui_clone = gameui_api_clone,
 };
 const LarecompModApi *modapi_get(void) { return &g_modapi; }
