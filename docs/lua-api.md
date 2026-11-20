@@ -310,7 +310,10 @@ camera as it turns, and it goes when its time is up, when the target is removed 
 * **Many at once**: up to 32. Bubbles that would cover each other are stacked: the nearer one keeps its place, the
   farther one moves above it, with a thin line down to its character. Far ones (35 to 45 m) fade out; ones behind the
   camera or off the screen aren't drawn.
-* **Height**: a person's head by default (2 m over the feet; the player 1.95 m, a Pokémon 1 m). `opts.height` sets it.
+* **Over a spot** (a position, no character): a sign - no tail and no line, centred on the spot (moved up like the
+  rest when it would cover another).
+* **Height**: a person's head by default (2 m over the feet in Z-A, the player 1.95 m; in Arceus the player 1.7 m and
+  its people 1.9 m; a Pokémon 1 m). `opts.height` sets it.
 * A script reload clears the scripts' bubbles with their characters.
 
 The runtime draws them over the game's image (its overlay, as the notices), placed with the game's own scene camera
@@ -416,6 +419,172 @@ end)
 **Legends Studio:** in a Z-A level, **Add > NPC** writes a new townsperson into the mod's `lua/studio_npcs.lua`. The
 **Scripts** panel names it, turns it and gives it a walk route, and has an editor and this API at hand. **Play** starts
 the game with the mod, so its scripts run.
+
+## The overlay, menus, input, sounds, storage (API version 6)
+
+Scripts can draw their own interface over the game, build menus that work with a controller, mouse or keyboard, read
+the keyboard and mouse, play their own sounds and keep values per save. The same in both games. A complete example is
+`contrib/legendslua/examples/spawnmenu` (**Spawn Menu**: M on the keyboard, L + R on a controller, or `spawnmenu` in the
+console).
+
+### Drawing: `draw`, `hud`
+
+```lua
+hud.add(function()                                   -- each frame (the same as on("draw", fn))
+  local x, y, w, h = draw.box()                      -- the game's 16:9 interface box
+  local s = draw.scale()                             -- its height / 1080: design at 1920x1080, multiply by s
+  draw.rect(x + 20 * s, y + 20 * s, 300 * s, 80 * s, 0x14171fc8, 12 * s)
+  draw.text("Hello", x + 36 * s, y + 40 * s, {size = 28 * s, color = "yellow", shadow = true})
+end)
+```
+
+Drawing calls only count inside a draw handler; everything one frame draws is handed to the runtime together and drawn
+over the game's image (over the speech bubbles, under the runtime's own menus) from the next frame on. Coordinates are
+the window's pixels, y down.
+
+| | |
+|---|---|
+| `draw.size()` | The overlay's width and height (the window's pixels). |
+| `draw.box()` | x, y, w, h of the game's interface: 16:9 in the middle. The whole screen at 16:9; on a wider one (ultrawide, "Fill the window") the game keeps its interface in this box, so put yours there too. |
+| `draw.scale()` | The box's height / 1080. |
+| `draw.rect(x, y, w, h, color [, rounding])` | A filled rectangle, rounded corners if given. |
+| `draw.rect_outline(x, y, w, h, color [, thickness [, rounding]])` | Its outline. |
+| `draw.line(x1, y1, x2, y2, color [, thickness])` | |
+| `draw.circle(x, y, r, color)` / `draw.circle_outline(x, y, r, color [, thickness])` | |
+| `draw.triangle(x1, y1, x2, y2, x3, y3, color)` | |
+| `draw.gradient(x, y, w, h, top, bottom)` | Top colour to bottom colour. |
+| `draw.text(text, x, y [, opts])` | `opts`: `size` (22), `color`, `align` (`"left"`, `"center"`, `"right"`: what x is), `valign` (`"top"`, `"middle"`, `"bottom"`: what y is), `wrap` (a width: lines wrap inside it, `align` then within it; `\n` breaks a line), `shadow`. Or `draw.text(text, x, y, size, color, align)`. |
+| `draw.text_size(text [, size [, wrap]])` | Its width and height. |
+| `draw.image(img, x, y [, w, h [, opts]])` | An image from `image.load`. `opts`: `tint` (a colour it's multiplied by), `uv = {u0, v0, u1, v1}` (a part of it, 0..1), `rounding`. |
+| `draw.clip(x, y, w, h [, fn])` / `draw.unclip()` | What's drawn (by `fn`, or until `unclip`) is cut to the rectangle. |
+| `draw.alpha(a)` | Everything drawn after it is that transparent (0..1) until the next `draw.alpha`; each frame starts at 1. |
+| `draw.to_screen(pos)` | Where a point of the world is on the screen: x, y and the metres to it; `nil` behind the camera. For name tags. |
+| `image.load("images/x.png")` | A PNG or JPG of the mod's folder: `{id, w, h}` (the same file again: the same image). Read once; uploaded the first time it's drawn. |
+| `hud.add(fn)` / `hud.remove(id)` | `on("draw", fn)` / `off(id)`. |
+
+**Colours** are `0xRRGGBBAA` numbers, `{r, g, b, a}` tables (0..255; `a` 255 if left out), or a name: `"white"`,
+`"black"`, `"red"`, `"green"`, `"blue"`, `"yellow"`, `"gray"`, `"dark"`, `"clear"`. `color(r, g, b [, a])` makes the
+number, `color.hex("#ff8800")` / `"#ff880080"`, `color.alpha(c, a)`, `color.lerp(a, b, t)`.
+
+**Text** is the overlay's font (DejaVu Sans on Linux, Segoe UI on Windows) with Japanese and common Chinese (a Noto Sans
+CJK JP subset: kana, 5,392 characters in all) and emoji (Noto Emoji, black and white: drawn in the text's colour)
+merged in - the speech bubbles get them too. Korean and rarer kanji show as `?`.
+
+### Menus: `gui`
+
+```lua
+local menu = gui.window{title = "My menu", w = 560}        -- (w: pixels at 1080 lines; x / y: default centred)
+menu:button("Say hi", function() ui.notify("Hi!") end)
+menu:checkbox("Fast", false, function(on) ... end)
+menu:slider("Hour", 0, 24, 12, function(v) game.set_time(v) end, {step = 0.5, format = "%.1f h"})
+menu:choice("Species", {"Pikachu", "Eevee"}, 1, function(i, name) ... end)
+menu:list({"One", "Two", "Three"}, function(i, name) ... end)
+menu:input("Name", "Bob", function(text) ... end, {max = 24})
+menu:label("Text")  menu:separator()  menu:image(img, 80)
+on("key", "M", function(e) if e.down then menu:toggle() end end)
+```
+
+| | |
+|---|---|
+| `gui.window{title, w, h, x, y, on_close}` | A window (hidden until `open`). `h`: the most it grows to; longer content scrolls. |
+| `w:open()` / `w:close()` / `w:toggle()` / `w:is_open()` | |
+| `w:clear()` | Its widgets gone (rebuild it: menus whose content changes). |
+| `w:label(text)` | Text (a function: called each frame - a live value). |
+| `w:button(text, fn(w))` | |
+| `w:checkbox(text, value, fn(on))` | |
+| `w:slider(text, min, max, value, fn(v), {step, format})` | Left / right (or dragging it) change it by `step`. |
+| `w:choice(text, options, index, fn(i, option))` | Left / right (or a click) go through the options. |
+| `w:list(options, fn(i, option), {selected = i})` | One row each; activating one picks it. |
+| `w:input(text, value, fn(text), {max})` | Opens the runtime's text dialog (below). |
+| `w:image(img [, height])` / `w:separator()` | |
+| `gui.close_all()` | Every window of the mod's. |
+
+While a window is open it has the input: **the game's is held back** (the player doesn't move, the camera doesn't
+turn, the mouse is let go) and Esc goes to the window instead of opening the runtime's menu (F1 still does). Controls:
+
+* **Controller** (and the keyboard's game keys: arrows, Enter / Space, Backspace / Q): d-pad up / down move (held:
+  repeating), A activates, left / right change a slider or choice, B closes.
+* **Mouse**: what's under the pointer has the focus, a click activates (drag a slider), the wheel scrolls, a right
+  click or the × closes.
+* **Keyboard**: Esc closes.
+
+Several windows can be open; the last opened is on top and has the input.
+
+### Keyboard and mouse: `input`, `on("key")`, `on("mouse")`, `on("text")`
+
+```lua
+on("key", "F7", function(e) if e.down and not e.rep then ... end end)   -- (a filter: that key only)
+on("mouse", "left", function(e) if e.down then log(e.x, e.y) end end)
+on("mouse", "wheel", function(e) zoom = zoom + e.wheel end)
+```
+
+| | |
+|---|---|
+| `key` (filter: the key's name) | `e.key` (SDL's names: `"A"`, `"Return"`, `"Escape"`, `"Left Shift"`, `"F5"`...), `e.down`, `e.rep` (held: repeating), `e.shift`, `e.ctrl`, `e.alt`. The game still sees keys (unless a menu holds the input). |
+| `mouse` (filter: `"left"`, `"right"`, `"middle"`, `"wheel"`) | `e.button`, `e.down`, `e.x`, `e.y` (overlay pixels), `e.wheel`. |
+| `text` | The text typed (when the window takes text input). |
+| `input.mouse_pos()` | x, y of the pointer (overlay pixels). |
+| `input.mouse_down([button])` / `input.key_down(name)` | |
+| `input.grab(on)` | Hold the game's input back yourself (a menu of your own drawing). |
+| `input.text(title, text, max, fn(result))` | The runtime's text dialog: typed with a keyboard, the on-screen keyboard with a controller (as the game's own name entry). `fn(text)` on OK, `fn(nil)` cancelled. The game's input is held while it's up. |
+
+The controller stays with `player.button(name)` and `on("button")`.
+
+### Sounds: `sound`
+
+```lua
+local pop = sound.load("sounds/pop.ogg")
+pop:play()                                              -- everywhere (2D)
+pop:play{pos = npc_a:pos(), range = 25, volume = 0.8}   -- from a spot: quieter farther, panned
+local loop = pop:play{loop = true, pitch = 1.2}  loop:stop()
+```
+
+| | |
+|---|---|
+| `sound.load(file)` | A `.wav` (8 / 16 / 24 / 32-bit or float, mono or stereo, any rate) or `.ogg` (Vorbis) of the mod's folder, read once. `nil` if it can't be read. |
+| `snd:play{volume, pitch, pos, range, loop}` | `volume` 0..4 (1), `pitch` 0.25..4 (its speed), `pos` a spot of the world (silent beyond `range` metres, 30; panned by where it is from the camera), `loop`. Returns a voice. |
+| `voice:stop()`, `voice:playing()`, `voice:set_volume(v)`, `voice:set_pos(p)` | |
+| `sound.play(file or snd, opts)` / `sound.stop_all()` | |
+
+They're mixed into the game's own output (after the game's mix: the Volume setting and background muting apply), up to
+64 at once.
+
+### Storage and files: `storage`, `files`
+
+```lua
+storage.set("best", 42)                 -- kept for this save (the game's save_<n>)
+local best = storage.get("best", 0)
+storage.global.set("first_run", false)  -- kept for the mod, whatever the save
+```
+
+| | |
+|---|---|
+| `storage.get(key [, default])` / `storage.set(key, value)` | Values: strings, numbers, true / false, tables of those (nested; no loops). Written half a second after a change, by a thread of the plugin's (not the game's), to `<game folder>/moddata/<mod>/<save>.lua`. |
+| `storage.all()` | The whole table (change it in place, then `storage.save()`). |
+| `storage.slot()` | Which save it's kept for (`"save_0"`). |
+| `storage.global.*` | The same, for the mod as a whole (`moddata/<mod>/_mod.lua`). |
+| `files.read(path)` / `files.exists(path)` | A file of the mod's own folder (`"data/levels.txt"`; no `..`): its text, `nil` when missing. |
+
+### From the runtime
+
+`runtime/hud.h` (the draw list and input events), `runtime/modapi_ext.h` and the mod API's version 6 in
+`runtime/modapi.h`: `hud_submit` / `hud_size` / `hud_measure` / `hud_image` / `hud_to_screen` (runtime/ui/hud.mm),
+`input_grab` / `input_events` / `input_mouse` (runtime/hle/scriptinput.c), `text_prompt` / `text_prompt_poll`
+(ui/menu.mm), `sound_*` (runtime/hle/modsound.c), `save_id`. Tests: `<live>/sdl` makes window events (`key M`,
+`click 640 300 left`, `move x y`, `wheel 1`, `type text`), `<live>/kbd` answers a script's text dialog, `<live>/wshot`
+saves the window image with the overlay, `LARECOMP_MODSOUND_WAV=<file>` records what scripts' sounds added.
+
+### Cost
+
+Measured with `lua.stats` (CPU time of the Lua side each frame; Legends Z-A, i9-12900K with two other games running):
+the test mods with nothing drawn 36 us a frame, + the Spawn Menu's HUD panel (4 things drawn) +16 us, + its menu open
+(~90 things a frame) +57 us, a test drawing ~45 things with option tables, text measuring and a name tag +80 us. In a hot
+loop the same frame is 4 us (panel) to 35 us (the test): the in-game numbers are cold caches on a busy machine.
+
+The render thread (`LARECOMP_HUD_STATS=<frames>` logs it; Legends: Arceus, the same machine): turning the overlay on at
+all - ImGui's frame and its draw data recorded - is about 40 us a frame; on top of that the scripts' list costs 5 us
+for the HUD panel (4 commands), 14 us with the menu open (42 commands drawn), 18 us for the heavy test (35 commands,
+1,930 vertices with its text). Speech bubbles: under 1 us for a few.
 
 # The world
 

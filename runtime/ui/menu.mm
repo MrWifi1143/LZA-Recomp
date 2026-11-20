@@ -130,10 +130,12 @@ static ImGuiKey key_from_pad(Uint8 b) {
 // they last used a controller.
 static std::atomic<int> g_kbd{0};  // 1 open, 2 confirmed, 3 cancelled
 static std::atomic<bool> g_last_pad{false};
-static char g_kbd_text[96];
+static char g_kbd_text[512];  // (a script's text prompt may take up to 120 characters: menu_text_prompt)
 static int g_kbd_max = 8;
 static char g_kbd_title[256];  // (the game's heading for it: swkbd.c)
+static std::atomic<bool> g_kbd_script{false};  // (the dialog is a script's text prompt: menu_text_prompt, not the game's)
 static bool capturing() { return g_open.load() || g_kbd.load() == 1; }
+extern "C" bool scriptinput_grabbed(void);  // (runtime/hle/scriptinput.c: a script's menu has the input)
 // The game gets no input while this is true (runtime/hle/input.c): the question or the name entry is up.
 extern "C" bool menu_input_captured(void) { return capturing(); }
 
@@ -153,7 +155,7 @@ bool menu_handle_event(const SDL_Event *e) {
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN:
         if (!e->key.repeat && (e->key.scancode == SDL_SCANCODE_F1 ||
-                               (e->key.scancode == SDL_SCANCODE_ESCAPE && !g_open.load()))) {
+                               (e->key.scancode == SDL_SCANCODE_ESCAPE && !g_open.load() && !(scriptinput_grabbed() && !typing)))) {
             if (!typing) set_open(!g_open.load());  // (Esc with the question up goes to it below: "Não")
             return true;
         }
@@ -281,6 +283,14 @@ static void style_init(void) {
     c[ImGuiCol_NavCursor] = gold;
 }
 
+// scripts' overlay (runtime/ui/hud.mm): their fonts, draw list and the frame's size
+void hud_fonts_merge(ImGuiIO &io, ImFont *into, float size);
+void hud_fonts_ready(ImFont *font, ImFont *big);
+bool hud_wanted(void);
+void hud_frame_size(float w, float h);
+void hud_render(ImGuiIO &io, float scale);
+void hud_render_stats(uint64_t bubbles_ns, uint64_t hud_ns, uint64_t all_ns, int vertices, bool menu);
+
 static void init(void) {
     IMGUI_CHECKVERSION();
     pick_menu_language();
@@ -292,7 +302,8 @@ static void init(void) {
     io.IniFilename = NULL;
     ImFontConfig cfg;
     cfg.OversampleH = 2;
-    static const ImWchar ranges[] = {0x20, 0xFF, 0x400, 0x45F, 0};  // (Latin-1: Portuguese accents; Cyrillic)
+    static const ImWchar ranges[] = {0x20, 0xFF, 0x400, 0x45F, 0x2010, 0x205E, 0x20AC, 0x20AC, 0x2122, 0x2122, 0};  // (Latin-1:
+    // Portuguese accents; Cyrillic; dashes, quotes, ellipsis, euro)
     const char *paths[] = {"C:/Windows/Fonts/segoeui.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                            "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"};
     for (const char *p : paths) {
@@ -302,6 +313,7 @@ static void init(void) {
         g_font_big = io.Fonts->AddFontFromFileTTF(p, 56, &cfg, ranges);
         break;
     }
+    hud_fonts_merge(io, g_font, 34);  // (Japanese / Chinese and emoji for scripts' text and speech bubbles: runtime/ui/hud.mm)
     char baloo[1024];
     if (rt_resource("Baloo2-SemiBold.ttf", "third_party/fonts/Baloo2/Baloo2-SemiBold.ttf", baloo, sizeof baloo))
         g_menu_font = io.Fonts->AddFontFromFileTTF(baloo, 39, &cfg, ranges);
@@ -334,6 +346,7 @@ static void drain_events(ImGuiIO &io) {
 RT_ON_RESET(menu_reset) {
     set_open(false);
     g_kbd = 0;
+    g_kbd_script = false;
     osk_cancel();
     pthread_mutex_lock(&q_lock);
     q_events.clear();
@@ -486,9 +499,51 @@ static void update_notice_once(void) {
     fprintf(stderr, "[update] told in the game: %s\n", t);
 }
 
+// A script's text prompt (the mod API's text_prompt: Lua input.text): the name entry's dialog - typed with a keyboard,
+// the on-screen keyboard with a controller - without holding the game up. 1 opened, 0 busy (another one is up).
+extern "C" int menu_text_prompt(const char *title, const char *text, int max_chars) {
+    int idle = 0;
+    if (!g_kbd.compare_exchange_strong(idle, 4)) return 0;  // (4: being set up)
+    snprintf(g_kbd_text, sizeof g_kbd_text, "%s", text ? text : "");
+    snprintf(g_kbd_title, sizeof g_kbd_title, "%s", title ? title : "");
+    g_kbd_max = max_chars > 0 && max_chars <= 120 ? max_chars : 60;
+    if ((int)strlen(g_kbd_text) > g_kbd_max) g_kbd_text[g_kbd_max] = 0;
+    g_kbd_script = true;
+    g_kbd = 1;
+    return 1;
+}
+// 0 still typing, 1 confirmed (out: the text), -1 cancelled, -2 no prompt of a script's
+extern "C" int menu_text_prompt_poll(char *out, int cap) {
+    if (!g_kbd_script.load()) return -2;
+    {   // (testing) LARECOMP_LIVE=<dir>: <dir>/kbd answers the open prompt with its first line ("" / "\x1b": cancelled)
+        static const char *dir = (const char *)1;
+        if (dir == (const char *)1) dir = getenv("LARECOMP_LIVE");
+        char p[1100], line[512];
+        if (dir && g_kbd.load() == 1) {
+            snprintf(p, sizeof p, "%s/kbd", dir);
+            if (FILE *f = fopen(p, "r")) {
+                if (!fgets(line, sizeof line, f)) line[0] = 0;
+                fclose(f);
+                remove(p);
+                line[strcspn(line, "\r\n")] = 0;
+                if (line[0] && line[0] != 0x1b) snprintf(g_kbd_text, sizeof g_kbd_text, "%s", line), g_kbd = 2;
+                else g_kbd = 3;
+            }
+        }
+    }
+    int k = g_kbd.load();
+    if (k == 1 || k == 4) return 0;
+    g_kbd_script = false;
+    if (k == 2 && out) snprintf(out, (size_t)cap, "%s", g_kbd_text);
+    g_kbd = 0;
+    return k == 2 ? 1 : -1;
+}
+
 // Speech bubbles over characters (runtime/bubble.h): a white box with a tail at the spot bubble_draw_list gives, the
 // text wrapped and centred (about 26 characters a line), the townspeople's look. Boxes that would overlap are stacked:
-// the nearer one keeps its place, the farther one goes above it (its tail then a thin line down to its character).
+// the nearer one keeps its place, the farther one goes above it (its tail then a thin line down to its character). One
+// over a spot (no character under it) is a sign: no tail, no line, centred on the spot (2026-11-20: lines down to
+// nothing read as the air talking).
 static void bubbles_draw(ImGuiIO &io, float scale) {
     static BubbleDraw d[BUBBLE_MAX];
     int n = bubble_draw_list(d, BUBBLE_MAX, io.DisplaySize.x, io.DisplaySize.y);
@@ -521,7 +576,7 @@ static void bubbles_draw(ImGuiIO &io, float scale) {
         }
         b.w = fmaxf(wmax + 2 * pad_x, 3 * tail + 2 * round), b.h = b.nl * lh + 2 * pad_y;
         b.x0 = fminf(fmaxf(d[i].x - b.w * 0.5f, m), io.DisplaySize.x - m - b.w);  // (kept on the screen)
-        b.y0 = d[i].y - tail - b.h;
+        b.y0 = d[i].spot ? d[i].y - b.h * 0.5f : d[i].y - tail - b.h;
     }
     for (int i = n - 2; i >= 0; i--)  // (nearest first - the list is farthest first: each one above those it overlaps)
         for (int pass = 0; pass < BUBBLE_MAX; pass++) {
@@ -542,11 +597,12 @@ static void bubbles_draw(ImGuiIO &io, float scale) {
         ImU32 fill = IM_COL32(255, 255, 255, (int)(a * 0.96f)), edge = IM_COL32(205, 205, 210, a), ink = IM_COL32(40, 40, 46, a);
         ImU32 shade = IM_COL32(0, 0, 0, (int)(a * 0.22f));
         float tx = fminf(fmaxf(x, x0 + round + tail), x0 + b.w - round - tail), tip = fminf(y, y1 + tail);
-        if (y > tip + 1) dl->AddLine(ImVec2(tx, tip), ImVec2(x, y), IM_COL32(255, 255, 255, (int)(a * 0.7f)), 2 * scale);
+        bool spot = d[i].spot != 0;
+        if (!spot && y > tip + 1) dl->AddLine(ImVec2(tx, tip), ImVec2(x, y), IM_COL32(255, 255, 255, (int)(a * 0.7f)), 2 * scale);
         dl->AddRectFilled(ImVec2(x0 + 2 * scale, y0 + 3 * scale), ImVec2(x0 + b.w + 2 * scale, y1 + 3 * scale), shade, round);
         dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + b.w, y1), fill, round);
         dl->AddRect(ImVec2(x0, y0), ImVec2(x0 + b.w, y1), edge, round, 0, 1.5f * scale);
-        if (tip > y1)  // (the tail, down to the character)
+        if (!spot && tip > y1)  // (the tail, down to the character)
             dl->AddTriangleFilled(ImVec2(tx - tail, y1 - 1), ImVec2(tx + tail, y1 - 1), ImVec2(y > tip + 1 ? tx : fminf(fmaxf(x, tx - tail), tx + tail), tip), fill);
         for (int k = 0; k < b.nl; k++)
             dl->AddText(f, fs, ImVec2(x0 + (b.w - b.lw[k]) * 0.5f, y0 + pad_y + k * lh), ink, b.ls[k], b.le[k]);
@@ -558,11 +614,12 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     float fx, fy;
     bool fdown, finger = !open && input_finger_cursor(&fx, &fy, &fdown);
     update_notice_once();
-    bool notice = SDL_GetTicks() < g_notice_until.load(), bubbles = bubble_count() > 0;
-    if (!open && !kbd && !g_settings.show_fps && !finger && !notice && !bubbles) {
+    bool notice = SDL_GetTicks() < g_notice_until.load(), bubbles = bubble_count() > 0, hud = hud_wanted();
+    if (!open && !kbd && !g_settings.show_fps && !finger && !notice && !bubbles && !hud) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
+    uint64_t t_all = SDL_GetTicksNS();  // (the overlay's cost on the render thread: hud_render_stats, LARECOMP_HUD_STATS)
     if (!g_inited) init();
     ImGui::SetCurrentContext(g_ctx);
     ImGuiIO &io = ImGui::GetIO();
@@ -587,7 +644,13 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     }
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
+    hud_frame_size((float)target_w, (float)target_h);
+    uint64_t t_b = SDL_GetTicksNS();
     if (bubbles) bubbles_draw(io, scale);
+    uint64_t t_h = SDL_GetTicksNS();
+    if (hud) hud_render(io, scale);
+    uint64_t t_e = SDL_GetTicksNS();
+    hud_fonts_ready(g_font, g_font_big);  // (built by now: scripts may measure text)
 
     if (notice) {
         ImGui::SetNextWindowPos(ImVec2(16 * scale, io.DisplaySize.y - 16 * scale), 0, ImVec2(0, 1));
@@ -628,4 +691,5 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     if (kbd) keyboard_draw(io, scale);
     ImGui::Render();
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd);  // inside the window image's rendering
+    hud_render_stats(t_h - t_b, t_e - t_h, SDL_GetTicksNS() - t_all, ImGui::GetDrawData()->TotalVtxCount, open || kbd);
 }

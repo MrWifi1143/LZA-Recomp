@@ -134,6 +134,28 @@ local function chat_poll()
   end
 end
 
+-- the chat key: T on the keyboard, L + ZL held together on a controller - while the shared world is on - opens the
+-- runtime's text dialog (input.text: the on-screen keyboard with a controller) and says what was typed. chat.key(false)
+-- switches it off (a mod with a T of its own), chat.key(true) back on.
+local chat_key_on, chat_prompting = true, false
+function chat.key(on_) chat_key_on = on_ ~= false end
+function chat.prompt()
+  local inp = G.input
+  if chat_prompting or not (inp and inp.text) or not players.online() then return false end
+  chat_prompting = true
+  inp.text("Chat", "", 100, function(t)
+    chat_prompting = false
+    if t and #t > 0 then chat.say(t) end
+  end)
+  return true
+end
+on(P.shared, "key", "T", function(e)
+  if chat_key_on and e.down and not e.rep and not G.__gui_open and not chat_prompting then chat.prompt() end
+end)
+on(P.shared, "button", function(b)
+  if chat_key_on and (b == "L" or b == "ZL") and player.button("L") and player.button("ZL") and not G.__gui_open then chat.prompt() end
+end)
+
 -- ---------------------------------------------------------------- the player held, walked, sped up
 local BUTTONS = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS", "MINUS", "LEFT", "UP", "RIGHT", "DOWN"}
 local BIT = {}
