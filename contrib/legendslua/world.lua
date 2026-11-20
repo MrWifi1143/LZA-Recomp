@@ -852,13 +852,20 @@ end
 -- 174 talking; Arceus: the player animation controller's Action(n) - 16 yes, 17 no, 12 passing an item);
 -- player.anim_loop(n, on) (Arceus: LoopAction - 9 looking at the phone), player.pose(n, on) (Arceus: PhotoPoseAction 1-15),
 -- player.face_expression(name) (Z-A: "smile", "serious", "sad"...)
+-- (Z-A: the framework holds the Player while it animates it - a held Player can't send its Pokemon out - and each job
+-- lets it go at its end, which also ends what it was playing: so the animation runs in a game.run coroutine that waits
+-- for it (S0958C602F426FF59), and a loop holds the Player until anim_loop(n, false))
 function player.anim(n)
   n = math.floor(n)
-  if ZA then return S(nil, fmt("Commands.FObj_Set_Animation(\"Player\", %d)", n)) end
+  if ZA then return RUN(nil, fmt("local h = Commands.FObj_Set_Animation(\"Player\", %d) if h then Commands.S0958C602F426FF59(h) end", n)) end
   return S(nil, fmt("Global.GetPlayerComponent():__haxe_export_GetPlayerAnimationController():Action(%d)", n))
 end
 function player.anim_loop(n, on_)
-  if ZA then return S(nil, on_ == false and "Commands.FObj_Reset_AnimationAll(\"Player\")" or fmt("Commands.FObj_Set_Animation(\"Player\", %d)", math.floor(n))) end
+  if ZA then
+    if on_ == false then return S(nil, "__LZA_ANIMLOOP = false") end
+    return RUN(nil, fmt("__LZA_ANIMLOOP = true Commands.FObj_Set_Animation(\"Player\", %d) local k = 0 " ..
+      "while __LZA_ANIMLOOP and k < 36000 do k = k + 1 Commands.Suspend() end Commands.FObj_Reset_AnimationAll(\"Player\")", math.floor(n)))
+  end
   return S(nil, fmt("Global.GetPlayerComponent():__haxe_export_GetPlayerAnimationController():LoopAction(%d, %s)", math.floor(n), on_ == false and "false" or "true"))
 end
 function player.pose(n, on_)

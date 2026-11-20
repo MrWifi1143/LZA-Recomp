@@ -200,13 +200,32 @@ local function hashed(code)
     return "Commands.S" .. fnv64(n)
   end))
 end
-local function script(mod, code, fn)
+-- (Z-A: the framework's own object lookup - every FObj_* command, its party's Player - takes the object into the
+-- framework's list of event objects, as an event does (SCDED1A922C1D919F: SEED5C57DB4A3CB5D:push), and only an event's end
+-- lets them go. Held, the Player can't send its Pokemon out (D-pad Up threw nothing - 2026-11-19). So each job lets go
+-- what it took: the objects in that list after it that weren't before, but the scripts' own (luanpc_, luapoke_, luaprop_)
+-- - S38F7587912F54E9A, the framework's own release of one, and its priority tag. A game.run coroutine does it at its end)
+local ZA_HELD = [[if not __LZA_HELD then
+  __LZA_HELD = function() local l, h = C0C062DE5AED06885.SEED5C57DB4A3CB5D, {} for i = 0, l.length - 1 do h[l[i]:fE9C29DA1()] = true end return h end
+  __LZA_LETGO = function(h) local l, n = C0C062DE5AED06885.SEED5C57DB4A3CB5D, {}
+    for i = 0, l.length - 1 do local nm = l[i]:fE9C29DA1() if not h[nm] and not tostring(nm):match("^lua") then n[#n + 1] = nm end end
+    for _, nm in ipairs(n) do C0C062DE5AED06885.S38F7587912F54E9A(nm) C0C062DE5AED06885.SB54DBC4F41BBBCDD(nm) end end
+end
+]]
+local function script(mod, code, fn, keep)
   if (rt.api_version or 1) < 3 then return nil, "this game build is too old" end
   -- (its first result as text: the game's lua_tolstring takes strings and numbers only)
   -- (Z-A: the framework's Commands at hand, its hashed names; Arceus: plain names)
   local za = game.name == "za"
-  local id = rt.game_script((za and "local Commands = C0C062DE5AED06885\n" or "") .. "local __r = (function()\n" ..
-    (za and hashed(code) or code) .. "\nend)()\nreturn tostring(__r)")
+  local text
+  if za and not keep then
+    text = "local Commands = C0C062DE5AED06885\n" .. ZA_HELD .. "local __h = __LZA_HELD()\nlocal __ok, __r = pcall(function()\n" ..
+      hashed(code) .. "\nend)\n__LZA_LETGO(__h)\nif not __ok then error(__r, 0) end\nreturn tostring(__r)"
+  else
+    text = (za and "local Commands = C0C062DE5AED06885\n" or "") .. "local __r = (function()\n" .. (za and hashed(code) or code) ..
+      "\nend)()\nreturn tostring(__r)"
+  end
+  local id = rt.game_script(text)
   if id == 0 then return nil, "not taken (too many waiting, or not in this game)" end
   jobs[id] = {fn = fn, mod = mod}
   return id
@@ -229,9 +248,12 @@ local CO_TICK = "local n, t = 0, __LZA_CO or {} for i = #t, 1, -1 do local co = 
   "if coroutine.status(co) == 'dead' then table.remove(t, i) if not ok then __LZA_ERR = tostring(e) end else n = n + 1 end end " ..
   "local e = __LZA_ERR __LZA_ERR = nil return n .. (e and (' ' .. e) or '')"
 local function run_co(mod, code, fn)
-  local id, err = script(mod, "__LZA_CO = __LZA_CO or {} local co = coroutine.create(function()\n" .. code ..
-    "\nend) local ok, e = coroutine.resume(co) if coroutine.status(co) ~= 'dead' then __LZA_CO[#__LZA_CO + 1] = co end " ..
-    "if not ok then error(e, 0) end return 'started'", fn)
+  local za = game.name == "za"
+  local body = za and (ZA_HELD .. "__LZA_CO = __LZA_CO or {} local co = coroutine.create(function()\nlocal __h = __LZA_HELD()\n" ..
+    "local __ok, __e = pcall(function()\n" .. code .. "\nend)\n__LZA_LETGO(__h)\nif not __ok then error(__e, 0) end\nend)")
+    or ("__LZA_CO = __LZA_CO or {} local co = coroutine.create(function()\n" .. code .. "\nend)")
+  local id, err = script(mod, body .. " local ok, e = coroutine.resume(co) if coroutine.status(co) ~= 'dead' then __LZA_CO[#__LZA_CO + 1] = co end " ..
+    "if not ok then error(e, 0) end return 'started'", fn, true)
   if id then co_alive = true end
   return id, err
 end
@@ -243,7 +265,7 @@ local function co_tick()
     co_alive = (tonumber(n) or 0) > 0
     if msg and msg ~= "" then rt.log("game.run: " .. msg) end
     if e then rt.log("game.run: " .. e) co_alive = false end
-  end)
+  end, true)  -- (keep: the coroutines let go of what they took at their own end)
 end
 local function call_code(fname, args)
   local a = {}
