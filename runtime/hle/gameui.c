@@ -500,7 +500,13 @@ static int draw_hook(Cpu *c, uint64_t addr) {
     uint32_t mode = 0;
     float kx = 1, ky = 1, proj[2];
     bool wide = false;
-    if (fit) {
+    if (!fit && l && l->root && (g_screen_k > 1.005f || G.di_target)) {
+        // (any other layout on a screen that isn't 16:9: the box, its panes as big as the layout over the whole screen -
+        // told by their own shape, not exec.c's guesses for draws it knows nothing of: a plain white sheet drawn after
+        // the blurred backdrop was taken for a screen fill and stretched - Z-A's Settings)
+        screen_k(di, l->lw, l->lh, &kx, &ky);
+        if (kx > 1 || ky > 1) fit = true, mode = 1 + GUI_MODE_BOX;
+    } else if (fit) {
         mode = (uint32_t)(1 + l->mode) | (uint32_t)((l->ls.has & GUI_ANCHOR) ? l->ls.anchor : 0) << 8;
         if ((l->ls.has & GUI_FILL) && !l->ls.fill) mode |= 0x10u << 8;  // (fill 0: no pane stretched over the screen)
         screen_k(di, l->lw, l->lh, &kx, &ky);
@@ -754,8 +760,6 @@ static const Builtin k_wide_za[] = {
     {"map_top_00", "N_header_00/N_weather_00", "anchor=right"},
     {"map_top_00", "N_header_00/N_comp_on_of_00", "anchor=right"},
     {"map_top_00", "N_inout_01/L_info_guide_00", "anchor=left"},
-    // (the Settings sheet: wider than the layout, it was stretched over the screen with the dimming - kept in the box)
-    {"option_gamesetting_00", "", "fill=0"},
     {NULL, NULL, NULL},
 };
 static const Builtin k_wide_pla[] = {

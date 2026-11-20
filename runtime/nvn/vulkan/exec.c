@@ -5252,6 +5252,7 @@ static void draw_(CmdRec *r, bool indexed) {
         pass_size(&pw_, &ph_);
         float bw_ = fminf(img_w, img_h * (16.0f / 9.0f)), bh_ = fminf(img_h, img_w * (9.0f / 16.0f));
         int ui_mode = (int)(st.ui & 0xff) - 1, ui_anchor = (int)(st.ui >> 8) & 0xff;
+        if (ui_mode >= 0) composite = reads_scene;  // (a layout's pane: its shape tells - below - not the quad guesses)
         if (ui_mode >= 0 && !composite) {
             // A layout the game layer fits itself (runtime/hle/gameui.c; modes as gameui.h's GUI_MODE_*): 0 the box,
             // moved to the edge it is anchored at; 1 "wide" - its projection already as wide as the image: the whole
