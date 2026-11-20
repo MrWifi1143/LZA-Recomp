@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "modapi.h"
+#include "worldapi.h"
 #include "mods.h"
 #include "paths.h"
 #include "plugin.h"
@@ -158,6 +159,9 @@ static void load_one(const char *path) {
     // (the mod API - npc / player / ui for scripts, runtime/modapi.h: to a plugin that asks for it)
     void (*take)(const LarecompModApi *) = (void (*)(const LarecompModApi *))dl_sym(h, "larecomp_plugin_modapi");
     if (take) take(modapi_get());
+    // (the world API - networking, the player held, the party, battles, traces, weather, runtime/worldapi.h: the same way)
+    void (*take_w)(const LarecompWorldApi *) = (void (*)(const LarecompWorldApi *))dl_sym(h, "larecomp_plugin_worldapi");
+    if (take_w) take_w(worldapi_get());
     LOG("[plugin] loaded %s\n", path);
 }
 

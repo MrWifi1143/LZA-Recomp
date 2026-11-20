@@ -1178,6 +1178,7 @@ void larecomp_world_send(const void *p, size_t n) {  // (to everyone in the shar
     memcpy(b + 1, &g_srv_id, 8), memcpy(b + 9, p, n);
     srv_send(b, 9 + n);
 }
+uint64_t larecomp_world_self(void) { return g_srv_id; }  // (our id in the shared world: what the others' recv says sent ours)
 int larecomp_world_recv(uint64_t *from, void *p, size_t cap) {  // (the oldest waiting: its length, 0 none)
     int n = 0;
     pthread_mutex_lock(&g_wq_lock);

@@ -416,3 +416,213 @@ end)
 **Legends Studio:** in a Z-A level, **Add > NPC** writes a new townsperson into the mod's `lua/studio_npcs.lua`. The
 **Scripts** panel names it, turns it and gives it a walk route, and has an editor and this API at hand. **Play** starts
 the game with the mod, so its scripts run.
+
+# The world
+
+The second half of the API (`contrib/legendslua/world.lua` on the game's `runtime/worldapi.h`): scripts talking between
+players, the player held and walked, the party and boxes, battles, objects and effects, traces, the camera, weather.
+Same in both games, with any differences noted. Much of it runs the game's own script commands (`game.script` / `game.run`),
+so **those answers come a frame later, to a callback** (`world.trace(a, b, function(hit) ... end)`).
+
+## Networking: `net`, `players`, `chat`
+
+Over the shared world: the online server's relay (Options > Online, `world_players`), the same link the other players'
+stand-ins come over. Without a shared world nothing is sent (`net.send` returns false).
+
+```lua
+net.receive("score", function(from, t) log(from, "scored", t.points) end)
+net.send("score", {points = 10, where = player.pos()})            -- everyone else
+net.send("hello", {text = "just you"}, players.list()[1])          -- one player (a player table or its id)
+for _, p in ipairs(players.list()) do log(p.id, p.pos, p.standin, p.dist) end
+chat.say("Hi!")                                                   -- over your head here, over your stand-in there
+on("chat", function(from, text) log(from, "said", text) end)
+```
+
+| | |
+|---|---|
+| `net.send(name, data [, to])` | `data`: nil, booleans, numbers, strings, `vec`s and tables of them (8 deep). `to`: a player (`players.list()` entry) or its id; leave it out for everyone. Returns true when sent. |
+| `net.receive(name, fn(from, data))` | `from` is the sender's id (16 hex digits). Several handlers per name; every mod's run. |
+| `players.list()` | The other players heard in the last 10 s: `{id, pos, yaw, standin, dist}` (`standin`: the character showing them is in the world here). |
+| `players.me()` / `players.online()` | Our id / whether the shared world is on. |
+| `chat.say(text)` | A chat line: a speech bubble over our player here, and over our stand-in on everyone else's screen; the `chat` event fires there. One line a second. |
+| `chat` event | `(from, text)`: a line heard (its bubble is shown by the runtime, scripts or not). |
+
+Console: `chat <text>`, `players`.
+
+* **Caps**: a message is at most 1024 bytes (name and data packed); each copy sends at most 30 messages and 8 KB a
+  second (bursts of 60 / 16 KB), and takes no more than that from any one player (more is dropped, logged once a minute).
+  Chat: one line a second each way per player, 100 characters.
+* **Delivery**: the relay is UDP. A message travels in 80-byte pieces (the relay passes 96-byte packets) and is
+  dropped whole if a piece is lost (2 s). Send again what must arrive. `to` is checked by the receiver: everyone in the
+  world receives the pieces, so don't send secrets.
+* **What a message can do**: it's data, never code. A receiver's handler should check what it gets like any input from
+  the internet.
+* **The runtime side** (`runtime/hle/luanet.c`, the same in both games): pieces are packet type 10 in Z-A's world
+  protocol (`hle/warp.c`, header + 80 bytes) and `'L' '1'` + 80 bytes in Arceus' (`hle/pla_world.c`). The sender's id is
+  Z-A's own player id (as its positions), Arceus' the relay's (the server's word: `larecomp_world_self` in the relay
+  plugin). Chat bubbles use `bubble.h`'s `BUBBLE_FN` target with the world code's `world_player_feet(id)`.
+* Tested (2026-11-19): Z-A two copies over the UDP test transport (`LARECOMP_GHOST=<mine>,<theirs>`) and one copy
+  hearing itself (`LARECOMP_GHOST_SELF=1`); Arceus two copies through a local `lzaserver --no-accounts`. Messages with
+  tables and vecs both ways, a 950-byte message (15 pieces), one sent to a player and one to an unknown id (not delivered),
+  60 of a 100-message burst sent (the cap), chat over the other copy's stand-in
+  (`testout/lua-world/zaNet-chat-grid.png`, `plaNet-A-sees-B-chat2.png`).
+
+## The player held and walked
+
+| | |
+|---|---|
+| `player.freeze(true [, {camera = true}])` / `player.freeze(false)` | Every button but + and - kept from the game, both sticks at rest (`camera = true` leaves the right stick to the player). Scripts still see the buttons (`on("button")`, `player.button`), so a frozen player can drive a script's own controls. |
+| `player.hold({"A", "B"}, sticks)` | Just these buttons kept from the game; `sticks` `"left"`, `"right"`, `"both"`. `player.hold()` lets go. |
+| `player.walk(x, y)` / `player.walk(false)` | The left stick given to the game (-1..1, `y` forward, as the player's own stick: relative to the camera) until `player.walk(false)`. Works while frozen: a script walks the player. |
+| `player.anim(n)` | One of the game's player animations. **Z-A**: `FObj_Set_Animation("Player", n)` (1 standing, 74 receiving, 174 talking). **Arceus**: the player animation controller's `Action(n)` (16 yes, 17 no, 12 passing an item). |
+| `player.anim_loop(n [, false])`, `player.pose(n [, false])` | **Arceus**: `LoopAction(n)` (9 looking at the phone) / `PhotoPoseAction(n)` (1-15) and back. **Z-A**: the same animation held / `FObj_Reset_AnimationAll`. |
+| `player.face_expression(name)` | **Z-A**: `"smile"`, `"serious"`, `"sad"`... |
+| `player.dismount()`, `player.riding(fn)` | **Arceus**: off the ride Pokémon (the ride manager's `StopRide`, as every event does) / `fn(true)` while riding. |
+| `player.speed(k)` | Not found in either game yet: returns false. |
+
+Input is held in the runtime (`hle/input.c` asks `world_input_filter`, `hle/worldcommon.c`): a reload of the scripts
+lets the player go. Checked: Z-A frozen, a test's stick push moved nothing; unfrozen it moved 4.5 m; `player.walk(0, 1)`
+walked on. **Mounting** from a script: the only path (the ride manager's `StartOdoshishiRide`, Wyrdeer) hung Arceus when
+called from the field script's state - left out.
+
+## The camera: `camera`
+
+```lua
+camera.look(player.pos() + vec(0, 1.2, 0), {from = player.ahead(3) + vec(0, 1.6, 0), time = 1})
+camera.path({{from = a, at = b, time = 2}, {from = c, at = d, time = 3}})
+camera.reset(0.5)   -- the game's own camera back, eased over 0.5 s
+```
+
+| | |
+|---|---|
+| `camera.look(target [, opts])` | The event camera at `opts.from` (default 4 m behind the player, 2.2 m up) looking at `target` (a spot, `"player"`, or a character), moving there over `opts.time` seconds (default 1; 0 at once), `opts.fov` degrees (50). |
+| `camera.path(shots)` | Each `{from, at, time, fov}` in turn. |
+| `camera.reset([seconds])` | Back to the game's camera. |
+
+**Z-A**: `Camera_Move_Angle(time, eye, {pitch, yaw, roll}, fov, 0, 3)` with pitch = up from level and yaw 180 off the
+way it looks (checked: a shot from 3 m in front of the player shows the player, `za10-cam-front-grid.png`); reset:
+`S060E4139F53705A4(seconds)` + its wait, then what an event's end does (`S87C02A63ACAD9232(false)`,
+`SC818B7D84F7486E2(true)`). **Arceus**: `CameraManager` `EventCameraStart` / `EventCameraMove(CameraInterpolationParameter)` /
+`EventCameraEnd` (checked, `pla2-cam-grid.png`). While the event camera is on, the player still moves (freeze them if
+the shot must hold).
+
+## Traces: `world.trace`, `world.ground`
+
+```lua
+world.trace(player.pos() + vec(0, 1, 0), player.pos() + player.forward() * 40, function(hit)
+  if hit then log("wall at", hit.pos, hit.dist, hit.normal, hit.what) end
+end)
+world.ground(player.ahead(10), function(y) log("ground height", y) end)
+```
+
+`hit = {pos, dist, normal, what}` or nil. **Z-A**: the framework's own ground ray (`SED24081F313B33A9(from, to)`,
+collision groups 8 and 2 - the ground and buildings): no normal. **Arceus**: the player character's field physics
+`CastRayToLayerMask(from, to, FieldPhysics.GetGroundLayersBitField())`: position, normal and the collision's raw id.
+Checked both (straight down: the player's feet; forward: the wall 12-23 m away).
+
+## Objects and effects: `world.effect`, `world.prop`
+
+```lua
+local fx = world.effect{path = "field/item/kira/ef_item_kira", pos = player.ahead(3), scale = 3}   -- Z-A
+local fx = world.effect{path = "bin/effect/battle/particle/ew399/ew399_hit.ptcl", pos = player.ahead(3), scale = 2.5}  -- Arceus
+fx:move(p) fx:rotate(pitch, yaw, roll) fx:scale(s) fx:remove()
+local rock = world.prop{model = "world/ik_obj_template/effect/field/gimmick/field_item303a", pos = player.ahead(3), yaw = 90}  -- Z-A
+rock:physics(false) rock:fall(5) rock:show(false) world.props_clear()
+```
+
+* **Effects**: the game's particle effects by path. **Z-A**: a path under `ik_effect/data/` without `.ptcl`
+  (`CreateEffect` / `IsSetUpEffect` / position / rotation / scale / `PlayEffect` / `RemoveEffect`; there are about 2,500:
+  `field/gimmick/holovator/holovator_warp`, `field/event/sand_app/sand_app_01`...). **Arceus**: a `.ptcl` path
+  (`PlayParticleVfx` / `IsLoadedParticle` / `EmitParticle` / `SetPosParticle` / `KillParticle`). Checked both
+  (`za-fx-cam-grid.png`, `pla6-grid.png`). Z-A clears its effects when one of its events ends.
+* **Props** (Z-A): the game's object templates - a model with its look and collision (`CreateObjectTemplate`; 449
+  `.trsot` under `world/ik_obj_template/`) or a `.trsot` by its whole path (`trsot =`, the café objects' make). Made
+  hidden and shown once loaded; the script drives their load (`Commands.Update` each frame until they're made). The
+  game removes props only all together: `world.props_clear()` (`p:remove()` hides one). `p:physics(on)` switches its
+  collision and gravity (`S10A25E1BCEA2D263`), `p:fall(d)` drops it onto the ground (`FObj_Falling`), `p:move` /
+  `p:rotate` move its object. A game event's end clears them too. Checked: a thorn-vine gimmick made in front of the
+  player and cleared (`za2-fx-prop.png`, `za-fx2-grid.png`).
+* **Arceus**: no free model or ground-item make in its scripts; Pokémon (`pokemon.spawn`) and people (`npc.spawn`) are.
+  Items lying on the ground: neither game's scripts make them.
+
+## The party and the boxes: `party`, `box`, `pokemon.give`
+
+```lua
+for i, m in ipairs(party.list()) do log(i, m.species, m.level, m.nickname, m.shiny, table.concat(m.moves, ",")) end
+local m = box.get(1, 1)
+m:set{nickname = "Sparky", moves = {84, 39}, ivs = {31, 31, 31, 31, 31, 31}}
+local b, s = pokemon.give{species = 25, level = 12, shiny = true, name = "Gifty", moves = {84, 39}}
+```
+
+A Pokémon read is a table: `species` (national dex), `form`, `level`, `exp`, `nickname`, `nicknamed`, `shiny`,
+`alpha`, `gender` (0 male, 1 female, 2 none), `egg`, `moves` (4 numbers), `pp`, `ivs` (HP Atk Def Spe SpA SpD), `nature`,
+`ability`, `item`, `ball`, `hp`, `stats` (where the format has them), `ot`, `tid`, `sid`, `pid`, `ec`; `m:bytes()` is the
+whole decrypted data (PKHeX's `.pa9` / `.pa8`). Reading is decoding the game's own data as PKHeX does (`hle/worldcommon.c`:
+PokeCrypto; the layouts from PKHeX's PA9 / PA8).
+
+| | |
+|---|---|
+| `party.get(i)` / `party.list()` / `party.count()` | The party (1-6). See below for what each game knows of it. |
+| `party.ready()` / `party.refresh([fn])` | Whether the party is known yet / ask the game again now. |
+| `box.get(b, s)` / `box.list(b)` | Box `b` (1-32) slot `s` (1-30), as the game holds it (LiveHeX's pointers). |
+| `box.put(b, s, bytes)` | A whole Pokémon (another's `m:bytes()`, a PKHeX file's data) into a slot. |
+| `box.empty_slot()` | The first empty slot: `b, s`. |
+| `m:set{...}` | Writes into its slot at once (a move the game doesn't have - Z-A's smaller move list - isn't shown) (checksum and encryption as the game's): `nickname`, `moves` (PP 20 for a new one), `item`, `form`, `nature`, `ivs`, `shiny` (the PID made to match the trainer's ids, as PKHeX), `exp` (+ `level` with it), `hp`, `ball`, `species`. The game shows it when it next reads the slot (the box screen). |
+| `pokemon.give{species, level, form, shiny, name, nickname, moves, ball, alpha}` | A new Pokémon into the first empty box slot: one of the player's own as the mould (their trainer data), species / form / level / moves / colours / a new EC and PID / random IVs set. Its EXP is the level's on that species' growth curve, found from another of that species the player has (level and EXP), else the medium-fast one. `name` is what the box shows (default "Pokémon"). Returns box, slot. |
+
+* **Z-A**: the boxes keep the party format (level and stats are there). The party's members are the game's own
+  objects: where each one's data is is asked of the game's Lua (its Player object's party: member -> `[ud]` -> `+8` ->
+  `+0x50` -> `+0x30`, checked before it's used) every 3 s once a script uses the party; that data is the stored part
+  (no level: the level comes from the member's own `fD2EF1BBB()`). `m:set` on a party member writes the game's own data
+  (checked: renamed in the box screen). Checked (`za13-boxes.png`, `za14-edit-grid.png`): a shiny Pikachu Lv 12 given
+  into box 1 (the game worked out its stats: 31/31 HP, its moves Thunder Shock + Tail Whip), an Eevee renamed with new
+  moves, the party's Totodile renamed.
+* **Arceus**: boxes are the stored format (no level in a box - the EXP is). The party the game plays with is its own
+  objects; the save's party block (`[[main+42BA6B0]+200]+68`, 6 x 0x178) is written when the game saves, so a party
+  member's names, IVs and trainer come from there and what changes in play (species, form, level, HP, max HP, shiny,
+  alpha, moves) from the game's `PokemonCommand` reads (every 3 s once used; `m.live`). `m:set` on a party member takes
+  `hp` and `form` only (`PokemonCommand.SetHp` / `ChangeFormNo`; checked HP 20/53 in the satchel, `pla6-grid.png`).
+  `pokemon.give` writes a box slot (read back right; not looked at in a pasture).
+* Writing is writing the save's data. Test on a copy of the save first; the game keeps what you write when it saves.
+
+## Battles: `battle`
+
+| | |
+|---|---|
+| `battle.wild(id [, {pos, yaw, field, mode}])` | **Arceus**: a wild battle against one of the game's event encounters (`bin/pokemon/data/poke_event_encount.bin`: `"aipom01"` Aipom Lv 30, `"yukimenoko01"` Froslass Lv 55, the Mount Coronet `mut_*` ones...), started as its events start theirs (`AppCommand.ExecuteEventCommand("call_wild_battle", ...)`), where the player stands. Checked: an Aipom Lv 30 battle in the Jubilife training ground (`pla3-battle-grid.png`). **Z-A**: false - its battles start from its C++ triggers. |
+| `battle_start` / `battle_end` events, `battle.active()`, `battle.last()` | Fire when the runtime knows a battle state: **not found yet in either game** (the API is there; nothing fires). |
+
+Arceus' battle doesn't run Lua of its own (the field script's state runs on, the same calls in and out of a battle).
+The game hands a battle's result to the event that runs after it (trigger work 0, `1` won), which a script-started
+battle doesn't have.
+
+## Weather: `weather`
+
+| | |
+|---|---|
+| `weather.get(fn)` | **Z-A**: `fn(id)` - the weather its getter reports (`c4B6212B8.f6362F6BB()`: 0 clear, 2 rain...). **Arceus**: `fn(nil)`. |
+| `weather.is(name, fn)` | **Z-A**: its own check (`IsCheckWeather("rain" / "storm")`). |
+| `weather.set(id)` | false: no setter found yet. |
+
+What's known: Z-A's framework weather calls (`FixWeather`, `SyncWeather`, `ResetWeather`) are empty, and the visible
+weather doesn't follow the index its getter reads; a rain look a script can make is the weather effect itself
+(`world.effect{path = "field/weather/et001/et001_rain_wide_range"}`). Arceus' scripts set no weather; its save flags
+`FSYS_FORCE_WEATHER_ENABLE`, `FSYS_WEATHER_DISABLE_RAINY` / `_SNOW` / `_CLOUDY` / `_SPECIAL` (`game.work("flag:...")`)
+are read by the game's C++ (when they take effect is untested).
+
+## The world's cost
+
+Nothing until a script uses it: the world part's work each frame is a few table checks (messages and chat lines waiting,
+every 4th frame the battle state); the party is asked of the game only once a script has used it (then every 3 s, a
+job on the game's thread); traces, effects, the camera and the like are one job each when called.
+
+Measured 2026-11-19 (Core i9-12900K, other games sharing the CPU), the test mod (`net.receive` / `chat` / battle
+handlers, a message and a party read every second, console commands), `lua.stats()`:
+
+| | per frame |
+|---|---|
+| Z-A, 60 fps, the shared world on (a copy hearing itself) | 8.4 us on average (most 176 us: a frame with a message decoded and the party job's answer) |
+| Arceus, 30 fps | 19 us on average (most 542 us: a party read - the save's party block decrypted, 6 slots) |
+
+The runtime side: a script message costs its pieces' sends (80 bytes each) and, heard, a copy into the queue; held input
+is one test in the controller read. A frame is 16,700 us at 60 fps: the world part is 0.05-0.1% of it.

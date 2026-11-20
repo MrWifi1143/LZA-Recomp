@@ -305,7 +305,7 @@ LUAMOD := $(B)/plugins/liblegendslua.so
 LUAMOD_FLAGS := -fPIC -DLUA_USE_POSIX -lpthread -lm
 endif
 legendslua: $(LUAMOD)
-$(LUAMOD): contrib/legendslua/legendslua.c contrib/legendslua/api.lua runtime/plugin.h runtime/modapi.h $(wildcard third_party/lua/*.c third_party/lua/*.h)
+$(LUAMOD): contrib/legendslua/legendslua.c contrib/legendslua/api.lua contrib/legendslua/world.c contrib/legendslua/world.lua runtime/plugin.h runtime/modapi.h runtime/worldapi.h $(wildcard third_party/lua/*.c third_party/lua/*.h)
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -Wall -shared -Iruntime -Ithird_party $(DEPINC) $< $(wildcard third_party/lua/*.c) -o $@ $(LUAMOD_FLAGS)
 

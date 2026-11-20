@@ -2409,6 +2409,11 @@ static void ghost_frame(uint64_t frame) {
         if (g_self_test && in.from == g_self) in.from = g_self ^ 2;  // (ourselves, as someone else)
         if (in.ver != 1 || in.from == g_self || !in.from) continue;
         Peer *p = peer_from(&in, via);
+        if (in.type == 10) {  // (a script message's piece / a chat line's: hle/luanet.c)
+            void luanet_heard(uint64_t from, const uint8_t *b, int n);
+            if (n > 16) luanet_heard(in.from, (const uint8_t *)&in + 16, n - 16);
+            continue;
+        }
         // (a walk-up trade's messages: from a player we hear - or from the one we trade with, known by the server's word,
         // while we have no stand-in for them: back from a menu or a lag stall they are heard again only with their next
         // position - the answer to our ask came first, was dropped, and the trade never started, 2026-11-17)
@@ -3062,4 +3067,46 @@ bool look_wear_at_make(Cpu *c, uint64_t owner, const Look *l) {
     uint64_t comp = look_put_on(c, o, alloc, l);
     LOG("[world] look put on node %llx before its make (%llx)\n", (unsigned long long)o, (unsigned long long)comp);
     return true;
+}
+
+// ---- For scripts (hle/luanet.c: the world API's net / players / chat): a script message's piece travels as type 10,
+// {type 10, ver 1, u8[6], u64 from} + up to 80 bytes (luanet's piece), through the same transport as the rest.
+#include "../worldapi.h"
+void luanet_heard(uint64_t from, const uint8_t *b, int n);
+int world_net_up(void) { return g_world && w_send != NULL; }
+uint64_t world_self_id(void) { return g_self; }
+void world_net_send(const uint8_t *body, int n) {
+    if (n <= 0 || n > 80) return;
+    WorldPkt k = {.type = 10, .ver = 1, .from = g_self};
+    memcpy((uint8_t *)&k + 16, body, (size_t)n);
+    world_send(&k, 16 + (size_t)n);
+}
+// the other players heard (positions as last heard; standin 1: theirs is drawn here)
+int world_players_list(LarecompPlayer *out, int max) {
+    int n = 0;
+    float me[3];
+    bool have_me = warp_player_now(me, NULL);
+    uint64_t now = world_now_ns();
+    for (int i = 0; i < MAXPEER && n < max; i++) {
+        const Peer *p = &g_peers[i];
+        if (!p->id || now - p->heard_ns > PEER_TIMEOUT_NS * 2) continue;
+        LarecompPlayer *o = &out[n++];
+        o->id = p->id, o->yaw = p->yaw * 57.29578f;
+        memcpy(o->pos, p->pos, 12);
+        o->standin = p->show && p->node;
+        if (o->standin) memcpy(o->pos, p->shown, 12);
+        o->dist = have_me ? sqrtf((o->pos[0] - me[0]) * (o->pos[0] - me[0]) + (o->pos[2] - me[2]) * (o->pos[2] - me[2])) : -1;
+    }
+    return n;
+}
+// where that player's stand-in stands: 1 (feet), 0 not drawn now, -1 no such player
+int world_player_feet(uint64_t id, float feet[3]) {
+    for (int i = 0; i < MAXPEER; i++) {
+        const Peer *p = &g_peers[i];
+        if (p->id != id) continue;
+        if (!(p->show && p->node)) return 0;
+        memcpy(feet, p->shown, 12);
+        return 1;
+    }
+    return -1;
 }
