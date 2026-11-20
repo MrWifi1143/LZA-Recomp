@@ -6,6 +6,7 @@
 // JP subset) and emoji (Noto Emoji) merged in - third_party/fonts.
 #include <SDL3/SDL.h>
 #include <math.h>
+#include <stdlib.h>
 #include <pthread.h>
 #include <atomic>
 #include <string>
@@ -253,4 +254,27 @@ void hud_render(ImGuiIO &io, float scale) {
     }
     while (clips-- > 0) dl->PopClipRect();
     pthread_mutex_unlock(&g_lock);
+}
+
+// The overlay's cost on the render thread (menu.mm, each drawn frame: building the speech bubbles' and scripts' ImGui
+// lists, and the whole overlay - ImGui's frame, those, its draw data recorded). LARECOMP_HUD_STATS=<frames>: averages
+// and maxima logged every that many frames ("[hud] render ..."), with the draw list's size.
+void hud_render_stats(uint64_t bubbles_ns, uint64_t hud_ns, uint64_t all_ns, int vertices, bool menu) {
+    static long every = -1;
+    if (every < 0) every = getenv("LARECOMP_HUD_STATS") ? atol(getenv("LARECOMP_HUD_STATS")) : 0;
+    if (every <= 0) return;
+    static uint64_t n, sb, sh, sa, mb, mh, ma, sv;
+    static int menus;
+    n++, sb += bubbles_ns, sh += hud_ns, sa += all_ns, sv += (uint64_t)vertices, menus += menu;
+    if (bubbles_ns > mb) mb = bubbles_ns;
+    if (hud_ns > mh) mh = hud_ns;
+    if (all_ns > ma) ma = all_ns;
+    if ((long)n < every) return;
+    pthread_mutex_lock(&g_lock);
+    size_t cmds = g_cmd[g_front].size();
+    pthread_mutex_unlock(&g_lock);
+    LOG("[hud] render over %llu frames: scripts' list %.1f us (max %.1f, %zu commands), bubbles %.1f us (max %.1f), the "
+        "whole overlay %.1f us (max %.1f), %llu vertices%s\n", (unsigned long long)n, sh / 1e3 / n, mh / 1e3, cmds, sb / 1e3 / n,
+        mb / 1e3, sa / 1e3 / n, ma / 1e3, (unsigned long long)(sv / n), menus ? " (the runtime's menu up some of it)" : "");
+    n = sb = sh = sa = mb = mh = ma = sv = 0, menus = 0;
 }
