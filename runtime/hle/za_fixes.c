@@ -319,7 +319,13 @@ static void bubble_cam(uint64_t cam) {
     if (!warp_player_now(p, NULL)) return;
     float dx = t[0] - p[0], dy = t[1] - p[1], dz = t[2] - p[2];
     if (dx * dx + dz * dz > 4.0f || dy < -0.5f || dy > 3.0f) return;
-    bubble_camera((const float *)(uintptr_t)(cam + 0x1c0));
+    // (and looking at it from away: after an area load - the night change - a second camera with the same target but its
+    // eye at the player's feet and no view of it is served after the scene's every frame, until the camera moves; taken,
+    // it put everything behind the camera: markers and bubbles gone - traced with a Legends Lua hook here, 2026-11-20)
+    const float *e = (const float *)(uintptr_t)(cam + 0x1c0);
+    float vx = t[0] - e[0], vy = t[1] - e[1], vz = t[2] - e[2], d = sqrtf(vx * vx + vy * vy + vz * vz);
+    if (d < 1.8f || -(vx * e[6] + vy * e[10] + vz * e[14]) / d < 0.5f) return;  // (Z = e[6], e[10], e[14]: the view's back)
+    bubble_camera(e);
 }
 static int wide_cam_hook(Cpu *c, uint64_t addr) {
     (void)addr;
