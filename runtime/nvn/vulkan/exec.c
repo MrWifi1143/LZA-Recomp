@@ -4383,7 +4383,9 @@ static uint64_t prof_tp_;
 // Known by their first instructions: c[3][0x210] / c[3][0x214] loaded at pc 0x8 / 0x18, the FFMAs with c[3][0x218] /
 // c[3][0x21c] soon after (registers and places vary; the same in Z-A and Arceus). A pane that covers the whole layout -
 // the screen fades, a menu's dimming of the world - is drawn over the whole image instead of the box (the sides went
-// undimmed). Wider-than-the-layout panels (Z-A's Settings sheet) are stretched to the sides with it; their contents stay.
+// undimmed), and so is one across the layout's whole width on a wider screen (a menu's tint bands, header and footer
+// bars). One that ends at the layout's left or right edge (a header tab, a side panel, a guide line) has its edge
+// continued to the image's edge (ui_extend_edges). Contents stay in the box.
 static bool layout_vs(uint64_t code) {
     static struct { uint64_t code; bool yes; } cache[256];
     uint32_t h = (uint32_t)((code >> 4) * 0x9E3779B1u) >> 24;
@@ -4399,11 +4401,12 @@ static bool layout_vs(uint64_t code) {
 }
 // (kx, ky: the layout's projection made that much wider / taller by the game layer - runtime/hle/gameui.c "wide": a
 // pane as big as the layout covers 1 / kx of the image's width)
-static bool layout_pane_covers(float kx, float ky) {
+// (its place in the layout's projected space, -1..1: x lo[0] .. hi[0], y lo[1] .. hi[1])
+static bool layout_pane_rect(float lo[2], float hi[2]) {
     if (!st.program || !layout_vs(st.program->stages[0].code_addr)) return false;
     const float *c = (const float *)(uintptr_t)st.ubuf[0][0].addr;  // (the vertex stage's c3: ubuf[0][0])
     if (!c || st.ubuf[0][0].size < 136 * 4) return false;
-    float lo[2] = {1e9f, 1e9f}, hi[2] = {-1e9f, -1e9f};
+    lo[0] = lo[1] = 1e9f, hi[0] = hi[1] = -1e9f;
     for (int k = 0; k < 4; k++) {
         float lx = (float)(k & 1) * c[132] + c[134], ly = -(float)(k >> 1) * c[133] + c[135];
         float wx = c[16] * lx + c[17] * ly + c[19], wy = c[20] * lx + c[21] * ly + c[23], wz = c[24] * lx + c[25] * ly + c[27];
@@ -4413,12 +4416,42 @@ static bool layout_pane_covers(float kx, float ky) {
         lo[0] = fminf(lo[0], nx), hi[0] = fmaxf(hi[0], nx), lo[1] = fminf(lo[1], ny), hi[1] = fmaxf(hi[1], ny);
     }
     if (g_debug_frame) LOG("[draw]   layout pane: x %.3f .. %.3f, y %.3f .. %.3f\n", lo[0], hi[0], lo[1], hi[1]);
-    return lo[0] <= -0.99f / kx && hi[0] >= 0.99f / kx && lo[1] <= -0.99f / ky && hi[1] >= 0.99f / ky;
+    return true;
+}
+static bool layout_pane_covers(float kx, float ky) {
+    float lo[2], hi[2];
+    return layout_pane_rect(lo, hi) && lo[0] <= -0.99f / kx && hi[0] >= 0.99f / kx && lo[1] <= -0.99f / ky && hi[1] >= 0.99f / ky;
 }
 static bool layout_fullscreen_pane(void) { return layout_pane_covers(1, 1); }
+// (draw_, ultrawide: an interface pane that ends at its 16:9 box's left / right edge drawn again over the side between the box
+// and the image's edge, through a viewport so wide that only the pane's edge - a few texels - falls there: the edge goes on
+// to the screen's edge as on a 16:9 screen. Clipped to that side: nothing is drawn twice over)
+static void ui_extend_edges(VkCommandBuffer cb, int sides, const float img_x[2], const float vp[4], float zn, float zf, bool use_index,
+                            uint32_t count, uint32_t icount, uint32_t inst, uint32_t first, int32_t base_vertex, uint32_t base_inst) {
+    VkRect2D sc = scissor_rect();  // (the pane's own clip, in the box: it must reach the edge too)
+    const VkPhysicalDeviceLimits *L = &g_vk.props.limits;
+    float maxw = fminf((float)L->maxViewportDimensions[0], L->viewportBoundsRange[1]) * 0.95f;
+    for (int side = 0; side < 2; side++) {
+        if (!(sides & (1 << side)) || vp[2] < 1) continue;
+        float edge = side ? vp[0] + vp[2] : vp[0], out = img_x[side];
+        int a = side ? (int)ceilf(edge) : (int)floorf(out), b = side ? (int)ceilf(out) : (int)floorf(edge);
+        if (b - a < 1) continue;
+        if (side ? sc.offset.x + (int)sc.extent.width < (int)edge - 1 : sc.offset.x > (int)edge + 1) continue;
+        float w = maxw;
+        w = side ? fminf(w, out - L->viewportBoundsRange[0] * 0.95f) : fminf(w, L->viewportBoundsRange[1] * 0.95f - out);
+        if (w <= vp[2] * 1.5f) continue;
+        set_viewport(side ? out - w : out, vp[1], w, vp[3], zn, zf);
+        VkRect2D r = {{a, sc.offset.y}, {(uint32_t)(b - a), sc.extent.height}};
+        vkCmdSetScissor(cb, 0, 1, &r);
+        if (!use_index) vkCmdDraw(cb, count, inst, first, base_inst);
+        else vkCmdDrawIndexed(cb, icount, inst, 0, base_vertex, base_inst);
+    }
+}
 
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
+    int ui_ext = 0;  // (an interface pane ending at the box's left (1) / right (2) edge: continued to the image's - below)
+    float ui_ext_x[2] = {0, 0}, ui_ext_vp[4] = {0, 0, 0, 0};
     if (!st.program) { SKIP(0); return; }
     if (ip_rec()) {  // (frame interpolation, stereo: what identifies this draw from one frame to the next)
         // what the draw is (program, vertex buffer, parameters), and which game object it belongs to: the same mesh
@@ -4779,12 +4812,27 @@ static void draw_(CmdRec *r, bool indexed) {
                 vp_sx = img_w / rt0->width, vp_sy = img_h / rt0->height, vp_ox = x0, vp_oy = y0;
                 if (ui_mode == 1 && !keep && layout_pane_covers(kx, ky))
                     vp_sx *= kx, vp_sy *= ky, vp_ox -= (kx - 1) * img_w * 0.5f, vp_oy -= (ky - 1) * img_h * 0.5f;
-            } else if (!keep && layout_pane_covers(1, 1)) {
-                composite = true;
             } else {
-                vp_sx = bw_ / rt0->width, vp_sy = bh_ / rt0->height;
-                vp_ox = ui_anchor & 1 ? x0 : ui_anchor & 2 ? x0 + img_w - bw_ : (pw_ - bw_) * 0.5f;
-                vp_oy = ui_anchor & 4 ? y0 : ui_anchor & 8 ? y0 + img_h - bh_ : (ph_ - bh_) * 0.5f;
+                float lo[2], hi[2];
+                bool rect = !keep && layout_pane_rect(lo, hi);
+                bool spans_x = rect && lo[0] <= -0.99f && hi[0] >= 0.99f, spans_y = rect && lo[1] <= -0.99f && hi[1] >= 0.99f;
+                // (a pane as big as the layout - a fade, a dimming - covers the whole image; so does one across its whole
+                // width on a wider screen - a band: a header, a footer, a menu's tint over the top or bottom half - or its
+                // whole height on a taller one: the box's sides went without them)
+                if ((spans_x && spans_y) || (spans_x && kx > 1.001f && !(ui_anchor & 3)) || (spans_y && ky > 1.001f && !(ui_anchor & 12))) {
+                    composite = true;
+                } else {
+                    vp_sx = bw_ / rt0->width, vp_sy = bh_ / rt0->height;
+                    vp_ox = ui_anchor & 1 ? x0 : ui_anchor & 2 ? x0 + img_w - bw_ : (pw_ - bw_) * 0.5f;
+                    vp_oy = ui_anchor & 4 ? y0 : ui_anchor & 8 ? y0 + img_h - bh_ : (ph_ - bh_) * 0.5f;
+                    // (one that ends at the layout's left or right edge: a narrow upright strip - an accent bar on a header's
+                    // end - goes to the image's edge; anything else - a header tab, a side panel, a line running off the screen
+                    // - has its edge go on to the image's edge: drawn again after itself, its edge stretched over the side)
+                    int edge = rect && kx > 1.001f && !(ui_anchor & 3) && !st.ui_copy ? (lo[0] <= -0.99f ? 1 : 0) | (hi[0] >= 0.99f ? 2 : 0) : 0;
+                    float pw_px = (hi[0] - lo[0]) * 0.5f * bw_, ph_px = (hi[1] - lo[1]) * 0.5f * bh_;
+                    if ((edge == 1 || edge == 2) && pw_px <= bw_ * 0.045f && ph_px >= pw_px * 2.5f) vp_ox = edge == 1 ? x0 : x0 + img_w - bw_;
+                    else if (edge) ui_ext = edge, ui_ext_x[0] = x0, ui_ext_x[1] = x0 + img_w;
+                }
             }
             if (!composite) wide_frame = ~0ull;
         } else {
@@ -4837,6 +4885,7 @@ static void draw_(CmdRec *r, bool indexed) {
             vw *= sc, vh *= sc;
         }
         set_viewport(vx, vy, vw, vh, zn, zf);
+        ui_ext_vp[0] = vx, ui_ext_vp[1] = vy, ui_ext_vp[2] = vw, ui_ext_vp[3] = vh;
         if (g_debug_frame) {
             VkRect2D sr = scissor_rect();
             LOG("[draw]   vp %.2f %.2f %.2f %.2f (fs hash %016llx) scissor %d %d %u %u | guest sc %d %d %d %d | pass %ux%u s %.4f %.4f\n",
@@ -5022,6 +5071,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (exp_hit && exp_mode == 1) { /* skipped */ }
     else if (!use_index) vkCmdDraw(cb, count, inst_eff, first, base_inst);
     else vkCmdDrawIndexed(cb, icount, inst_eff, 0, base_vertex, base_inst);
+    if (ui_ext && !exp_hit && !xfb_on) ui_extend_edges(cb, ui_ext, ui_ext_x, ui_ext_vp, zn, zf, use_index, count, icount, inst_eff, first, base_vertex, base_inst);
     if (xfb_on) {
         g_vk.end_xfb(cb, 0, 0, NULL, NULL);
         for (int b = 0; b < 4 && pr->vkey.xfb_count[b]; b++) gpuw_note(st.xfb_addr[b], st.xfb_size[b]);
