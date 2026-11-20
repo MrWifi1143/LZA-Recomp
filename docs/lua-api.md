@@ -1044,7 +1044,9 @@ reload).
   `hle/newnpc.c`): the spawn read past the runtime's 0x300-byte copy of the station block into whatever followed it in
   the HLE heap; the block is now 0x2040 bytes, zero past the copy (made reliable with `LARECOMP_NEWNPC_ROOM=0x300
   LARECOMP_NEWNPC_FILL=1`; 121 spawns across 12 day / night changes after the fix).
-* Z-A Windows build (under Wine): turning or moving a script character (`n:face_player()`, the quest's talk) crashed it
-  (exception c0000005 accessing 0 in the exe's own code, every time) - the same on the old block size, so not the fix
-  above; Linux is fine. Open (the quest example boots and its giver is made; Arceus' Windows build plays the quest).
+* Z-A Windows build (under Wine): turning or moving a script character (`n:face_player()`, `walk_to`, the quest's talk)
+  crashed it (c0000005 accessing 0) - FIXED 2026-11-20 (`hle/newnpc.c`): a character's node is updated by more than one
+  game thread, and the move setter published "ready" before allocating its scratch, so the other thread passed a scratch
+  of 0 (on Windows hle_alloc's commit held that window open every time). Checked under Wine: the Lost Charm played through
+  and the Town Walk walkers walking; Arceus' Windows build plays the quest too.
 Shots and logs: `testout/quests/` (final-za, final-pla, fix-za, fix-pla).
