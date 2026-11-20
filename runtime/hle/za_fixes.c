@@ -28,6 +28,7 @@
 #include <time.h>
 #include <stdatomic.h>
 
+#include "../gameui.h"
 #include "../hle.h"
 #include "../settings.h"
 #include "../platform.h"
@@ -347,6 +348,7 @@ static void za_wide_engage(uint64_t sw, uint64_t sh) {
         return;
     }
     g_wide_cam = (float)a, g_game_image_aspect = (float)a;
+    gameui_set_screen((float)(a / (16.0 / 9.0)));  // (the HUD at the real edges: runtime/hle/gameui.c)
     static bool hooked;
     if (!hooked) hooked = true, rt_register_fnhook_at(ZA_CAM_UPDATE, wide_cam_hook);
     LOG("[wide] fill the window: screen %llux%llu, shape %.3f x 16:9, scene camera aspect %.4f; interface in a centred 16:9 box\n",
@@ -356,6 +358,17 @@ static void za_wide_engage(uint64_t sw, uint64_t sh) {
 // The engine's system config (read by 0x7001b2fc30 (config table, engine info, ...) into the info struct): +0x10 / +0x18
 // the output width / height (1920 x 1080 unless the data sets them), +0x58 the worker core count (hle/za_jobs.c).
 // (the output size: set by the screen size, below)
+// The interface's layouts (runtime/gameui.h, hle/gameui.c): nn::ui2d in 2.0.2 (its class tables found by their RTTI
+// names, N2nn4ui2d4PaneE...; Calculate / Draw the Layout table's slots 23 / 18)
+static void za_gameui_init(void) {
+    static const GameUiGame g = {
+        .game = "za", .layout_calc = 0x7002634188ull, .layout_draw = 0x7002634720ull,
+        .lay_name = 0x30, .di_proj = 0x10, .di_target = 0x138,
+        .vt = {0x7003c93b08ull, 0x7003c93db8ull, 0x7003c94028ull, 0x7003c943b0ull, 0x7003c93c68ull, 0, 0, 0, 0x7003c931b8ull},
+    };
+    gameui_init(&g);
+}
+
 #define ZA_CONFIG_READ 0x7001b2fc30ull
 #define ZA_SCREEN_SIZES 0x70031a14e0ull  // (u32 handheld w, docked w, handheld h, docked h: 1280, 1920, 720, 1080)
 static int config_read(Cpu *c, uint64_t addr) {
@@ -790,6 +803,7 @@ void za_fixes_configure(const char *exefs) {
     }
     if (done || memcmp(id, ZA_MAIN, 8)) return;
     done = true;
+    za_gameui_init();
     rt_register_fnhook_at(0x70010e3ed0ull, sensor_make);  // (the props' streaming distances)
     rt_register_fnhook_at(0x70010930d4ull, model_cull_set);  // (models' culling distances)
     rt_register_fnhook_at(0x7001108570ull, collision_make);  // (NPC spawners' trigger radius)

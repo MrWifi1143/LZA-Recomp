@@ -62,7 +62,9 @@ int mods_list(char names[][128], int max) {
         snprintf(tp, sizeof tp, "%s/texpack", p);  // (a texture pack alone - mods/<name>/texpack/ - is a mod too)
         char lp[1100];
         snprintf(lp, sizeof lp, "%s/lua", p);  // (and scripts alone - mods/<name>/lua/: Legends Lua runs them)
-        if (is_dir(p) && (find_romfs(p, 4, r, sizeof r) || is_dir(tp) || is_dir(lp))) snprintf(names[n++], 128, "%s", e->d_name);
+        char up[1100];
+        snprintf(up, sizeof up, "%s/ui", p);  // (and interface edits alone - mods/<name>/ui/<layout>.ini: hle/gameui.c)
+        if (is_dir(p) && (find_romfs(p, 4, r, sizeof r) || is_dir(tp) || is_dir(lp) || is_dir(up))) snprintf(names[n++], 128, "%s", e->d_name);
     }
     closedir(d);
     return n;

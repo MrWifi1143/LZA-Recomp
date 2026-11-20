@@ -588,6 +588,39 @@ static int r_bubble(lua_State *s) {
     return 1;
 }
 static int r_bubble_hide(lua_State *s) { need_m(s); lua_pushinteger(s, M->version >= 5 ? M->bubble_hide((int)luaL_checkinteger(s, 1)) : 0); return 1; }
+// (version 6) the game's interface: ui_set(layout, pane, key, value) -> bool; ui_unset([layout [, pane]]);
+// ui_layouts() / ui_panes(layout) / ui_text(layout, pane) -> text (nil: none / older build); ui_clone(layout, src, name)
+static int r_ui_set(lua_State *s) {
+    need_m(s);
+    lua_pushboolean(s, M->version >= 6 && M->ui_set(luaL_checkstring(s, 1), luaL_optstring(s, 2, ""), luaL_checkstring(s, 3),
+                                                    luaL_checkstring(s, 4)));
+    return 1;
+}
+static int r_ui_unset(lua_State *s) {
+    need_m(s);
+    if (M->version >= 6) M->ui_unset(luaL_optstring(s, 1, NULL), luaL_optstring(s, 2, NULL));
+    return 0;
+}
+static int ui_text_answer(lua_State *s, int kind) {
+    need_m(s);
+    if (M->version < 6) return 0;
+    int cap = 1 << 18;
+    char *out = malloc((size_t)cap);
+    if (!out) return 0;
+    int n = kind == 0 ? M->ui_layouts(out, cap) : kind == 1 ? M->ui_panes(luaL_checkstring(s, 1), out, cap)
+                                                           : M->ui_text(luaL_checkstring(s, 1), luaL_checkstring(s, 2), out, cap);
+    if (n >= 0) lua_pushlstring(s, out, (size_t)n);
+    free(out);
+    return n >= 0;
+}
+static int r_ui_layouts(lua_State *s) { return ui_text_answer(s, 0); }
+static int r_ui_panes(lua_State *s) { return ui_text_answer(s, 1); }
+static int r_ui_text(lua_State *s) { return ui_text_answer(s, 2); }
+static int r_ui_clone(lua_State *s) {
+    need_m(s);
+    lua_pushboolean(s, M->version >= 6 && M->ui_clone(luaL_checkstring(s, 1), luaL_checkstring(s, 2), luaL_checkstring(s, 3)));
+    return 1;
+}
 static int r_time_set(lua_State *s) { need_m3(s); lua_pushboolean(s, M->time_set((float)luaL_checknumber(s, 1))); return 1; }
 static int r_item_give(lua_State *s) { need_m3(s); lua_pushboolean(s, M->item_give((int)luaL_checkinteger(s, 1), (int)luaL_checkinteger(s, 2))); return 1; }
 static int r_npc_object(lua_State *s) {
@@ -688,6 +721,8 @@ static void new_state(void) {
                                   {"time_set", r_time_set}, {"message_text", r_message_text}, {"object_anim", r_object_anim},
                                   {"npc_talk", r_npc_talk}, {"npc_talked", r_npc_talked},
                                   {"bubble", r_bubble}, {"bubble_hide", r_bubble_hide},
+                                  {"ui_set", r_ui_set}, {"ui_unset", r_ui_unset}, {"ui_layouts", r_ui_layouts}, {"ui_panes", r_ui_panes},
+                                  {"ui_text", r_ui_text}, {"ui_clone", r_ui_clone},
                                   {"trace", l_trace}, {NULL, NULL}};
     uint64_t was = deadline_set(LUA_LOAD_MS);
     if (luaL_loadbufferx(L, k_api_lua, strlen(k_api_lua), "=api.lua", "t")) {
@@ -788,6 +823,7 @@ static void load_scripts(void) {
     if (M) {
         M->npc_remove_all();
         if (M->version >= 5) M->bubble_hide(0);  // (their bubbles too)
+        if (M->version >= 6) M->ui_unset(NULL, NULL);  // (and their interface edits)
         int n = 0;
         scan_all(&n);
         if (n) M->enable();  // (scripts added while the game runs: from now on)

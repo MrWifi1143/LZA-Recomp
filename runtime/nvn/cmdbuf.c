@@ -155,11 +155,24 @@ static int obj_hook(Cpu *c, uint64_t addr) {
     return 1;  // (the original ran)
 }
 // Before a draw or a command list call: a CMD_OBJECT when the object changed since the list's last one.
+static void ui_mark(Cpu *c, NvnCmdBuf *cb);
 static void obj_mark(Cpu *c, NvnCmdBuf *cb) {
+    ui_mark(c, cb);
     if (cb->obj_tag == g_obj_tag) return;
     CmdRec *r = rec(c, cb, CMD_OBJECT, 0);
     r->x[0] = g_obj_tag;
     cb->obj_tag = g_obj_tag;
+}
+
+// The game's interface (runtime/hle/gameui.c): a layout drawn with a fitting of its own (anchored to an edge, as wide
+// as the screen...) names it before its draws - a CMD_UI when it changed since the list's last one (exec.c draw_).
+uint32_t gameui_draw_mode(void);
+static void ui_mark(Cpu *c, NvnCmdBuf *cb) {
+    uint32_t m = gameui_draw_mode();
+    if (cb->ui_mode == m) return;
+    CmdRec *r = rec(c, cb, CMD_UI, 0);
+    r->x[0] = m;
+    cb->ui_mode = m;
 }
 
 static void draw_chain(Cpu *c, const char *kind, uint64_t count);
@@ -177,6 +190,7 @@ NVN(nvnCommandBufferBeginRecording) {
     }
     NvnCmdBuf *cb = cb_of(A(0));
     cb->obj_tag = 0;
+    cb->ui_mode = ~0u;  // (a list's first draw names its layout - or none: the list may be called from one that had one)
     cb->recording = true;
     rec(c, cb, CMD_BARRIER, 0);  // makes sure memory exists; the list starts here
     cb->start = cb->mem + cb->used - sizeof(CmdRec);

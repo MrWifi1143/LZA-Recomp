@@ -4,6 +4,7 @@
 //   mods/<name>/romfs/...                                  the game's RomFS paths (bin/message/English/...)
 //   mods/<name>/texpack/<key>.png                          a texture pack (runtime/nvn/vulkan/texpack.c)
 //   mods/<name>/lua/*.lua                                  scripts (contrib/legendslua: Legends Lua is loaded for them)
+//   mods/<name>/ui/<layout>.ini                            the game's interface edited (runtime/gameui.h)
 //   mods/<name>/atmosphere/contents/<title id>/romfs/...   (or any folder holding a romfs/ up to 4 levels down:
 //                                                           a download unpacked as it came)
 #pragma once
