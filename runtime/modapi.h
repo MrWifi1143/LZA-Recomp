@@ -10,8 +10,8 @@
 #pragma once
 #include <stdint.h>
 
-#define LARECOMP_MODAPI_VERSION 4  // (2: npc_outfit, npc_anim, pokemon_*, game_work; 3: game_script, item_give, npc_object;
-                                   //  4: npc_talk, npc_talked)
+#define LARECOMP_MODAPI_VERSION 5  // (2: npc_outfit, npc_anim, pokemon_*, game_work; 3: game_script, item_give, npc_object;
+                                   //  4: npc_talk, npc_talked; 5: bubble, bubble_hide)
 
 // npc_state answers
 enum {
@@ -105,6 +105,14 @@ typedef struct {
     // no prompt). npc_talked: a character the player talked to through that prompt since the last call (0 none).
     int (*npc_talk)(int h, int on);
     int (*npc_talked)(void);
+
+    // ---- version 5
+    // A speech bubble over a target's head (runtime/bubble.h): kind 0 a spot (pos), 1 the player, 2 a script's character
+    // (handle), 3 a script's Pokémon (handle, Arceus), 4 a game object by its name (object, Z-A: "luapoke_1"...); height
+    // metres over its feet (0: a head's); text UTF-8, cut at 100 characters; seconds (0: by its length). Answers its id
+    // (0 none); a bubble already over that target is replaced. bubble_hide(id) fades it out; id 0: every script's.
+    int (*bubble)(int kind, int handle, const char *object, const float pos[3], float height, const char *text, float seconds);
+    int (*bubble_hide)(int id);
 } LarecompModApi;
 
 // ---- runtime side

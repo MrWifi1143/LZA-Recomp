@@ -302,9 +302,27 @@ static int res_scale_hook(Cpu *c, uint64_t addr) {
 // reflection's of another shape keep theirs. Hor+: the vertical field of view stays, the sides see more. (A VR plugin's
 // shape: the plugin sets the cameras itself.)
 #define ZA_CAM_UPDATE 0x70018cff60ull
+// Speech bubbles (runtime/bubble.h) are placed with the scene camera: of the cameras this update serves, the one looking
+// at the player - its target (+0x280) the player's head, ~1.5 m over the feet (the others: interface cameras at the
+// origin, shadows); eye +0x1c0 then the view's columns, field of view / aspect 0x24 / 0x20 before it (as LegendsVR).
+// What it had from its last update (this runs before the game's): half a frame old at most.
+static volatile int g_bubble_cam;
+static void bubble_cam(uint64_t cam) {
+    extern int bubble_count(void);
+    extern void bubble_camera(const float *eye);
+    extern bool warp_player_now(float pos[3], float *yaw);
+    if (!bubble_count()) return;
+    const float *t = (const float *)(uintptr_t)(cam + 0x280);
+    float p[3];
+    if (!warp_player_now(p, NULL)) return;
+    float dx = t[0] - p[0], dy = t[1] - p[1], dz = t[2] - p[2];
+    if (dx * dx + dz * dz > 4.0f || dy < -0.5f || dy > 3.0f) return;
+    bubble_camera((const float *)(uintptr_t)(cam + 0x1c0));
+}
 static int wide_cam_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     extern volatile float g_plugin_render_shape;
+    if (g_bubble_cam) bubble_cam(c->x[0]);
     if (g_plugin_render_shape > 0 || !g_wide_cam) return 0;
     float *a = (float *)(uintptr_t)(c->x[0] + 0x1a0);
     if (fabsf(*a - 16.0f / 9.0f) < 0.002f) {
@@ -313,6 +331,11 @@ static int wide_cam_hook(Cpu *c, uint64_t addr) {
         *a = g_wide_cam;
     }
     return 0;
+}
+void za_bubble_cam_on(void) {  // (the first speech bubble: runtime/hle/modapi.c)
+    if (g_bubble_cam) return;
+    g_bubble_cam = 1;
+    rt_register_fnhook_at(ZA_CAM_UPDATE, wide_cam_hook);
 }
 static void za_wide_engage(uint64_t sw, uint64_t sh) {
     extern volatile float g_plugin_render_shape;

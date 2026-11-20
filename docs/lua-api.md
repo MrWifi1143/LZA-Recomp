@@ -98,7 +98,7 @@ spot when the player comes back, carrying on its walk. Removing a handle is the 
 | `n:state()` | `"waiting"` (not in the world now), `"coming"` (being made), `"up"`, `"walking"`, `"removed"`. |
 | `n:is_up()` / `n:valid()` | In the world / not removed. |
 | `n:dist([pos])` | Metres to the player (or to `pos`), along the ground. |
-| `n:say(text [, seconds])` | A notice on screen: `Name: text`. |
+| `n:say(text [, seconds])` | A speech bubble over its head with the text (see Speech bubbles, below): `ui.bubble(n, text, seconds)`. |
 | `n:anim(name, value [, kind])` | Set one of its animation's parameters (the game's own: what its animation graph reads to pick a pose). `value` true/false sets a bool, a whole number an int, any other number a float, `nil` fires a trigger (or pass `kind` `"b"`, `"i"`, `"f"`, `"t"`). Returns whether the character has that parameter. Checked: **Z-A** `n:anim("sit_bool", true) n:anim("sit_int", 1)` sits (int 2 another way; back to `false` / `0` stands up). The city's own people also use `speak_bool` + `wait_int` 2 (chatting) and `loop_action_bool`. **Arceus** `n:anim("set_squat_bool", true)` crouches (dressed characters run the player's animation, the others a villager's). In a pose a Z-A character doesn't walk: stand it up first. |
 | `n:trigger(name)` | Fire a trigger parameter (`n:anim(name)`). |
 | `n:play_once(n)` | Its once-action `n`: `once_action_int` n, then `once_action_trigger` (Z-A characters also `wait_int` 1, their route goes through their default wait). What plays is the motion its set has in that state - or a new one put there with Studio (below). |
@@ -236,7 +236,9 @@ off(id)
 | `timer.after(sec, fn)` / `timer.every(sec, fn)` | Returns an id; `timer.cancel(id)` stops it. |
 | `ui.notify(text [, sec])` | A notice at the top of the screen (default 4 s). |
 | `ui.message(text [, fn])` | **Z-A**: the game's own message window (the one its people talk in) with this text - `\n` for a new line; A closes it, then `fn()`. Elsewhere a notice. |
-| `ui.say(npc_or_name, text)` | `ui.message("Name:\n" .. text)`. (`n:say(text)` stays a notice: it doesn't wait for A.) |
+| `ui.say(npc_or_name, text)` | `ui.message("Name:\n" .. text)`. (`n:say(text)` is a speech bubble instead: it doesn't wait for A.) |
+| `ui.bubble(target, text [, seconds [, opts]])` | A speech bubble over the target's head (below). Returns its id. |
+| `ui.bubble_hide(id or target)` | That bubble fades out. |
 | `cmd.add(name, fn, help)` | A console command (below). Its arguments are the words after the name; numbers come as numbers. |
 | `vec(x, y, z)` | `+ - *`, `:len()`, `:dist(b)`, `:dist2d(b)`, `:yaw_to(b)`, `:ahead(yaw, d)`, `:lerp(b, t)`, `:unpack()`, `.x .y .z`. |
 | `include("lib/x.lua")` | Runs another file of this mod in its globals and returns what it returns. |
@@ -286,14 +288,78 @@ Measured on 2026-11-19 (Core i9-12900K, both games, with other games sharing the
 
 At 60 fps a frame is 16,700 us, so a mod like the samples costs about 0.1-0.2% of the frame.
 
+## Speech bubbles
+
+```lua
+n:say("Hello!")                                  -- over a character (npc.spawn)
+ui.bubble("player", "On my way!", 6)             -- over the player, for 6 s
+ui.bubble(pikachu, "Pika!", nil, {height = 0.6}) -- over a Pokémon (pokemon.spawn); height over its feet
+ui.bubble("npc_A04_z02_02_0031", "Hi")           -- Z-A: over any game object by its name
+local id = ui.bubble(vec(10, 2, 5), "Here")      -- over a spot
+ui.bubble_hide(id)
+```
+
+A white bubble with a tail, the townspeople's look, over the target's head. It follows the target as it walks and the
+camera as it turns, and it goes when its time is up, when the target is removed (or its area unloads), or with
+`ui.bubble_hide`. Both games, the same way.
+
+* **Text**: UTF-8. Long lines wrap (about 26 characters a line); `\n` breaks a line. Cut at 100 characters (`...` at the
+  end). The overlay's font has Latin-1 (accents) and Cyrillic; other characters show as `?`.
+* **How long**: `seconds`, or by the text's length (3 to 12 s).
+* **Replacing**: a new bubble over the same target replaces the one it has (its id stays). One bubble per target.
+* **Many at once**: up to 32. Bubbles that would cover each other are stacked: the nearer one keeps its place, the
+  farther one moves above it, with a thin line down to its character. Far ones (35 to 45 m) fade out; ones behind the
+  camera or off the screen aren't drawn.
+* **Height**: a person's head by default (2 m over the feet; the player 1.95 m, a Pokémon 1 m). `opts.height` sets it.
+* A script reload clears the scripts' bubbles with their characters.
+
+The runtime draws them over the game's image (its overlay, as the notices), placed with the game's own scene camera
+(Z-A: the camera update 0x70018cff60's camera that looks at the player; Arceus: the render camera 0x7002994b70). They're
+not the game's own bubbles: those can't be put over just anything. **Z-A**'s are the townspeople's: a townsperson's AI
+(`StandTalkNpcLookAt...`) activates its own bubble component (vfunc +0x98, 0x7000a920c8), which builds a "MainPage"
+layout instance and asks the bubble manager to show it (0x70009236e0 -> 0x7000fd7cd0 -> the layout's show 0x7000fdb370);
+the text is bound to the townsperson's NPC data (its message file and label, e.g. `t1_A04` / `msg_A04_z02_02_speech_31`)
+and read when the bubble draws (0x700068d8b0). A script character, the player or a Pokémon has no such component or data.
+**Arceus**' bubbles are the event message window in its speech-bubble look (`FieldMessageWindowManager`'s
+`CreateMessageWindow`, style 1, over a speaker object: one window at a time, its text from the event's message files)
+and the camp people's lines from their talk data - neither can show several lines of our own at once.
+
+### From the runtime (multiplayer chat)
+
+`runtime/bubble.h` (`runtime/hle/bubble.c`, the same in both games) is the C side, for code like the multiplayer's: a
+remote player's chat line over their stand-in. Any thread.
+
+```c
+#include "bubble.h"
+// over a stand-in the multiplayer code moves itself: asked where it stands each drawn frame
+static int standin_feet(void *ctx, float feet[3]) {   // 1 there, 0 not now (hidden), -1 gone (the bubble too)
+    Peer *p = ctx;
+    if (!p->connected) return -1;
+    if (!p->standin_up) return 0;
+    memcpy(feet, p->standin_pos, 12);
+    return 1;
+}
+BubbleTarget t = {.kind = BUBBLE_FN, .where = standin_feet, .ctx = peer, .owner = BUBBLE_OWNER_MP};
+int id = bubble_show(&t, chat_line_utf8, 0);   // 0: by its length; the peer's previous line is replaced
+...
+bubble_hide_target(&t);                          // (or bubble_hide(id)) when the peer leaves
+bubble_clear(BUBBLE_OWNER_MP);                   // every chat bubble (a session ends)
+```
+
+Other targets: `BUBBLE_NPC` with a mod API character handle (`.handle`), `BUBBLE_POKEMON` (Arceus, a handle),
+`BUBBLE_OBJECT` (Z-A: a game object's name in `.object` - a stand-in made as `luanpc_<k>` by the mod API's characters is
+followed by its name), `BUBBLE_PLAYER`, `BUBBLE_POS` (`.pos`). `.height` overrides the head height. `BUBBLE_OWNER_MP`
+bubbles survive a script reload (`bubble_clear(BUBBLE_OWNER_SCRIPT)`). The text is cleaned the same way (UTF-8 checked,
+control characters made spaces, cut at 100 characters), so a peer's text can be passed as it came - but it's the chat's
+job to limit how often a peer may send.
+
 ## Not there yet
 
-* **The townspeople's speech bubbles** on script characters. Z-A's townspeople have no A prompt: a talkable one
-  (talk script `StandTalkNpcLookAt...`) says a line in a bubble when the player comes near, and A does nothing more. A
-  script character's `talk` is an A press near it, and with `ui.say` that opens the game's own window - so talking to one
-  looks like the game. The bubble is the townspeople's C++ AI; a script character has the same InteractNPC component, but
-  its record (+0x48) is named after its object (`luanpc_001`). Pointing that record at a talkable townsperson's, copying
-  that townsperson (`model`), or giving it the talkable talk script (research `LARECOMP_MODNPC_TALK=1`) brought no bubble.
+* **The game's own speech bubbles** over script characters (Z-A's townspeople's; the runtime draws its own instead -
+  Speech bubbles, above). Z-A's townspeople have no A prompt: a talkable one says a line in a bubble when the player
+  comes near. A script character has the same InteractNPC component, but its record (+0x48) is named after its object
+  (`luanpc_001`); pointing that record at a talkable townsperson's, copying that townsperson (`model`), or giving it the
+  talkable talk script (research `LARECOMP_MODNPC_TALK=1`) brought no bubble - the bubble is a component of its own.
 * **Weather** (both games). Z-A's framework has no setter (its `FixWeather` is empty); the weather the game reports
   comes from an object of the environment clock's (a list of 4 entries, the current one at +0x68): pointing it at
   another entry changes what the game reports (`c4B6212B8.f6362F6BB()`), but nothing on screen. Arceus' scripts have

@@ -6,7 +6,7 @@ layers:
 - **The mod API** (`docs/lua-api.md`): mods carry scripts in `mods/<name>/lua/`. Scripts can make new characters
   that the game itself creates, dress them, pose them and walk them around, make Pokémon, give items, set the time of
   day, run the game's own script commands (Z-A), read and set the story's progress values, react to the player (events: tick, area loaded, buttons, talk, near), set timers, add
-  console commands and show notices. It's the same in both games, it's written in `api.lua`
+  console commands, show notices and put speech bubbles over characters' heads. It's the same in both games, it's written in `api.lua`
   on top of the game's `runtime/modapi.h`, and there are samples in `examples/`.
 - **The raw layer** (below): hook any game function, read and write game memory, call the game's own functions and
   run something every frame. It's for research and for what the mod API doesn't have yet.

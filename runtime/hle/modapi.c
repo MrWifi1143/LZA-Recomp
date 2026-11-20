@@ -67,6 +67,36 @@ static int item_give(int item, int count) {
     snprintf(code, sizeof code, "C0C062DE5AED06885.SB01A9B29CD4CC6CB(%d, %d) return 1", item, count);  // (AddItem: "S" + FNV-1a 64)
     return za_script(code) ? 1 : 0;
 }
+// ---- speech bubbles (runtime/bubble.h, hle/bubble.c): where a target stands, a script's bubble made and hidden
+#include "../bubble.h"
+int newnpc_object_pos(const char *name, float out[3]);  // (hle/newnpc.c: a game object by its name, its node's position)
+void za_bubble_cam_on(void);                             // (hle/za_fixes.c: the scene camera to bubble_camera)
+int bubble_target_where(const BubbleTarget *t, float feet[3]) {
+    switch (t->kind) {
+    case BUBBLE_PLAYER: return warp_player_now(feet, NULL) ? 1 : 0;
+    case BUBBLE_NPC: {
+        int st = newnpc_mod_state(t->handle, feet, NULL);
+        return st == 0 ? -1 : st >= 3 ? 1 : 0;  // (gone / not in the world now)
+    }
+    case BUBBLE_OBJECT: return newnpc_object_pos(t->object, feet);
+    case BUBBLE_FN: return t->where(t->ctx, feet);
+    default: return -1;  // (Z-A's script Pokémon are objects by name: BUBBLE_OBJECT)
+    }
+}
+static int bubble_api(int kind, int handle, const char *object, const float pos[3], float height, const char *text, float seconds) {
+    BubbleTarget t = {.kind = kind, .handle = handle, .height = height, .owner = BUBBLE_OWNER_SCRIPT};
+    if (kind < BUBBLE_POS || kind > BUBBLE_OBJECT || kind == BUBBLE_POKEMON) return 0;
+    if (object) snprintf(t.object, sizeof t.object, "%s", object);
+    if (pos) memcpy(t.pos, pos, 12);
+    za_bubble_cam_on();
+    if (kind == BUBBLE_OBJECT) newnpc_object_pos(t.object, t.pos);  // (followed from now on)
+    return bubble_show(&t, text, seconds);
+}
+static int bubble_hide_api(int id) {
+    if (id == 0) { bubble_clear(BUBBLE_OWNER_SCRIPT); return 1; }
+    return bubble_hide(id);
+}
+
 // the Talk prompt: Z-A's townspeople have none (a script's talk is A pressed by one - contrib/legendslua/api.lua)
 static int talk_none(int h, int on) { (void)h, (void)on; return 0; }
 static int talked_none(void) { return 0; }
@@ -84,5 +114,6 @@ static const LarecompModApi g_modapi = {
     .time_set = za_time_set, .message_text = za_message_text,
     .object_anim = newnpc_object_anim,
     .npc_talk = talk_none, .npc_talked = talked_none,
+    .bubble = bubble_api, .bubble_hide = bubble_hide_api,
 };
 const LarecompModApi *modapi_get(void) { return &g_modapi; }

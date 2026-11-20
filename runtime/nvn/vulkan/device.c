@@ -930,6 +930,16 @@ void backend_present(NvnTexture *t) {
                 snprintf(lpath, sizeof lpath, "build/frames/%s_%ld.png", final ? "fin" : "mid", list[i]);
                 path = lpath;
             }
+        {   // (testing) LARECOMP_LIVE=<dir>: <dir>/wshot appears -> the next window image, the overlay on it (notices,
+            // speech bubbles, the menu), as <dir>/win_<frame>.png; the request file is removed once taken
+            static char wpath[600];
+            const char *dir = ENV("LARECOMP_LIVE");
+            if (final && dir && !path && total_frames % 4 == 0) {
+                char req[560];
+                snprintf(req, sizeof req, "%s/wshot", dir);
+                if (!remove(req)) snprintf(wpath, sizeof wpath, "%s/win_%06llu.png", dir, (unsigned long long)total_frames), path = wpath;
+            }
+        }
         vk_frame_end(path);
         if (final && shot && ENV("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
     } else {

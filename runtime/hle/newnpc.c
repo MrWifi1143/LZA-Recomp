@@ -745,9 +745,65 @@ static void oanim_check(Cpu *c, uint64_t n) {
     }
     pthread_mutex_unlock(&g_olock);
 }
+// ---- Game objects followed by their name (speech bubbles over them: runtime/bubble.h's BUBBLE_OBJECT): a name asked
+// for is looked for among the nodes this hook sees (+0x2b8 its name, +0xe0 its position, as the player's) and its
+// position kept; one not asked for in 5 s is let go.
+#define NOPOS 16
+static struct { char name[48]; float p[3]; uint64_t seen, asked; volatile int on; } g_opos[NOPOS];
+static volatile int g_nopos;
+static pthread_mutex_t g_plock = PTHREAD_MUTEX_INITIALIZER;
+// 1 its position (seen in the last second), 0 not seen yet / lately (asked for: followed from now on)
+int newnpc_object_pos(const char *name, float out[3]) {
+    if (!name || !*name || strlen(name) >= 48) return -1;
+    uint64_t now = plat_now_ns();
+    int r = 0, i, free_i = -1;
+    pthread_mutex_lock(&g_plock);
+    for (i = 0; i < NOPOS; i++) {
+        if (!g_opos[i].on) { if (free_i < 0) free_i = i; continue; }
+        if (strcmp(g_opos[i].name, name)) continue;
+        g_opos[i].asked = now;
+        if (g_opos[i].seen && now - g_opos[i].seen < 1000000000ull) memcpy(out, g_opos[i].p, 12), r = 1;
+        break;
+    }
+    if (i == NOPOS && free_i >= 0) {
+        snprintf(g_opos[free_i].name, sizeof g_opos[free_i].name, "%s", name);
+        g_opos[free_i].seen = 0, g_opos[free_i].asked = now, g_opos[free_i].on = 1, g_nopos++;
+    }
+    pthread_mutex_unlock(&g_plock);
+    if (i == NOPOS && free_i >= 0) {
+        extern volatile int g_newnpc_mods;
+        void warp_node_hook_on(void);
+        g_newnpc_mods = 1, warp_node_hook_on();
+    }
+    return r;
+}
+static void opos_check(uint64_t n) {  // (every node, every frame while names are asked for: no lock unless it's one)
+    static unsigned calls;
+    if ((++calls & 4095) == 0) {  // (now and then: names nobody asked for in 5 s let go)
+        uint64_t now = plat_now_ns();
+        pthread_mutex_lock(&g_plock);
+        for (int i = 0; i < NOPOS; i++)
+            if (g_opos[i].on && now - g_opos[i].asked > 5000000000ull) g_opos[i].on = 0, g_nopos--;
+        pthread_mutex_unlock(&g_plock);
+    }
+    uint64_t v = 0, p = 0, len = 0;
+    if (!rd(n, &v, 8) || v != NODE_VTABLE || !rd(n + 0x2b8, &p, 8) || !rd(n + 0x2c0, &len, 8) || !p || len == 0 || len >= 48) return;
+    char nm[48];
+    if (!rd(p, nm, len)) return;
+    nm[len] = 0;
+    for (int i = 0; i < NOPOS; i++) {
+        if (!g_opos[i].on || g_opos[i].name[0] != nm[0] || strcmp(nm, g_opos[i].name)) continue;
+        float q[3];
+        if (!rd(n + 0xe0, q, 12)) continue;
+        pthread_mutex_lock(&g_plock);
+        memcpy(g_opos[i].p, q, 12), g_opos[i].seen = plat_now_ns();
+        pthread_mutex_unlock(&g_plock);
+    }
+}
 void newnpc_node(Cpu *c, uint64_t n) {
     if (g_mstats > 0) __atomic_add_fetch(&g_ms_all, 1, __ATOMIC_RELAXED);
     if (g_noanim) oanim_check(c, n);
+    if (g_nopos) opos_check(n);
     if (!(g_node_mask & mask_bit(n))) return;
     if (g_mstats <= 0) { modnpc_node_(c, n); return; }
     uint64_t k = __atomic_add_fetch(&g_ms_calls, 1, __ATOMIC_RELAXED);

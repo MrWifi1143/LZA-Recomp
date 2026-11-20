@@ -424,7 +424,12 @@ function Npc:remove()
   npcs[self.id] = nil
   self.removed = true
 end
-function Npc:say(text, seconds) ui.say(self.name, text, seconds) return self end
+-- a line over its head in a speech bubble (seconds: default by its length); a notice where the game build has none
+function Npc:say(text, seconds)
+  check_npc(self)
+  ui.bubble(self, text, seconds)
+  return self
+end
 -- one of its animation's parameters, by the game's name: true / false a bool, a whole number an int, else a float;
 -- n:anim(name) (or kind "trigger") fires a trigger. Z-A: "sit_bool" + "sit_int" (1, 2) sit it down, "speak_bool" talks,
 -- "once_action_trigger" a gesture; Arceus (dressed ones: the player's net) "set_squat_bool" crouches
@@ -581,9 +586,49 @@ function Poke:remove()
   self.removed = true
   pokes[self.id] = nil
   if za_poke(self) then script(nil, fmt("Commands.SB1734BFAFC3FB69D(%q)", self.object)) else rt.poke_remove(self.id) end  -- (Z-A: the framework's delete of a Pokémon it made)
+  if ui.bubble_hide then ui.bubble_hide(self) end  -- (its speech bubble with it)
 end
 function pokemon.all() local t = {} for _, p in pairs(pokes) do t[#t + 1] = p end return t end
 G.pokemon = pokemon
+
+-- ---------------------------------------------------------------- speech bubbles
+-- ui.bubble(target, text [, seconds [, opts]]): a speech bubble over target's head (the runtime draws it - white box,
+-- tail - and it follows the target): a character (npc.spawn), a Pokémon (pokemon.spawn), "player", a game object's
+-- name (Z-A: "luanpc_001", a townsperson's), or a spot {x, y, z}. seconds: how long (default: by the text's length,
+-- 3 to 12 s); opts.height: metres over its feet. Text is cut at 100 characters; "\n" breaks a line, long ones wrap.
+-- The same target's bubble is replaced. Returns its id (nil: this game build has no bubbles - a notice instead).
+local BUBBLE = rt.have_api and (rt.api_version or 1) >= 5
+local bubble_of = setmetatable({}, {__mode = "k"})  -- (target -> its last bubble's id)
+function ui.bubble(target, text, seconds, opts)
+  text = tostring(text)
+  if not BUBBLE then
+    local who = type(target) == "table" and target.name
+    rt.notify(who and (who .. ": " .. text) or text, tonumber(seconds) or 4)
+    return nil
+  end
+  local kind, handle, object, p = 0, 0, "", nil
+  local mt = getmetatable(target)
+  if mt == Npc then
+    if target.removed then return nil end
+    kind, handle = 2, target.id
+  elseif mt == Poke then
+    if target.removed then return nil end
+    if target.id < 0 then kind, object = 4, target.object else kind, handle = 3, target.id end
+  elseif target == "player" or target == player then kind = 1
+  elseif type(target) == "string" then kind, object = 4, target
+  else p = vec(target) end
+  local h = type(opts) == "table" and tonumber(opts.height) or (mt == Poke and 1.0) or 0  -- (a Pokémon: lower than a head)
+  local id = rt.bubble(kind, handle, object, p and p.x or 0, p and p.y or 0, p and p.z or 0, h, text, tonumber(seconds) or 0)
+  if id == 0 then return nil end
+  if type(target) == "table" then bubble_of[target] = id end
+  return id
+end
+-- ui.bubble_hide(id or target): that bubble fades out
+function ui.bubble_hide(x)
+  if not BUBBLE then return false end
+  local id = type(x) == "number" and x or bubble_of[x]
+  return id ~= nil and id > 0 and rt.bubble_hide(id) == 1
+end
 -- a story work (Z-A "SYS_WORK_PHASE", Arceus "WPHA_STORY"; Arceus flags as "flag:<name>"): its value, or nil when the
 -- game has no such work (yet); game.work(name, value) writes it
 game.work = function(name, value)
