@@ -228,7 +228,7 @@ int bubble_draw_list(BubbleDraw *out, int max, float w, float h) {
         if (dist > FAR_FADE) a *= (FAR_GONE - dist) / (FAR_GONE - FAR_FADE);
         if (a <= 0.01) continue;
         out[n].x = vx + (nx * 0.5f + 0.5f) * vw, out[n].y = vy + (0.5f - ny * 0.5f) * vh;
-        out[n].alpha = (float)a, out[n].dist = dist;
+        out[n].alpha = (float)a, out[n].dist = dist, out[n].spot = b[i].t.kind == BUBBLE_POS;
         memcpy(out[n].text, b[i].text, sizeof out[n].text);
         n++;
     }

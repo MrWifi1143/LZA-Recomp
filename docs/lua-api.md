@@ -310,7 +310,10 @@ camera as it turns, and it goes when its time is up, when the target is removed 
 * **Many at once**: up to 32. Bubbles that would cover each other are stacked: the nearer one keeps its place, the
   farther one moves above it, with a thin line down to its character. Far ones (35 to 45 m) fade out; ones behind the
   camera or off the screen aren't drawn.
-* **Height**: a person's head by default (2 m over the feet; the player 1.95 m, a Pokémon 1 m). `opts.height` sets it.
+* **Over a spot** (a position, no character): a sign - no tail and no line, centred on the spot (moved up like the
+  rest when it would cover another).
+* **Height**: a person's head by default (2 m over the feet in Z-A, the player 1.95 m; in Arceus the player 1.7 m and
+  its people 1.9 m; a Pokémon 1 m). `opts.height` sets it.
 * A script reload clears the scripts' bubbles with their characters.
 
 The runtime draws them over the game's image (its overlay, as the notices), placed with the game's own scene camera
@@ -576,5 +579,9 @@ saves the window image with the overlay, `LARECOMP_MODSOUND_WAV=<file>` records 
 Measured with `lua.stats` (CPU time of the Lua side each frame; Legends Z-A, i9-12900K with two other games running):
 the test mods with nothing drawn 36 us a frame, + the Spawn Menu's HUD panel (4 things drawn) +16 us, + its menu open
 (~90 things a frame) +57 us, a test drawing ~45 things with option tables, text measuring and a name tag +80 us. In a hot
-loop the same frame is 4 us (panel) to 35 us (the test): the in-game numbers are cold caches on a busy machine. The
-runtime's side (copying the list, drawing it on the render thread) wasn't measured on its own.
+loop the same frame is 4 us (panel) to 35 us (the test): the in-game numbers are cold caches on a busy machine.
+
+The render thread (`LARECOMP_HUD_STATS=<frames>` logs it; Legends: Arceus, the same machine): turning the overlay on at
+all - ImGui's frame and its draw data recorded - is about 40 us a frame; on top of that the scripts' list costs 5 us
+for the HUD panel (4 commands), 14 us with the menu open (42 commands drawn), 18 us for the heavy test (35 commands,
+1,930 vertices with its text). Speech bubbles: under 1 us for a few.
