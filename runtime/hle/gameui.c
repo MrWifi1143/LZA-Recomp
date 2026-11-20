@@ -984,8 +984,9 @@ static const Builtin k_wide_pla[] = {
     // (the quest and request markers over the world: placed by the game for a 16:9 screen - spread to the real one)
     {"fieldinfo_qicon_00", "", "mode=wide"},
     {"fieldinfo_qicon_00", "N_qicon_*/L_qicon_*", "follow=1"},
-    {"pokeget_item_change_00", "", "mode=wide"},  // (the item / party wheel, bottom right)
-    {"pokeget_item_change_00", "all/N_pos_00", "anchor=right"},
+    // (the item / party wheel, bottom right: its box at the right edge - not "wide", which showed the wheel's off-screen
+    // slots left of the 16:9 screen, over the satchel)
+    {"pokeget_item_change_00", "", "anchor=right"},
     // (battles: the letterbox bars across the screen, the player's plate left, the commands right, the plates over the
     // Pokemon spread to the real screen)
     {"battle_cinema_mask_00", "", "mode=wide"},
@@ -999,6 +1000,9 @@ static const Builtin k_wide_pla[] = {
     {"battle_command_03", "all/wake", "anchor=right"},
     {"battle_command_waza_00", "", "mode=wide"},
     {"battle_command_waza_00", "wake/A_alignment_00", "anchor=right"},
+    // (the title: its landscape is drawn in the 16:9 box only, so the parchment beside it isn't continued to the
+    // screen's edge either - the title stays a box, black at both sides)
+    {"title_demo_01", "", "fill=0"},
     {NULL, NULL, NULL},
 };
 static void builtin_wide(void) {
