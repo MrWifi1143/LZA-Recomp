@@ -321,7 +321,7 @@ void warp_world_start(void) {
     if (g_world) return;
     g_world = 1;
     if (g_state < 0) g_state = 3;
-    rt_register_fnhook_at(0x7002994b70ull, cam_hook);
+    // (the camera update: hle/pla_wide.c's hook runs warp_cam_hook)
     rt_register_fnhook_at(0x7002fee4e0ull, body_hook);
 }
 
@@ -331,7 +331,7 @@ void warp_api_start(void) {
     if (g_api) return;
     g_api = 1;
     if (g_state < 0) g_state = 3;
-    rt_register_fnhook_at(0x7002994b70ull, cam_hook);
+    // (the camera update: hle/pla_wide.c's hook runs warp_cam_hook)
     rt_register_fnhook_at(0x7002fee4e0ull, body_hook);
 }
 // where the player is and which way it faces (its body's z axis, +0x80), for scripts

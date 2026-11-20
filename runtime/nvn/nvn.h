@@ -113,6 +113,7 @@ typedef struct {
     uint64_t obj_tag;  // frame interpolation: the game object the list's last CMD_OBJECT named (cmdbuf.c)
     void *last_prog;   // (research, LARECOMP_LOG_XFB) the host program last bound while recording
     uint8_t xfb_active;
+    uint32_t ui_mode;  // the game's interface layout the list's last CMD_UI named (runtime/gameui.h gameui_draw_mode)
 } NvnCmdBuf;
 
 // One recorded command: header, the call's integer and float arguments, then copied data.
@@ -141,6 +142,7 @@ enum {
     CMD_DISCARD_DEPTH_STENCIL, CMD_SET_COPY_STRIDES, CMD_DRAW_TEXTURE, CMD_RESOLVE_DEPTH,
     CMD_OBJECT,  // (ours) x[0]: the game object the following draws belong to, 0 = none (frame interpolation)
     CMD_XFB_BEGIN, CMD_XFB_END, CMD_XFB_BIND, CMD_SET_RASTER_DISCARD, CMD_SET_DEPTH_CLAMP,
+    CMD_UI,  // (ours) x[0]: how the following draws - an interface layout's - fit a screen that isn't 16:9 (gameui.h)
     CMD_COUNT
 };
 

@@ -752,6 +752,7 @@ static struct {
     uint64_t copy_row_stride, copy_image_stride;
     uint64_t obj;       // frame interpolation: the game object the current draws belong to (CMD_OBJECT), 0 = none
     uint32_t obj_draw;  // draws of that object so far in this run of it
+    uint32_t ui;        // the interface layout being drawn, fitted by the game layer (CMD_UI, runtime/gameui.h): 0 none
     bool xfb_active, raster_discard;  // transform feedback (CMD_XFB_*), SetRasterizerDiscard
     bool depth_clamp;                 // SetDepthClamp (a pipeline key bit)
     uint64_t xfb_addr[4], xfb_size[4];
@@ -4393,7 +4394,9 @@ static bool layout_vs(uint64_t code) {
     cache[h].code = code, cache[h].yes = yes;
     return yes;
 }
-static bool layout_fullscreen_pane(void) {
+// (kx, ky: the layout's projection made that much wider / taller by the game layer - runtime/hle/gameui.c "wide": a
+// pane as big as the layout covers 1 / kx of the image's width)
+static bool layout_pane_covers(float kx, float ky) {
     if (!st.program || !layout_vs(st.program->stages[0].code_addr)) return false;
     const float *c = (const float *)(uintptr_t)st.ubuf[0][0].addr;  // (the vertex stage's c3: ubuf[0][0])
     if (!c || st.ubuf[0][0].size < 136 * 4) return false;
@@ -4407,8 +4410,9 @@ static bool layout_fullscreen_pane(void) {
         lo[0] = fminf(lo[0], nx), hi[0] = fmaxf(hi[0], nx), lo[1] = fminf(lo[1], ny), hi[1] = fmaxf(hi[1], ny);
     }
     if (g_debug_frame) LOG("[draw]   layout pane: x %.3f .. %.3f, y %.3f .. %.3f\n", lo[0], hi[0], lo[1], hi[1]);
-    return lo[0] <= -0.99f && hi[0] >= 0.99f && lo[1] <= -0.99f && hi[1] >= 0.99f;
+    return lo[0] <= -0.99f / kx && hi[0] >= 0.99f / kx && lo[1] <= -0.99f / ky && hi[1] >= 0.99f / ky;
 }
+static bool layout_fullscreen_pane(void) { return layout_pane_covers(1, 1); }
 
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
@@ -4746,6 +4750,31 @@ static void draw_(CmdRec *r, bool indexed) {
             fade_fill = black || white;
         }
         bool composite = reads_scene || fade_fill || (fullscreen_fill && wide_frame == renderer_present_count());
+        int pw_, ph_;
+        pass_size(&pw_, &ph_);
+        float bw_ = fminf(img_w, img_h * (16.0f / 9.0f)), bh_ = fminf(img_h, img_w * (9.0f / 16.0f));
+        int ui_mode = (int)(st.ui & 0xff) - 1, ui_anchor = (int)(st.ui >> 8) & 0xff;
+        if (ui_mode >= 0) composite = reads_scene;  // (a layout's pane: its shape tells - below - not the quad guesses)
+        if (ui_mode >= 0 && !composite) {
+            // A layout the game layer fits itself (runtime/hle/gameui.c; modes as gameui.h's GUI_MODE_*): 0 the box,
+            // moved to the edge it is anchored at; 1 "wide" - its projection already as wide as the image: the whole
+            // image, a pane as big as the layout stretched over it; 2 stretched over the whole image.
+            float kx = img_w / bw_, ky = img_h / bh_;
+            float x0 = (pw_ - img_w) * 0.5f, y0 = (ph_ - img_h) * 0.5f;  // (the image in the pass)
+            bool keep = (ui_anchor & 0x10) != 0;  // (the layout's "fill 0": no pane of it stretched)
+            if (ui_mode == 1 || ui_mode == 2) {
+                vp_sx = img_w / rt0->width, vp_sy = img_h / rt0->height, vp_ox = x0, vp_oy = y0;
+                if (ui_mode == 1 && !keep && layout_pane_covers(kx, ky))
+                    vp_sx *= kx, vp_sy *= ky, vp_ox -= (kx - 1) * img_w * 0.5f, vp_oy -= (ky - 1) * img_h * 0.5f;
+            } else if (!keep && layout_pane_covers(1, 1)) {
+                composite = true;
+            } else {
+                vp_sx = bw_ / rt0->width, vp_sy = bh_ / rt0->height;
+                vp_ox = ui_anchor & 1 ? x0 : ui_anchor & 2 ? x0 + img_w - bw_ : (pw_ - bw_) * 0.5f;
+                vp_oy = ui_anchor & 4 ? y0 : ui_anchor & 8 ? y0 + img_h - bh_ : (ph_ - bh_) * 0.5f;
+            }
+            if (!composite) wide_frame = ~0ull;
+        } else {
         // (an interface pane as big as the whole layout - a fade, a menu's dimming - covers the whole image)
         if (!composite && layout_fullscreen_pane()) composite = true;
         if (!composite) wide_frame = ~0ull;
@@ -4759,6 +4788,7 @@ static void draw_(CmdRec *r, bool indexed) {
             vp_sx = bw / rt0->width, vp_sy = bh / rt0->height;
             vp_ox = (pw - bw) * 0.5f;
             vp_oy = (ph - bh) * 0.5f;
+        }
         }
     }
     {   // (research, LARECOMP_COUNT_FS=<fs hash>: draws with that fragment shader per frame, logged when the count changes)
@@ -5753,7 +5783,7 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
 // ================================================================== executor (renderer.m exec_list)
 static void exec_list(uint64_t handle, int depth) {
     uint64_t p = handle;
-    if (depth == 0) st.obj = 0, st.obj_draw = 0;  // (a submitted list starts with no object; its called lists inherit)
+    if (depth == 0) st.obj = 0, st.obj_draw = 0, st.ui = 0;  // (a submitted list starts with no object; its called lists inherit)
     for (int guard = 0; guard < 10000000; guard++) {
         CmdRec *r = (CmdRec *)(uintptr_t)p;
         // (the records were written by a game thread on another core: fetch ahead, each one was a cache miss here)
@@ -5770,6 +5800,7 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_XFB_BIND: if (r->x[0] < 4) { st.xfb_addr[r->x[0]] = r->x[1]; st.xfb_size[r->x[0]] = r->x[2]; } break;
         case CMD_SET_RASTER_DISCARD: st.raster_discard = r->x[0] != 0; break;
         case CMD_SET_DEPTH_CLAMP: st.depth_clamp = r->x[0] != 0; break;
+        case CMD_UI: st.ui = (uint32_t)r->x[0]; break;
         case CMD_OBJECT: st.obj = r->x[0]; st.obj_draw = 0; { static int d; if (ENV("LARECOMP_OBJDBG") && vk_frame_counter() == 1450 && d++ < 80) LOG("[objdbg] depth %d object %llx\n", depth,(unsigned long long)r->x[0]); } break;
         case CMD_JUMP: p = r->x[0]; continue;
         case CMD_CALL: {
