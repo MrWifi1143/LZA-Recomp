@@ -916,3 +916,120 @@ handlers, a message and a party read every second, console commands), `lua.stats
 
 The runtime side: a script message costs its pieces' sends (80 bytes each) and, heard, a copy into the queue; held input
 is one test in the controller read. A frame is 16,700 us at 60 fps: the world part is 0.05-0.1% of it.
+
+# Quests
+
+A quest library is built into Legends Lua (`contrib/legendslua/lib/quest.lua`, the same file in both games): every mod
+has `quest`, and `include("lib/quest.lua")` returns it (a mod's own `lua/lib/quest.lua`, if it has one, wins). A quest
+is a table - a giver, what they say, steps from templates, rewards, what it needs first - and the library does the rest:
+the giver in the world with a **!** over them, the offer window (**Accept** / **Not now**), a tracker with the objective
+and a marker over where to go, progress kept per save, a **?** to hand it in, the rewards, and a journal. Legends
+Studio's **Quest Builder** writes these tables from a form (`lua/quests/<id>.lua`, its source `<id>.json`, and the
+loader `lua/quests.lua`); they can be written by hand too.
+
+```lua
+local quest = include("lib/quest.lua")
+
+quest.define{
+  id = "lost_charm",                       -- unique in the mod (its progress is kept under it)
+  title = "The Lost Charm",
+  description = "Mireille's lucky charm went missing in the plaza. Help her find it.",
+  giver = {name = "Mireille", pos = {-564.4, 0.14, -252.3}, yaw = 168, model = "npc_A04_z02_02_0032"},
+  npcs = {{name = "Rene", pos = {-560, 0.14, -244}, yaw = 200}},   -- (the quest's own characters, made while it's on)
+  lines = {
+    offer = {"Oh no, oh no... my lucky charm is gone!", "Could you help me look for it?"},
+    accept = "Thank you!", decline = "Oh... all right.", progress = "Any sign of my charm?",
+    done = {"My charm, whole again!", "Please, take these."}, after = "I'll never lose it again!",
+    locked = "Come back later.",           -- (said while what it needs isn't done)
+  },
+  steps = {
+    {kind = "talk", npc = "Rene", text = "Ask Rene about the charm", lines = {"A Fletchling took it!"}},
+    {kind = "go", pos = {-552, 0, -258}, radius = 4, place = "the street corner"},
+    {kind = "collect", spots = {{-557, 0, -262}, {-554, 0, -250}}, one = "a charm piece"},
+    {kind = "show", npc = "giver", species = 661, what = "a Fletchling", missing = "Do you have a Fletchling?"},
+    {kind = "time", when = "night"},
+  },
+  rewards = {items = {{id = 4, n = 5, name = "Poke Ball"}}, pokemon = {{species = 25, level = 10, name = "Pikachu"}}, money = 0},
+  requires = {story = 30000, quests = {"another_quest"}},
+}
+```
+
+| Field | |
+|---|---|
+| `giver` | `{name, pos, yaw, model, outfit, body, route}` - a character the quest makes (as `npc.spawn`), or the name of one another script makes (`"Studio NPC 1"`). Arceus: made once the player is in the quest's `area`. |
+| `area` | (Arceus) the area its places are in: `"ha_area01"`. |
+| `npcs` | The quest's own characters, made while it is on; a step names one with `npc = "<name>"` (or `"giver"`). |
+| `lines` | `offer`, `accept`, `decline`, `progress`, `done`, `after`, `locked`: a line or a list (each a page: A for the next). |
+| `steps` | In order; each `{kind, text, lines, ...}`: `text` is the objective shown (left out: the library's own words), `lines` what is said when it is done (by the step's character, or as a notice). |
+| `rewards` | `items = {{id, n, name}}` (Z-A: the game's own "You obtained..." window), `pokemon = {{species, level, shiny, form, name}}` (into the first empty box slot, `pokemon.give`), `money` (Arceus). |
+| `requires` | `story` (Z-A `SYS_WORK_PHASE`, Arceus `WPHA_STORY` at least that), `quests` (ids done first, this mod's or `"<mod>/<id>"`). |
+| `turn_in` | `false`: the rewards come with the last step (no going back to the giver). |
+| `auto_accept` | `true`: taken without the window. |
+| `mark` | `false`: no **!** over the giver. |
+| `dialogue` | (Z-A) `"overlay"`: the overlay's box instead of the game's message window. |
+| `native` | (Arceus) the game's request list entry it shows as (`"sub_901"`, made by Studio): its progress is set to 10 when accepted and 255 when done. |
+
+**Step kinds**
+
+| kind | fields | done when |
+|---|---|---|
+| `talk` | `npc` | the player talks to that character |
+| `go` | `pos`, `radius` (5), `place` | the player is within `radius` of `pos` (and within 6 m up or down) |
+| `collect` | `spots`, `radius` (1.6), `one`, `what` | the player has walked over every spot (each one sparkles when near; a notice counts them) |
+| `catch` | `species`, `count` (1), `what` | there are `count` more of the species in the party and the boxes than when the step began (counted a box at a time: a first round of the 32 boxes takes about 16 s) |
+| `show` | `npc`, `species`, `what`, `missing` | the player talks to the character with the species in the party |
+| `item` | `npc`, `item`, `count`, `take` (true), `missing` | the player talks to the character with `count` of the item in the bag; it is taken. **Arceus** counts the bag (`Bag():GetItemNum` / `SubItem`); **Z-A** has no reader of the bag's counts yet: the character takes the player's word |
+| `battle` | `npc`, `encounter` | (Arceus) talking to the character starts a wild battle (`battle.wild(encounter)`); done when it ends, not lost (the `battle_end` event). Z-A: turned into a `custom` step (no battles from scripts) |
+| `time` | `when` (`"night"` / `"day"`) | (Z-A) the game's `IsDayTime()` says so. Arceus: no clock reader yet - the step passes at once |
+| `wait` | `seconds` | that many seconds of play (kept across restarts) |
+| `custom` | | the mod's own code calls `quest.advance(id)` |
+
+**In the game**
+
+* **Talking**: the characters get the talk event (Arceus: the game's own "Ⓐ *name*" prompt; Z-A: A facing them).
+  **Z-A** says the lines in the game's own message window (its runtime labels `lza_say_8`..`15`; one coroutine of the
+  game's for all of a talk's pages, `__LQ_SEQ` set at its end tells the library it was closed). **Arceus** has no
+  own-text window yet: a dialogue box drawn on the overlay with the speaker's name, A for the next page, the player held
+  meanwhile (`player.freeze`, camera free).
+* **The offer**: talking to the giver says `offer`, then a window - the description, the first objective, the
+  rewards, Accept / Not now (controller, mouse, keyboard; opened once A is let go, so the A that closed the talk doesn't
+  accept it).
+* **The tracker**: top right of the interface box: the quest's title and objective (with n / m), and a diamond over
+  where to go with the metres to it (a character's head; a place's spot), held at the screen's edge when off screen.
+  The quest tracked is the last one that moved (or the one picked in the journal).
+* **The journal**: J on the keyboard, R + d-pad down on a controller, `quest journal` in the console, `quest.journal()`
+  - the quests on now (pick one to track it), the ones done, the tracker on / off.
+* **Progress** is the mod's storage (`moddata/<mod>/<save>.lua`, `quest.<id>`): `s` none / active / ready / done, the
+  step, and a step's own values (spots found, a catch's starting count, a wait's time left). It is kept as it changes,
+  not when the game saves.
+* **Notices**: "New quest: ...", each objective as it comes, "Found ... (2/3)", "Quest complete: ...".
+
+| | |
+|---|---|
+| `quest.define(t)` | A quest (see above). Errors in the table are raised at once, with the step and the field. |
+| `quest.state(id)` / `quest.step(id)` / `quest.objective(id)` | `"none"`, `"active"`, `"ready"` (hand it in), `"done"` / the step / the objective's text. |
+| `quest.start(id)` / `quest.advance(id)` / `quest.complete(id)` / `quest.reset(id)` | Start it, the next step, done now (rewards given), forgotten (for tests). |
+| `quest.track(id)` / `quest.journal([open])` / `quest.list()` | |
+| events | `quest_started (id)`, `quest_step (id, step done)`, `quest_progress (id, n, of)`, `quest_done (id)`. |
+| console | `quests` (every quest and where it is), `quest start / next / done / reset / track <id>`, `quest step <id> <n>`, `quest journal`. |
+
+**Cost**: nothing until a mod defines a quest. Then a check a few times a second (the steps, a giver's spawn), a box
+read every half second while a catch step is on, the J key's handler (scripts then tick every frame), and the overlay
+while there is something to show (the tracker, a **!** near, a talk box). Measured with `lua.stats` (i9-12900K, other
+games sharing the CPU): Z-A 87 us a frame on average over a whole playthrough (tracker and marker drawn most of it;
+most 960 us, a talk's job and a reload), 38 us with the quest done; Arceus 70 us (most 500 us).
+`LEGENDSLUA_QUEST_LIB=<file>` runs that file instead of the built-in copy (working on the library: read again at every
+reload).
+
+**Checked in the game (2026-11-20)**, script-driven (teleports and pad presses) on test saves:
+* Z-A, The Lost Charm (`examples/lostcharm`): the **!**, the offer in the game's window, Accept, a second character,
+  a place, three spots, a Fletchling shown, night (`game.set_time(21)`), the **?**, handed in, 5 Poké Balls (the game's
+  window) and a Pikachu in box 1, the journal; progress kept across a restart of the game (mid-quest and done).
+* Arceus, The Scout's Lost Supplies (`examples/scoutsupplies`): the game's Talk prompt over the giver, the overlay
+  talk box, Not now then Accept, a dressed second character, a place, three spots, a Bidoof (put in a box with
+  `pokemon.give` as a stand-in for a catch), 3 Poké Balls taken (8 -> 5), handed in: 5 Poké Balls (5 -> 10), 500 money,
+  an Eevee in box 1, the journal; with Studio's request list entry (sub_901) its progress read back from the game: 10
+  once accepted, 255 when done (the copied request's own reward set to 0: nothing extra given).
+* Not working: a character copied from a placement whose character has no navigator (Arceus `area01_npc_senior`) is
+  never made (the runtime asks again forever) - leave `model` empty or use another.
+Shots and logs: `testout/quests/` (final-za, final-pla).
