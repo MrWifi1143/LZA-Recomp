@@ -183,6 +183,19 @@ static volatile int g_api;  // (the mod API: scripts' characters made here too, 
 static int cam_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     if ((g_state == 0 || g_state == 3 || g_world || g_api) && in_heap(c->x[0])) g_cam = c->x[0];
+    {   // speech bubbles (runtime/bubble.h) are placed with this camera: the render camera following the player (its
+        // target +0x320 the player's position; eye +0x260 then the view's columns; field of view / aspect +0x23c /
+        // +0x240 - LegendsVR camera.c). What its last update made (this runs before the game's): half a frame old.
+        extern int bubble_count(void);
+        extern void bubble_camera(const float *eye);
+        bool warp_player_now(float pos[3], float *yaw);
+        float me[3];
+        if (bubble_count() && in_heap(c->x[0]) && warp_player_now(me, NULL)) {
+            const float *t = (const float *)(uintptr_t)(c->x[0] + 0x320);
+            float dx = t[0] - me[0], dy = t[1] - me[1], dz = t[2] - me[2];
+            if (dx * dx + dz * dz < 9.0f && fabsf(dy) < 3.0f) bubble_camera((const float *)(uintptr_t)(c->x[0] + 0x260));
+        }
+    }
     if (g_world || g_api) { extern void pla_npc_cam(Cpu *); pla_npc_cam(c); }  // (characters of our own are made here: hle/pla_npc.c)
     if (g_area_state == 2) {
         g_area_state = 0;

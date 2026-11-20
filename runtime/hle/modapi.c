@@ -45,6 +45,30 @@ static int message_none(int slot, const char *text) { (void)slot, (void)text; re
 int pla_npc_object_anim(const char *object, const char *param, int kind, float value);  // (hle/pla_npc.c)
 int pla_npc_mod_talk(int h, int on);  // (hle/pla_npc.c: the game's Talk prompt over ours)
 int pla_npc_mod_talked(void);
+// ---- speech bubbles (runtime/bubble.h, hle/bubble.c): where a target stands, a script's bubble made and hidden (the
+// scene camera: hle/warp.c's camera update hook)
+#include "../bubble.h"
+int bubble_target_where(const BubbleTarget *t, float feet[3]) {
+    int st;
+    switch (t->kind) {
+    case BUBBLE_PLAYER: return warp_player_now(feet, NULL) ? 1 : 0;
+    case BUBBLE_NPC: st = pla_npc_mod_state(t->handle, feet, NULL); return st == 0 ? -1 : st >= 3 ? 1 : 0;
+    case BUBBLE_POKEMON: st = pla_npc_poke_state(t->handle, feet, NULL); return st == 0 ? -1 : st >= 3 ? 1 : 0;
+    case BUBBLE_FN: return t->where(t->ctx, feet);
+    default: return -1;  // (Arceus: no objects by name)
+    }
+}
+static int bubble_api(int kind, int handle, const char *object, const float pos[3], float height, const char *text, float seconds) {
+    BubbleTarget t = {.kind = kind, .handle = handle, .height = height, .owner = BUBBLE_OWNER_SCRIPT};
+    if (kind < BUBBLE_POS || kind > BUBBLE_POKEMON) return 0;
+    if (object) snprintf(t.object, sizeof t.object, "%s", object);
+    if (pos) memcpy(t.pos, pos, 12);
+    return bubble_show(&t, text, seconds);
+}
+static int bubble_hide_api(int id) {
+    if (id == 0) { bubble_clear(BUBBLE_OWNER_SCRIPT); return 1; }
+    return bubble_hide(id);
+}
 static const LarecompModApi g_modapi = {
     .version = LARECOMP_MODAPI_VERSION, .game = "pla", .enable = enable,
     .npc_spawn = pla_npc_mod_spawn, .npc_remove = pla_npc_mod_remove, .npc_remove_all = pla_npc_mod_remove_all,
@@ -58,5 +82,6 @@ static const LarecompModApi g_modapi = {
     .game_script = pla_script, .script_result = pla_script_result, .item_give = pla_item_give, .npc_object = object_none,
     .time_set = pla_time_set, .message_text = message_none, .object_anim = pla_npc_object_anim,
     .npc_talk = pla_npc_mod_talk, .npc_talked = pla_npc_mod_talked,
+    .bubble = bubble_api, .bubble_hide = bubble_hide_api,
 };
 const LarecompModApi *modapi_get(void) { return &g_modapi; }

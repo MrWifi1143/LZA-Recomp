@@ -577,6 +577,17 @@ static int r_npc_talk(lua_State *s) {
     return 1;
 }
 static int r_npc_talked(lua_State *s) { need_m(s); lua_pushinteger(s, M->version >= 4 ? M->npc_talked() : 0); return 1; }
+// (version 5) a speech bubble: bubble(kind, handle, object, x, y, z, height, text, seconds) -> id (0 none / older build);
+// bubble_hide(id) (0: every script's)
+static int r_bubble(lua_State *s) {
+    need_m(s);
+    if (M->version < 5) { lua_pushinteger(s, 0); return 1; }
+    float p[3] = {(float)luaL_optnumber(s, 4, 0), (float)luaL_optnumber(s, 5, 0), (float)luaL_optnumber(s, 6, 0)};
+    lua_pushinteger(s, M->bubble((int)luaL_checkinteger(s, 1), (int)luaL_optinteger(s, 2, 0), luaL_optstring(s, 3, ""), p,
+                                 (float)luaL_optnumber(s, 7, 0), luaL_checkstring(s, 8), (float)luaL_optnumber(s, 9, 0)));
+    return 1;
+}
+static int r_bubble_hide(lua_State *s) { need_m(s); lua_pushinteger(s, M->version >= 5 ? M->bubble_hide((int)luaL_checkinteger(s, 1)) : 0); return 1; }
 static int r_time_set(lua_State *s) { need_m3(s); lua_pushboolean(s, M->time_set((float)luaL_checknumber(s, 1))); return 1; }
 static int r_item_give(lua_State *s) { need_m3(s); lua_pushboolean(s, M->item_give((int)luaL_checkinteger(s, 1), (int)luaL_checkinteger(s, 2))); return 1; }
 static int r_npc_object(lua_State *s) {
@@ -676,6 +687,7 @@ static void new_state(void) {
                                   {"script_result", r_script_result}, {"item_give", r_item_give}, {"npc_object", r_npc_object},
                                   {"time_set", r_time_set}, {"message_text", r_message_text}, {"object_anim", r_object_anim},
                                   {"npc_talk", r_npc_talk}, {"npc_talked", r_npc_talked},
+                                  {"bubble", r_bubble}, {"bubble_hide", r_bubble_hide},
                                   {"trace", l_trace}, {NULL, NULL}};
     uint64_t was = deadline_set(LUA_LOAD_MS);
     if (luaL_loadbufferx(L, k_api_lua, strlen(k_api_lua), "=api.lua", "t")) {
@@ -775,6 +787,7 @@ static void load_scripts(void) {
     }
     if (M) {
         M->npc_remove_all();
+        if (M->version >= 5) M->bubble_hide(0);  // (their bubbles too)
         int n = 0;
         scan_all(&n);
         if (n) M->enable();  // (scripts added while the game runs: from now on)

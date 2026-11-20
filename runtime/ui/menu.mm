@@ -23,6 +23,7 @@ extern "C" {
 #include "../settings.h"
 #include "menu.h"
 #include "../paths.h"
+#include "../bubble.h"
 void input_reset(void);
 bool input_finger_cursor(float *x, float *y, bool *down);  // runtime/hle/input.c
 void input_rec_text(const char *text);                   // (LARECOMP_REC / LARECOMP_REPLAY: the names typed)
@@ -459,12 +460,79 @@ extern "C" void menu_notice_for(const char *text, unsigned ms) {
 }
 extern "C" void menu_notice(const char *text) { menu_notice_for(text, 2500); }
 
+// Speech bubbles over characters (runtime/bubble.h): a white box with a tail at the spot bubble_draw_list gives, the
+// text wrapped and centred (about 26 characters a line), the townspeople's look. Boxes that would overlap are stacked:
+// the nearer one keeps its place, the farther one goes above it (its tail then a thin line down to its character).
+static void bubbles_draw(ImGuiIO &io, float scale) {
+    static BubbleDraw d[BUBBLE_MAX];
+    int n = bubble_draw_list(d, BUBBLE_MAX, io.DisplaySize.x, io.DisplaySize.y);
+    if (!n) return;
+    ImDrawList *dl = ImGui::GetBackgroundDrawList();  // (under the menu and notices)
+    ImFont *f = g_font;
+    float fs = 30 * scale, wrap = 430 * scale, pad_x = 18 * scale, pad_y = 11 * scale, tail = 13 * scale, round = 18 * scale;
+    float m = 6 * scale, gap = 4 * scale, lh = fs * 1.12f;
+    struct Box { float x0, y0, w, h; int nl; const char *ls[8], *le[8]; float lw[8]; };
+    static Box bx[BUBBLE_MAX];
+    for (int i = 0; i < n; i++) {
+        Box &b = bx[i];
+        const char *s = d[i].text, *end = s + strlen(s);
+        float wmax = 0;
+        b.nl = 0;
+        while (s < end && b.nl < 8) {  // (the lines: words wrapped at the width, "\n" breaks one)
+            const char *e = f->CalcWordWrapPositionA(fs / f->FontSize, s, end, wrap);
+            if (e == s) e = s + 1;
+            const char *nlp = (const char *)memchr(s, '\n', (size_t)(e - s));
+            if (nlp) e = nlp;
+            const char *te = e;
+            while (te > s && te[-1] == ' ') te--;
+            b.ls[b.nl] = s, b.le[b.nl] = te;
+            b.lw[b.nl] = f->CalcTextSizeA(fs, FLT_MAX, 0, s, te).x;
+            if (b.lw[b.nl] > wmax) wmax = b.lw[b.nl];
+            b.nl++;
+            s = e;
+            if (s < end && *s == '\n') s++;
+            while (s < end && *s == ' ') s++;
+        }
+        b.w = fmaxf(wmax + 2 * pad_x, 3 * tail + 2 * round), b.h = b.nl * lh + 2 * pad_y;
+        b.x0 = fminf(fmaxf(d[i].x - b.w * 0.5f, m), io.DisplaySize.x - m - b.w);  // (kept on the screen)
+        b.y0 = d[i].y - tail - b.h;
+    }
+    for (int i = n - 2; i >= 0; i--)  // (nearest first - the list is farthest first: each one above those it overlaps)
+        for (int pass = 0; pass < BUBBLE_MAX; pass++) {
+            bool moved = false;
+            for (int j = n - 1; j > i; j--) {
+                const Box &o = bx[j];
+                Box &b = bx[i];
+                if (b.x0 < o.x0 + o.w + gap && o.x0 < b.x0 + b.w + gap && b.y0 < o.y0 + o.h + gap && o.y0 < b.y0 + b.h + gap)
+                    b.y0 = o.y0 - gap - b.h, moved = true;
+            }
+            if (!moved) break;
+        }
+    for (int i = 0; i < n; i++) {
+        Box &b = bx[i];
+        if (b.y0 < m) continue;  // (pushed off the top: not drawn)
+        float x0 = b.x0, y0 = b.y0, y1 = y0 + b.h, x = d[i].x, y = d[i].y;
+        int a = (int)(d[i].alpha * 255.0f + 0.5f);
+        ImU32 fill = IM_COL32(255, 255, 255, (int)(a * 0.96f)), edge = IM_COL32(205, 205, 210, a), ink = IM_COL32(40, 40, 46, a);
+        ImU32 shade = IM_COL32(0, 0, 0, (int)(a * 0.22f));
+        float tx = fminf(fmaxf(x, x0 + round + tail), x0 + b.w - round - tail), tip = fminf(y, y1 + tail);
+        if (y > tip + 1) dl->AddLine(ImVec2(tx, tip), ImVec2(x, y), IM_COL32(255, 255, 255, (int)(a * 0.7f)), 2 * scale);
+        dl->AddRectFilled(ImVec2(x0 + 2 * scale, y0 + 3 * scale), ImVec2(x0 + b.w + 2 * scale, y1 + 3 * scale), shade, round);
+        dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + b.w, y1), fill, round);
+        dl->AddRect(ImVec2(x0, y0), ImVec2(x0 + b.w, y1), edge, round, 0, 1.5f * scale);
+        if (tip > y1)  // (the tail, down to the character)
+            dl->AddTriangleFilled(ImVec2(tx - tail, y1 - 1), ImVec2(tx + tail, y1 - 1), ImVec2(y > tip + 1 ? tx : fminf(fmaxf(x, tx - tail), tx + tail), tip), fill);
+        for (int k = 0; k < b.nl; k++)
+            dl->AddText(f, fs, ImVec2(x0 + (b.w - b.lw[k]) * 0.5f, y0 + pad_y + k * lh), ink, b.ls[k], b.le[k]);
+    }
+}
+
 void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool open = g_open.load(), kbd = g_kbd.load() == 1;
     float fx, fy;
     bool fdown, finger = !open && input_finger_cursor(&fx, &fy, &fdown);
-    bool notice = SDL_GetTicks() < g_notice_until.load();
-    if (!open && !kbd && !g_settings.show_fps && !finger && !notice) {
+    bool notice = SDL_GetTicks() < g_notice_until.load(), bubbles = bubble_count() > 0;
+    if (!open && !kbd && !g_settings.show_fps && !finger && !notice && !bubbles) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
@@ -492,6 +560,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     }
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
+    if (bubbles) bubbles_draw(io, scale);
 
     if (notice) {
         ImGui::SetNextWindowPos(ImVec2(16 * scale, io.DisplaySize.y - 16 * scale), 0, ImVec2(0, 1));
