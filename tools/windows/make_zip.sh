@@ -48,6 +48,7 @@ for z in data/pgo/*.clang21.profdata.zst; do [ -f "$z" ] && zstd -q -d -f "$z" -
 cp docs/icon/icon_1024.png "$D/icon.png"
 mkdir -p "$D/steam" && cp docs/icon/steam/*.png "$D/steam/"  # (Add to Steam's library artwork: runtime/steam_shortcut.c)
 cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$D/"
+cp third_party/fonts/NotoSansJP/NotoSansCJKjp-Regular-subset.otf third_party/fonts/NotoEmoji/NotoEmoji-Regular.ttf "$D/"  # (the overlay's Japanese / emoji)
 # Legends Lua (contrib/legendslua): shipped, off until switched on in the start screen's Mods page
 make -s PLATFORM=windows B=build/win CC=$R/tools/windows/zcc DEPS=$W/deps steamrelay legendslua
 mkdir -p "$D/plugins" && cp build/win/plugins/steamrelay.dll build/win/plugins/steamrelay-helper.exe build/win/plugins/legendslua.dll "$D/plugins/"
@@ -64,6 +65,8 @@ cp third_party/imgui/LICENSE.txt "$D/licenses/imgui-LICENSE.txt"
 cp third_party/vma/LICENSE.txt "$D/licenses/VulkanMemoryAllocator-LICENSE.txt"
 cp third_party/smaa/LICENSE.txt "$D/licenses/SMAA-LICENSE.txt"
 cp third_party/fonts/Baloo2/OFL.txt "$D/licenses/Baloo2-OFL.txt"
+cp third_party/fonts/NotoSansJP/OFL.txt "$D/licenses/NotoSansCJK-OFL.txt"
+cp third_party/fonts/NotoEmoji/OFL.txt "$D/licenses/NotoEmoji-OFL.txt"
 cp "$D/python/LICENSE.txt" "$D/licenses/Python-LICENSE.txt"
 cp "$D/zig/LICENSE" "$D/licenses/zig-LICENSE.txt"
 cp "$D"/python/Lib/site-packages/capstone-*.dist-info/LICENSE.TXT "$D/licenses/capstone-LICENSE.txt"

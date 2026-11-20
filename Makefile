@@ -195,7 +195,7 @@ $(B)/inc/smaa_hlsl.inc: third_party/smaa/SMAA.hlsl
 $(B)/rt/nvn/smaa_data.o: $(B)/inc/smaa_hlsl.inc
 $(B)/rt/nvn/smaa_data.o: RTFLAGS += -I$(B)/inc -Ithird_party/smaa/Textures
 
-$(B)/rt/%.o: runtime/%.cpp $(RT_HDRS)
+$(B)/rt/%.o: runtime/%.cpp $(RT_HDRS) $(IMGUI)/imconfig.h
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(OSFLAGS) -c $< -o $@
 
@@ -213,15 +213,15 @@ $(GAMELIB): $(GEN_OBJ) | $(EXE)
 	mv -f $@.tmp $@
 	echo $(GAMELIB_ID) > $@.id
 
-$(B)/rt/ui/%.o: runtime/ui/%.mm $(RT_HDRS)
+$(B)/rt/ui/%.o: runtime/ui/%.mm $(RT_HDRS) $(IMGUI)/imconfig.h
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(UIFLAGS) -c $< -o $@
 
-$(B)/imgui/%.o: $(IMGUI)/%.cpp
+$(B)/imgui/%.o: $(IMGUI)/%.cpp $(IMGUI)/imconfig.h
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(B)/imgui/imgui_impl_%.o: $(IMGUI)/backends/imgui_impl_%.cpp
+$(B)/imgui/imgui_impl_%.o: $(IMGUI)/backends/imgui_impl_%.cpp $(IMGUI)/imconfig.h
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -305,7 +305,7 @@ LUAMOD := $(B)/plugins/liblegendslua.so
 LUAMOD_FLAGS := -fPIC -DLUA_USE_POSIX -lpthread -lm
 endif
 legendslua: $(LUAMOD)
-$(LUAMOD): contrib/legendslua/legendslua.c contrib/legendslua/api.lua contrib/legendslua/world.c contrib/legendslua/world.lua runtime/plugin.h runtime/modapi.h runtime/worldapi.h $(wildcard third_party/lua/*.c third_party/lua/*.h)
+$(LUAMOD): contrib/legendslua/legendslua.c contrib/legendslua/ext.c $(wildcard contrib/legendslua/*.lua) runtime/plugin.h runtime/modapi.h runtime/hud.h contrib/legendslua/world.c runtime/worldapi.h $(wildcard third_party/lua/*.c third_party/lua/*.h)
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -Wall -shared -Iruntime -Ithird_party $(DEPINC) $< $(wildcard third_party/lua/*.c) -o $@ $(LUAMOD_FLAGS)
 

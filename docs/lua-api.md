@@ -310,7 +310,10 @@ camera as it turns, and it goes when its time is up, when the target is removed 
 * **Many at once**: up to 32. Bubbles that would cover each other are stacked: the nearer one keeps its place, the
   farther one moves above it, with a thin line down to its character. Far ones (35 to 45 m) fade out; ones behind the
   camera or off the screen aren't drawn.
-* **Height**: a person's head by default (2 m over the feet; the player 1.95 m, a Pokémon 1 m). `opts.height` sets it.
+* **Over a spot** (a position, no character): a sign - no tail and no line, centred on the spot (moved up like the
+  rest when it would cover another).
+* **Height**: a person's head by default (2 m over the feet in Z-A, the player 1.95 m; in Arceus the player 1.7 m and
+  its people 1.9 m; a Pokémon 1 m). `opts.height` sets it.
 * A script reload clears the scripts' bubbles with their characters.
 
 The runtime draws them over the game's image (its overlay, as the notices), placed with the game's own scene camera
@@ -417,6 +420,172 @@ end)
 **Scripts** panel names it, turns it and gives it a walk route, and has an editor and this API at hand. **Play** starts
 the game with the mod, so its scripts run.
 
+## The overlay, menus, input, sounds, storage (API version 6)
+
+Scripts can draw their own interface over the game, build menus that work with a controller, mouse or keyboard, read
+the keyboard and mouse, play their own sounds and keep values per save. The same in both games. A complete example is
+`contrib/legendslua/examples/spawnmenu` (**Spawn Menu**: M on the keyboard, L + R on a controller, or `spawnmenu` in the
+console).
+
+### Drawing: `draw`, `hud`
+
+```lua
+hud.add(function()                                   -- each frame (the same as on("draw", fn))
+  local x, y, w, h = draw.box()                      -- the game's 16:9 interface box
+  local s = draw.scale()                             -- its height / 1080: design at 1920x1080, multiply by s
+  draw.rect(x + 20 * s, y + 20 * s, 300 * s, 80 * s, 0x14171fc8, 12 * s)
+  draw.text("Hello", x + 36 * s, y + 40 * s, {size = 28 * s, color = "yellow", shadow = true})
+end)
+```
+
+Drawing calls only count inside a draw handler; everything one frame draws is handed to the runtime together and drawn
+over the game's image (over the speech bubbles, under the runtime's own menus) from the next frame on. Coordinates are
+the window's pixels, y down.
+
+| | |
+|---|---|
+| `draw.size()` | The overlay's width and height (the window's pixels). |
+| `draw.box()` | x, y, w, h of the game's interface: 16:9 in the middle. The whole screen at 16:9; on a wider one (ultrawide, "Fill the window") the game keeps its interface in this box, so put yours there too. |
+| `draw.scale()` | The box's height / 1080. |
+| `draw.rect(x, y, w, h, color [, rounding])` | A filled rectangle, rounded corners if given. |
+| `draw.rect_outline(x, y, w, h, color [, thickness [, rounding]])` | Its outline. |
+| `draw.line(x1, y1, x2, y2, color [, thickness])` | |
+| `draw.circle(x, y, r, color)` / `draw.circle_outline(x, y, r, color [, thickness])` | |
+| `draw.triangle(x1, y1, x2, y2, x3, y3, color)` | |
+| `draw.gradient(x, y, w, h, top, bottom)` | Top colour to bottom colour. |
+| `draw.text(text, x, y [, opts])` | `opts`: `size` (22), `color`, `align` (`"left"`, `"center"`, `"right"`: what x is), `valign` (`"top"`, `"middle"`, `"bottom"`: what y is), `wrap` (a width: lines wrap inside it, `align` then within it; `\n` breaks a line), `shadow`. Or `draw.text(text, x, y, size, color, align)`. |
+| `draw.text_size(text [, size [, wrap]])` | Its width and height. |
+| `draw.image(img, x, y [, w, h [, opts]])` | An image from `image.load`. `opts`: `tint` (a colour it's multiplied by), `uv = {u0, v0, u1, v1}` (a part of it, 0..1), `rounding`. |
+| `draw.clip(x, y, w, h [, fn])` / `draw.unclip()` | What's drawn (by `fn`, or until `unclip`) is cut to the rectangle. |
+| `draw.alpha(a)` | Everything drawn after it is that transparent (0..1) until the next `draw.alpha`; each frame starts at 1. |
+| `draw.to_screen(pos)` | Where a point of the world is on the screen: x, y and the metres to it; `nil` behind the camera. For name tags. |
+| `image.load("images/x.png")` | A PNG or JPG of the mod's folder: `{id, w, h}` (the same file again: the same image). Read once; uploaded the first time it's drawn. |
+| `hud.add(fn)` / `hud.remove(id)` | `on("draw", fn)` / `off(id)`. |
+
+**Colours** are `0xRRGGBBAA` numbers, `{r, g, b, a}` tables (0..255; `a` 255 if left out), or a name: `"white"`,
+`"black"`, `"red"`, `"green"`, `"blue"`, `"yellow"`, `"gray"`, `"dark"`, `"clear"`. `color(r, g, b [, a])` makes the
+number, `color.hex("#ff8800")` / `"#ff880080"`, `color.alpha(c, a)`, `color.lerp(a, b, t)`.
+
+**Text** is the overlay's font (DejaVu Sans on Linux, Segoe UI on Windows) with Japanese and common Chinese (a Noto Sans
+CJK JP subset: kana, 5,392 characters in all) and emoji (Noto Emoji, black and white: drawn in the text's colour)
+merged in - the speech bubbles get them too. Korean and rarer kanji show as `?`.
+
+### Menus: `gui`
+
+```lua
+local menu = gui.window{title = "My menu", w = 560}        -- (w: pixels at 1080 lines; x / y: default centred)
+menu:button("Say hi", function() ui.notify("Hi!") end)
+menu:checkbox("Fast", false, function(on) ... end)
+menu:slider("Hour", 0, 24, 12, function(v) game.set_time(v) end, {step = 0.5, format = "%.1f h"})
+menu:choice("Species", {"Pikachu", "Eevee"}, 1, function(i, name) ... end)
+menu:list({"One", "Two", "Three"}, function(i, name) ... end)
+menu:input("Name", "Bob", function(text) ... end, {max = 24})
+menu:label("Text")  menu:separator()  menu:image(img, 80)
+on("key", "M", function(e) if e.down then menu:toggle() end end)
+```
+
+| | |
+|---|---|
+| `gui.window{title, w, h, x, y, on_close}` | A window (hidden until `open`). `h`: the most it grows to; longer content scrolls. |
+| `w:open()` / `w:close()` / `w:toggle()` / `w:is_open()` | |
+| `w:clear()` | Its widgets gone (rebuild it: menus whose content changes). |
+| `w:label(text)` | Text (a function: called each frame - a live value). |
+| `w:button(text, fn(w))` | |
+| `w:checkbox(text, value, fn(on))` | |
+| `w:slider(text, min, max, value, fn(v), {step, format})` | Left / right (or dragging it) change it by `step`. |
+| `w:choice(text, options, index, fn(i, option))` | Left / right (or a click) go through the options. |
+| `w:list(options, fn(i, option), {selected = i})` | One row each; activating one picks it. |
+| `w:input(text, value, fn(text), {max})` | Opens the runtime's text dialog (below). |
+| `w:image(img [, height])` / `w:separator()` | |
+| `gui.close_all()` | Every window of the mod's. |
+
+While a window is open it has the input: **the game's is held back** (the player doesn't move, the camera doesn't
+turn, the mouse is let go) and Esc goes to the window instead of opening the runtime's menu (F1 still does). Controls:
+
+* **Controller** (and the keyboard's game keys: arrows, Enter / Space, Backspace / Q): d-pad up / down move (held:
+  repeating), A activates, left / right change a slider or choice, B closes.
+* **Mouse**: what's under the pointer has the focus, a click activates (drag a slider), the wheel scrolls, a right
+  click or the × closes.
+* **Keyboard**: Esc closes.
+
+Several windows can be open; the last opened is on top and has the input.
+
+### Keyboard and mouse: `input`, `on("key")`, `on("mouse")`, `on("text")`
+
+```lua
+on("key", "F7", function(e) if e.down and not e.rep then ... end end)   -- (a filter: that key only)
+on("mouse", "left", function(e) if e.down then log(e.x, e.y) end end)
+on("mouse", "wheel", function(e) zoom = zoom + e.wheel end)
+```
+
+| | |
+|---|---|
+| `key` (filter: the key's name) | `e.key` (SDL's names: `"A"`, `"Return"`, `"Escape"`, `"Left Shift"`, `"F5"`...), `e.down`, `e.rep` (held: repeating), `e.shift`, `e.ctrl`, `e.alt`. The game still sees keys (unless a menu holds the input). |
+| `mouse` (filter: `"left"`, `"right"`, `"middle"`, `"wheel"`) | `e.button`, `e.down`, `e.x`, `e.y` (overlay pixels), `e.wheel`. |
+| `text` | The text typed (when the window takes text input). |
+| `input.mouse_pos()` | x, y of the pointer (overlay pixels). |
+| `input.mouse_down([button])` / `input.key_down(name)` | |
+| `input.grab(on)` | Hold the game's input back yourself (a menu of your own drawing). |
+| `input.text(title, text, max, fn(result))` | The runtime's text dialog: typed with a keyboard, the on-screen keyboard with a controller (as the game's own name entry). `fn(text)` on OK, `fn(nil)` cancelled. The game's input is held while it's up. |
+
+The controller stays with `player.button(name)` and `on("button")`.
+
+### Sounds: `sound`
+
+```lua
+local pop = sound.load("sounds/pop.ogg")
+pop:play()                                              -- everywhere (2D)
+pop:play{pos = npc_a:pos(), range = 25, volume = 0.8}   -- from a spot: quieter farther, panned
+local loop = pop:play{loop = true, pitch = 1.2}  loop:stop()
+```
+
+| | |
+|---|---|
+| `sound.load(file)` | A `.wav` (8 / 16 / 24 / 32-bit or float, mono or stereo, any rate) or `.ogg` (Vorbis) of the mod's folder, read once. `nil` if it can't be read. |
+| `snd:play{volume, pitch, pos, range, loop}` | `volume` 0..4 (1), `pitch` 0.25..4 (its speed), `pos` a spot of the world (silent beyond `range` metres, 30; panned by where it is from the camera), `loop`. Returns a voice. |
+| `voice:stop()`, `voice:playing()`, `voice:set_volume(v)`, `voice:set_pos(p)` | |
+| `sound.play(file or snd, opts)` / `sound.stop_all()` | |
+
+They're mixed into the game's own output (after the game's mix: the Volume setting and background muting apply), up to
+64 at once.
+
+### Storage and files: `storage`, `files`
+
+```lua
+storage.set("best", 42)                 -- kept for this save (the game's save_<n>)
+local best = storage.get("best", 0)
+storage.global.set("first_run", false)  -- kept for the mod, whatever the save
+```
+
+| | |
+|---|---|
+| `storage.get(key [, default])` / `storage.set(key, value)` | Values: strings, numbers, true / false, tables of those (nested; no loops). Written half a second after a change, by a thread of the plugin's (not the game's), to `<game folder>/moddata/<mod>/<save>.lua`. |
+| `storage.all()` | The whole table (change it in place, then `storage.save()`). |
+| `storage.slot()` | Which save it's kept for (`"save_0"`). |
+| `storage.global.*` | The same, for the mod as a whole (`moddata/<mod>/_mod.lua`). |
+| `files.read(path)` / `files.exists(path)` | A file of the mod's own folder (`"data/levels.txt"`; no `..`): its text, `nil` when missing. |
+
+### From the runtime
+
+`runtime/hud.h` (the draw list and input events), `runtime/modapi_ext.h` and the mod API's version 6 in
+`runtime/modapi.h`: `hud_submit` / `hud_size` / `hud_measure` / `hud_image` / `hud_to_screen` (runtime/ui/hud.mm),
+`input_grab` / `input_events` / `input_mouse` (runtime/hle/scriptinput.c), `text_prompt` / `text_prompt_poll`
+(ui/menu.mm), `sound_*` (runtime/hle/modsound.c), `save_id`. Tests: `<live>/sdl` makes window events (`key M`,
+`click 640 300 left`, `move x y`, `wheel 1`, `type text`), `<live>/kbd` answers a script's text dialog, `<live>/wshot`
+saves the window image with the overlay, `LARECOMP_MODSOUND_WAV=<file>` records what scripts' sounds added.
+
+### Cost
+
+Measured with `lua.stats` (CPU time of the Lua side each frame; Legends Z-A, i9-12900K with two other games running):
+the test mods with nothing drawn 36 us a frame, + the Spawn Menu's HUD panel (4 things drawn) +16 us, + its menu open
+(~90 things a frame) +57 us, a test drawing ~45 things with option tables, text measuring and a name tag +80 us. In a hot
+loop the same frame is 4 us (panel) to 35 us (the test): the in-game numbers are cold caches on a busy machine.
+
+The render thread (`LARECOMP_HUD_STATS=<frames>` logs it; Legends: Arceus, the same machine): turning the overlay on at
+all - ImGui's frame and its draw data recorded - is about 40 us a frame; on top of that the scripts' list costs 5 us
+for the HUD panel (4 commands), 14 us with the menu open (42 commands drawn), 18 us for the heavy test (35 commands,
+1,930 vertices with its text). Speech bubbles: under 1 us for a few.
+
 # The world
 
 The second half of the API (`contrib/legendslua/world.lua` on the game's `runtime/worldapi.h`): scripts talking between
@@ -447,7 +616,10 @@ on("chat", function(from, text) log(from, "said", text) end)
 | `chat.say(text)` | A chat line: a speech bubble over our player here, and over our stand-in on everyone else's screen; the `chat` event fires there. One line a second. |
 | `chat` event | `(from, text)`: a line heard (its bubble is shown by the runtime, scripts or not). |
 
-Console: `chat <text>`, `players`.
+Console: `chat <text>`, `players`. **The chat key**: T on the keyboard, or L + ZL held on a controller, while the shared
+world is on: the runtime's text dialog (the on-screen keyboard with a controller - `input.text`), and what was typed is
+said. `chat.key(false)` switches the key off (a mod using T itself), `chat.prompt()` opens the dialog from a script.
+Checked with two Z-A copies: T on one, the line over its stand-in on the other (`zaKey-chat-grid.png`).
 
 * **Caps**: a message is at most 1024 bytes (name and data packed); each copy sends at most 30 messages and 8 KB a
   second (bursts of 60 / 16 KB), and takes no more than that from any one player (more is dropped, logged once a minute).
@@ -478,10 +650,11 @@ Console: `chat <text>`, `players`.
 | `player.anim_loop(n [, false])`, `player.pose(n [, false])` | **Arceus**: `LoopAction(n)` (9 looking at the phone) / `PhotoPoseAction(n)` (1-15) and back. **Z-A**: the same animation held / `FObj_Reset_AnimationAll`. |
 | `player.face_expression(name)` | **Z-A**: `"smile"`, `"serious"`, `"sad"`... |
 | `player.dismount()`, `player.riding(fn)` | **Arceus**: off the ride Pokémon (the ride manager's `StopRide`, as every event does) / `fn(true)` while riding. |
-| `player.speed(k)` | Not found in either game yet: returns false. |
+| `player.speed(k)` | How fast the player moves, times k (0-10]. **Arceus**: the player's animation controller's master speed (`SetAnimationMasterSpeed`): the walk and run carry the player by their root motion, so faster steps go further - checked 1x 8.4 m, 2x 19.7 m in the same 2 s of stick; all the player's animations play that much faster. A reload puts 1 back. **Z-A**: false - not found (its commands have no speed; tried 2026-11-19: no animation-rate or move-speed command in the framework). |
 
 Input is held in the runtime (`hle/input.c` asks `world_input_filter`, `hle/worldcommon.c`): a reload of the scripts
-lets the player go. Checked: Z-A frozen, a test's stick push moved nothing; unfrozen it moved 4.5 m; `player.walk(0, 1)`
+lets the player go. Windows: both games' exes and `legendslua.dll` booted under Wine with the test mod (party, box levels, traces, `player.speed`,
+`battle_start`, an effect: `wine-pla-world.png`, `wine-pla-battle.png`, `wine-za-world.png`). Checked: Z-A frozen, a test's stick push moved nothing; unfrozen it moved 4.5 m; `player.walk(0, 1)`
 walked on. **Mounting** from a script: the only path (the ride manager's `StartOdoshishiRide`, Wyrdeer) hung Arceus when
 called from the field script's state - left out.
 
@@ -577,7 +750,11 @@ PokeCrypto; the layouts from PKHeX's PA9 / PA8).
   (checked: renamed in the box screen). Checked (`za13-boxes.png`, `za14-edit-grid.png`): a shiny Pikachu Lv 12 given
   into box 1 (the game worked out its stats: 31/31 HP, its moves Thunder Shock + Tail Whip), an Eevee renamed with new
   moves, the party's Totodile renamed.
-* **Arceus**: boxes are the stored format (no level in a box - the EXP is). The party the game plays with is its own
+* **Arceus**: boxes are the stored format (no level in a box - the EXP is): a box Pokémon's `level` is its EXP on its
+  species' growth curve (`m.growth`), the curve read from the game's own personal table in its romfs
+  (`bin/pml/personal/personal_data_total.perbin`, read once by the runtime: `hle/worldcommon.c`; 1,276 species / forms) -
+  checked against the game's own `PokemonCommand.GetLevel` for every box slot of the test save (all equal; under Wine too).
+  `pokemon.give` uses the same curves. The party the game plays with is its own
   objects; the save's party block (`[[main+42BA6B0]+200]+68`, 6 x 0x178) is written when the game saves, so a party
   member's names, IVs and trainer come from there and what changes in play (species, form, level, HP, max HP, shiny,
   alpha, moves) from the game's `PokemonCommand` reads (every 3 s once used; `m.live`). `m:set` on a party member takes
@@ -589,12 +766,21 @@ PokeCrypto; the layouts from PKHeX's PA9 / PA8).
 
 | | |
 |---|---|
-| `battle.wild(id [, {pos, yaw, field, mode}])` | **Arceus**: a wild battle against one of the game's event encounters (`bin/pokemon/data/poke_event_encount.bin`: `"aipom01"` Aipom Lv 30, `"yukimenoko01"` Froslass Lv 55, the Mount Coronet `mut_*` ones...), started as its events start theirs (`AppCommand.ExecuteEventCommand("call_wild_battle", ...)`), where the player stands. Checked: an Aipom Lv 30 battle in the Jubilife training ground (`pla3-battle-grid.png`). **Z-A**: false - its battles start from its C++ triggers. |
-| `battle_start` / `battle_end` events, `battle.active()`, `battle.last()` | Fire when the runtime knows a battle state: **not found yet in either game** (the API is there; nothing fires). |
+| `battle.wild(id [, {pos, yaw, field, mode}])` | **Arceus**: a wild battle against one of the game's event encounters (`bin/pokemon/data/poke_event_encount.bin`: `"aipom01"` Aipom Lv 30, `"yukimenoko01"` Froslass Lv 55, the Mount Coronet `mut_*` ones...), started as its events start theirs (`AppCommand.ExecuteEventCommand("call_wild_battle", ...)`), where the player stands. Checked (`pla3-battle-grid.png`). These are challenge battles: the player can't run from them. **Z-A**: false - its battles start from its C++ triggers. |
+| `battle_start` event | `{kind}` - a battle began (kind `"unknown"`: not told apart yet). |
+| `battle_end` event | `{result, party_hp}` - it ended. `result`: `"caught"` (a Pokémon more in the party or the boxes than at its start), `"lost"` (the whole party fainted), else `"other"` (won or ran: the game keeps no result a script can read for a battle no event of its own started). |
+| `battle.active()` / `battle.last()` | A battle on now / the last one's result. |
 
-Arceus' battle doesn't run Lua of its own (the field script's state runs on, the same calls in and out of a battle).
-The game hands a battle's result to the event that runs after it (trigger work 0, `1` won), which a script-started
-battle doesn't have.
+**How a battle is seen (Arceus)**: the game's C++, not its Lua (its Lua runs on through a battle: the same calls in and
+out). Profiling which of the game's functions run in a window of 60 frames (the runtime's `LARECOMP_FNPROF_LIVE`) in the
+field and through a battle (its start, its turns, its menus - the satchel, a Pokémon's summary) gave about 100 that run
+exactly once a frame from the battle's first moments to its end and never in the field; the runtime hooks one of them
+(0x7000898db0, `hle/worldapi.c`) once a script asks: a battle is on while it ran within the last half second. Checked:
+`battle_start` fired as the scripted Aipom battle began, its satchel and summary screens kept it on, under Wine too.
+The end of a battle wasn't reached in the tests (a challenge battle can't be run from, and losing it by pad automation
+didn't finish - the end is that function stopping; the result's check runs 1.5 s after). The profile windows are kept
+(`testout/lua-world/fnprof-pla`). **Z-A**: not found - no battle could be started in the test save (its battles come from
+wild zones and trainers' triggers; the test save stands in a plaza).
 
 ## Weather: `weather`
 
@@ -602,13 +788,21 @@ battle doesn't have.
 |---|---|
 | `weather.get(fn)` | **Z-A**: `fn(id)` - the weather its getter reports (`c4B6212B8.f6362F6BB()`: 0 clear, 2 rain...). **Arceus**: `fn(nil)`. |
 | `weather.is(name, fn)` | **Z-A**: its own check (`IsCheckWeather("rain" / "storm")`). |
-| `weather.set(id)` | false: no setter found yet. |
+| `weather.set(id)` | false: no setter found. |
 
-What's known: Z-A's framework weather calls (`FixWeather`, `SyncWeather`, `ResetWeather`) are empty, and the visible
-weather doesn't follow the index its getter reads; a rain look a script can make is the weather effect itself
-(`world.effect{path = "field/weather/et001/et001_rain_wide_range"}`). Arceus' scripts set no weather; its save flags
-`FSYS_FORCE_WEATHER_ENABLE`, `FSYS_WEATHER_DISABLE_RAINY` / `_SNOW` / `_CLOUDY` / `_SPECIAL` (`game.work("flag:...")`)
-are read by the game's C++ (when they take effect is untested).
+What was traced (2026-11-19):
+* **Z-A**: its framework's weather calls (`FixWeather`, `SyncWeather`, `ResetWeather`, `BeginSyncWeather` - a seed and a
+  lottery result) are empty in the Lua, and no event sets weather (its story's special scenes fix a light instead:
+  `FixLightWithPriority(10, "light/spl/...trlgt", 0)`). The getter's path: native 0x7002761dc0 -> 0x700299af90 -> the
+  time manager's handle (0x700090de20) -> environment `+0x40` -> 0x7002d92a18 -> the current weather record (0x7002d93e40)
+  `+0x10`. What reads that index for the sky and the rain isn't found (setting it changed only what's reported). A rain
+  look a script can make: `world.effect{path = "field/weather/et001/et001_rain_wide_range"}`.
+* **Arceus**: its scripts have no weather calls; the strings the weather has in the game are its shaders' parameters
+  (`GlobalWeatherScale`, `EnableWeatherLayer`), its wet / snow looks and its weather particles - and loading one of those
+  particles (`ef_weather_03_camfix_01.ptcl`) as an effect **crashed the game** (they need the weather system's resources:
+  don't). `bin/field/weather/weather_table.bin`, named in the game, isn't in its romfs; each area has a
+  `local_weather.bin`. Save flags `FSYS_FORCE_WEATHER_ENABLE`, `FSYS_WEATHER_DISABLE_*` exist (`game.work("flag:...")`),
+  read by its C++ - untested.
 
 ## The world's cost
 
@@ -623,6 +817,7 @@ handlers, a message and a party read every second, console commands), `lua.stats
 |---|---|
 | Z-A, 60 fps, the shared world on (a copy hearing itself) | 8.4 us on average (most 176 us: a frame with a message decoded and the party job's answer) |
 | Arceus, 30 fps | 19 us on average (most 542 us: a party read - the save's party block decrypted, 6 slots) |
+| Windows builds under Wine (the same test mod; the v6 overlay merged in): Arceus / Z-A | 48 / 39 us (most 436 / 451 us) |
 
 The runtime side: a script message costs its pieces' sends (80 bytes each) and, heard, a copy into the queue; held input
 is one test in the controller read. A frame is 16,700 us at 60 fps: the world part is 0.05-0.1% of it.

@@ -925,3 +925,10 @@ G.__world_parts = {
   lit = lit, fnv64 = fnv64, Npc = Npc, Poke = Poke, npcs = npcs, pokes = pokes, shared = shared, cmd_add = cmd_add,
   api_for = function(f) local was = api_for if f then api_for = f end return was end,
 }
+
+-- ---------------------------------------------------------------- for the extensions (hud.lua, gui.lua: run next)
+-- (the mod API's version 6 - the overlay, input, sounds, storage, menus - lives in files of its own; they reach what
+-- this file keeps local through this table)
+G.__api = {rt = rt, on = on, off = off, emit = emit, emit_to = emit_to, has = has, run = run, report = report,
+           tell_once = tell_once, vec = vec, is_vec = is_vec, Npc = Npc, Poke = Poke, npcs = npcs, pokes = pokes,
+           mods = mods, shared = shared, ui = ui, player = player, game = game, cmd_add = cmd_add, now = now}

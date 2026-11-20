@@ -190,7 +190,8 @@ static int cam_hook(Cpu *c, uint64_t addr) {
         extern void bubble_camera(const float *eye);
         bool warp_player_now(float pos[3], float *yaw);
         float me[3];
-        if (bubble_count() && in_heap(c->x[0]) && warp_player_now(me, NULL)) {
+        extern volatile int g_scene_cam_wanted;  // (also positional sounds, scripts' to_screen: hle/bubble.c)
+        if ((g_scene_cam_wanted || bubble_count()) && in_heap(c->x[0]) && warp_player_now(me, NULL)) {
             const float *t = (const float *)(uintptr_t)(c->x[0] + 0x320);
             float dx = t[0] - me[0], dy = t[1] - me[1], dz = t[2] - me[2];
             if (dx * dx + dz * dz < 9.0f && fabsf(dy) < 3.0f) bubble_camera((const float *)(uintptr_t)(c->x[0] + 0x260));

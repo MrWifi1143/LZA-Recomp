@@ -51,6 +51,7 @@ typedef struct {
     float x, y;    // the tail's tip, in pixels
     float alpha;   // 0..1 (fading in / out, far away)
     float dist;    // metres from the camera
+    int spot;      // (over a spot, not a target: a sign - no tail, no line down; centred on the spot)
     char text[4 * BUBBLE_MAX_CHARS + 8];
 } BubbleDraw;
 int bubble_draw_list(BubbleDraw *out, int max, float w, float h);

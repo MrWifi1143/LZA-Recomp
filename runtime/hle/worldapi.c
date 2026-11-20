@@ -84,19 +84,25 @@ void world_bubbles_on(void) {}  // (the render camera's hook is on with the shar
 
 // ---- not in this game yet (0)
 static int speed_none(float k) { (void)k; return 0; }
-static int battle_none(int *kind) { if (kind) *kind = 0; return 0; }
-static int result_none(uint32_t *count) { if (count) *count = 0; return 0; }
+// battles: 0x7000898db0 runs once a frame from a battle's start to its end, in its menus too, never in the field
+// (2026-11-19, fnprof windows around a scripted wild battle - testout/lua-world/fnprof-pla)
+int world_battle_state_at(uint64_t fn, int *kind);
+int world_battle_ends(uint32_t *count);
+static int battle_state(int *kind) { return world_battle_state_at(0x7000898db0ull, kind); }
 static int weather_set_none(int id) { (void)id; return 0; }
 static int weather_get_none(void) { return -1; }
 static int weather_name_none(int id, char *out, int cap) { (void)id; if (cap > 0) out[0] = 0; return 0; }
+
+int world_growth(const char *path, int species, int form);
+static int growth(int species, int form) { return world_growth("bin/pml/personal/personal_data_total.perbin", species, form); }
 
 static const LarecompWorldApi g_api = {
     .version = LARECOMP_WORLDAPI_VERSION, .game = "pla",
     .net_up = luanet_up, .net_self = luanet_self, .net_send = luanet_send, .net_recv = luanet_recv, .players = luanet_players,
     .chat_send = luanet_chat_send, .chat_recv = luanet_chat_recv, .bubble_over = luanet_bubble_over,
     .input_hold = world_input_hold, .input_stick = world_input_stick, .player_speed = speed_none,
-    .pkm_read = world_pkm_read, .pkm_write = world_pkm_write, .pkm_info = pkm_info, .pkm_party_at = party_at,
-    .battle_state = battle_none, .battle_result = result_none,
+    .pkm_read = world_pkm_read, .pkm_write = world_pkm_write, .pkm_info = pkm_info, .pkm_party_at = party_at, .pkm_growth = growth,
+    .battle_state = battle_state, .battle_result = world_battle_ends,
     .weather_set = weather_set_none, .weather_get = weather_get_none, .weather_name = weather_name_none,
 };
 const LarecompWorldApi *worldapi_get(void) { return &g_api; }

@@ -9,6 +9,7 @@ local P = G.__world_parts
 G.__world_parts = nil
 if not P then return end
 local rt, vec, player, ui = P.rt, P.vec, P.player, P.ui
+local function timer_after(sec, fn) return P.timer_add(P.shared, sec, false, fn) end
 local on, emit, has, run, report = P.on, P.emit, P.has, P.run, P.report
 local fmt, spack, sunpack = string.format, string.pack, string.unpack
 local ZA = game.name == "za"
@@ -134,6 +135,28 @@ local function chat_poll()
   end
 end
 
+-- the chat key: T on the keyboard, L + ZL held together on a controller - while the shared world is on - opens the
+-- runtime's text dialog (input.text: the on-screen keyboard with a controller) and says what was typed. chat.key(false)
+-- switches it off (a mod with a T of its own), chat.key(true) back on.
+local chat_key_on, chat_prompting = true, false
+function chat.key(on_) chat_key_on = on_ ~= false end
+function chat.prompt()
+  local inp = G.input
+  if chat_prompting or not (inp and inp.text) or not players.online() then return false end
+  chat_prompting = true
+  inp.text("Chat", "", 100, function(t)
+    chat_prompting = false
+    if t and #t > 0 then chat.say(t) end
+  end)
+  return true
+end
+on(P.shared, "key", "T", function(e)
+  if chat_key_on and e.down and not e.rep and not G.__gui_open and not chat_prompting then chat.prompt() end
+end)
+on(P.shared, "button", function(b)
+  if chat_key_on and (b == "L" or b == "ZL") and player.button("L") and player.button("ZL") and not G.__gui_open then chat.prompt() end
+end)
+
 -- ---------------------------------------------------------------- the player held, walked, sped up
 local BUTTONS = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS", "MINUS", "LEFT", "UP", "RIGHT", "DOWN"}
 local BIT = {}
@@ -176,12 +199,20 @@ function player.walk(x, y)
   walking = true
   wt.input_stick(true, tonumber(x) or 0, tonumber(y) or 0)
 end
--- player.speed(k): how fast the player moves, times k (1 normal). Not found yet in either game: false (2026-11-19 -
--- Arceus' character controller SetMoveRootMotionAmplifier / SetRootMotionRate changed nothing; steps added by
--- moving the player each frame fought the game's own movement)
+-- player.speed(k): how fast the player moves, times k (1 normal). Arceus: the player's animation controller's master
+-- speed (SetAnimationMasterSpeed) - its walk and run carry it by their root motion, so faster steps go further (2x:
+-- 2.3x the way in the same time, checked 2026-11-19); every animation of the player's plays that much faster. Z-A: the
+-- runtime's (worldapi player_speed) - false where it isn't found.
+local speed_k = 1
+local PLA_SPEED = [[Global.GetFieldObjectForHaxe():__haxe_export_FindCharactorComponent(FnvHash64.new("PlayerObject")):__haxe_export_GetCharacterController():__haxe_export_GetAnimationController():SetAnimationMasterSpeed(%s)]]
 function player.speed(k)
   need("player.speed")
-  return wt.speed(tonumber(k) or 1)
+  k = tonumber(k) or 1
+  if k <= 0 or k > 10 then error("player.speed(k): 0 < k <= 10", 2) end
+  if ZA then return wt.speed(k) end
+  speed_k = k
+  P.script(nil, fmt(PLA_SPEED, fmt("%.6g", k)))
+  return true
 end
 
 -- ---------------------------------------------------------------- Pokémon: the party and the boxes (PKHeX's formats)
@@ -255,6 +286,27 @@ local function put(b, f, v)
   return b:sub(1, o) .. s .. b:sub(o + #s + 1)
 end
 local party_used, party_job, party_t, party_seen = false, false, -1e9, false  -- (the party's asking: below)
+local function curve(g, n)
+  if g == 0 then return n ^ 3
+  elseif g == 4 then return math.floor(4 * n ^ 3 / 5)
+  elseif g == 5 then return math.floor(5 * n ^ 3 / 4)
+  elseif g == 3 then return math.max(0, math.floor(6 * n ^ 3 / 5 - 15 * n * n + 100 * n - 140))
+  elseif g == 1 then
+    if n <= 50 then return math.floor(n ^ 3 * (100 - n) / 50)
+    elseif n <= 68 then return math.floor(n ^ 3 * (150 - n) / 100)
+    elseif n <= 98 then return math.floor(n ^ 3 * ((1911 - 10 * n) // 3) / 500)
+    else return math.floor(n ^ 3 * (160 - n) / 100) end
+  else
+    if n <= 15 then return math.floor(n ^ 3 * ((n + 1) // 3 + 24) / 50)
+    elseif n <= 36 then return math.floor(n ^ 3 * (n + 14) / 50)
+    else return math.floor(n ^ 3 * (n // 2 + 32) / 50) end
+  end
+end
+local function level_of(g, exp)
+  local lv = 1
+  while lv < 100 and curve(g, lv + 1) <= exp do lv = lv + 1 end
+  return lv
+end
 local Mon = {}
 Mon.__index = Mon
 Mon.__tostring = function(m) return fmt("pokemon #%d%s lv %s \"%s\"", m.species, m.form ~= 0 and ("-" .. m.form) or "", tostring(m.level), m.nickname) end
@@ -270,7 +322,11 @@ local function decode(b, box, slot)
   m.alpha = ZA and b:byte(0x23 + 1) ~= 0 or (b:byte(0x16 + 1) & 32) ~= 0
   local x = ((m.pid >> 16) ~ (m.pid & 0xffff) ~ m.tid ~ m.sid)
   m.shiny = x < 16
-  if box ~= -1 and not ZA then m.level, m.stats = nil, nil end  -- (Arceus' boxes: the stored part only)
+  if box ~= -1 and not ZA then  -- (Arceus' boxes: the stored part only - the level is its EXP on the species' growth
+    m.level, m.stats = nil, nil  --  curve, read from the game's own personal table)
+    local g = wt.growth and wt.growth(m.species, m.form)
+    if g then m.level = level_of(g, m.exp) m.growth = g end
+  end
   m.iv32 = nil
   return m
 end
@@ -469,23 +525,9 @@ local pokemon = G.pokemon  -- (api.lua's: pokemon.spawn ...; give added here)
 -- data, the game's format) with its species, form, level, moves and colours changed - as PKHeX would. Its EXP is the
 -- level's on the species' growth curve, which is found from another of that species the player has (its level and
 -- EXP); without one, the medium-fast curve (most Pokémon): the game then shows the level its EXP makes.
-local function curve(g, n)
-  if g == 0 then return n ^ 3
-  elseif g == 4 then return math.floor(4 * n ^ 3 / 5)
-  elseif g == 5 then return math.floor(5 * n ^ 3 / 4)
-  elseif g == 3 then return math.max(0, math.floor(6 * n ^ 3 / 5 - 15 * n * n + 100 * n - 140))
-  elseif g == 1 then
-    if n <= 50 then return math.floor(n ^ 3 * (100 - n) / 50)
-    elseif n <= 68 then return math.floor(n ^ 3 * (150 - n) / 100)
-    elseif n <= 98 then return math.floor(n ^ 3 * ((1911 - 10 * n) // 3) / 500)
-    else return math.floor(n ^ 3 * (160 - n) / 100) end
-  else
-    if n <= 15 then return math.floor(n ^ 3 * ((n + 1) // 3 + 24) / 50)
-    elseif n <= 36 then return math.floor(n ^ 3 * (n + 14) / 50)
-    else return math.floor(n ^ 3 * (n // 2 + 32) / 50) end
-  end
-end
-local function growth_of(species)
+local function growth_of(species, form)
+  local gr = wt.growth and wt.growth(species, form or 0)
+  if gr then return gr end
   local function fit(m)
     if not (m and m.species == species and m.level and m.level > 1 and m.level < 100) then return nil end
     for g = 0, 5 do if curve(g, m.level) <= m.exp and m.exp < curve(g, m.level + 1) then return g end end
@@ -525,7 +567,7 @@ function pokemon.give(t)
   w(0x0A, "<I2", 0)                                 -- (no held item)
   w(0x1C, "<I4", (hi << 16) | low)
   w(0x24, "<I1", math.floor(tonumber(t.form) or 0))
-  local g = growth_of(sp)
+  local g = growth_of(sp, math.floor(tonumber(t.form) or 0))
   w(0x10, "<I4", curve(g, lv))
   local mv = t.moves or {33}
   local moves_off, pp_off, relearn_off, iv_off, hp_off = ZA and 0x72 or 0x54, ZA and 0x7A or 0x5C, ZA and 0x82 or 0x8A, ZA and 0x8C or 0x94, ZA and 0x8A or 0x92
@@ -551,18 +593,45 @@ end
 -- ---------------------------------------------------------------- battles: battle_start / battle_end events
 local battle = {}
 local b_on, b_count = 0, nil
-local RESULTS = {[0] = "none", "won", "lost", "other"}
+local b_snap, b_last = nil, nil
 local KINDS = {[0] = "unknown", "wild", "trainer"}
+-- (what a battle changed, seen from outside it: a Pokémon more (party or boxes) -> "caught"; the whole party fainted ->
+-- "lost"; else "other" (won or ran - the game keeps no result a script can read for a battle it didn't start from an
+-- event)
+local function snapshot(fn)
+  party.refresh(function()
+    local s = {party = 0, hp = 0, boxed = 0}
+    for i = 1, 6 do local m = party.get(i) if m then s.party = s.party + 1 s.hp = s.hp + (m.hp or 0) end end
+    for b = 0, 31 do for k = 0, 29 do if wt.pkm_read(b, k) then s.boxed = s.boxed + 1 end end end
+    fn(s)
+  end)
+end
 function battle.active() if not wt.have then return false end local on_ = wt.battle() return on_ == 1 end
-function battle.last() if not wt.have then return nil end local _, _, r = wt.battle() return RESULTS[r] end
+function battle.last() return b_last end
 local function battle_poll()
   local on_, kind, res, count = wt.battle()
   if on_ ~= b_on then
     b_on = on_
-    if on_ == 1 then emit("battle_start", {kind = KINDS[kind] or "unknown"}) end
+    if on_ == 1 then
+      b_snap = nil
+      snapshot(function(s) b_snap = s end)
+      emit("battle_start", {kind = KINDS[kind] or "unknown"})
+    end
   end
   if b_count == nil then b_count = count
-  elseif count ~= b_count then b_count = count emit("battle_end", {result = RESULTS[res] or "other"}) end
+  elseif count ~= b_count then
+    b_count = count
+    local before = b_snap
+    timer_after(1.5, function()  -- (the game puts a caught one away / heals after its end screen: looked at a little later)
+      snapshot(function(s)
+        local r = "other"
+        if before and (s.party + s.boxed > before.party + before.boxed) then r = "caught"
+        elseif s.party > 0 and s.hp == 0 then r = "lost" end
+        b_last = r
+        emit("battle_end", {result = r, party_hp = s.hp})
+      end)
+    end)
+  end
 end
 
 -- ---------------------------------------------------------------- the world through the game's own scripts
@@ -877,6 +946,7 @@ G.__unload = function()
     if held.buttons ~= 0 or held.sticks ~= 0 then wt.input_hold(0, 0) end
     if walking then wt.input_stick(false, 0, 0) end
     wt.speed(1)
+    if not ZA and speed_k ~= 1 then P.script(nil, fmt(PLA_SPEED, "1")) end
   end
 end
 
