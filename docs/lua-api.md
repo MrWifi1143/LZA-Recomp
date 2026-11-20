@@ -416,3 +416,94 @@ end)
 **Legends Studio:** in a Z-A level, **Add > NPC** writes a new townsperson into the mod's `lua/studio_npcs.lua`. The
 **Scripts** panel names it, turns it and gives it a walk route, and has an editor and this API at hand. **Play** starts
 the game with the mod, so its scripts run.
+
+## Game UI: the game's own interface
+
+Both games build their interface with Nintendo's `nn::ui2d`: **layouts** (`.bflyt`, in the game's `.arc` archives) made
+of named **panes** (Pane, Picture, TextBox, Window, Parts...). Any pane of any layout can be moved, scaled, faded,
+hidden, anchored to the real screen's edges, or given other text - by a script, or by a mod with no code at all. The
+game's animations go on as before: the change is put on the pane each frame just before the game turns it into what
+it draws, and taken off right after.
+
+```lua
+for _, l in ipairs(gameui.layouts()) do print(l.name, l.panes) end   -- what is on screen now
+for _, p in ipairs(gameui.panes("hud_pokelist_00")) do               -- one layout's panes, in tree order
+  print(string.rep("  ", p.depth) .. p.name, p.type, p.x, p.y, p.w, p.h, p.shown)
+end
+gameui.set("main_menu_top_00", "T_money_00", {text = "Hello"})        -- a TextBox's text
+gameui.set("hud_pokelist_00", "RootPane/all", {scale = 0.8, y = 60})  -- smaller and higher
+gameui.set("hud_pokelist_00", {alpha = 0.6})                          -- (no pane: the whole layout)
+gameui.set("main_menu_top_00", "T_lv_num_00", {hide = true})          -- every pane of that name
+print(gameui.text("main_menu_top_00", "T_money_00"))                  -- a TextBox's text now
+gameui.reset("main_menu_top_00")                                      -- this script's edits of it taken back
+```
+
+In the game, the console command **`ui`** lists the layouts on screen and **`ui <layout>`** its panes (name, type, place,
+size, hidden). Legends Studio's **Game UI** window lists every layout in the game's files, with its panes, without
+playing (CLI: `uilayouts [filter]`, `uipanes <layout>`).
+
+* **Names**: a layout's name is its `.bflyt`'s (`hud_minimap_field_00`). A pane is named as in the layout (`T_money_00`);
+  a name many panes share (Parts copies) edits all of them. `"a/b"` is a pane `b` whose parent is `a` (and `"x/a/b"`
+  up the tree); a name ending in `*` matches its beginning (`"N_header_00/P_header_*"`). The pane `""` (or none) is the
+  layout itself.
+* **Keys** (`gameui.set`'s table and a mod's `.ini` alike):
+
+  | key | what |
+  |---|---|
+  | `x`, `y` | moved by that many layout units (a 1920 x 1080 space, 0 in the middle, y up) |
+  | `scale`, `sx`, `sy` | its scale times that (around its own origin) |
+  | `w`, `h` | its size set |
+  | `alpha` | its alpha times that (0..1) |
+  | `hide` / `show` | not drawn / drawn even where the game hides it |
+  | `text` | a TextBox's text (UTF-8, `\n` a new line; cut at the box's own length) - the game's text comes back when the edit goes |
+  | `anchor` | `left`, `right`, `top`, `bottom` (or two, `"left top"`), `auto` (the edge it is nearest): kept that far from the real screen's edge as from the 16:9 layout's. On the layout itself: its whole 16:9 box moved to that edge |
+  | `fill` | stretched over the whole screen's width (a backdrop); on the layout itself `fill = false`: none of its panes is |
+  | `follow` | a pane the game places over something in the world (a marker over a character): its place spread to the real screen's width |
+  | `mode` | (the layout) on a screen wider than 16:9: `box` (default: the 16:9 box in the middle), `wide` (as wide as the screen: panes where they were, the anchored ones at the edges; set by itself when a pane is anchored), `stretch` (stretched across, as the game itself would) |
+  | `image` | accepted, not done yet (a Picture's texture: replace the texture itself with a texture pack - `texpack/`) |
+
+* **Who wins**: a script's edits beat a mod's data, which beat the runtime's own; a reload takes the scripts' back.
+* `gameui.clone(layout, src, name, {...})` (a new pane, a copy of `src`) is in the API but answers `false`: the games'
+  pane-tree copy isn't wired yet.
+
+### A UI mod without code
+
+```
+<game folder>/mods/<name>/ui/<layout>.ini
+
+; mods/Small Party Bar/ui/hud_pokelist_00.ini
+[layout]            ; the layout itself ([*] too)
+alpha = 0.6
+[RootPane/all]      ; a pane
+scale = 0.8
+y = 60
+```
+
+The file's name is the layout's. A mod with only `ui/` is a mod (the Mods page shows it). The files are read again
+within two seconds when one changes, while the game runs.
+
+### Ultrawide
+
+With **Aspect ratio: Fill the window** on a screen wider than 16:9, the runtime itself edits a few layouts (its own,
+lowest-priority edits): Z-A's minimap and party bar go to the left edge, the field's markers and the aiming reticle
+(placed by the game over things in the world) are spread to the real screen, the map is as wide as the screen with its
+header across it; Arceus' field HUD parts go to the edge each is nearest (commands and button hints left, the item and
+party wheel right) and its quest markers are spread out. Every other layout stays in the middle 16:9 box; a pane as
+big as the whole layout (a fade, a menu's dimming, a blurred backdrop) covers the whole screen - told by the pane's own
+shape, so sheets like Z-A's Settings keep their proportions. `LARECOMP_GAMEUI_NOWIDE=1` leaves the runtime's own
+edits out; `LARECOMP_GAMEUI=0` all of it (research).
+
+### How it works
+
+`runtime/hle/gameui.c` (the same file in both games) hooks `nn::ui2d::Layout::Calculate` (Z-A 2.0.2 `0x7002634188`,
+Arceus 1.1.1 `0x7000134e38`): the edits are put on the panes' fields (translate `+0x30`, scale `+0x48`, size `+0x50`,
+flags `+0x58` - bit 0 shown, bit 4 "matrix to be made again" -, alpha `+0x59`, name `+0xb0`; a TextBox's text
+`+0xd8` / `+0x110` / `+0x112` / `+0x114`) before the game's function and taken off after. `Layout::Draw` (Z-A
+`0x7002634720`, Arceus `0x70001353e0`) is hooked to tell the renderer which layout its draws are (a `CMD_UI` record in
+the command list, `nvn/cmdbuf.c`) and how it is fitted; `nvn/vulkan/exec.c` places them. A "wide" layout's projection
+(`DrawInfo +0x10`) is made as wide as the screen while it is calculated and drawn. Cost: ~6 us a frame on Z-A's field
+with the ultrawide edits, ~15 us on Arceus' (its `auto` anchors); nothing to speak of without edits.
+
+C: `runtime/gameui.h` - `gameui_set(layout, pane, &spec, GUI_OWNER_*)`, `gameui_unset`, `gameui_layouts`,
+`gameui_panes`, `gameui_text`. The mod API (version 6): `ui_set(layout, pane, key, value)`, `ui_unset`, `ui_layouts`,
+`ui_panes`, `ui_text`, `ui_clone`.
