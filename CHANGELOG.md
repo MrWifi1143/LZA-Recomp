@@ -5,17 +5,41 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsZA`)
 
-- Missing characters and text after updating to 1.2.4 on PCs with little memory to spare (a possible cause of a Discord
-  report; not confirmed on the reporter's PC yet): 1.2.4's bigger 3.5 GB game memory block made the part of it the
-  graphics card reads from system memory 3.75 GB (3 GB before). Where the graphics driver won't set aside that much,
-  the card read zeros for the game's memory - no player, no NPCs or stretched shapes, empty speech bubbles and name
-  plates. On NVIDIA cards the in-parts sharing meant for small-memory PCs never worked (it fell back to all at once),
-  so the 8 GB RAM laptops it was for got the whole 3.75 GB too. Now the game's memory is shared in parts as it is
-  used (about 2.5 GB in Lumiose) wherever all of it would take more than half of the system memory the driver offers,
-  NVIDIA included; and lasrecomp.log lists the GPU's memory at the start and says plainly when the driver refuses.
-- Where the game's memory is shared in parts (integrated graphics, AMD on Windows with 8 GB of RAM, and now the case
-  above), some of Lumiose's GPU-placed scenery was skipped - several hundred draws every 2 seconds, whose index data
-  sat near the end of a 64 MB part. They're drawn now.
+## 2026-11-21: LegendsZA-v1.3.0
+
+Previous release: LegendsZA-v1.2.4 (1.2.5 was prepared but never released; its fixes are in this one). Game version:
+Pokemon Legends: Z-A 2.0.2. Same game code as 1.2.0, so nothing is rebuilt on start.
+
+- Ultrawide: Options > Display > Aspect ratio "Fill the window" (and the game's Graphics settings; from the next start)
+  fills a window or screen wider than 16:9 with more of the world (Hor+), not black bars. The interface is fitted to
+  it: the minimap and party at the screen's left edge, world markers and townspeople's speech bubbles over the right
+  spots, menus (Items, Summary, Boxes, Outfit, shops, the Pokedex, Settings, Help) continued to the screen's edges
+  instead of ending in a 16:9 box, the map across the screen, battles fitted (plates on their Pokemon, the move
+  palette at the right). The title screen stays 16:9.
+- Linux: the Legends Lua research plugin is now in the Linux release too (plugins/liblegendslua.so, off until switched
+  on, as on Windows), and the AppImage finds its plugins (they were only looked for in the data folder,
+  ~/.local/share/<game>: the Steam relay never loaded there either).
+- Experimental: "New menu mouse pointer" under Options > Display > Experimental settings (off by default): our own
+  pointer drawn in the game's menus, the window keeps the mouse, hovering picks, menu keys of their own (Controls >
+  In menus). It could break things; off is the menu mouse as before.
+- Mouse: a held mouse is no longer let go while aiming, locked on or in cutscenes - only for a menu with buttons.
+- Missing characters and text on PCs with little memory to spare (reported on Discord by a player on a GTX 1650 laptop
+  with 8 GB of RAM; their log shows the driver refusing exactly this): 1.2.4's bigger 3.5 GB game memory block made the
+  part of it the graphics card reads from system memory 3.75 GB. Where the graphics driver won't set aside that much,
+  the card read zeros - no player, no NPCs or stretched shapes, empty speech bubbles and name plates. On NVIDIA cards
+  the in-parts sharing meant for small-memory PCs never worked. Now the game's memory is shared in parts as it is used
+  (about 2.5 GB in Lumiose) wherever all of it would take more than half of the system memory the driver offers,
+  NVIDIA included; lasrecomp.log lists the GPU's memory at the start and says plainly when the driver refuses.
+- Where the game's memory is shared in parts, some of Lumiose's GPU-placed scenery was skipped (several hundred draws
+  every 2 seconds). They're drawn now.
+- GPU crash reports: when the graphics driver stops ("device lost"), lasrecomp.log now names the shaders and the
+  render pass the GPU was on, and a note (gpucrash.json next to the log) makes the next start check those shaders more
+  closely (about 10% slower until 30 minutes pass without a crash). A shader that crashed the GPU twice on the same
+  driver is skipped from then on (never a common or full-screen one; a driver update clears the list): that effect is
+  missing, but the game keeps going. LARECOMP_GPU_AUTOSKIP=0 turns the skipping off, LARECOMP_GPUCRASH_RESET=1 clears
+  the note.
+- lasrecomp.log: a "[mem]" line every 30 s (the game's RAM, the PC's free RAM, the GPU heaps' use and budget), and a
+  failed game-code build puts the compiler's first errors in the log.
 
 ## 2026-11-17: LegendsZA-v1.2.4
 
