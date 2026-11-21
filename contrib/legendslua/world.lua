@@ -70,8 +70,13 @@ local function dec(s, i, depth)
 end
 
 -- ---------------------------------------------------------------- net: messages between players
+-- THIS RELEASE: multiplayer is left out for now, so there is no shared world to talk over - net.send / net.receive /
+-- chat.say raise "not available", players.list() is empty and players.online() false. (NET_OFF = false: the code below.)
+local NET_OFF = true
+local NET_MSG = "not available in this release (script networking and chat come with multiplayer in a later update)"
 local receivers = {}  -- name -> list of {fn, mod}
 local function net_send(mod, name, data, to)
+  if NET_OFF then error("net.send: " .. NET_MSG, 2) end
   need("net.send")
   if type(name) ~= "string" or #name == 0 or #name > 32 then error("net.send(name, data [, to]): name is 1-32 characters", 2) end
   local out = {spack("<s1", name)}
@@ -82,6 +87,7 @@ local function net_send(mod, name, data, to)
   return wt.net_send(b, to)
 end
 local function net_receive(mod, name, fn)
+  if NET_OFF then error("net.receive: " .. NET_MSG, 2) end
   if type(name) ~= "string" or type(fn) ~= "function" then error("net.receive(name, fn(from, data))", 2) end
   local l = receivers[name]
   if not l then l = {} receivers[name] = l end
@@ -108,20 +114,21 @@ end
 -- ---------------------------------------------------------------- players: the others in the shared world
 local players = {}
 function players.list()
-  if not wt.have then return {} end
+  if NET_OFF or not wt.have then return {} end
   local t = {}
   for i, p in ipairs(wt.players()) do
     t[i] = {id = p.id, pos = vec(p.x, p.y, p.z), yaw = p.yaw, standin = p.standin, dist = p.dist >= 0 and p.dist or nil}
   end
   return t
 end
-function players.me() return wt.have and wt.net_self() or nil end
-function players.online() return wt.have and wt.net_up() or false end
+function players.me() return not NET_OFF and wt.have and wt.net_self() or nil end
+function players.online() return not NET_OFF and wt.have and wt.net_up() or false end
 function players.find(id) for _, p in ipairs(players.list()) do if p.id == id then return p end end end
 
 -- ---------------------------------------------------------------- chat: a line over the sender's stand-in, everyone
 local chat = {}
 function chat.say(text)
+  if NET_OFF then error("chat.say: " .. NET_MSG, 2) end
   need("chat.say")
   text = tostring(text)
   if #text == 0 then return false end
@@ -138,7 +145,7 @@ end
 -- the chat key: T on the keyboard, L + ZL held together on a controller - while the shared world is on - opens the
 -- runtime's text dialog (input.text: the on-screen keyboard with a controller) and says what was typed. chat.key(false)
 -- switches it off (a mod with a T of its own), chat.key(true) back on.
-local chat_key_on, chat_prompting = true, false
+local chat_key_on, chat_prompting = not NET_OFF, false
 function chat.key(on_) chat_key_on = on_ ~= false end
 function chat.prompt()
   local inp = G.input
@@ -941,8 +948,7 @@ G.__tick = function(frame)
   base_tick(frame)
   if not wt.have then return end
   wframe = wframe + 1
-  net_poll()
-  chat_poll()
+  if not NET_OFF then net_poll() chat_poll() end
   if wframe % 4 == 0 then battle_poll() end
   if wframe % 30 == 0 then party_poll() end
 end
@@ -962,6 +968,7 @@ P.cmd_add(P.shared, "chat", function(...)
   local t = {...}
   for i = 1, #t do t[i] = tostring(t[i]) end
   local line = table.concat(t, " ")
+  if NET_OFF then print("chat: " .. NET_MSG) return end
   print(chat.say(line) and ("said: " .. line) or "not sent (no shared world, or more than one line a second)")
 end, "chat <text>: a chat line to the other players (over your head)")
 P.cmd_add(P.shared, "players", function()

@@ -177,7 +177,6 @@ def main():
     for src, dst in (('third_party/imgui/LICENSE.txt', 'imgui-LICENSE.txt'),
                      ('third_party/vma/LICENSE.txt', 'VulkanMemoryAllocator-LICENSE.txt'),
                      ('third_party/smaa/LICENSE.txt', 'SMAA-LICENSE.txt'), ('third_party/fonts/Baloo2/OFL.txt', 'Baloo2-OFL.txt'), ('third_party/fonts/NotoSansJP/OFL.txt', 'NotoSansCJK-OFL.txt'), ('third_party/fonts/NotoEmoji/OFL.txt', 'NotoEmoji-OFL.txt'),
-                     ('third_party/mbedtls/LICENSE', 'MbedTLS-LICENSE.txt'),
                      (os.path.join(P, 'LICENSE.txt'), 'Python-LICENSE.txt'), (os.path.join(D, 'zig', 'LICENSE'), 'zig-LICENSE.txt'),
                      (glob.glob(os.path.join(sp, 'capstone-*.dist-info', 'LICENSE.TXT'))[0], 'capstone-LICENSE.txt'),
                      (glob.glob(os.path.join(sp, 'lz4-*.dist-info', 'licenses', 'LICENSE'))[0], 'python-lz4-LICENSE.txt'),

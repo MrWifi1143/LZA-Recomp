@@ -9,14 +9,7 @@
 // still fails with ENETDOWN: nothing ever goes to the internet.
 // Control messages, UDP port LDN_CTRL_PORT ("LDN1" + type ...): 'S' scan -> 's' + NetworkInfo from a host; 'C' join
 // (user name, version) -> 'A' node + NetworkInfo + the nodes' addresses / 'R' refused; 'I' + NetworkInfo + addresses
-// (the host to its stations, on a change); 'L' node [session id] (a station leaves; 0xff: whichever node this address
-// is - a join given up on); 'D' [session id] (the host closed the network); 'n' (a relay peer asked by a scan: not
-// hosting - the scan needn't wait for it). Over the relay (an online server, the internet) these can come late, out of
-// order or not at all: a scan waits longer for relay peers and asks again, a join asks again (a host answers a repeat
-// with the same node); 'L' and 'D' go three times (nothing else repeats them: a lost 'D' left the station in a closed
-// room until the game gave up ~7 s later; a lost 'L', the host with a node that never comes) and carry the network's
-// session id, so a late copy can't end the next network between the same two copies (older copies send none: taken as
-// before), and a 'D' that overtakes the answer to our join is kept for that join (Connect).
+// (the host to its stations, on a change); 'L' node (a station leaves); 'D' (the host closed the network).
 // Structures (NetworkInfo 0x480 ...) as switchbrew / Ryujinx's Ldn types document them. Windows: the same, on Winsock.
 #include <stdbool.h>
 #include <stdio.h>
@@ -179,41 +172,9 @@ static struct {
     KEvent *event;          // the game's state change event (AttachStateChangeEvent)
     int ctrl;               // control socket, -1 none
     uint8_t changes[NODES]; // NodeLatestUpdate: 1 joined, 2 left - since the game last read them
-    uint64_t joined_ns[NODES];  // (the host: when each station joined, plat_now_ns)
-    uint8_t closed[16];         // (a station: the last network whose 'D' came while we weren't in it - Connect below)
-    uint64_t closed_ns;
     struct { uint8_t session[16]; uint32_t addr; } found[NODES];  // the last scan's hosts
     int nfound;
 } L = {.lock = PTHREAD_MUTEX_INITIALIZER, .state = ST_NONE, .node = -1, .ctrl = -1};
-
-// The walk-up trade (runtime/hle/warp.c): two players who agreed to trade over the shared world both open Link Trade with
-// the same Link Code. Left to the game, each copy looks for a room a few times, then opens one for a few seconds, then
-// looks again - over the internet the two copies' looks kept missing each other's rooms (2026-11-17: half the trades
-// through a lagged server never paired). So the roles are fixed here: the one who answered HOSTS (its scans find nothing
-// at once - it opens its room straight away, and again each time the game closes it), the one who asked only JOINS: its
-// scans wait (up to TRADE_SCAN_MS each) until the other's room is up - warp.c hears that over the shared world, and it
-// asks the lobby itself every half second too - and a room its game opens meanwhile is kept hidden (no one is told of
-// it, scans get 'n', joins are refused): two rooms waiting for each other can't happen. (Pia's own look for a room -
-// LanBackgroundProcessJob::AutoConnectNetworkScan, 0x7002529c1c - lasts 2 s whatever the scans take, then it opens a
-// room unless a scan found one: a scan held longer than that would come too late to count)
-enum { TRADE_NONE, TRADE_HOST, TRADE_JOIN };
-#define TRADE_SCAN_MS 1500
-static struct {
-    volatile int role;
-    volatile uint64_t until_ns;          // (the role ends by itself then)
-    volatile uint64_t partner_up_ns;     // (joiner: when the other said its room is up, 0 down - good for 1.5 s)
-    volatile uint64_t active_ns;         // (the game's last ldn command: it is in Link Play)
-    volatile int hidden;                 // (this copy's room is hidden: a joiner's)
-} T;
-static int trade_role(void) {
-    if (T.role && plat_now_ns() > T.until_ns) T.role = TRADE_NONE;
-    return T.role;
-}
-void ldn_trade_role(int role, unsigned secs) {
-    T.role = role, T.until_ns = plat_now_ns() + (uint64_t)secs * 1000000000ull, T.partner_up_ns = 0;
-}
-void ldn_trade_partner(int up) { T.partner_up_ns = up ? plat_now_ns() : 0; }
-static bool partner_up(void) { uint64_t u = T.partner_up_ns; return u && plat_now_ns() - u < 1500000000ull; }
 
 static uint32_t my_addr(void) { return 0x7F000100u | (uint32_t)L.me; }   // 127.0.1.N
 static uint32_t bind_addr(void) { return L.me == 1 ? 0 : my_addr(); }    // (slot 1: every address)
@@ -281,11 +242,6 @@ static void ctrl_send(int fd, uint32_t ip, char type, const void *body, size_t n
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(LDN_CTRL_PORT), .sin_addr.s_addr = htonl(ip)};
     net_sendto(fd, m, 5 + n, 0, &a);
 }
-static int ctrl_repeat(void) {  // ('L' / 'D': 3 copies; research LARECOMP_LDN_REPEAT=1: one, as before 2026-11-17)
-    static int n = -1;
-    if (n < 0) n = getenv("LARECOMP_LDN_REPEAT") && atoi(getenv("LARECOMP_LDN_REPEAT")) > 0 ? atoi(getenv("LARECOMP_LDN_REPEAT")) : 3;
-    return n;
-}
 // (L.lock held) the network's info and its nodes' addresses, as the host sends them: 0 for itself; then the relay ids
 // of the nodes it reaches through the relay
 #define TABLE_SIZE (4 * NODES + 8 * NODES)
@@ -334,25 +290,12 @@ static void *ctrl_thread(void *arg) {
         pthread_mutex_lock(&L.lock);
         char t = (char)m[4];
         if (ldn_log()) LOG("[ldn]   control '%c' from %s:%u (state %d)\n", t, ip_str(src, sb), ntohs(from.sin_port), L.state);
-        bool open = L.state == ST_AP_CREATED && !T.hidden;  // (a joiner's room: hidden - walk-up trade, above)
-        if (open && t == 'S') {  // a scan: our network
+        if (L.state == ST_AP_CREATED && t == 'S') {  // a scan: our network
             uint8_t r[5 + sizeof(NetworkInfo)];
             memcpy(r, "LDN1s", 5), memcpy(r + 5, &L.info, sizeof L.info);
             net_sendto(fd, r, sizeof r, 0, &from);
-        } else if (t == 'S' && RELAY(src)) {  // (over the relay: no room here - its scan needn't wait for us)
-            net_sendto(fd, "LDN1n", 5, 0, &from);
-        } else if (open && t == 'C' && n >= 5 + 33 + 2) {  // a join
+        } else if (L.state == ST_AP_CREATED && t == 'C' && n >= 5 + 33 + 2) {  // a join
             int k = 1;
-            while (k < L.info.ldn.max_nodes && !(L.info.ldn.nodes[k].connected && L.real[k] == src)) k++;
-            if (k < L.info.ldn.max_nodes) {  // (asked again - our answer was lost or late: the same node, answered again)
-                uint8_t r[6 + sizeof(NetworkInfo) + TABLE_SIZE];
-                memcpy(r, "LDN1A", 5), r[5] = (uint8_t)k;
-                size_t pn = host_packet(r + 6);
-                net_sendto(fd, r, 6 + pn, 0, &from);
-                pthread_mutex_unlock(&L.lock);
-                continue;
-            }
-            k = 1;
             while (k < L.info.ldn.max_nodes && L.info.ldn.nodes[k].connected) k++;
             uint8_t r[6 + sizeof(NetworkInfo) + TABLE_SIZE];
             if (k >= L.info.ldn.max_nodes || L.info.ldn.accept_policy == 1) {  // (full / AcceptPolicy RejectAll)
@@ -367,25 +310,20 @@ static void *ctrl_thread(void *arg) {
                 L.info.ldn.nodes_n++;
                 L.real[k] = src;
                 L.changes[k] = 1;
-                L.joined_ns[k] = plat_now_ns();
                 memcpy(r, "LDN1A", 5), r[5] = (uint8_t)k;
                 size_t pn = host_packet(r + 6);
                 net_sendto(fd, r, 6 + pn, 0, &from);
                 host_broadcast_info();
-                LOG("[ldn] \"%s\" joined as node %d (%s) t %llu\n", nd->name, k, ip_str(src, sb), (unsigned long long)(plat_now_ns() / 1000000));
+                LOG("[ldn] \"%s\" joined as node %d (%s)\n", nd->name, k, ip_str(src, sb));
                 signal_change();
             }
-        } else if (L.state == ST_AP_CREATED && t == 'C') {  // (a hidden room: refused)
-            net_sendto(fd, "LDN1R", 5, 0, &from);
-        } else if (L.state == ST_AP_CREATED && t == 'L' && n >= 6 && (n < 6 + 16 || !memcmp(m + 6, L.info.id.session, 16))) {  // a station leaves
+        } else if (L.state == ST_AP_CREATED && t == 'L' && n >= 6) {  // a station leaves
             int k = m[5];
-            if (k == 0xff)  // (a join it gave up on - our answer never reached it: whichever node that address is)
-                for (k = NODES - 1; k > 0 && !(L.info.ldn.nodes[k].connected && L.real[k] == src); k--) {}
             if (k > 0 && k < NODES && L.info.ldn.nodes[k].connected && L.real[k] == src) {
                 memset(&L.info.ldn.nodes[k], 0, sizeof(NodeInfo));
                 L.info.ldn.nodes_n--, L.changes[k] = 2, L.real[k] = 0;
                 host_broadcast_info();
-                LOG("[ldn] node %d left t %llu\n", k, (unsigned long long)(plat_now_ns() / 1000000));
+                LOG("[ldn] node %d left\n", k);
                 signal_change();
             }
         } else if (L.state == ST_STATION_CONNECTED && src == L.host_addr) {  // from our host:
@@ -397,13 +335,11 @@ static void *ctrl_thread(void *arg) {
                 L.info = ni;
                 station_table(m + 5 + sizeof ni);
                 signal_change();
-            } else if (t == 'D' && (n < 5 + 16 || !memcmp(m + 5, L.info.id.session, 16))) {  // it closed the network
+            } else if (t == 'D') {  // it closed the network
                 L.state = ST_STATION, L.disconnect_reason = 3, L.node = -1;  // (DestroyedByAccessPoint)
                 LOG("[ldn] the host closed the network\n");
                 signal_change();
             }
-        } else if (t == 'D' && n >= 5 + 16) {  // (a room that closed as we were joining it: its 'D' overtook its answer)
-            memcpy(L.closed, m + 5, 16), L.closed_ns = plat_now_ns();
         }
         pthread_mutex_unlock(&L.lock);
     }
@@ -429,31 +365,6 @@ static bool attach(void) {
     return true;
 }
 
-// A Private Battle room's passcode (Z-A): Pia's advertise data is its header (first a u16 big-endian: the header's size,
-// 0x5c) and then the game's bytes - for a Private Battle room the passcode as 4 ASCII digits, 8 zero bytes, the rules
-// (2026-11-13 / 11-18 dumps: "6888" 00 x8 00 00 00 00 04 00 00 00). Over an online server players meet in lobbies, and
-// the host never types its passcode: the room's lobby is taken from here (contrib/steamrelay larecomp_relay_room; a
-// joiner's from the passcode it types, runtime/hle/swkbd.c).
-static bool room_passcode(const uint8_t *adv, size_t n, char out[5]) {
-    if (n < 4) return false;
-    size_t h = (size_t)adv[0] << 8 | adv[1];
-    if (h < 4 || h + 16 > n) return false;
-    const uint8_t *d = adv + h;
-    for (int i = 0; i < 4; i++)
-        if (d[i] < '0' || d[i] > '9') return false;
-    for (int i = 4; i < 12; i++)
-        if (d[i]) return false;
-    memcpy(out, d, 4), out[4] = 0;
-    return true;
-}
-static void relay_room(void) {  // (L.lock held) hosting a room with a passcode: its lobby on an online server
-    char pass[5];
-    if (!g_relay || T.hidden || !room_passcode(L.info.ldn.adv, L.info.ldn.adv_size, pass)) return;
-    extern void *plugins_symbol(const char *name);
-    void (*room)(const char *) = (void (*)(const char *))plugins_symbol("larecomp_relay_room");
-    if (room) room(pass);
-}
-
 static void host_create(const NetworkConfig *nc, const SecurityConfig *sc, const UserConfig *uc) {
     uint16_t adv_size = L.info.ldn.adv_size;  // (the advertise data set before the network is made stays: Pia reads
     uint8_t adv[sizeof L.info.ldn.adv];        // it back with GetNetworkInfo and sends that copy again later)
@@ -477,12 +388,9 @@ static void host_create(const NetworkConfig *nc, const SecurityConfig *sc, const
     memcpy(me->mac, L.info.common.mac, 6), memcpy(me->name, uc->name, 32);
     L.info.ldn.nodes_n = 1;
     L.node = 0, L.real[0] = my_addr();
-    T.hidden = trade_role() == TRADE_JOIN;
-    LOG("[ldn] hosting (local id %016llx, scene %u, up to %d players)%s t %llu\n", (unsigned long long)L.info.id.intent.local_id,
-        nc->intent.scene_id, L.info.ldn.max_nodes, T.hidden ? " - hidden: the other player of this walk-up trade hosts" : "",
-        (unsigned long long)(plat_now_ns() / 1000000));
-    relay_room();  // (before hosting(1): the server lists us as hosting in the room's lobby)
-    if (g_relay && !T.hidden) g_relay->hosting(1);
+    LOG("[ldn] hosting (local id %016llx, scene %u, up to %d players)\n", (unsigned long long)L.info.id.intent.local_id,
+        nc->intent.scene_id, L.info.ldn.max_nodes);
+    if (g_relay) g_relay->hosting(1);
 }
 
 // where a scan asks besides this PC's other copies (slot 1 only): the LAN's broadcast addresses, and
@@ -522,55 +430,28 @@ static int scan(const ScanFilter *f, NetworkInfo *out, int max) {
         int nt = lan_targets(t, 24);
         for (int i = 0; i < nt; i++) ctrl_send(fd, t[i], 'S', NULL, 0);
     }
-    // (the relay's: friends hosting elsewhere, or the online server's lobby of this Link Code. Over the internet an
-    // answer takes a round trip through the server - 160-600 ms with lag, more in a hiccup - where this PC's and the
-    // LAN's take a millisecond: those peers get up to 1.2 s and are asked again every 350 ms (a lost ask or answer).
-    // Copies since 2026-11-17 answer 'n' when they have no room, so a scan ends once every peer has answered)
-    uint32_t rt[32];
-    kernel_block_begin();  // (the relay may wait for its lobby's member list first: contrib/steamrelay relay_targets)
-    int nt = g_relay ? g_relay->targets(rt, 32) : 0;
-    kernel_block_end();
-    bool answered[32] = {0};
-    for (int i = 0; i < nt; i++) ctrl_send(fd, rt[i], 'S', NULL, 0);
+    if (g_relay) {  // (the relay's: friends hosting elsewhere)
+        uint32_t t[32];
+        int nt = g_relay->targets(t, 32);
+        for (int i = 0; i < nt; i++) ctrl_send(fd, t[i], 'S', NULL, 0);
+    }
     int n = 0;
     pthread_mutex_lock(&L.lock);
     L.nfound = 0;
     pthread_mutex_unlock(&L.lock);
-    // (a Private Battle's joiner scans ONCE - its room not found then is "No room could be found!": through a lossy
-    // server it gets 2.5 s for its host's answer, contrib/steamrelay larecomp_relay_battle_lobby; a walk-up trade's joiner
-    // looks again and again by itself, join_scan)
-    extern void *plugins_symbol(const char *name);
-    int (*battle)(void) = nt ? (int (*)(void))plugins_symbol("larecomp_relay_battle_lobby") : NULL;
-    uint64_t relay_ns = battle && battle() ? 2500000000ull : 1200000000ull;
-    uint64_t start = plat_now_ns(), end = start + (nt ? relay_ns : 250000000ull), local_end = start + 250000000ull;
-    uint64_t again = start + 350000000ull;
+    uint64_t end = plat_now_ns() + 250000000ull;
     kernel_block_begin();
     for (uint64_t now; n < max && (now = plat_now_ns()) < end;) {
-        int left = 0;
-        for (int i = 0; i < nt; i++) left += !answered[i];
-        if (nt && !left && now >= local_end) break;  // (every relay peer answered, this PC's and the LAN's had their time)
-        if (nt && now >= again) {
-            again = now + 350000000ull;
-            for (int i = 0; i < nt; i++)
-                if (!answered[i]) ctrl_send(fd, rt[i], 'S', NULL, 0);
-        }
-        uint64_t until = end < again || !nt ? end : again;
-        if (nt && !left && local_end < until) until = local_end;
         struct pollfd p = {fd, POLLIN, 0};
-        int pr = sock_poll(&p, 1, (int)((until > now ? until - now : 0) / 1000000) + 1);
-        if (pr < 0) break;
-        if (pr == 0) continue;
+        if (sock_poll(&p, 1, (int)((end - now) / 1000000) + 1) <= 0) break;
         uint8_t m[8 + sizeof(NetworkInfo)];
         struct sockaddr_in from;
         socklen_t fl = sizeof from;
         ssize_t got = recvfrom(fd, (void *)m, sizeof m, 0, (struct sockaddr *)&from, &fl);
-        uint32_t src = canon(ntohl(from.sin_addr.s_addr));
-        if (got >= 5 && (m[4] == 's' || m[4] == 'n') && !memcmp(m, "LDN1", 4))
-            for (int i = 0; i < nt; i++)
-                if (rt[i] == src) answered[i] = true;
         if (got < 5 + (ssize_t)sizeof(NetworkInfo) || memcmp(m, "LDN1s", 5)) continue;
         NetworkInfo ni;
         memcpy(&ni, m + 5, sizeof ni);
+        uint32_t src = canon(ntohl(from.sin_addr.s_addr));
         int dup = -1;
         pthread_mutex_lock(&L.lock);
         for (int i = 0; i < L.nfound; i++)
@@ -599,29 +480,6 @@ static int scan(const ScanFilter *f, NetworkInfo *out, int max) {
     return n;
 }
 
-// a walk-up trade's joiner (above): look until the other's room is up - asked when warp.c hears it is (over the shared
-// world) and every half second anyway (an older copy doesn't tell) - up to TRADE_SCAN_MS, then the game's own turn again
-static int join_scan(const ScanFilter *f, NetworkInfo *out, int max) {
-    uint64_t end = plat_now_ns() + TRADE_SCAN_MS * 1000000ull, last = 0;
-    int n = 0, asked = 0;
-    while (!n && trade_role() == TRADE_JOIN) {
-        uint64_t now = plat_now_ns();
-        T.active_ns = now;  // (still in Link Play: warp.c watches for the game leaving it)
-        if (now >= end) break;
-        if (!last || (partner_up() && now - last >= 100000000ull) || now - last >= 500000000ull) {
-            last = now, asked++;
-            n = scan(f, out, max);
-            continue;
-        }
-        kernel_block_begin();
-        plat_sleep_until_ns(now + 20000000ull);
-        kernel_block_end();
-    }
-    if (ldn_log() || n) LOG("[ldn] walk-up trade: %s after %d look%s%s\n", n ? "the other player's room found" : "no room yet", asked,
-                          asked == 1 ? "" : "s", partner_up() ? " (their room is up)" : "");
-    return n;
-}
-
 // joining a network found by the last scan: ask its host; true with our node, its info and its nodes' addresses
 static bool station_connect(const NetworkInfo *want, const UserConfig *uc, uint16_t version) {
     uint32_t host = 0;
@@ -634,21 +492,13 @@ static bool station_connect(const NetworkInfo *want, const UserConfig *uc, uint1
     if (fd < 0) return false;
     uint8_t body[33 + 2];
     memcpy(body, uc->name, 33), memcpy(body + 33, &version, 2);
-    // (asked again every 400 ms - over the relay an ask or its answer can be lost; the host answers a repeat with the same
-    // node. Before, one lost answer left the host with a station that never came: its room full, the next scans saw it
-    // and the game didn't join, 2026-11-17)
-    bool ok = false, refused = false;
-    int tries = 0;
-    uint64_t end = plat_now_ns() + (RELAY(host) ? 3000000000ull : 1500000000ull), next = 0;
+    ctrl_send(fd, host, 'C', body, sizeof body);
+    struct pollfd p = {fd, POLLIN, 0};
+    bool ok = false;
     kernel_block_begin();
-    for (uint64_t now; !ok && !refused && (now = plat_now_ns()) < end;) {
-        if (now >= next) ctrl_send(fd, host, 'C', body, sizeof body), next = now + 400000000ull, tries++;
-        struct pollfd p = {fd, POLLIN, 0};
-        uint64_t until = next < end ? next : end;
-        if (sock_poll(&p, 1, (int)((until > now ? until - now : 0) / 1000000) + 1) <= 0) continue;
+    if (sock_poll(&p, 1, 1500) > 0) {
         uint8_t m[8 + sizeof(NetworkInfo) + TABLE_SIZE];
         ssize_t got = recv(fd, (void *)m, sizeof m, 0);
-        if (got >= 5 && !memcmp(m, "LDN1R", 5)) refused = true;
         if (got >= 6 + (ssize_t)(sizeof(NetworkInfo) + TABLE_SIZE) && !memcmp(m, "LDN1A", 5)) {
             pthread_mutex_lock(&L.lock);
             L.node = m[5], L.host_addr = host;
@@ -659,31 +509,21 @@ static bool station_connect(const NetworkInfo *want, const UserConfig *uc, uint1
         }
     }
     kernel_block_end();
-    if (!ok && !refused) {  // (it may have taken us without our hearing it: let that node go)
-        uint8_t b[1 + 16] = {0xff};
-        memcpy(b + 1, want->id.session, 16);
-        for (int i = 0; i < ctrl_repeat(); i++) ctrl_send(fd, host, 'L', b, sizeof b);
-    }
     close_sock(fd);
     char sb[16];
-    if (ok) LOG("[ldn] joined \"%s\"'s network at %s as node %d (asked %d time%s) t %llu\n", L.info.ldn.nodes[0].name, ip_str(host, sb),
-                L.node, tries, tries == 1 ? "" : "s", (unsigned long long)(plat_now_ns() / 1000000));
-    else LOG("[ldn] the host at %s %s (asked %d time%s)\n", ip_str(host, sb), refused ? "refused" : "didn't answer", tries, tries == 1 ? "" : "s");
+    if (ok) LOG("[ldn] joined \"%s\"'s network at %s as node %d\n", L.info.ldn.nodes[0].name, ip_str(host, sb), L.node);
     return ok;
 }
 static void leave(void) {  // (L.lock held) a station out / the host's network closed
     if (L.state == ST_STATION_CONNECTED && L.node > 0) {
-        uint8_t b[1 + 16] = {(uint8_t)L.node};
-        memcpy(b + 1, L.info.id.session, 16);
-        for (int i = 0; i < ctrl_repeat(); i++) ctrl_send(L.ctrl, L.host_addr, 'L', b, sizeof b);
+        uint8_t k = (uint8_t)L.node;
+        ctrl_send(L.ctrl, L.host_addr, 'L', &k, 1);
     }
     if (L.state == ST_AP_CREATED) {
         for (int k = 1; k < NODES; k++)
-            if (L.info.ldn.nodes[k].connected && L.real[k])
-                for (int i = 0; i < ctrl_repeat(); i++) ctrl_send(L.ctrl, L.real[k], 'D', L.info.id.session, 16);
+            if (L.info.ldn.nodes[k].connected && L.real[k]) ctrl_send(L.ctrl, L.real[k], 'D', NULL, 0);
         if (g_relay) g_relay->hosting(0);
     }
-    T.hidden = 0;
     L.node = -1, L.host_addr = 0;
     memset(&L.info, 0, sizeof L.info);
     memset(L.real, 0, sizeof L.real);
@@ -708,7 +548,6 @@ static void write_buf(IpcBuf *b, const void *p, size_t n) {
 static void ldn_user(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;
     if (ldn_log()) LOG("[ldn] cmd %u (state %d)\n", req->cmd, L.state);
-    T.active_ns = plat_now_ns();
     pthread_mutex_lock(&L.lock);
     switch (req->cmd) {
     case 0: OUT(uint32_t, 0) = (uint32_t)L.state, resp_size(resp, 4); break;  // GetState
@@ -750,22 +589,14 @@ static void ldn_user(Service *s, IpcReq *req, IpcResp *resp) {
         IpcBuf *b = out_buf(req, 0);
         NetworkInfo found[NODES];
         int n = 0, max = b ? (int)(b->size / sizeof(NetworkInfo)) : 0;
-        int role = trade_role();
-        if (max > 0 && role == TRADE_HOST) {  // (a walk-up trade's host: nothing to find - no one asked, the time a scan
-            pthread_mutex_unlock(&L.lock);    //  takes on this PC: Pia scans again and again until its look is over)
-            kernel_block_begin();
-            plat_sleep_until_ns(plat_now_ns() + 250000000ull);
-            kernel_block_end();
-            pthread_mutex_lock(&L.lock);
-        } else if (max > 0) {
+        if (max > 0) {
             pthread_mutex_unlock(&L.lock);  // (the scan waits for answers)
-            n = role == TRADE_JOIN ? join_scan(&f, found, max < NODES ? max : NODES) : scan(&f, found, max < NODES ? max : NODES);
+            n = scan(&f, found, max < NODES ? max : NODES);
             pthread_mutex_lock(&L.lock);
             write_buf(b, found, (size_t)n * sizeof(NetworkInfo));
         }
         OUT(uint16_t, 0) = (uint16_t)n, resp_size(resp, 4);
-        LOG("[ldn] scan: %d network%s%s t %llu\n", n, n == 1 ? "" : "s", role == TRADE_HOST ? " (walk-up trade: we host)" : "",
-            (unsigned long long)(plat_now_ns() / 1000000));
+        LOG("[ldn] scan: %d network%s\n", n, n == 1 ? "" : "s");
         if (ldn_log()) {
             LOG("[ldn]   filter flags %x local %016llx scene %u type %u; data %u bytes; b %d c %d x %d a %d (size %llu)\n", f.flags,
                 (unsigned long long)f.id.intent.local_id, f.id.intent.scene_id, f.type, req->data_size, req->nb, req->nc, req->nx, req->na,
@@ -783,15 +614,11 @@ static void ldn_user(Service *s, IpcReq *req, IpcResp *resp) {
         size_t o = req->cmd == 202 ? 0x44 : 0x64;
         memcpy(&sc, req->data, sizeof sc), memcpy(&uc, req->data + o, sizeof uc), memcpy(&nc, req->data + o + 0x30 + 4, sizeof nc);
         host_create(&nc, &sc, &uc);
-        if (ldn_log()) log_guest_stack();
         L.state = ST_AP_CREATED;
         signal_change();
         break;
     }
-    case 204:  // DestroyNetwork
-        if (ldn_log()) LOG("[ldn] network closed by the game\n"), log_guest_stack();
-        leave(), L.state = ST_AP, signal_change();
-        break;
+    case 204: leave(), L.state = ST_AP, signal_change(); break;  // DestroyNetwork
     case 206: {                                                  // SetAdvertiseData
         IpcBuf *b = in_buf(req, 0);
         size_t n = b ? (size_t)b->size : 0;
@@ -805,15 +632,12 @@ static void ldn_user(Service *s, IpcReq *req, IpcResp *resp) {
             LOG("\n");
             log_guest_stack();
         }
-        if (L.state == ST_AP_CREATED) relay_room(), host_broadcast_info();
+        if (L.state == ST_AP_CREATED) host_broadcast_info();
         break;
     }
     case 207: L.info.ldn.accept_policy = IN(uint8_t, 0); break;  // SetStationAcceptPolicy
     case 300: L.state = ST_STATION, signal_change(); break;      // OpenStation
-    case 301:  // CloseStation
-        if (ldn_log() && L.state == ST_STATION_CONNECTED) LOG("[ldn] station closed by the game\n"), log_guest_stack();
-        leave(), L.state = ST_INIT, signal_change();
-        break;
+    case 301: leave(), L.state = ST_INIT, signal_change(); break;  // CloseStation
     case 302: case 303: {  // Connect(SecurityConfig, UserConfig, version, option; NetworkInfo) / ConnectPrivate
         UserConfig uc;
         memcpy(&uc, req->data + 0x44, sizeof uc);
@@ -824,54 +648,16 @@ static void ldn_user(Service *s, IpcReq *req, IpcResp *resp) {
         pthread_mutex_unlock(&L.lock);
         bool ok = station_connect(&want, &uc, version);
         pthread_mutex_lock(&L.lock);
-        if (ok && L.closed_ns && plat_now_ns() - L.closed_ns < 10000000000ull && !memcmp(L.closed, L.info.id.session, 16)) {
-            // (its host took us and closed the room at once - its 'D' came first and was set aside: a station of a room
-            // that is gone waited ~7 s for the game to give up on it, 2026-11-17)
-            ok = false, L.node = -1, L.host_addr = 0;
-            LOG("[ldn] that room closed as we joined it\n");
-        }
         if (ok) L.state = ST_STATION_CONNECTED, L.disconnect_reason = 0, signal_change();
         else resp->result = MAKE_RESULT(203, 64), LOG("[ldn] couldn't join the network\n");  // (ConnectFailure)
         break;
     }
-    case 304:  // Disconnect
-        if (ldn_log()) LOG("[ldn] the game leaves the network t %llu\n", (unsigned long long)(plat_now_ns() / 1000000)), log_guest_stack();
-        leave(), L.state = ST_STATION, signal_change();
-        break;
+    case 304: leave(), L.state = ST_STATION, signal_change(); break;  // Disconnect
     case 400: case 402: if (attach()) L.state = ST_INIT; break;        // Initialize / InitializeWithVersion
     case 401: leave(), L.state = ST_NONE; break;                      // Finalize
     default: LOG("[ldn] IUserLocalCommunicationService cmd %u (ok)\n", req->cmd);
     }
     pthread_mutex_unlock(&L.lock);
-}
-
-// for warp.c's walk-up trade: 1 our room is open, 2 someone joined it, 4 we joined a room, 8 the game is in Link Play
-// (an ldn command in the last 3 s, or a network up)
-int ldn_trade_state(void) {
-    pthread_mutex_lock(&L.lock);
-    int r = (L.state == ST_AP_CREATED && !T.hidden ? 1 : 0) | (L.state == ST_AP_CREATED && L.info.ldn.nodes_n > 1 ? 2 : 0) |
-            (L.state == ST_STATION_CONNECTED ? 4 : 0);
-    if (r || L.state == ST_AP_CREATED || (T.active_ns && plat_now_ns() - T.active_ns < 3000000000ull)) r |= 8;
-    pthread_mutex_unlock(&L.lock);
-    return r;
-}
-
-uint64_t ldn_trade_active_ns(void) { return T.active_ns; }  // (the game's last ldn command, plat_now_ns)
-
-// (a game fix - runtime/hle/za_fixes.c, the host's room kept while someone is still joining it) hosting: the players in
-// our network, us included, and when the last station joined it (plat_now_ns); 0 when not hosting
-int ldn_host_players(uint64_t *last_join_ns) {
-    pthread_mutex_lock(&L.lock);
-    int n = 0;
-    uint64_t last = 0;
-    if (L.state == ST_AP_CREATED) {
-        n = L.info.ldn.nodes_n;
-        for (int k = 1; k < NODES; k++)
-            if (L.info.ldn.nodes[k].connected && L.joined_ns[k] > last) last = L.joined_ns[k];
-    }
-    pthread_mutex_unlock(&L.lock);
-    if (last_join_ns) *last_join_ns = last;
-    return n;
 }
 
 SERVICE("ldn:u", ldn_u) {
@@ -937,20 +723,6 @@ static bool broadcast(const struct sockaddr_in *h) {
 }
 
 static uint64_t g_sent[2], g_recvd[2];  // packets, bytes (LARECOMP_LDN_LOG: every 5 s)
-static bool bsd_trace(void) {  // (research LARECOMP_BSD_TRACE=1: every packet the game sends or takes, with the time)
-    static int on = -1;
-    if (on < 0) on = getenv("LARECOMP_BSD_TRACE") != NULL;
-    return on;
-}
-static void trace_pkt(const char *dir, const struct sockaddr_in *a, const void *p, ssize_t n) {
-    const uint8_t *b = (const uint8_t *)p;
-    char sb[16], hx[2 * 24 + 1] = "";
-    uint32_t h = 2166136261u;  // (FNV-1a of the whole packet: the same packet on both sides)
-    for (ssize_t i = 0; i < n; i++) h = (h ^ b[i]) * 16777619u;
-    for (ssize_t i = 0; i < n && i < 24; i++) snprintf(hx + 2 * i, 3, "%02x", b[i]);
-    LOG("[bsd] %s %s:%u %zd bytes #%08x %s t %llu\n", dir, ip_str(ntohl(a->sin_addr.s_addr), sb), ntohs(a->sin_port), n, h, hx,
-        (unsigned long long)(plat_now_ns() / 1000000));
-}
 static void traffic_log(void) {
     static uint64_t last;
     uint64_t now = plat_now_ns();
@@ -1019,7 +791,6 @@ SERVICE("bsd:u", bsd_u) {
         kernel_block_end();
         RET(n, n < 0 ? sock_errno() : 0);
         if (n > 0) g_recvd[0]++, g_recvd[1] += (uint64_t)n;
-        if (n > 0 && bsd_trace()) trace_pkt("in ", &from, (const void *)(uintptr_t)b->addr, n);
         if (req->cmd == 9) {
             uint8_t ga[16];
             to_guest(&from, ga);
@@ -1048,7 +819,6 @@ SERVICE("bsd:u", bsd_u) {
                     }
                 pthread_mutex_unlock(&L.lock);
             } else n = net_sendto(h, (const void *)(uintptr_t)b->addr, b->size, hf, &to);
-            if (bsd_trace()) trace_pkt("out", &to, (const void *)(uintptr_t)b->addr, (ssize_t)b->size);
         } else {
             struct sockaddr_in pa;
             socklen_t pl = sizeof pa;

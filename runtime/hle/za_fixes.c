@@ -727,87 +727,6 @@ static int collision_make(Cpu *c, uint64_t addr) {
     return 0;
 }
 
-// Link Play: the host's room kept while someone is still joining it (2026-11-17). Looking for a Link Trade partner the
-// game takes turns: it looks for a room, and when it finds none opens its own and waits for the others in a job,
-// 0x700199b0d0 (the job in x0: +0x50 u16 players needed, +0x58 double ms left, +0x60 double ms added per player who
-// comes (5000), +0x68 u16 players counted, +0x6a set once this copy hosts the session; its clock starts at ~2.9-4 s
-// and runs only on the host). At 0 it fails with Pia's Timeout, the game leaves the session (0x70019b71e0 -> LeaveSession) and
-// looks again. It counts players in Pia's session - a station that already joined our ldn network but whose Pia join
-// is still going (its join request or an answer lost, resent only after 0.5-1 s; over a lagged server that is a few
-// seconds) isn't one yet: the host left under it, and the joiner, its JoinSession done during the host's leave, saw
-// the player count fall to 1 and gave up (its connect task 0x7000b8c4e8, result 3): a rejoin, ~41 s a trade instead of
-// ~25. So while our network has more players than the job has counted, its clock is held at >= 1 s - for up to
-// ROOM_HOLD_S after that station joined (a station that never comes can't keep the room up for good).
-// LARECOMP_ROOM_HOLD=0: the game's own window (research), =<s>: another limit.
-#define ZA_WAIT_PLAYERS 0x700199b0d0ull
-#define ROOM_HOLD_S 10
-int ldn_host_players(uint64_t *last_join_ns);
-static int g_room_hold_s = ROOM_HOLD_S;
-static int wait_players_hook(Cpu *c, uint64_t addr) {
-    (void)addr;
-    uint64_t job = c->x[0];
-    if (job < GUEST_LO || job >= GUEST_HI || (job & 7) || !*(volatile uint8_t *)(uintptr_t)(job + 0x6a)) return 0;
-    uint16_t need = *(uint16_t *)(uintptr_t)(job + 0x50), counted = *(uint16_t *)(uintptr_t)(job + 0x68);
-    uint64_t joined;
-    int players = ldn_host_players(&joined);
-    if (players <= counted || counted >= need || !joined) return 0;
-    uint64_t now = plat_now_ns();
-    static uint64_t logged_for, capped_for;
-    if (now - joined >= (uint64_t)g_room_hold_s * 1000000000ull) {
-        if (logged_for == joined && capped_for != joined)
-            capped_for = joined, LOG("[za] Link Play: the player who joined our room %d s ago never came - let go\n", g_room_hold_s);
-        return 0;
-    }
-    double *left = (double *)(uintptr_t)(job + 0x58);
-    if (*left < 1000.0) {
-        if (logged_for != joined)
-            logged_for = joined, LOG("[za] Link Play: our room kept - a player joined it %.1f s ago and is still joining (%d in the "
-                                     "network, %u in the session)\n", (double)(now - joined) / 1e9, players, counted);
-        *left = 1000.0;
-    }
-    return 0;
-}
-
-// Link Trade: the link test's last message always finds room (2026-11-17 za-mp19). Once linked, each copy runs a link
-// test: it sends a fixed 1211-byte block (channel 1, kind 0) over Pia's ReliableProtocol every frame for a few seconds,
-// as fast as Pia takes them, then one 354-byte result (channel 1, kind 1) - and the other copy shows our name only once
-// that result came. The game sends it once (0x700095f8f4 -> 0x7000960aac -> its send 0x7001a77f6c) and drops it
-// whatever the send said. Pia takes a message only while its sliding window (64 messages) has room; on a lagged link
-// (RTT ~1 s, 1 s stalls) the blocks keep that window full for seconds, so the result could come at a full window:
-// not sent, never sent again - the other copy sat in the trade box without our name ("boxed", ~3 in 16 trades with
-// 1 s stalls). Now a block isn't sent (the game sees "full" and tries again next frame, as it does anyway) while fewer
-// than LINK_RESERVE slots are free: the result and the other messages always have room. ReliableProtocol (vtable
-// 0x7003c8e948) holds its window at +0x1a0 (ReliableSlidingWindow, vtable 0x7003c8ea40: +0x28 messages in it, +0x38 its
-// slots - Pia's room check 0x7002573660; +0x70, 128, is not the limit); the protocol is the one the game last sent a
-// block through (its send 0x700256f468).
-// LARECOMP_LINK_RESERVE=0: the game's own sends (research), =<n>: another reserve.
-#define ZA_LINK_SEND 0x7001a77f6cull  // (this, data, size, reliable, &header u16 (channel | kind << 8), station) -> bool
-#define ZA_RP_SEND 0x700256f468ull    // nn::pia::transport::ReliableProtocol::Send(this, station, data, size)
-#define LINK_RESERVE 8
-static int g_link_reserve = LINK_RESERVE;
-static volatile uint64_t g_link_rp;
-static int rp_send_hook(Cpu *c, uint64_t addr) {
-    (void)addr;
-    uint64_t rp = c->x[0], d = c->x[2];
-    if (rp >= GUEST_LO && rp < GUEST_HI && !(rp & 7) && d >= GUEST_LO && d < GUEST_HI && c->x[3] >= 2 &&
-        *(uint16_t *)(uintptr_t)d == 0x0001 && *(uint64_t *)(uintptr_t)rp == 0x7003c8e948ull)
-        g_link_rp = rp;
-    return 0;
-}
-static int link_send_hook(Cpu *c, uint64_t addr) {
-    (void)addr;
-    uint64_t hp = c->x[4], rp = g_link_rp;
-    if (!(c->x[3] & 1) || !rp || hp < GUEST_LO || hp >= GUEST_HI || *(uint16_t *)(uintptr_t)hp != 0x0001) return 0;
-    uint64_t w = rp + 0x1a0;
-    if (*(uint64_t *)(uintptr_t)rp != 0x7003c8e948ull || *(uint64_t *)(uintptr_t)w != 0x7003c8ea40ull) return 0;
-    uint32_t n = *(volatile uint32_t *)(uintptr_t)(w + 0x28), size = *(volatile uint32_t *)(uintptr_t)(w + 0x38);
-    if (!size || size > 4096 || n + (uint32_t)g_link_reserve < size) return 0;
-    static uint64_t held;
-    if (!held++) LOG("[za] Link Play: link test blocks held back while Pia's window is nearly full (%u of %u)\n", n, size);
-    c->x[0] = 0;  // ("not sent": the window is full - the game tries again next frame)
-    return 1;
-}
-
 void za_fixes_configure(const char *exefs) {
     static const uint8_t ZA_MAIN[8] = {0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a};  // 2.0.2 (any other build: none of this)
     static bool done;
@@ -828,10 +747,6 @@ void za_fixes_configure(const char *exefs) {
     rt_register_fnhook_at(0x7001108570ull, collision_make);  // (NPC spawners' trigger radius)
     g_mouse_look = !getenv("LARECOMP_ZA_MOUSE_LOOK") || atoi(getenv("LARECOMP_ZA_MOUSE_LOOK")) != 0;
     rt_register_fnhook_at(ZA_CAM_ANGLES, mouse_look_hook);
-    if (getenv("LARECOMP_ROOM_HOLD")) g_room_hold_s = atoi(getenv("LARECOMP_ROOM_HOLD"));
-    if (g_room_hold_s > 0) rt_register_fnhook_at(ZA_WAIT_PLAYERS, wait_players_hook);
-    if (getenv("LARECOMP_LINK_RESERVE")) g_link_reserve = atoi(getenv("LARECOMP_LINK_RESERVE"));
-    if (g_link_reserve > 0) rt_register_fnhook_at(ZA_RP_SEND, rp_send_hook), rt_register_fnhook_at(ZA_LINK_SEND, link_send_hook);
     { extern void za_options_configure(void); za_options_configure(); }
     {   // (runtime/hle/menu_mouse.c: ui2d pane matrices, the menu navigator's core, the scroll lists' select cell)
         extern void menu_mouse_configure(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t);

@@ -298,6 +298,10 @@ __attribute__((constructor)) static void story_init(void) {
     LOG("[warp] story at phase %d%s\n", g_story, g_story_all ? " for everything" : " for the spawn conditions");
 }
 
+// THIS RELEASE (Z-A 1.3.0): multiplayer is left out for now - the shared world below can't be turned on (WORLD_SHARED 0:
+// no setting, no online server in the relay plugin, no test transport). Its pieces stay: the Lua mod API's characters
+// (hle/newnpc.c: made, dressed, walking, animated) are built on them.
+#define WORLD_SHARED 0
 // ---- The shared world: other players walking around Lumiose (opt-in: larecomp.ini world_players = 1, the launcher's
 // Options > Online tab, with an online server - contrib/lzaserver, signed in - joined through the relay plugin; or LARECOMP_GHOST=<my port>,
 // <peer port>[,<peer host>] for two copies over UDP, a test). Each copy sends its player's position, speed and facing
@@ -1300,7 +1304,9 @@ static void ask_note(uint64_t from, uint32_t code) {
 // looks wait until the answerer's room is up. The answerer says so here (type 9 state 1), the asker's looks then find it
 // at once (they ask the lobby every second too: an older answerer doesn't say). Not linked by the end of TRADE_LINK_S:
 // both are told (state 3), a notice says so, and the game is backed out of its search to the field.
-int ldn_trade_state(void);  // (1 our room open, 2 someone joined it, 4 we joined a room, 8 the game is in Link Play)
+// (1 our room open, 2 someone joined it, 4 we joined a room, 8 the game is in Link Play - the walk-up trade's ldn.c side,
+// not in this release: WORLD_SHARED 0, so never asked)
+static int ldn_trade_state(void) { return 0; }
 void ldn_trade_role(int role, unsigned secs);
 void ldn_trade_partner(int up);
 #define TRADE_LINK_S 75
@@ -2216,7 +2222,7 @@ void ghost_init(void) {  // (the test transport: LARECOMP_GHOST=<my port>,<peer 
     const char *e = getenv("LARECOMP_GHOST");
     int mine = 0, peer = 0;
     char host[64] = "127.0.0.1";
-    if (!e || sscanf(e, "%d,%d,%63s", &mine, &peer, host) < 2) return;
+    if (!WORLD_SHARED || !e || sscanf(e, "%d,%d,%63s", &mine, &peer, host) < 2) return;
     g_udp = socket(AF_INET, SOCK_DGRAM, 0);
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)mine), .sin_addr.s_addr = htonl(INADDR_ANY)};
     if (g_udp < 0 || bind(g_udp, (struct sockaddr *)&a, sizeof a)) { LOG("[world] can't bind UDP %d\n", mine); return; }
@@ -2237,9 +2243,10 @@ void ghost_init(void) {  // (the test transport: LARECOMP_GHOST=<my port>,<peer 
 // the online server's shared world, when the setting is on and the relay plugin has a server (checked once a second)
 static void world_transport(uint64_t frame) {
     static uint64_t checked;
-    if (g_udp_test() || frame - checked < 60) return;
+    if (!WORLD_SHARED || g_udp_test() || frame - checked < 60) return;  // (not in this release: see WORLD_SHARED)
     checked = frame;
-    if (g_settings.world_players) dress_hook_on();  // (our player's outfit: kept as its character is made)
+    const int world_players = 0;  // (the setting world_players: not in this release)
+    if (world_players) dress_hook_on();  // (our player's outfit: kept as its character is made)
     void *plugins_symbol(const char *name);
     if (!w_avail) {
         w_avail = (int (*)(void))plugins_symbol("larecomp_world_available");
@@ -2248,7 +2255,7 @@ static void world_transport(uint64_t frame) {
         w_recv = (int (*)(uint64_t *, void *, size_t))plugins_symbol("larecomp_world_recv");
         if (!w_avail || !w_enable || !w_send || !w_recv) { w_avail = NULL, w_send = NULL, w_recv = NULL; return; }
     }
-    int want = g_settings.world_players && w_avail();
+    int want = world_players && w_avail();
     if (want == g_world) return;
     w_enable(want);
     g_world = want;
@@ -2268,7 +2275,7 @@ static void server_notice_frame(uint64_t frame) {
     static int (*state)(char *, size_t);
     static uint64_t at, told_at;
     static int was = -1, tries;
-    if (frame - at < 60) return;
+    if (!WORLD_SHARED || frame - at < 60) return;  // (no online server in this release)
     at = frame;
     if (!state) {
         if (tries > 30) return;  // (no relay plugin with it - an older one, or none: looked for 30 s, then not again)
@@ -2322,7 +2329,7 @@ static void ghost_frame(uint64_t frame) {
     static float last[3];
     static uint64_t beat_ns;  // (ours 20 a second - the setting world_rate: 30; research LARECOMP_WORLD_RATE=<n>, 5..60)
     if (!beat_ns) {
-        int r = getenv("LARECOMP_WORLD_RATE") ? atoi(getenv("LARECOMP_WORLD_RATE")) : g_settings.world_rate == 30 ? 30 : 20;
+        int r = getenv("LARECOMP_WORLD_RATE") ? atoi(getenv("LARECOMP_WORLD_RATE")) : 20;
         if (r < 5 || r > 60) r = 20;
         beat_ns = 1000000000ull / (uint64_t)r;
         LOG("[world] our position sent %d times a second\n", r);
