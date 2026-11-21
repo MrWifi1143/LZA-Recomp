@@ -1,5 +1,5 @@
-// Legends Lua: the quest library (lib/quest.lua - docs/lua-api.md "Quests"), built in and run after the rest of the
-// API with the same rt table: every mod gets `quest`. #included by legendslua.c (after world.c).
+// Legends Lua: lib/quest.lua, built in and run after the rest of the API with the same rt table: every mod gets `quest`.
+// (This release: a stand-in that answers "not available" - the quest library comes with Legends Studio.) #included by legendslua.c (after world.c).
 static const char k_quest_lua[] = {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wc23-extensions"
