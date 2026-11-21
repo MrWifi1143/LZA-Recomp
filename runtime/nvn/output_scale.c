@@ -7,7 +7,12 @@
 //   .75x / .50x / .25x  of Match display (scaled up to the window - with MetalFX on macOS when chosen)
 //   Dynamic        Match display, lowered in steps while the GPU can't hold 60 fps and raised again when it can
 //                  (each change reallocates the render targets: a short hitch, so it changes rarely, with hysteresis)
-// Test overrides: LARECOMP_SCALE=<f> (render height = 1080 x f), LARECOMP_WIDE_TEST=<f> (forced shape).
+// Aspect ratio (Settings.ultrawide, "Fill the window"): a window wider than 16:9 is filled, Hor+ - the render targets
+// take its shape (reshape_allowed: Legends: Arceus; Legends Z-A makes its screen that shape itself, g_game_image_aspect),
+// the scene camera sees as much more to the sides (Arceus: g_wide_aspect, hle/pla_wide.c; Z-A: hle/za_fixes.c) and the
+// interface stays a centred 16:9 box (nvn/vulkan/exec.c draw_). A window taller than 16:9 keeps 16:9 with bars.
+// Test overrides: LARECOMP_SCALE=<f> (render height = 1080 x f), LARECOMP_WIDE_TEST=<f> (forced shape: the image that
+// much wider than 16:9, fitted to the window - as "Fill the window" would make it for a window of that shape).
 // A plugin's render height (plugin.h set_render_height: a VR mod's headset resolution) comes before the setting.
 #include <math.h>
 #include <stdlib.h>
@@ -69,13 +74,16 @@ static void dyn_update(double now, double gpu_ms, double target_ms) {
 
 double output_scale_dynamic_factor(void) { return g_dyn; }
 
+volatile float g_wide_aspect;
+volatile float g_game_image_aspect;
+
 void output_scale(double dw, double dh, bool reshape_allowed, double now, double gpu_ms, OutScale *o) {
     double fit = fmin(dw / 1920.0, dh / 1080.0);
     static double forced = -1, wide_test = -1;
     if (forced < 0) forced = getenv("LARECOMP_SCALE") ? atof(getenv("LARECOMP_SCALE")) : 0;
     if (wide_test < 0) wide_test = getenv("LARECOMP_WIDE_TEST") ? atof(getenv("LARECOMP_WIDE_TEST")) : 0;
     double shape = wide_test > 0 ? wide_test : (dw / dh) / (16.0 / 9.0);
-    bool reshape = reshape_allowed && fabs(shape - 1.0) > 0.005;
+    bool reshape = (reshape_allowed || wide_test > 0) && fabs(shape - 1.0) > 0.005;
     if (!reshape) shape = 1.0;
     // render height in units of the Switch's 1080 lines
     double h;
@@ -99,15 +107,19 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
     }
     h = fmax(h, 0.1);  // (.25x of a small window)
     extern volatile float g_plugin_render_shape;  // (runtime/plugin.c: a VR mod's eye)
-    bool plug_shape = g_plugin_render_shape > 0;
-    if (plug_shape) shape = g_plugin_render_shape / (16.0 / 9.0);
+    // (an image the game makes in its own shape - Legends Z-A's ultrawide screen - is fitted like a plugin's)
+    float fixed = g_plugin_render_shape > 0 ? g_plugin_render_shape : g_game_image_aspect;
+    bool plug_shape = fixed > 0;
+    if (plug_shape) shape = fixed / (16.0 / 9.0);
     double sx = h * shape, sy = h;
     double cap = fmin(MAX_TEX / (1920.0 * sx), MAX_TEX / (1080.0 * sy));
     if (cap < 1.0) { sx *= cap; sy *= cap; }
     o->sx = sx; o->sy = sy; o->shape = shape;
     // where the image goes in the window: fills it when reshaped, else a fitted 16:9 box (a plugin's shape: fitted)
+    // the scene camera's aspect: the reshaped image's (a plugin's shape is its own business)
+    g_wide_aspect = reshape && !plug_shape ? (float)(shape * 16.0 / 9.0) : 0.0f;
     if (plug_shape) {
-        double a = g_plugin_render_shape, f2 = fmin(dw / a, dh);
+        double a = fixed, f2 = fmin(dw / a, dh);
         o->vw = a * f2, o->vh = f2;
     } else if (reshape) { o->vw = dw; o->vh = dh; }
     else { o->vw = 1920.0 * fit; o->vh = 1080.0 * fit; }

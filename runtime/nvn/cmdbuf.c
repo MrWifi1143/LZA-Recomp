@@ -155,11 +155,32 @@ static int obj_hook(Cpu *c, uint64_t addr) {
     return 1;  // (the original ran)
 }
 // Before a draw or a command list call: a CMD_OBJECT when the object changed since the list's last one.
+static void ui_mark(Cpu *c, NvnCmdBuf *cb);
 static void obj_mark(Cpu *c, NvnCmdBuf *cb) {
+    ui_mark(c, cb);
     if (cb->obj_tag == g_obj_tag) return;
     CmdRec *r = rec(c, cb, CMD_OBJECT, 0);
     r->x[0] = g_obj_tag;
     cb->obj_tag = g_obj_tag;
+}
+
+// The game's interface (runtime/hle/gameui.c): a layout drawn with a fitting of its own (anchored to an edge, as wide
+// as the screen...) names it before its draws - a CMD_UI when it changed since the list's last one (exec.c draw_).
+uint32_t gameui_draw_mode(void);
+uint32_t gameui_draw_extra(uint32_t *img, int *copy, float f[5]);
+static void ui_mark(Cpu *c, NvnCmdBuf *cb) {
+    uint32_t m = gameui_draw_mode(), img;
+    int copy;
+    float f[5];
+    uint32_t v = gameui_draw_extra(&img, &copy, f);
+    if (cb->ui_mode == m && cb->ui_ver == v) return;
+    CmdRec *r = rec(c, cb, CMD_UI, 0);
+    r->x[0] = m, r->x[1] = img, r->x[2] = (uint64_t)copy;  // (a pane's image; a copy: f = its offset x y, scale, centre x y)
+    uint32_t cy;
+    memcpy(&cy, &f[4], 4);
+    r->x[3] = cy;
+    memcpy(r->f, f, sizeof r->f);
+    cb->ui_mode = m, cb->ui_ver = v;
 }
 
 static void draw_chain(Cpu *c, const char *kind, uint64_t count);
@@ -177,6 +198,8 @@ NVN(nvnCommandBufferBeginRecording) {
     }
     NvnCmdBuf *cb = cb_of(A(0));
     cb->obj_tag = 0;
+    cb->ui_ver = ~0u;
+    cb->ui_mode = ~0u;  // (a list's first draw names its layout - or none: the list may be called from one that had one)
     cb->recording = true;
     rec(c, cb, CMD_BARRIER, 0);  // makes sure memory exists; the list starts here
     cb->start = cb->mem + cb->used - sizeof(CmdRec);

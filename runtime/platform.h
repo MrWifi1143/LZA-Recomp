@@ -32,6 +32,9 @@ int plat_protect(uint64_t addr, uint64_t size, int prot);  // 0 on success
 // ---- time
 uint64_t plat_now_ns(void);                // monotonic
 int plat_cpu_count(void);                  // logical CPUs this process may run on (its affinity mask)
+// this process's memory in RAM (resident / working set) and committed (private), the PC's free and total RAM, in MB
+// (0 where unknown)
+void plat_mem_info(uint64_t *rss_mb, uint64_t *commit_mb, uint64_t *avail_mb, uint64_t *total_mb);
 // x86-64-v3's AVX2 + FMA + BMI2, usable (the OS saves the AVX state): what the lifted code is compiled for. CPUID itself, not
 // __builtin_cpu_supports: zig's compiler runtime for Windows has no __cpu_model.
 #if defined(__x86_64__)

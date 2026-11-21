@@ -7,6 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "modapi.h"
+#include "worldapi.h"
+#include "mods.h"
 #include "paths.h"
 #include "plugin.h"
 #include "rt.h"
@@ -36,6 +39,17 @@ uint64_t game_title_id(void);
 #define MAX_PLUGINS 8
 static LarecompPluginHooks g_hooks[MAX_PLUGINS];
 static int g_n;
+static void *g_handles[MAX_PLUGINS];
+
+// A function a loaded plugin exports by name (the first that has it; NULL: none) - optional extras outside the API
+// struct (the Steam relay's larecomp_relay_invite / larecomp_relay_join: runtime/discord.c)
+void *plugins_symbol(const char *name) {
+    for (int i = 0; i < g_n; i++) {
+        void *f = g_handles[i] ? dl_sym(g_handles[i], name) : NULL;
+        if (f) return f;
+    }
+    return NULL;
+}
 static pthread_mutex_t g_queue = PTHREAD_MUTEX_INITIALIZER;
 
 void vk_queue_lock(void) { pthread_mutex_lock(&g_queue); }
@@ -139,8 +153,15 @@ static void load_one(const char *path) {
     LarecompPluginHooks hk = {0};
     int r = init(&g_api, &hk);
     if (r) { LOG("[plugin] %s stays out (%d)\n", path, r); dl_close(h); return; }
+    g_handles[g_n] = h;
     g_hooks[g_n++] = hk;
     if (hk.cbuf_bound) g_plugins_cbuf = 1;
+    // (the mod API - npc / player / ui for scripts, runtime/modapi.h: to a plugin that asks for it)
+    void (*take)(const LarecompModApi *) = (void (*)(const LarecompModApi *))dl_sym(h, "larecomp_plugin_modapi");
+    if (take) take(modapi_get());
+    // (the world API - networking, the player held, the party, battles, traces, weather, runtime/worldapi.h: the same way)
+    void (*take_w)(const LarecompWorldApi *) = (void (*)(const LarecompWorldApi *))dl_sym(h, "larecomp_plugin_worldapi");
+    if (take_w) take_w(worldapi_get());
     LOG("[plugin] loaded %s\n", path);
 }
 
@@ -157,7 +178,14 @@ bool plugin_listed(const char *list, const char *name) {
 // Plugins that are off until the player switches them on (the start screen's Mods page): ones that change what the
 // game does with other people or the PC - the Steam relay (Steam shows "Playing Spacewar"), Legends Lua (runs scripts)
 bool plugin_opt_in(const char *name) { return strstr(name, "steamrelay") != NULL || strstr(name, "legendslua") != NULL; }
+// A mod that is on and carries scripts (mods/<name>/lua/) brings Legends Lua with it: a mod is switched on for what it
+// does, its scripts included - without such a mod nothing is loaded (no cost)
+static bool mods_need_lua(void) {
+    char dirs[MODS_MAX][256];
+    return mod_lua_dirs(dirs, MODS_MAX) > 0;
+}
 bool plugin_enabled(const char *name) {
+    if (strstr(name, "legendslua") && mods_need_lua()) return true;
     return plugin_opt_in(name) ? plugin_listed(g_settings.plugins_on, name) : !plugin_listed(g_settings.plugins_off, name);
 }
 
@@ -228,6 +256,8 @@ void plugins_load(void) {
                     LOG("[plugin] plugins/%s is switched off\n", e->d_name);
                     continue;
                 }
+                if (strstr(e->d_name, "legendslua") && !plugin_listed(g_settings.plugins_on, e->d_name))
+                    LOG("[plugin] plugins/%s: on for the scripts of the mods that are on\n", e->d_name);
                 char path[1024];
                 snprintf(path, sizeof path, "plugins/%s", e->d_name);
                 load_one(path);

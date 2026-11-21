@@ -86,7 +86,7 @@ OSFLAGS  := -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -D_CRT_RAND_S 
 GENARCH  ?= -march=x86-64-v3  # AVX2 + FMA for the lifted FP/SIMD code (simd.h); override for older CPUs
 GENFLAGS += -D_FILE_OFFSET_BITS=64 $(GENARCH)
 LDFLAGS  := -fuse-ld=lld -Wl,--stack,16777216 $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
-            -lvulkan-1 -lwinmm -lole32 -lshell32 -lcomdlg32 -luuid -lws2_32 -lwinhttp -lshaderc_shared \
+            -lvulkan-1 -lwinmm -lole32 -lshell32 -lcomdlg32 -luuid -lws2_32 -lwinhttp -lbcrypt -lshaderc_shared \
             $(if $(RELEASE),-Wl$(comma)--subsystem$(comma)windows)  # release: no console window (log -> lasrecomp.log)
 BACKEND_SRC := $(wildcard runtime/nvn/vulkan/*.c) $(wildcard runtime/nvn/vulkan/*.cpp)
 BACKEND_OBJ := $(patsubst runtime/%.cpp,$(B)/rt/%.o,$(patsubst runtime/%.c,$(B)/rt/%.o,$(BACKEND_SRC)))
@@ -127,6 +127,23 @@ GAMELIB_SRCS := tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools
 GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS) $(PGO_ZST); echo '$(GENFLAGS)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
 
 RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
+# (the Mbed TLS rules below come before `all`: without this a bare `make` built only build/libmbedtls.a)
+.DEFAULT_GOAL := all
+# Mbed TLS (third_party/mbedtls, configuration lza_mbedtls_config.h): the online server's accounts and save sync over
+# TLS (runtime/acct.c; the server: contrib/lzaserver). A static library: only what is used is linked.
+MBEDTLS_SRC   := $(wildcard third_party/mbedtls/library/*.c)
+MBEDTLS_OBJ   := $(patsubst third_party/mbedtls/library/%.c,$(B)/mbedtls/%.o,$(MBEDTLS_SRC))
+MBEDTLS_LIB   := $(B)/libmbedtls.a
+LLVM_AR       ?= $(if $(shell command -v llvm-ar),llvm-ar,ar)
+MBEDTLS_FLAGS := -Ithird_party/mbedtls/include -Ithird_party/mbedtls '-DMBEDTLS_CONFIG_FILE="lza_mbedtls_config.h"'
+$(B)/mbedtls/%.o: third_party/mbedtls/library/%.c third_party/mbedtls/lza_mbedtls_config.h
+	@mkdir -p $(dir $@)
+	@$(CC) -O2 -g $(MBEDTLS_FLAGS) -Ithird_party/mbedtls/library $(OSFLAGS) $(ARMARCH) $(if $(filter linux,$(PLATFORM)),-fPIC) -c $< -o $@
+$(MBEDTLS_LIB): $(MBEDTLS_OBJ)
+	@rm -f $@
+	$(LLVM_AR) rcs $@ $^
+$(B)/rt/acct.o: RTFLAGS += $(MBEDTLS_FLAGS)
+$(B)/rt/acct.o: third_party/mbedtls/lza_mbedtls_config.h runtime/acct_proto.h
 RTFLAGS  := -O2 -g -fno-strict-aliasing -fdenormal-fp-math=dynamic -Wall -Wno-unused-function -Iruntime -Iruntime/nvn -Ithird_party $(DEPINC) $(OSFLAGS) $(ARMARCH)
 CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn -Ithird_party $(DEPINC)
 
@@ -178,14 +195,14 @@ $(B)/inc/smaa_hlsl.inc: third_party/smaa/SMAA.hlsl
 $(B)/rt/nvn/smaa_data.o: $(B)/inc/smaa_hlsl.inc
 $(B)/rt/nvn/smaa_data.o: RTFLAGS += -I$(B)/inc -Ithird_party/smaa/Textures
 
-$(B)/rt/%.o: runtime/%.cpp $(RT_HDRS)
+$(B)/rt/%.o: runtime/%.cpp $(RT_HDRS) $(IMGUI)/imconfig.h
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(OSFLAGS) -c $< -o $@
 
 # linked to a temp file, then renamed over: a copy of the game still running keeps its (old) file. The temp file keeps
 # the real name (in a folder of its own): on Windows the import library records the name the game code library loads
 # it by.
-$(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ)
+$(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ) $(MBEDTLS_LIB)
 	@mkdir -p $(dir $@)link
 	$(CXX) -o $(dir $@)link/$(notdir $@) $^ $(LDFLAGS)
 	mv -f $(dir $@)link/$(notdir $@) $@
@@ -196,15 +213,15 @@ $(GAMELIB): $(GEN_OBJ) | $(EXE)
 	mv -f $@.tmp $@
 	echo $(GAMELIB_ID) > $@.id
 
-$(B)/rt/ui/%.o: runtime/ui/%.mm $(RT_HDRS)
+$(B)/rt/ui/%.o: runtime/ui/%.mm $(RT_HDRS) $(IMGUI)/imconfig.h
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(UIFLAGS) -c $< -o $@
 
-$(B)/imgui/%.o: $(IMGUI)/%.cpp
+$(B)/imgui/%.o: $(IMGUI)/%.cpp $(IMGUI)/imconfig.h
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(B)/imgui/imgui_impl_%.o: $(IMGUI)/backends/imgui_impl_%.cpp
+$(B)/imgui/imgui_impl_%.o: $(IMGUI)/backends/imgui_impl_%.cpp $(IMGUI)/imconfig.h
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -261,6 +278,23 @@ $(RELAYH): contrib/steamrelay/steamrelay.c
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -Wall -DRELAY_HELPER $< -o $@ $(RELAYH_LIBS)
 
+# The online server (contrib/lzaserver): anyone can run it; players put its address in the Mods page (Online server)
+# and Link Play goes through it - players with the same Link Code meet there. Not part of the game.
+# Its accounts + save sync (lzaserver_accounts.c) use the same Mbed TLS as the game (below) and Monocypher's Argon2id.
+ifeq ($(PLATFORM),windows)
+LZASERVER := $(B)/lzaserver.exe
+LZASERVER_LIBS := -lws2_32 -lbcrypt -lpthread
+else
+LZASERVER := $(B)/lzaserver
+LZASERVER_LIBS := -lpthread
+endif
+lzaserver: $(LZASERVER)
+$(LZASERVER): contrib/lzaserver/lzaserver.c contrib/lzaserver/lzaserver_accounts.c contrib/lzaserver/lzaserver_accounts.h \
+              runtime/acct_proto.h $(MBEDTLS_LIB) third_party/monocypher/monocypher.c
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -Wall $(MBEDTLS_FLAGS) -Iruntime -Ithird_party contrib/lzaserver/lzaserver.c contrib/lzaserver/lzaserver_accounts.c \
+	    third_party/monocypher/monocypher.c $(MBEDTLS_LIB) -o $@ $(LZASERVER_LIBS)
+
 # Legends Lua (contrib/legendslua): Lua scripting of the game (hooks, memory, calls; scripts in <game folder>/lua/).
 # In <game folder>/plugins/; off until switched on in the Mods page.
 ifeq ($(PLATFORM),windows)
@@ -271,8 +305,8 @@ LUAMOD := $(B)/plugins/liblegendslua.so
 LUAMOD_FLAGS := -fPIC -DLUA_USE_POSIX -lpthread -lm
 endif
 legendslua: $(LUAMOD)
-$(LUAMOD): contrib/legendslua/legendslua.c runtime/plugin.h $(wildcard third_party/lua/*.c third_party/lua/*.h)
+$(LUAMOD): contrib/legendslua/legendslua.c contrib/legendslua/ext.c $(wildcard contrib/legendslua/*.lua) contrib/legendslua/questlib.c $(wildcard contrib/legendslua/lib/*.lua) runtime/plugin.h runtime/modapi.h runtime/hud.h contrib/legendslua/world.c runtime/worldapi.h $(wildcard third_party/lua/*.c third_party/lua/*.h)
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -Wall -shared -Iruntime -Ithird_party $(DEPINC) $< $(wildcard third_party/lua/*.c) -o $@ $(LUAMOD_FLAGS)
 
-.PHONY: all gen gen-objs runtime-objs win-exe dist steamrelay legendslua
+.PHONY: all gen gen-objs runtime-objs win-exe dist steamrelay legendslua lzaserver

@@ -959,9 +959,11 @@ void backend_present(NvnTexture *t) {
         output_scale(dw, dh, false, SDL_GetTicksNS() / 1e9, vk_gpu_frame_update(), &os);
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh;
         float crop[4] = {0, 0, 1, 1};  // uv origin and size: the whole image
-        {   // where the game image is in the window (pixels): the mouse as a finger on the touch screen (hle/input.c)
+        {   // where the game image is in the window (pixels): the mouse as a finger on the touch screen (hle/input.c) - in an
+            // image of another shape than 16:9 (ultrawide), the interface's centred 16:9 box in it (exec.c draw_)
             extern double g_present_rect[4];
-            g_present_rect[0] = vx, g_present_rect[1] = vy, g_present_rect[2] = vw, g_present_rect[3] = vh;
+            double bw = fmin(vw, vh * (16.0 / 9.0)), bh = fmin(vh, vw * (9.0 / 16.0));
+            g_present_rect[0] = vx + (vw - bw) / 2, g_present_rect[1] = vy + (vh - bh) / 2, g_present_rect[2] = bw, g_present_rect[3] = bh;
         }
         renderer_set_scale((float)sx, (float)sy);
         VkCommandBuffer cb = vk_cmd();
@@ -1002,6 +1004,16 @@ void backend_present(NvnTexture *t) {
                 snprintf(lpath, sizeof lpath, "build/frames/%s_%ld.png", final ? "fin" : "mid", list[i]);
                 path = lpath;
             }
+        {   // (testing) LARECOMP_LIVE=<dir>: <dir>/wshot appears -> the next window image, the overlay on it (notices,
+            // speech bubbles, the menu), as <dir>/win_<frame>.png; the request file is removed once taken
+            static char wpath[600];
+            const char *dir = ENV("LARECOMP_LIVE");
+            if (final && dir && !path && total_frames % 4 == 0) {
+                char req[560];
+                snprintf(req, sizeof req, "%s/wshot", dir);
+                if (!remove(req)) snprintf(wpath, sizeof wpath, "%s/win_%06llu.png", dir, (unsigned long long)total_frames), path = wpath;
+            }
+        }
         vk_frame_end(path);
         if (final && shot && ENV("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
     } else {
@@ -1591,6 +1603,30 @@ void backend_present(NvnTexture *t) {
         if (last_fps_time > 0)
             LOG("[vk] t=%.1f frame %llu %.1f fps max %.0fms (%s)\n", now, (unsigned long long)total_frames,
                 frames / (now - last_fps_time), max_gap * 1000.0, renderer_stats());
+            {   // memory every 30 s: a PC short of RAM swaps and the game crawls with the GPU idle (8 GB + integrated GPU,
+                // 2026-11-14 - the logs couldn't show it). The game's RAM, the PC's free RAM, the GPU heaps' use / budget.
+                static double mem_at;
+                if (now - mem_at >= 30) {
+                    mem_at = now;
+                    uint64_t rss, commit, avail, total;
+                    plat_mem_info(&rss, &commit, &avail, &total);
+                    char gpu[200] = "";
+                    if (g_vk.vma) {
+                        VmaBudget bud[VK_MAX_MEMORY_HEAPS];
+                        vmaGetHeapBudgets(g_vk.vma, bud);
+                        const VkPhysicalDeviceMemoryProperties *mp;
+                        vmaGetMemoryProperties(g_vk.vma, &mp);
+                        int n = 0;
+                        for (uint32_t h = 0; h < mp->memoryHeapCount && h < 3; h++)
+                            n += snprintf(gpu + n, sizeof gpu - n, "%s%llu/%llu", h ? ", " : "; GPU heaps (MB used/budget) ",
+                                          (unsigned long long)(bud[h].usage >> 20), (unsigned long long)(bud[h].budget >> 20));
+                    }
+                    extern unsigned vk_gmem_imported_mb(void);
+                    LOG("[mem] game %llu MB in RAM (%llu MB committed), PC %llu MB free of %llu; guest heap imported %u MB%s\n",
+                        (unsigned long long)rss, (unsigned long long)commit, (unsigned long long)avail, (unsigned long long)total,
+                        vk_gmem_imported_mb(), gpu);
+                }
+            }
             {   // (research, LARECOMP_MEM_LOG=1: GPU memory per heap - what VMA holds, what the driver counts, the budget)
                 static int on = -1;
                 if (on < 0) on = ENV("LARECOMP_MEM_LOG") != NULL;
@@ -1623,6 +1659,10 @@ void vk_shaders_init(void);
 // exit() from any thread: let the GPU finish, keep the pipeline cache, then end the process without the DLL
 // teardown (driver / validation-layer threads can stall it for minutes while the game's threads still run).
 static void quick_exit_handler(void) {
+    {   // (an online account's save sync: the last save's upload first - runtime/acct.c)
+        extern void acct_exit(void);
+        acct_exit();
+    }
     static int trace = -1;
     if (trace < 0) trace = ENV("LARECOMP_VK_TRACE") != NULL;
     if (trace) LOG("[vk] exit: waiting for the GPU\n");
@@ -1730,6 +1770,10 @@ int ui_run(void) {
                 if (bind_capture_event(&e)) continue;
             }
             if (menu_handle_event(&e)) continue;
+            {   // (scripts' keyboard / mouse: runtime/hle/scriptinput.c - a script's menu keeps the mouse from the game)
+                extern bool scriptinput_event(const SDL_Event *e);
+                if (scriptinput_event(&e)) continue;
+            }
             input_handle_event(&e);
         }
         menu_apply_window_requests(window);

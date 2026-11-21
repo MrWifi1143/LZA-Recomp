@@ -5,6 +5,15 @@
 // happens (tried again every 20 s). Off with larecomp.ini discord_presence = 0 (the launcher's Options).
 // The same file in both games (runtime/discord.c in LegendsA and LegendsZA): keep them in step.
 // LARECOMP_DISCORD_APP_ID=<id> uses another Discord application (tests); LARECOMP_DISCORD_LOG=1 logs the traffic.
+//
+// Invites (with the Steam relay plugin on: contrib/steamrelay): while this copy hosts a Link Trade / Private Battle
+// network, the status is joinable - Discord friends get Join on it and the chat's + > Invite card. The join secret
+// is "<host Steam id>.<token>.<Link Code>": the relay lets in whoever brings the token (larecomp_relay_invite /
+// larecomp_relay_join), and the joining copy fills the code into its Link Code box (runtime/hle/swkbd.c). Joining
+// doesn't move anyone in the game: the player still goes to the trade (Simona / Link Play) and confirms the code.
+// Asking to join isn't accepted by the game (anyone in a shared server sees the status): the host sends a friend the
+// chat's invite card, and that friend's Join takes it.
+// LARECOMP_DISCORD_JOIN=<secret> (tests): as if Discord had sent that join.
 #include <SDL3/SDL.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -40,6 +49,11 @@ static char g_area[64];             // where the player is ("" unknown)
 static int64_t g_start;             // when the game (or the launcher) was started (unix seconds)
 static volatile bool g_running;
 static bool g_log;
+static char g_code[16];       // the Link Code this copy last entered (8 digits): its invites carry it
+static char g_join_code[16];  // the code of an invite taken, for the next Link Code box
+static uint64_t g_join_at;    // (when: an invite's code is offered for 30 minutes)
+void *plugins_symbol(const char *name);  // runtime/plugin.c
+void menu_notice_for(const char *text, unsigned ms);  // runtime/ui/menu.mm
 
 #ifdef _WIN32
 static HANDLE g_pipe = INVALID_HANDLE_VALUE;
@@ -206,6 +220,16 @@ static void jesc(char *out, size_t size, const char *s) {
 
 static bool is_pla(void) { return RT_SHOT_PREFIX[0] == 'P'; }
 
+// The Steam relay plugin's invite functions (NULL: no relay)
+static int relay_invite(char *out, size_t size) {
+    int (*f)(char *, size_t) = (int (*)(char *, size_t))plugins_symbol("larecomp_relay_invite");
+    return f ? f(out, size) : 0;
+}
+static int relay_join(const char *secret) {
+    int (*f)(const char *) = (int (*)(const char *))plugins_symbol("larecomp_relay_join");
+    return f ? f(secret) : -1;
+}
+
 // The activity as JSON (the SET_ACTIVITY args), from the settings and where the player is
 static void build_activity(char *out, size_t size, uint64_t nonce) {
     char details[96], state[96], large[128], de[200], se[200], le[260];
@@ -225,20 +249,82 @@ static void build_activity(char *out, size_t size, uint64_t nonce) {
     else if (res) snprintf(state, sizeof state, "%s \xC2\xB7 %s", res, rate);
     else snprintf(state, sizeof state, "%s", rate);
     snprintf(large, sizeof large, "%s v%s", RT_APP_NAME, RT_APP_VERSION);
+    // hosting with the relay: joinable (party + join secret; Discord takes no buttons with a secret)
+    char secret[96] = "", party[64] = "", extra[400];
+    if (screen == 1 && relay_invite(secret, sizeof secret - 20)) {
+        SDL_LockMutex(g_lock);
+        size_t k = strlen(secret);
+        snprintf(secret + k, sizeof secret - k, ".%s", g_code);
+        SDL_UnlockMutex(g_lock);
+        snprintf(party, sizeof party, "lza-%.*s", (int)strcspn(secret, "."), secret);
+        snprintf(details, sizeof details, "%s", is_pla() ? "Waiting for a Link Trade partner" : "Waiting for a Link Play partner");
+    }
+    if (secret[0])
+        snprintf(extra, sizeof extra, "\"party\":{\"id\":\"%s\",\"size\":[1,2]},\"secrets\":{\"join\":\"%s\"}", party, secret);
+    else
+        snprintf(extra, sizeof extra, "\"buttons\":[{\"label\":\"Get the recomp\",\"url\":\"https://github.com/MrWifi1143/LZA-Recomp\"},"
+                                      "{\"label\":\"Discord\",\"url\":\"https://discord.gg/wxqppgye97\"}]");
     jesc(de, sizeof de, details), jesc(se, sizeof se, state), jesc(le, sizeof le, large);
     snprintf(out, size,
              "{\"cmd\":\"SET_ACTIVITY\",\"nonce\":\"%llu\",\"args\":{\"pid\":%d,\"activity\":{"
              "\"details\":\"%s\",\"state\":\"%s\",\"timestamps\":{\"start\":%lld},"
              "\"assets\":{\"large_image\":\"https://raw.githubusercontent.com/MrWifi1143/%s/main/icon.png\",\"large_text\":\"%s\"},"
-             "\"buttons\":[{\"label\":\"Get the recomp\",\"url\":\"https://github.com/MrWifi1143/LZA-Recomp\"},"
-             "{\"label\":\"Discord\",\"url\":\"https://discord.gg/wxqppgye97\"}]}}}",
+             "%s}}}",
              (unsigned long long)nonce,
 #ifdef _WIN32
              (int)GetCurrentProcessId(),
 #else
              (int)getpid(),
 #endif
-             de, se, (long long)start, is_pla() ? "PLA-Recomp" : "ZA-Recomp", le);
+             de, se, (long long)start, is_pla() ? "PLA-Recomp" : "ZA-Recomp", le, extra);
+}
+
+// The string value of "key":"..." after the first anchor in json (no escapes kept); false: not there
+static bool jstr(const char *json, const char *anchor, const char *key, char *out, size_t size) {
+    const char *p = anchor ? strstr(json, anchor) : json;
+    if (!p) return false;
+    char k[64];
+    snprintf(k, sizeof k, "\"%s\":\"", key);
+    p = strstr(p, k);
+    if (!p) return false;
+    p += strlen(k);
+    size_t n = 0;
+    while (*p && *p != '"' && n + 1 < size) {
+        if (*p == '\\' && p[1]) p++;
+        out[n++] = *p++;
+    }
+    out[n] = 0;
+    return true;
+}
+
+// An invite taken (Discord's ACTIVITY_JOIN, or LARECOMP_DISCORD_JOIN): the relay lets the host in, the code waits
+// for the Link Code box, and the player is told where to go
+static void take_invite(const char *secret) {
+    char relay[64] = "", code[16] = "";
+    const char *last = strrchr(secret, '.');
+    if (!last || last == secret) return;
+    snprintf(relay, sizeof relay, "%.*s", (int)(last - secret) < 63 ? (int)(last - secret) : 63, secret);
+    snprintf(code, sizeof code, "%s", last + 1);
+    int r = relay_join(relay);
+    LOG("[discord] invite taken: relay %s, Link Code %s\n", r > 0 ? "joining the host" : r == 0 ? "refused the invite" : "not on",
+        code[0] ? "known" : "not set");
+    if (r < 0) {
+        menu_notice_for("Discord invite: switch on the Steam relay first\n(launcher > Mods > Steam relay, then start the game again).", 15000);
+        return;
+    }
+    if (r == 0) return;
+    SDL_LockMutex(g_lock);
+    snprintf(g_join_code, sizeof g_join_code, "%s", code);
+    g_join_at = SDL_GetTicks();
+    SDL_UnlockMutex(g_lock);
+    char msg[320];
+    if (is_pla())
+        snprintf(msg, sizeof msg, "Joined a Discord friend's Link Trade.\nGo to Simona in the Galaxy Hall and pick a Link Trade (nearby)%s.",
+                 code[0] ? ": their Link Code is filled in" : "");
+    else
+        snprintf(msg, sizeof msg, "Joined a Discord friend's Link Play.\nOpen Link Play (Link Trade or Private Battle, nearby)%s.",
+                 code[0] ? ": their Link Code is filled in" : "");
+    menu_notice_for(msg, 20000);
 }
 
 static int dc_thread(void *arg) {
@@ -251,7 +337,19 @@ static int dc_thread(void *arg) {
         bool on = g_settings.discord_presence;
         if (!CONNECTED && on && now >= next_try) {
             if (!dc_connect()) next_try = now + 20000;
+            else {  // (invites: a join, and friends asking to join)
+                char sub[160];
+                snprintf(sub, sizeof sub, "{\"cmd\":\"SUBSCRIBE\",\"evt\":\"ACTIVITY_JOIN\",\"nonce\":\"%llu\",\"args\":{}}", (unsigned long long)nonce++);
+                dc_send(OP_FRAME, sub);
+                snprintf(sub, sizeof sub, "{\"cmd\":\"SUBSCRIBE\",\"evt\":\"ACTIVITY_JOIN_REQUEST\",\"nonce\":\"%llu\",\"args\":{}}", (unsigned long long)nonce++);
+                dc_send(OP_FRAME, sub);
+            }
             sent[0] = 0;
+        }
+        {   // (tests: a join as if from Discord)
+            static bool test_done;
+            const char *t = getenv("LARECOMP_DISCORD_JOIN");
+            if (t && !test_done && g_screen == 1 && now > 15000) test_done = true, take_invite(t);
         }
         if (CONNECTED) {
             for (int k = 0; k < 8; k++) {  // (whatever Discord sent: answers, pings)
@@ -261,7 +359,19 @@ static int dc_thread(void *arg) {
                 uint32_t op;
                 if (!dc_recv(&op, buf, sizeof buf)) { dc_close(); break; }
                 if (op == OP_PING) dc_send(OP_PONG, buf);
-                else if (op == OP_CLOSE) { LOG("[discord] Discord closed the connection: %.200s\n", buf); dc_close(); break; }
+                else if (op == OP_FRAME && strstr(buf, "\"evt\":\"ACTIVITY_JOIN\"")) {
+                    char secret[128];
+                    if (jstr(buf, "\"data\"", "secret", secret, sizeof secret)) take_invite(secret);
+                } else if (op == OP_FRAME && strstr(buf, "\"evt\":\"ACTIVITY_JOIN_REQUEST\"")) {
+                    // (someone asks to join: not let in from here - the status is seen in every shared server. The
+                    // player lets a friend in by sending them Discord's invite card: chat + > Invite)
+                    char name[64] = "", msg[200];
+                    jstr(buf, "\"user\"", "username", name, sizeof name);
+                    snprintf(msg, sizeof msg, "%s asked to join on Discord.\nTo let them in, invite them from a chat: + > Invite to %s.",
+                             name[0] ? name : "Someone", RT_APP_NAME);
+                    menu_notice_for(msg, 10000);
+                    LOG("[discord] %s asked to join (not accepted here: an invite from the chat lets them in)\n", name[0] ? name : "someone");
+                } else if (op == OP_CLOSE) { LOG("[discord] Discord closed the connection: %.200s\n", buf); dc_close(); break; }
             }
         }
         if (CONNECTED) {
@@ -348,4 +458,24 @@ void discord_file_read(const char *path) {
         if (n >= 0 && n < (int)(sizeof names / sizeof *names)) discord_set_area(names[n]);
         else discord_set_area("");
     }
+}
+
+// A Link Code box answered (runtime/hle/swkbd.c): an 8-digit code is this copy's room - its invites carry it
+void discord_link_code_entered(const char *text, int max_len) {
+    if (!g_lock || max_len != 8 || strlen(text) != 8 || strspn(text, "0123456789") != 8) return;
+    SDL_LockMutex(g_lock);
+    snprintf(g_code, sizeof g_code, "%s", text);
+    g_join_code[0] = 0;  // (an invite's code used, or another typed in its place)
+    SDL_UnlockMutex(g_lock);
+}
+
+// A Link Code box opening: the code of an invite taken in the last 30 minutes, to fill in (1)
+int discord_link_code_prefill(char *out, size_t size, int max_len) {
+    if (!g_lock || max_len != 8) return 0;
+    SDL_LockMutex(g_lock);
+    int ok = g_join_code[0] && SDL_GetTicks() - g_join_at < 30 * 60 * 1000;
+    if (ok) snprintf(out, size, "%s", g_join_code);
+    SDL_UnlockMutex(g_lock);
+    if (ok) LOG("[discord] Link Code box: the invite's code filled in\n");
+    return ok;
 }

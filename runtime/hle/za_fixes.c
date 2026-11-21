@@ -28,6 +28,7 @@
 #include <time.h>
 #include <stdatomic.h>
 
+#include "../gameui.h"
 #include "../hle.h"
 #include "../settings.h"
 #include "../platform.h"
@@ -220,8 +221,31 @@ static int timeline_step(Cpu *c, uint64_t addr) {
 // the docked entry of the render pipeline's screen sizes and the size its targets are made at (two constants), all
 // before the renderer is made. Every pass then agrees on it, as on the Switch 2. The internal resolution option picks
 // it: render_height lines (1440: 2560x1440, scene 1664x936), 1080 x the multiplier, or the display's height (Match
-// display; the 75 / 50 / 25 % choices of it); 16:9 (a VR plugin's: its eye's shape), multiples of 8. LARECOMP_ZA_RES=<w>x<h>
-// sets it directly.
+// display; the 75 / 50 / 25 % choices of it); 16:9 (a VR plugin's: its eye's shape; Aspect ratio "Fill the window": the
+// window's, below), multiples of 8. LARECOMP_ZA_RES=<w>x<h> sets it directly.
+//
+// Ultrawide (Settings.ultrawide, "Fill the window"; at the next start): a window wider than 16:9 - or the display, when
+// the game goes fullscreen - makes the screen that shape, Hor+: the same height, the world seen wider. Every pass follows
+// the screen size, but the game keeps its cameras at 16:9 (the image came out stretched across) - wide_cam_hook below
+// widens them - and its interface's 1920 x 1080 layout space is stretched to the screen: drawn into a centred 16:9 box
+// instead (nvn/vulkan/exec.c draw_). The window then shows the image fitted at its shape (output_scale.c,
+// g_game_image_aspect).
+static double window_aspect(void) {  // (the window's shape as the game starts, 0: not known)
+    bool video = SDL_WasInit(SDL_INIT_VIDEO);
+    extern SDL_Window *ui_window(void);  // (nvn/vulkan/device.c)
+    SDL_Window *win = video ? ui_window() : NULL;
+    // fullscreen: the display's (the window may not have its fullscreen size yet - or not be made yet, without the start
+    // screen: nvn/vulkan/device.c makes it fullscreen at once); test windows stay windows
+    if (video && g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) {
+        const SDL_DisplayMode *dm = SDL_GetDesktopDisplayMode(win ? SDL_GetDisplayForWindow(win) : SDL_GetPrimaryDisplay());
+        if (dm && dm->w > 0 && dm->h > 0) return (double)dm->w / dm->h;
+    }
+    int ww = 0, wh = 0;
+    if (win) SDL_GetWindowSizeInPixels(win, &ww, &wh);
+    else if (getenv("LARECOMP_WINDOW")) sscanf(getenv("LARECOMP_WINDOW"), "%dx%d", &ww, &wh);  // (the size it will be made at)
+    return ww > 0 && wh > 0 ? (double)ww / wh : 0;  // (else the 1280 x 720 it will be made at)
+}
+static float g_wide_cam;  // (the scene camera's aspect: the screen's, 0 the game's own 16:9)
 static void za_screen_size(uint64_t *w, uint64_t *h) {
     const char *r = getenv("LARECOMP_ZA_RES");
     if (r && strchr(r, 'x') && atoi(r) >= 640 && atoi(strchr(r, 'x') + 1) >= 360) {
@@ -235,6 +259,10 @@ static void za_screen_size(uint64_t *w, uint64_t *h) {
     extern volatile uint32_t g_plugin_render_height;
     extern volatile float g_plugin_render_shape;
     double shape = g_plugin_render_shape > 0 ? g_plugin_render_shape : 16.0 / 9.0;
+    if (!(g_plugin_render_shape > 0) && g_settings.ultrawide) {
+        double a = window_aspect();
+        if (a > 16.0 / 9.0 * 1.005) shape = a;  // (wider only: a taller window keeps 16:9, with bars)
+    }
     if (g_plugin_render_height) lines = g_plugin_render_height;
     else if (g_settings.res_height > 0) lines = g_settings.res_height;
     else if (mode >= 1 && mode <= 8) lines = 1080.0 * mode;
@@ -275,9 +303,87 @@ static int res_scale_hook(Cpu *c, uint64_t addr) {
     return 1;
 }
 
+// Ultrawide: the scene camera made as wide as the screen. The render camera update 0x70018cff60 (x0 = the camera; the
+// same function LegendsVR drives) serves every camera of a frame - the scene's, the shadows', reflections' - and builds
+// each one's projection from its field of view (+0x19c, radians, vertical) and aspect (+0x1a0) inside, so the aspect is
+// set before it runs: on the cameras whose aspect is the game's 16:9 (or already ours) only - a shadow map's or a
+// reflection's of another shape keep theirs. Hor+: the vertical field of view stays, the sides see more. (A VR plugin's
+// shape: the plugin sets the cameras itself.)
+#define ZA_CAM_UPDATE 0x70018cff60ull
+// Speech bubbles (runtime/bubble.h) are placed with the scene camera: of the cameras this update serves, the one looking
+// at the player - its target (+0x280) the player's head, ~1.5 m over the feet (the others: interface cameras at the
+// origin, shadows); eye +0x1c0 then the view's columns, field of view / aspect 0x24 / 0x20 before it (as LegendsVR).
+// What it had from its last update (this runs before the game's): half a frame old at most.
+static volatile int g_bubble_cam;
+static void bubble_cam(uint64_t cam) {
+    extern int bubble_count(void);
+    extern void bubble_camera(const float *eye);
+    extern bool warp_player_now(float pos[3], float *yaw);
+    extern volatile int g_scene_cam_wanted;  // (also positional sounds, scripts' to_screen: hle/bubble.c)
+    if (!bubble_count() && !g_scene_cam_wanted) return;
+    const float *t = (const float *)(uintptr_t)(cam + 0x280);
+    float p[3];
+    if (!warp_player_now(p, NULL)) return;
+    float dx = t[0] - p[0], dy = t[1] - p[1], dz = t[2] - p[2];
+    if (dx * dx + dz * dz > 4.0f || dy < -0.5f || dy > 3.0f) return;
+    // (and looking at it from away: after an area load - the night change - a second camera with the same target but its
+    // eye at the player's feet and no view of it is served after the scene's every frame, until the camera moves; taken,
+    // it put everything behind the camera: markers and bubbles gone - traced with a Legends Lua hook here, 2026-11-20)
+    const float *e = (const float *)(uintptr_t)(cam + 0x1c0);
+    float vx = t[0] - e[0], vy = t[1] - e[1], vz = t[2] - e[2], d = sqrtf(vx * vx + vy * vy + vz * vz);
+    if (d < 1.8f || -(vx * e[6] + vy * e[10] + vz * e[14]) / d < 0.5f) return;  // (Z = e[6], e[10], e[14]: the view's back)
+    bubble_camera(e);
+}
+static int wide_cam_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    extern volatile float g_plugin_render_shape;
+    if (g_bubble_cam) bubble_cam(c->x[0]);
+    if (g_plugin_render_shape > 0 || !g_wide_cam) return 0;
+    float *a = (float *)(uintptr_t)(c->x[0] + 0x1a0);
+    if (fabsf(*a - 16.0f / 9.0f) < 0.002f) {
+        static int said;
+        if (!said++) LOG("[wide] scene camera aspect %.4f -> %.4f (field of view %.1f degrees high)\n", *a, g_wide_cam, a[-1] * 57.29578f);
+        *a = g_wide_cam;
+    }
+    return 0;
+}
+void za_bubble_cam_on(void) {  // (the first speech bubble: runtime/hle/modapi.c)
+    if (g_bubble_cam) return;
+    g_bubble_cam = 1;
+    rt_register_fnhook_at(ZA_CAM_UPDATE, wide_cam_hook);
+}
+static void za_wide_engage(uint64_t sw, uint64_t sh) {
+    extern volatile float g_plugin_render_shape;
+    extern volatile float g_game_image_aspect;  // (nvn/output_scale.c)
+    double a = (double)sw / (double)sh;
+    if (g_plugin_render_shape > 0 || !g_settings.ultrawide || a <= 16.0 / 9.0 * 1.005) {
+        if (g_settings.ultrawide && !(g_plugin_render_shape > 0))
+            LOG("[wide] fill the window: the window is 16:9 or narrower - 16:9 (%llux%llu)\n", (unsigned long long)sw, (unsigned long long)sh);
+        return;
+    }
+    g_wide_cam = (float)a, g_game_image_aspect = (float)a;
+    gameui_set_screen((float)(a / (16.0 / 9.0)));  // (the HUD at the real edges: runtime/hle/gameui.c)
+    static bool hooked;
+    if (!hooked) hooked = true, rt_register_fnhook_at(ZA_CAM_UPDATE, wide_cam_hook);
+    LOG("[wide] fill the window: screen %llux%llu, shape %.3f x 16:9, scene camera aspect %.4f; interface in a centred 16:9 box\n",
+        (unsigned long long)sw, (unsigned long long)sh, a / (16.0 / 9.0), a);
+}
+
 // The engine's system config (read by 0x7001b2fc30 (config table, engine info, ...) into the info struct): +0x10 / +0x18
 // the output width / height (1920 x 1080 unless the data sets them), +0x58 the worker core count (hle/za_jobs.c).
 // (the output size: set by the screen size, below)
+// The interface's layouts (runtime/gameui.h, hle/gameui.c): nn::ui2d in 2.0.2 (its class tables found by their RTTI
+// names, N2nn4ui2d4PaneE...; Calculate / Draw the Layout table's slots 23 / 18)
+static void za_gameui_init(void) {
+    static const GameUiGame g = {
+        .game = "za", .layout_calc = 0x7002634188ull, .layout_draw = 0x7002634720ull,
+        .lay_name = 0x30, .di_proj = 0x10, .di_target = 0x138,
+        .vt = {0x7003c93b08ull, 0x7003c93db8ull, 0x7003c94028ull, 0x7003c943b0ull, 0x7003c93c68ull, 0, 0, 0, 0x7003c931b8ull},
+        .pane_draw = 0x7002644c40ull,
+    };
+    gameui_init(&g);
+}
+
 #define ZA_CONFIG_READ 0x7001b2fc30ull
 #define ZA_SCREEN_SIZES 0x70031a14e0ull  // (u32 handheld w, docked w, handheld h, docked h: 1280, 1920, 720, 1080)
 static int config_read(Cpu *c, uint64_t addr) {
@@ -294,6 +400,7 @@ static int config_read(Cpu *c, uint64_t addr) {
     }
     uint64_t sw, sh;
     za_screen_size(&sw, &sh);
+    za_wide_engage(sw, sh);
     if (sw != 1920 || sh != 1080) {
         g_res_sw = sw, g_res_sh = sh;
         // a smaller screen: targets the game sizes from the Switch's 1920 x 1080 that come out larger are fitted to it
@@ -620,6 +727,87 @@ static int collision_make(Cpu *c, uint64_t addr) {
     return 0;
 }
 
+// Link Play: the host's room kept while someone is still joining it (2026-11-17). Looking for a Link Trade partner the
+// game takes turns: it looks for a room, and when it finds none opens its own and waits for the others in a job,
+// 0x700199b0d0 (the job in x0: +0x50 u16 players needed, +0x58 double ms left, +0x60 double ms added per player who
+// comes (5000), +0x68 u16 players counted, +0x6a set once this copy hosts the session; its clock starts at ~2.9-4 s
+// and runs only on the host). At 0 it fails with Pia's Timeout, the game leaves the session (0x70019b71e0 -> LeaveSession) and
+// looks again. It counts players in Pia's session - a station that already joined our ldn network but whose Pia join
+// is still going (its join request or an answer lost, resent only after 0.5-1 s; over a lagged server that is a few
+// seconds) isn't one yet: the host left under it, and the joiner, its JoinSession done during the host's leave, saw
+// the player count fall to 1 and gave up (its connect task 0x7000b8c4e8, result 3): a rejoin, ~41 s a trade instead of
+// ~25. So while our network has more players than the job has counted, its clock is held at >= 1 s - for up to
+// ROOM_HOLD_S after that station joined (a station that never comes can't keep the room up for good).
+// LARECOMP_ROOM_HOLD=0: the game's own window (research), =<s>: another limit.
+#define ZA_WAIT_PLAYERS 0x700199b0d0ull
+#define ROOM_HOLD_S 10
+int ldn_host_players(uint64_t *last_join_ns);
+static int g_room_hold_s = ROOM_HOLD_S;
+static int wait_players_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    uint64_t job = c->x[0];
+    if (job < GUEST_LO || job >= GUEST_HI || (job & 7) || !*(volatile uint8_t *)(uintptr_t)(job + 0x6a)) return 0;
+    uint16_t need = *(uint16_t *)(uintptr_t)(job + 0x50), counted = *(uint16_t *)(uintptr_t)(job + 0x68);
+    uint64_t joined;
+    int players = ldn_host_players(&joined);
+    if (players <= counted || counted >= need || !joined) return 0;
+    uint64_t now = plat_now_ns();
+    static uint64_t logged_for, capped_for;
+    if (now - joined >= (uint64_t)g_room_hold_s * 1000000000ull) {
+        if (logged_for == joined && capped_for != joined)
+            capped_for = joined, LOG("[za] Link Play: the player who joined our room %d s ago never came - let go\n", g_room_hold_s);
+        return 0;
+    }
+    double *left = (double *)(uintptr_t)(job + 0x58);
+    if (*left < 1000.0) {
+        if (logged_for != joined)
+            logged_for = joined, LOG("[za] Link Play: our room kept - a player joined it %.1f s ago and is still joining (%d in the "
+                                     "network, %u in the session)\n", (double)(now - joined) / 1e9, players, counted);
+        *left = 1000.0;
+    }
+    return 0;
+}
+
+// Link Trade: the link test's last message always finds room (2026-11-17 za-mp19). Once linked, each copy runs a link
+// test: it sends a fixed 1211-byte block (channel 1, kind 0) over Pia's ReliableProtocol every frame for a few seconds,
+// as fast as Pia takes them, then one 354-byte result (channel 1, kind 1) - and the other copy shows our name only once
+// that result came. The game sends it once (0x700095f8f4 -> 0x7000960aac -> its send 0x7001a77f6c) and drops it
+// whatever the send said. Pia takes a message only while its sliding window (64 messages) has room; on a lagged link
+// (RTT ~1 s, 1 s stalls) the blocks keep that window full for seconds, so the result could come at a full window:
+// not sent, never sent again - the other copy sat in the trade box without our name ("boxed", ~3 in 16 trades with
+// 1 s stalls). Now a block isn't sent (the game sees "full" and tries again next frame, as it does anyway) while fewer
+// than LINK_RESERVE slots are free: the result and the other messages always have room. ReliableProtocol (vtable
+// 0x7003c8e948) holds its window at +0x1a0 (ReliableSlidingWindow, vtable 0x7003c8ea40: +0x28 messages in it, +0x38 its
+// slots - Pia's room check 0x7002573660; +0x70, 128, is not the limit); the protocol is the one the game last sent a
+// block through (its send 0x700256f468).
+// LARECOMP_LINK_RESERVE=0: the game's own sends (research), =<n>: another reserve.
+#define ZA_LINK_SEND 0x7001a77f6cull  // (this, data, size, reliable, &header u16 (channel | kind << 8), station) -> bool
+#define ZA_RP_SEND 0x700256f468ull    // nn::pia::transport::ReliableProtocol::Send(this, station, data, size)
+#define LINK_RESERVE 8
+static int g_link_reserve = LINK_RESERVE;
+static volatile uint64_t g_link_rp;
+static int rp_send_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    uint64_t rp = c->x[0], d = c->x[2];
+    if (rp >= GUEST_LO && rp < GUEST_HI && !(rp & 7) && d >= GUEST_LO && d < GUEST_HI && c->x[3] >= 2 &&
+        *(uint16_t *)(uintptr_t)d == 0x0001 && *(uint64_t *)(uintptr_t)rp == 0x7003c8e948ull)
+        g_link_rp = rp;
+    return 0;
+}
+static int link_send_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    uint64_t hp = c->x[4], rp = g_link_rp;
+    if (!(c->x[3] & 1) || !rp || hp < GUEST_LO || hp >= GUEST_HI || *(uint16_t *)(uintptr_t)hp != 0x0001) return 0;
+    uint64_t w = rp + 0x1a0;
+    if (*(uint64_t *)(uintptr_t)rp != 0x7003c8e948ull || *(uint64_t *)(uintptr_t)w != 0x7003c8ea40ull) return 0;
+    uint32_t n = *(volatile uint32_t *)(uintptr_t)(w + 0x28), size = *(volatile uint32_t *)(uintptr_t)(w + 0x38);
+    if (!size || size > 4096 || n + (uint32_t)g_link_reserve < size) return 0;
+    static uint64_t held;
+    if (!held++) LOG("[za] Link Play: link test blocks held back while Pia's window is nearly full (%u of %u)\n", n, size);
+    c->x[0] = 0;  // ("not sent": the window is full - the game tries again next frame)
+    return 1;
+}
+
 void za_fixes_configure(const char *exefs) {
     static const uint8_t ZA_MAIN[8] = {0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a};  // 2.0.2 (any other build: none of this)
     static bool done;
@@ -634,11 +822,16 @@ void za_fixes_configure(const char *exefs) {
     }
     if (done || memcmp(id, ZA_MAIN, 8)) return;
     done = true;
+    za_gameui_init();
     rt_register_fnhook_at(0x70010e3ed0ull, sensor_make);  // (the props' streaming distances)
     rt_register_fnhook_at(0x70010930d4ull, model_cull_set);  // (models' culling distances)
     rt_register_fnhook_at(0x7001108570ull, collision_make);  // (NPC spawners' trigger radius)
     g_mouse_look = !getenv("LARECOMP_ZA_MOUSE_LOOK") || atoi(getenv("LARECOMP_ZA_MOUSE_LOOK")) != 0;
     rt_register_fnhook_at(ZA_CAM_ANGLES, mouse_look_hook);
+    if (getenv("LARECOMP_ROOM_HOLD")) g_room_hold_s = atoi(getenv("LARECOMP_ROOM_HOLD"));
+    if (g_room_hold_s > 0) rt_register_fnhook_at(ZA_WAIT_PLAYERS, wait_players_hook);
+    if (getenv("LARECOMP_LINK_RESERVE")) g_link_reserve = atoi(getenv("LARECOMP_LINK_RESERVE"));
+    if (g_link_reserve > 0) rt_register_fnhook_at(ZA_RP_SEND, rp_send_hook), rt_register_fnhook_at(ZA_LINK_SEND, link_send_hook);
     { extern void za_options_configure(void); za_options_configure(); }
     {   // (runtime/hle/menu_mouse.c: ui2d pane matrices, the menu navigator's core, the scroll lists' select cell)
         extern void menu_mouse_configure(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t);

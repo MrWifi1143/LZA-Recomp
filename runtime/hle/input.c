@@ -133,6 +133,9 @@ static void mouse_release(void) {
     recompute_keyboard();
 }
 
+// (a script's menu took the input - runtime/hle/scriptinput.c, the window's thread: a held mouse is let go)
+void input_mouse_let_go(void) { if (mouse_win) mouse_release(); }
+
 // The game window's focus (its events here), for Settings.background: muted (services/audio.c) or paused at the next
 // present (nvn/objects.c) while another window has it. LARECOMP_LIVE's dir file "unfocused" (0 / 1) stands in (tests).
 static _Atomic int g_unfocused;
@@ -699,6 +702,40 @@ static void host_test_frame(uint64_t frame) {
 static uint64_t g_pad_obj;
 volatile int g_inject_plus;  // frames to hold Plus for the game (movie.c: A / B skip the opening movie too)
 RT_ON_RESET(input_reboot_reset) { g_pad_obj = 0; g_inject_plus = 0; }  // (reboot: the controller object was guest memory)
+// The scripted-input queue: LARECOMP_LIVE's commands and input_macro()'s (lines "<frames> <keys>" or "<n>ms <keys>")
+static struct { long len; bool ms, macro; char keys[120]; } g_mq[256];  // (macro: an input_macro() line)
+static int g_mqh, g_mqt;
+static bool g_mq_active;
+static bool g_mq_macro;  // (input_macro's lines queued: busy until the queue is empty)
+static bool g_mq_now_macro;  // (the line pressing now is input_macro()'s: never swallowed)
+static void mq_push_line_as(const char *line, bool macro) {
+    long len;
+    char keys[120], unit[8] = "";
+    bool ms = sscanf(line, "%ld%7[ms] %119s", &len, unit, keys) == 3 && !strcmp(unit, "ms");
+    if ((ms || sscanf(line, "%ld %119s", &len, keys) == 2) && (g_mqt + 1) % 256 != g_mqh)
+        g_mq[g_mqt].len = len, g_mq[g_mqt].ms = ms, g_mq[g_mqt].macro = macro, snprintf(g_mq[g_mqt].keys, 120, "%s", keys),
+        g_mqt = (g_mqt + 1) % 256;
+}
+static void mq_push_line(const char *line) { mq_push_line_as(line, false); }
+// Buttons pressed for the player, on top of their own input (the input thread: from input_frame's callees only)
+void input_macro(const char *lines) {
+    for (const char *l = lines; l && *l;) {
+        const char *e = strchr(l, '\n');
+        char line[160];
+        size_t n = e ? (size_t)(e - l) : strlen(l);
+        snprintf(line, sizeof line, "%.*s", (int)(n < sizeof line - 1 ? n : sizeof line - 1), l);
+        mq_push_line_as(line, true);
+        l = e ? e + 1 : NULL;
+    }
+    g_mq_macro = true;
+}
+bool input_macro_busy(void) {
+    if (g_mq_macro && !g_mq_active && g_mqh == g_mqt) g_mq_macro = false;
+    return g_mq_macro;
+}
+volatile uint64_t g_input_swallow;  // buttons kept from the game (the player's own, and the test queue's - LARECOMP_LIVE
+                                    // presses as a player's would be; never input_macro()'s own)
+
 void input_frame(uint64_t frame) {
     if (g_pad_obj && getenv("LARECOMP_DUMP_PAD") && frame % 600 == 0) {
         const uint8_t *m = (const uint8_t *)(uintptr_t)(g_pad_obj - 0x98);
@@ -718,34 +755,35 @@ void input_frame(uint64_t frame) {
     host_test_frame(frame);
     extern void warp_frame(uint64_t frame);  // (LARECOMP_WARP: hle/warp.c)
     warp_frame(frame);
+    extern void newnpc_frame(uint64_t frame);  // (LARECOMP_NEWNPC research: hle/newnpc.c)
+    newnpc_frame(frame);
     extern void plugins_game_frame(uint64_t frame);  // (runtime/plugin.h hooks.game_frame)
     plugins_game_frame(frame);
+    extern void scriptinput_live_poll(uint64_t frame);  // (testing: <live>/sdl - window events, hle/scriptinput.c)
+    scriptinput_live_poll(frame);
     {   // LARECOMP_LIVE=<dir> (testing): steered while it runs - lines appended to <dir>/cmd, "<frames> <keys>" with keys
         // LARECOMP_INPUT's names joined by '+' (A, STICK_UP, STICK_45 = left stick at 45 degrees, RSTICK_LEFT...; "-": none),
         // run one after another; <dir>/state says the frame and what's left (screenshots: <dir>/shot, nvn/vulkan/device.c)
         static const char *dir = (const char *)1;
         if (dir == (const char *)1) dir = getenv("LARECOMP_LIVE");
-        if (dir) {
+        if (dir || g_mq_active || g_mqh != g_mqt) {
             static long off;
-            static struct { long len; bool ms; char keys[120]; } q[256];  // (len in frames, or "<n>ms": real milliseconds)
             static uint64_t until_ns;
-            static int qh, qt;
             static uint64_t until;
-            static bool active;
+#define q g_mq
+#define qh g_mqh
+#define qt g_mqt
+#define active g_mq_active
             char path[1100], line[160];
-            snprintf(path, sizeof path, "%s/cmd", dir);
-            FILE *f = fopen(path, "r");
+            snprintf(path, sizeof path, "%s/cmd", dir ? dir : "");
+            FILE *f = dir ? fopen(path, "r") : NULL;
             if (f) {
                 fseek(f, 0, SEEK_END);
                 if (ftell(f) < off) off = 0;  // (the file written anew, shorter: read it from the start)
                 fseek(f, off, SEEK_SET);
                 while ((qt + 1) % 256 != qh && fgets(line, sizeof line, f) && strchr(line, '\n')) {  // (a full queue: the
                     off = ftell(f);                                                                   // rest read later)
-                    long len;
-                    char keys[120], unit[8] = "";
-                    bool ms = sscanf(line, "%ld%7[ms] %119s", &len, unit, keys) == 3 && !strcmp(unit, "ms");
-                    if ((ms || sscanf(line, "%ld %119s", &len, keys) == 2) && (qt + 1) % 256 != qh)
-                        q[qt].len = len, q[qt].ms = ms, snprintf(q[qt].keys, 120, "%s", keys), qt = (qt + 1) % 256;
+                    mq_push_line(line);
                 }
                 fclose(f);
             }
@@ -788,14 +826,19 @@ void input_frame(uint64_t frame) {
                 }
             }
             static uint64_t last_state;
-            if (frame - last_state >= 30) {
+            if (dir && frame - last_state >= 30) {
                 last_state = frame;
                 snprintf(path, sizeof path, "%s/state", dir);
                 FILE *o = fopen(path, "w");
                 if (o) { fprintf(o, "frame %llu queued %d%s%s\n", (unsigned long long)frame, (qt - qh + 256) % 256, active ? " now " : "", active ? q[qh].keys : ""); fclose(o); }
             }
+#undef q
+#undef qh
+#undef qt
+#undef active
             script_buttons = b, script_lx = lx, script_ly = ly, script_rx = rx, script_ry = ry;
-            return;
+            g_mq_now_macro = g_mq_active && g_mq[g_mqh].macro;
+            if (dir || g_mq_active || g_mqh != g_mqt) return;
         }
     }
     {   // LARECOMP_REPLAY=<file>: a LARECOMP_REC recording, by game frame
@@ -982,11 +1025,14 @@ static void fill_state(Cpu *c) {
         g_watch_hi = c->x[1] - 8 - 0x98 + hi;
         LOG("[input] watching controller object %llx\n", c->x[1] - 8);
     }
-    bool menu = menu_input_captured();  // the overlay menu / name entry has the controls (typing there isn't for the game)
+    extern bool scriptinput_grabbed(void);  // (runtime/hle/scriptinput.c: a script's menu holds the input too)
+    bool menu = menu_input_captured() || scriptinput_grabbed();  // the overlay menu / name entry has the controls (typing there isn't for the game)
     bool input_pad_finger_on(void);
     const uint64_t zr = input_pad_finger_on() ? 1ull << BTN_ZR : 0;  // (with the finger on, the controller's ZR touches)
     if (wheel_until[0] || wheel_until[1]) recompute_keyboard();  // (a wheel notch's binding lets go by time)
-    uint64_t b = menu ? script_buttons & ~zr : key_buttons | plugin_buttons | ((pad_buttons | script_buttons) & ~zr);
+    bool grab = scriptinput_grabbed();  // (a script's menu: the test harness' buttons - <live>/cmd - are its too)
+    uint64_t b = menu ? (grab ? 0 : script_buttons & ~zr) : ((key_buttons | plugin_buttons | (pad_buttons & ~zr)) & ~g_input_swallow) |
+                                               (script_buttons & ~zr & (g_mq_now_macro ? ~0ull : ~g_input_swallow));
     {
         uint64_t menu_mouse_buttons(Cpu *c);  // (runtime/hle/menu_mouse.c: the mouse in the game's menus)
         uint64_t m = menu_mouse_buttons(c);
@@ -1000,10 +1046,10 @@ static void fill_state(Cpu *c) {
         if (g_inject_plus > 0) { until = renderer_game_frame() + 10; g_inject_plus = 0; }
         if (renderer_game_frame() < until) b |= 1ull << BTN_PLUS;
     }
-    int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx + plugin_lx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly + plugin_ly) + script_ly);
+    int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx + plugin_lx) + (grab ? 0 : script_lx)), ly = clamp_axis((menu ? 0 : key_ly + pad_ly + plugin_ly) + (grab ? 0 : script_ly));
     int32_t mrx = 0, mry = 0;
     mouse_stick(&mrx, &mry);
-    int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx + plugin_rx + mrx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry + plugin_ry + mry) + script_ry);
+    int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx + plugin_rx + mrx) + (grab ? 0 : script_rx)), ry = clamp_axis((menu ? 0 : key_ry + pad_ry + plugin_ry + mry) + (grab ? 0 : script_ry));
     // d-pad / arrow keys walk (setting) while the stick is at rest. "At rest" has a dead zone: a controller's stick
     // never reads exactly 0 (a DualSense rests at a few hundred), which used to turn the d-pad off altogether.
     if (!menu && g_settings.dpad_move && (int64_t)lx * lx + (int64_t)ly * ly < 8000ll * 8000) {
@@ -1012,6 +1058,10 @@ static void fill_state(Cpu *c) {
         int dy = (int)((d >> BTN_UP) & 1) - (int)((d >> BTN_DOWN) & 1);
         int32_t m = dx && dy ? 23170 : 32767;  // diagonals: same speed (32767 / sqrt 2)
         if (dx || dy) lx = dx * m, ly = dy * m;
+    }
+    {   // (a script holding the player still / walking them - the world API's input_hold / input_stick, hle/worldcommon.c)
+        void world_input_filter(uint64_t *b, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry);
+        if (!menu) world_input_filter(&b, &lx, &ly, &rx, &ry);
     }
     // stick directions also appear as buttons (bits 16-23)
     if (lx < -16000) b |= 1ull << 16;
@@ -1120,7 +1170,8 @@ static bool touch_now(int32_t *x, int32_t *y) {
     }
     if (pad_finger(x, y)) return true;
     *x = touch_x, *y = touch_y;
-    return touch_down && !menu_input_captured();
+    extern bool scriptinput_grabbed(void);
+    return touch_down && !menu_input_captured() && !scriptinput_grabbed();
 }
 // The controller as a finger (a controller has no touch screen, and Play with Eevee pets with one): the right stick
 // moves it over the screen - the overlay draws it (runtime/ui/menu.mm) - and ZR held touches there. ZR then doesn't
@@ -1150,7 +1201,8 @@ static bool pad_finger(int32_t *x, int32_t *y) {
         finger_y = finger_y < 0 ? 0 : finger_y > TOUCH_H - 1 ? TOUCH_H - 1 : finger_y;
         finger_seen_ns = now;
     }
-    bool down = ((pad_buttons | script_buttons) >> BTN_ZR & 1) && !menu_input_captured();
+    extern bool scriptinput_grabbed(void);
+    bool down = ((pad_buttons | script_buttons) >> BTN_ZR & 1) && !menu_input_captured() && !scriptinput_grabbed();
     if (down) finger_seen_ns = now;
     finger_down = down;
     *x = (int32_t)finger_x, *y = (int32_t)finger_y;

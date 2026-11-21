@@ -187,6 +187,10 @@ static void boot(const char *root) {
     }
     LOG("main thread: prio %d, stack 0x%x, program id %016llx, system resource %#llx\n", prio, stack_size,
         (unsigned long long)g_program_id, (unsigned long long)g_system_resource_size);
+    if (!g_oodle_server && !g_extract_shaders) {  // (an online server account's save sync, before the game reads its save: runtime/acct.c)
+        extern void acct_boot_sync(uint64_t program_id);
+        acct_boot_sync(g_program_id);
+    }
 
     // older SDKs: nn::init::Start(thread_handle, args_region, init_sdk, init_main); newer ones (PLA) add a third
     // callback run after nnMain returns
@@ -296,7 +300,10 @@ int main(int argc, char **argv) {
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
     if (g_prepare) exit(setup_prepare(g_game, g_prepare));
     for (int i = 1; i < argc; i++)
-        if (!strcmp(argv[i], "--add-to-steam")) {  // (the start screen's Add to Steam, without a window: runtime/steam_shortcut.c)
+        if (!strcmp(argv[i], "--account")) {  // (an online server account without a window: runtime/acct.c, tests)
+            extern int acct_cli(int argc, char **argv);
+            exit(acct_cli(argc, argv));
+        } else if (!strcmp(argv[i], "--add-to-steam")) {  // (the start screen's Add to Steam, without a window: runtime/steam_shortcut.c)
             extern int steam_shortcut_add_now(void);
             exit(steam_shortcut_add_now());
         }

@@ -60,7 +60,11 @@ int mods_list(char names[][128], int max) {
         snprintf(p, sizeof p, "mods/%s", e->d_name);
         char tp[1100];
         snprintf(tp, sizeof tp, "%s/texpack", p);  // (a texture pack alone - mods/<name>/texpack/ - is a mod too)
-        if (is_dir(p) && (find_romfs(p, 4, r, sizeof r) || is_dir(tp))) snprintf(names[n++], 128, "%s", e->d_name);
+        char lp[1100];
+        snprintf(lp, sizeof lp, "%s/lua", p);  // (and scripts alone - mods/<name>/lua/: Legends Lua runs them)
+        char up[1100];
+        snprintf(up, sizeof up, "%s/ui", p);  // (and interface edits alone - mods/<name>/ui/<layout>.ini: hle/gameui.c)
+        if (is_dir(p) && (find_romfs(p, 4, r, sizeof r) || is_dir(tp) || is_dir(lp) || is_dir(up))) snprintf(names[n++], 128, "%s", e->d_name);
     }
     closedir(d);
     return n;
@@ -159,6 +163,16 @@ int mod_texpack_dirs(char dirs[][160], int max) {
     int n = mods_active(names, MODS_MAX), k = 0;
     for (int i = 0; i < n && k < max; i++) {
         snprintf(dirs[k], 160, "mods/%s/texpack", names[i]);
+        if (is_dir(dirs[k])) k++;
+    }
+    return k;
+}
+
+int mod_lua_dirs(char dirs[][256], int max) {
+    char names[MODS_MAX][128];
+    int n = mods_active(names, MODS_MAX), k = 0;
+    for (int i = 0; i < n && k < max; i++) {
+        snprintf(dirs[k], 256, "mods/%s/lua", names[i]);
         if (is_dir(dirs[k])) k++;
     }
     return k;

@@ -1,5 +1,6 @@
 // Windows host layer (runtime/platform.h).
 #include <windows.h>
+#include <psapi.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -470,3 +471,12 @@ bool plat_remove_tree(const char *dir) {
 
 // End the process at once, skipping DLL teardown (from an atexit handler, after flushing). Exit status 0.
 void plat_terminate(void) { TerminateProcess(GetCurrentProcess(), 0); }
+
+void plat_mem_info(uint64_t *rss_mb, uint64_t *commit_mb, uint64_t *avail_mb, uint64_t *total_mb) {
+    *rss_mb = *commit_mb = *avail_mb = *total_mb = 0;
+    PROCESS_MEMORY_COUNTERS_EX pm = {.cb = sizeof pm};
+    if (K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&pm, sizeof pm))
+        *rss_mb = pm.WorkingSetSize >> 20, *commit_mb = pm.PrivateUsage >> 20;
+    MEMORYSTATUSEX ms = {.dwLength = sizeof ms};
+    if (GlobalMemoryStatusEx(&ms)) *avail_mb = ms.ullAvailPhys >> 20, *total_mb = ms.ullTotalPhys >> 20;
+}

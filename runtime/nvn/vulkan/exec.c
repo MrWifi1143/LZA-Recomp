@@ -1037,6 +1037,10 @@ static struct {
     uint64_t copy_row_stride, copy_image_stride;
     uint64_t obj;       // frame interpolation: the game object the current draws belong to (CMD_OBJECT), 0 = none
     uint32_t obj_draw;  // draws of that object so far in this run of it
+    uint32_t ui;        // the interface layout being drawn, fitted by the game layer (CMD_UI, runtime/gameui.h): 0 none
+    uint32_t ui_img;    // (its pane's image: runtime/hle/gameui.c's id, 0 none)
+    int ui_copy;        // (a copy of a pane drawn again: ui_cf = offset x y, scale, the pane's centre x y; -1..1 space)
+    float ui_cf[5];
     bool xfb_active, raster_discard;  // transform feedback (CMD_XFB_*), SetRasterizerDiscard
     bool depth_clamp;                 // SetDepthClamp (a pipeline key bit)
     uint64_t xfb_addr[4], xfb_size[4];
@@ -5023,8 +5027,82 @@ static bool wait_budget(_Atomic int *state) {
 }
 
 static uint64_t prof_tp_;
+// The Legends' interface panes (ultrawide: the 16:9 box in draw_). Their layout shaders draw a unit quad (a0) into the
+// pane: local x = a0.x * c3[0x210] + c3[0x218], y = -a0.y * c3[0x214] + c3[0x21c] (the pane's size and origin), times its
+// 3 x 4 matrix (c3[0x40..0x6f], rows) and the layout's projection (c3[0x00..0x3f], rows: 1920 x 1080 around the centre).
+// Known by their first instructions: c[3][0x210] / c[3][0x214] loaded at pc 0x8 / 0x18, the FFMAs with c[3][0x218] /
+// c[3][0x21c] soon after (registers and places vary; the same in Z-A and Arceus). A pane that covers the whole layout -
+// the screen fades, a menu's dimming of the world - is drawn over the whole image instead of the box (the sides went
+// undimmed). One across the layout's whole width (a menu's tint bands, header and footer bars) or ending at its left or
+// right edge (a header tab, a side panel, a guide line) stays in the box with its edges continued to the image's edges
+// (ui_extend_edges). Contents stay in the box.
+static bool za_layout_vs(uint64_t code) {
+    static struct { uint64_t code; bool yes; } cache[256];
+    uint32_t h = (uint32_t)((code >> 4) * 0x9E3779B1u) >> 24;
+    if (cache[h].code == code) return cache[h].yes;
+    const uint64_t *w = (const uint64_t *)(uintptr_t)(code + 0x80);  // (after the NVN header 0x30 and the SPH 0x50)
+    #define CR(x, op, off) (((x) >> 48) == (op) && (((x) >> 34) & 0x1f) == 3 && (((x) >> 20) & 0x3fff) * 4 == (off))
+    bool fx = false, fy = false;
+    for (int i = 5; i < 16; i++) fx |= CR(w[i], 0x51a0u, 0x218u), fy |= CR(w[i], 0x51a1u, 0x21cu);
+    bool yes = code && CR(w[1], 0x4c98u, 0x210u) && CR(w[3], 0x4c98u, 0x214u) && fx && fy;
+    #undef CR
+    cache[h].code = code, cache[h].yes = yes;
+    return yes;
+}
+// (kx, ky: the layout's projection made that much wider / taller by the game layer - runtime/hle/gameui.c "wide": a
+// pane as big as the layout covers 1 / kx of the image's width)
+// (its place in the layout's projected space, -1..1: x lo[0] .. hi[0], y lo[1] .. hi[1])
+static bool layout_pane_rect(float lo[2], float hi[2]) {
+    if (!st.program || !za_layout_vs(st.program->stages[0].code_addr)) return false;
+    const float *c = (const float *)(uintptr_t)st.ubuf[0][0].addr;  // (the vertex stage's c3: ubuf[0][0])
+    if (!c || st.ubuf[0][0].size < 136 * 4) return false;
+    lo[0] = lo[1] = 1e9f, hi[0] = hi[1] = -1e9f;
+    for (int k = 0; k < 4; k++) {
+        float lx = (float)(k & 1) * c[132] + c[134], ly = -(float)(k >> 1) * c[133] + c[135];
+        float wx = c[16] * lx + c[17] * ly + c[19], wy = c[20] * lx + c[21] * ly + c[23], wz = c[24] * lx + c[25] * ly + c[27];
+        float cw = c[12] * wx + c[13] * wy + c[14] * wz + c[15];
+        if (!(fabsf(cw) > 1e-6f)) return false;
+        float nx = (c[0] * wx + c[1] * wy + c[2] * wz + c[3]) / cw, ny = (c[4] * wx + c[5] * wy + c[6] * wz + c[7]) / cw;
+        lo[0] = fminf(lo[0], nx), hi[0] = fmaxf(hi[0], nx), lo[1] = fminf(lo[1], ny), hi[1] = fmaxf(hi[1], ny);
+    }
+    if (g_debug_frame) LOG("[draw]   layout pane: x %.3f .. %.3f, y %.3f .. %.3f\n", lo[0], hi[0], lo[1], hi[1]);
+    return true;
+}
+static bool layout_pane_covers(float kx, float ky) {
+    float lo[2], hi[2];
+    return layout_pane_rect(lo, hi) && lo[0] <= -0.99f / kx && hi[0] >= 0.99f / kx && lo[1] <= -0.99f / ky && hi[1] >= 0.99f / ky;
+}
+static bool za_fullscreen_pane(void) { return layout_pane_covers(1, 1); }
+// (draw_, ultrawide: an interface pane that ends at its 16:9 box's left / right edge drawn again over the side between the box
+// and the image's edge, through a viewport so wide that only the pane's edge - a few texels - falls there: the edge goes on
+// to the screen's edge as on a 16:9 screen. Clipped to that side: nothing is drawn twice over)
+static void ui_extend_edges(VkCommandBuffer cb, int sides, const float img_x[2], const float vp[4], float zn, float zf, bool use_index,
+                            uint32_t count, uint32_t icount, uint32_t inst, uint32_t first, int32_t base_vertex, uint32_t base_inst) {
+    VkRect2D sc = dc_sc;  // (the pane's own clip, in the box: it must reach the edge too)
+    const VkPhysicalDeviceLimits *L = &g_vk.props.limits;
+    float maxw = fminf((float)L->maxViewportDimensions[0], L->viewportBoundsRange[1]) * 0.95f;
+    for (int side = 0; side < 2; side++) {
+        if (!(sides & (1 << side)) || vp[2] < 1) continue;
+        float edge = side ? vp[0] + vp[2] : vp[0], out = img_x[side];
+        int a = side ? (int)ceilf(edge) : (int)floorf(out), b = side ? (int)ceilf(out) : (int)floorf(edge);
+        if (b - a < 1) continue;
+        if (side ? sc.offset.x + (int)sc.extent.width < (int)edge - 1 : sc.offset.x > (int)edge + 1) continue;
+        float w = maxw;
+        w = side ? fminf(w, out - L->viewportBoundsRange[0] * 0.95f) : fminf(w, L->viewportBoundsRange[1] * 0.95f - out);
+        if (w <= vp[2] * 1.5f) continue;
+        set_viewport(side ? out - w : out, vp[1], w, vp[3], zn, zf);
+        VkRect2D r = {{a, sc.offset.y}, {(uint32_t)(b - a), sc.extent.height}};
+        vkCmdSetScissor(cb, 0, 1, &r);
+        dc_sc = r;
+        if (!use_index) vkCmdDraw(cb, count, inst, first, base_inst);
+        else vkCmdDrawIndexed(cb, icount, inst, 0, base_vertex, base_inst);
+    }
+}
+
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
+    int ui_ext = 0;  // (an interface pane ending at the box's left (1) / right (2) edge: continued to the image's - below)
+    float ui_ext_x[2] = {0, 0}, ui_ext_vp[4] = {0, 0, 0, 0};
     if (!st.program) { SKIP(0); return; }
     if (ip_rec()) {  // (frame interpolation, stereo: what identifies this draw from one frame to the next)
         // what the draw is (program, vertex buffer, parameters), and which game object it belongs to: the same mesh
@@ -5426,6 +5504,16 @@ static void draw_(CmdRec *r, bool indexed) {
     PROF_ADD(prof_sets);
     VkDescriptorImageInfo fii[64];
     uint64_t prof_tx_ = prof ? SDL_GetTicksNS() : 0;
+    if (st.ui_img && pr->fi->ntex > 0 && st.tpool) {  // (a game UI pane's image: its first texture replaced - runtime/hle/gameui.c)
+        extern void vk_texture_gameui_image(NvnTexture *t, uint32_t img);
+        int slot = ((int)pr->fi->tex[0].handle_offset - 0x20) / 8;
+        uint64_t h = slot >= 0 && slot < 32 ? st.tex[1][slot] : 0;
+        uint32_t tic = h & 0xFFFFF;
+        if (h && tic < (uint32_t)st.tpool->count) {
+            NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
+            if (e->tex) vk_texture_gameui_image(e->tex, st.ui_img);
+        }
+    }
     for (int i = 0; i < pr->fi->ntex && i < 64; i++) {
         float sc[2]; uint32_t wh[2];
         texture_info(1, pr->fi, i, &fii[i], sc, wh);
@@ -5433,19 +5521,29 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     if (prof) prof_tex += SDL_GetTicksNS() - prof_tx_;
     // (the scene's final target, the presented image's size, takes the box too for the interface drawn into it: Legends:
-    // Arceus' sprites go there and a last pass copies it to the window - in a VR mod's eye shape they came out squeezed)
-    bool final_rt = st.rt.ncolor && st.rt.color[0] && !renderer_texture_presented(st.rt.color[0]) &&
-                    st.rt.color[0]->width == st_pres_w && st.rt.color[0]->height == st_pres_h && !(st.rt.depth && st.ds[0]) &&
-                    (st.color_state[0] & 1) && g_plugin_render_shape > 0;
-    if (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && (renderer_texture_presented(st.rt.color[0]) || final_rt)) {
+    // Arceus' sprites go there and a last pass copies it to the window - in a VR mod's eye shape they came out squeezed.
+    // Not Legends Z-A's: its screen-sized targets hold the scene too, drawn without the runtime's scale)
+    extern bool g_tex_no_scale;  // (textures.c: Legends Z-A renders unscaled - its screen is the image's own size)
+    NvnTexture *rt0 = st.rt.ncolor ? st.rt.color[0] : NULL;
+    bool presented = rt0 && renderer_texture_presented(rt0);
+    bool final_rt = rt0 && !presented && !g_tex_no_scale && rt0->width == st_pres_w && rt0->height == st_pres_h &&
+                    !(st.rt.depth && st.ds[0]) && (st.color_state[0] & 1);
+    // the image as drawn: not 16:9 (a reshaped image - "Fill the window" - a VR mod's eye shape, Z-A's ultrawide screen)
+    float img_w = rt0 ? rt0->width * pass_sx : 0, img_h = rt0 ? rt0->height * pass_sy : 0;
+    // (Z-A: its targets that are presented now and then also take scene passes - the interface is drawn without a depth test)
+    if (presented && g_tex_no_scale && st.rt.depth && st.ds[0]) presented = false;
+    if (!st.program->stages[1].code_addr) presented = false;  // (no fragment shader: nothing drawn - vertex work)
+    if (img_h > 0 && fabsf(img_w / img_h - 16.0f / 9.0f) > 0.01f * (16.0f / 9.0f) && (presented || final_rt)) {
         // Draws into the swapchain image (see renderer.m): composites fill the window, UI goes in a centred 16:9 box.
+        // A composite reads the scene: a texture the target's size - scaled by the runtime (its render targets), or, in
+        // a game that makes its own screen size (Z-A), any of that size.
         bool reads_scene = false;
         for (int i = 0; i < pr->fi->ntex && i < 64; i++)
-            if ((tex_sc[1][i][0] != 1 || tex_sc[1][i][1] != 1) && tex_wh[1][i][0] == st.rt.color[0]->width &&
-                tex_wh[1][i][1] == st.rt.color[0]->height)
+            if ((g_tex_no_scale || tex_sc[1][i][0] != 1 || tex_sc[1][i][1] != 1) && tex_wh[1][i][0] == rt0->width &&
+                tex_wh[1][i][1] == rt0->height)
                 reads_scene = true;
         bool fullscreen_quad = r->x[2] <= 6 && st.viewport[0][0] == 0 && st.viewport[0][1] == 0 &&
-                               st.viewport[0][2] >= st.rt.color[0]->width && st.viewport[0][3] >= st.rt.color[0]->height;
+                               st.viewport[0][2] >= rt0->width && st.viewport[0][3] >= rt0->height;
         bool fullscreen_fill = pr->fi->ntex == 0 && fullscreen_quad;
         if (fullscreen_quad && !reads_scene && pr->fi->ntex == 1 && (tex_sc[1][0][0] != 1 || tex_sc[1][0][1] != 1)) reads_scene = true;
         static uint64_t wide_frame = ~0ull;
@@ -5457,14 +5555,65 @@ static void draw_(CmdRec *r, bool indexed) {
             fade_fill = black || white;
         }
         bool composite = reads_scene || fade_fill || (fullscreen_fill && wide_frame == renderer_present_count());
+        int pw_, ph_;
+        pass_size(&pw_, &ph_);
+        float bw_ = fminf(img_w, img_h * (16.0f / 9.0f)), bh_ = fminf(img_h, img_w * (9.0f / 16.0f));
+        int ui_mode = (int)(st.ui & 0xff) - 1, ui_anchor = (int)(st.ui >> 8) & 0xff;
+        if (ui_mode >= 0) composite = reads_scene;  // (a layout's pane: its shape tells - below - not the quad guesses)
+        if (ui_mode == 0 && composite) {
+            // (a pane that reads a screen-sized image is a backdrop - the blurred capture behind a menu - only when it is as
+            // big as the layout: Arceus' satchel grid icons read a screen-sized mask (its scissor) and were drawn
+            // stretched over the whole image, two of them left of the 16:9 box)
+            float lo[2], hi[2];
+            if (layout_pane_rect(lo, hi) && !(lo[0] <= -0.99f && hi[0] >= 0.99f && lo[1] <= -0.99f && hi[1] >= 0.99f)) composite = false;
+        }
+        if (ui_mode >= 0 && !composite) {
+            // A layout the game layer fits itself (runtime/hle/gameui.c; modes as gameui.h's GUI_MODE_*): 0 the box,
+            // moved to the edge it is anchored at; 1 "wide" - its projection already as wide as the image: the whole
+            // image, a pane as big as the layout stretched over it; 2 stretched over the whole image.
+            float kx = img_w / bw_, ky = img_h / bh_;
+            float x0 = (pw_ - img_w) * 0.5f, y0 = (ph_ - img_h) * 0.5f;  // (the image in the pass)
+            bool keep = (ui_anchor & 0x10) != 0;  // (the layout's "fill 0": no pane of it stretched)
+            if (ui_mode == 1 || ui_mode == 2) {
+                vp_sx = img_w / rt0->width, vp_sy = img_h / rt0->height, vp_ox = x0, vp_oy = y0;
+                if (ui_mode == 1 && !keep && layout_pane_covers(kx, ky))
+                    vp_sx *= kx, vp_sy *= ky, vp_ox -= (kx - 1) * img_w * 0.5f, vp_oy -= (ky - 1) * img_h * 0.5f;
+            } else {
+                float lo[2], hi[2];
+                bool rect = !keep && layout_pane_rect(lo, hi);
+                bool spans_x = rect && lo[0] <= -0.99f && hi[0] >= 0.99f, spans_y = rect && lo[1] <= -0.99f && hi[1] >= 0.99f;
+                // (a pane as big as the layout - a fade, a dimming - covers the whole image; so does one across its whole
+                // height on a taller screen. One across its whole width on a wider screen - a band: a header bar, a menu's
+                // tint over the top or bottom half - stays in the box and has both edges continued (below): an ornament
+                // in the bar - Arceus' tab bar diamond - stays where it was, next to its title)
+                if ((spans_x && spans_y) || (spans_y && ky > 1.001f && !(ui_anchor & 12))) {
+                    composite = true;
+                } else {
+                    vp_sx = bw_ / rt0->width, vp_sy = bh_ / rt0->height;
+                    vp_ox = ui_anchor & 1 ? x0 : ui_anchor & 2 ? x0 + img_w - bw_ : (pw_ - bw_) * 0.5f;
+                    vp_oy = ui_anchor & 4 ? y0 : ui_anchor & 8 ? y0 + img_h - bh_ : (ph_ - bh_) * 0.5f;
+                    // (one that ends at the layout's left or right edge: a narrow upright strip - an accent bar on a header's
+                    // end - goes to the image's edge; anything else - a header tab, a side panel, a line running off the screen
+                    // - has its edge go on to the image's edge: drawn again after itself, its edge stretched over the side)
+                    int edge = rect && kx > 1.001f && !(ui_anchor & 3) && !st.ui_copy ? (lo[0] <= -0.99f ? 1 : 0) | (hi[0] >= 0.99f ? 2 : 0) : 0;
+                    float pw_px = (hi[0] - lo[0]) * 0.5f * bw_, ph_px = (hi[1] - lo[1]) * 0.5f * bh_;
+                    if ((edge == 1 || edge == 2) && pw_px <= bw_ * 0.045f && ph_px >= pw_px * 2.5f) vp_ox = edge == 1 ? x0 : x0 + img_w - bw_;
+                    else if (edge) ui_ext = edge, ui_ext_x[0] = x0, ui_ext_x[1] = x0 + img_w;
+                }
+            }
+            if (!composite) wide_frame = ~0ull;
+        } else {
+        // (Z-A: an interface pane as big as the whole layout - a fade, a menu's dimming - covers the whole image)
+        if (!composite && g_tex_no_scale && za_fullscreen_pane()) composite = true;
         if (!composite) wide_frame = ~0ull;
-        if (!composite) {
+        if (!composite) {  // (the box: the largest 16:9 in the image, centred; the whole target maps onto it)
             int pw, ph;
             pass_size(&pw, &ph);
-            float u = fminf(pass_sx, pass_sy);
-            vp_sx = vp_sy = u;
-            vp_ox = (pw - st.rt.color[0]->width * u) * 0.5f;
-            vp_oy = (ph - st.rt.color[0]->height * u) * 0.5f;
+            float bw = fminf(img_w, img_h * (16.0f / 9.0f)), bh = fminf(img_h, img_w * (9.0f / 16.0f));
+            vp_sx = bw / rt0->width, vp_sy = bh / rt0->height;
+            vp_ox = (pw - bw) * 0.5f;
+            vp_oy = (ph - bh) * 0.5f;
+        }
         }
     }
     {   // (research, LARECOMP_COUNT_FS=<fs hash>: draws with that fragment shader per frame, logged when the count changes)
@@ -5491,8 +5640,16 @@ static void draw_(CmdRec *r, bool indexed) {
         if (overlay) vp_ox -= g_plugin_overlay_px;  // (pixels of the image as drawn, as vp_ox)
     }
     {
-        float vx = vp[0] * vp_sx + vp_ox, vw = vp[2] * vp_sx;
-        set_viewport(vx, vp[1] * vp_sy + vp_oy, vw, vp[3] * vp_sy, zn, zf);
+        float vx = vp[0] * vp_sx + vp_ox, vw = vp[2] * vp_sx, vy = vp[1] * vp_sy + vp_oy, vh = vp[3] * vp_sy;
+        if (st.ui_copy) {  // (a copy of a game UI pane: its draws again, moved and scaled about the pane's centre)
+            float sc = st.ui_cf[2] > 0 ? st.ui_cf[2] : 1;
+            float px = vx + (st.ui_cf[3] + 1) * 0.5f * vw, py = vy + (1 - st.ui_cf[4]) * 0.5f * vh;  // (layout y up)
+            vx = px + (vx - px) * sc + st.ui_cf[0] * 0.5f * vw;
+            vy = py + (vy - py) * sc - st.ui_cf[1] * 0.5f * vh;
+            vw *= sc, vh *= sc;
+        }
+        set_viewport(vx, vy, vw, vh, zn, zf);
+        ui_ext_vp[0] = vx, ui_ext_vp[1] = vy, ui_ext_vp[2] = vw, ui_ext_vp[3] = vh;
         if (g_debug_frame) {
             VkRect2D sr = scissor_rect();
             LOG("[draw]   vp %.2f %.2f %.2f %.2f (fs hash %016llx) scissor %d %d %u %u | guest sc %d %d %d %d | pass %ux%u s %.4f %.4f\n",
@@ -5739,6 +5896,7 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     else if (!use_index) vkCmdDraw(cb, count, inst_eff, first, base_inst);
     else vkCmdDrawIndexed(cb, icount, inst_eff, 0, base_vertex, base_inst);
+    if (ui_ext && !g_draw_indirect && !exp_hit && !xfb_on) ui_extend_edges(cb, ui_ext, ui_ext_x, ui_ext_vp, zn, zf, use_index, count, icount, inst_eff, first, base_vertex, base_inst);
     if (xfb_on) {
         g_vk.end_xfb(cb, 0, 0, NULL, NULL);
         for (int b = 0; b < 4 && pr->vkey.xfb_count[b]; b++) gpuw_note(st.xfb_addr[b], st.xfb_size[b]);
@@ -6769,7 +6927,7 @@ static void exec_list(uint64_t handle, int depth) {
     if (depth < 9) g_cur_list[depth] = handle;
     g_cur_depth = depth;
     uint64_t p = handle;
-    if (depth == 0) st.obj = 0, st.obj_draw = 0;  // (a submitted list starts with no object; its called lists inherit)
+    if (depth == 0) st.obj = 0, st.obj_draw = 0, st.ui = 0, st.ui_img = 0, st.ui_copy = 0;  // (a submitted list starts with no object; its called lists inherit)
     for (int guard = 0; guard < 10000000; guard++) {
         CmdRec *r = (CmdRec *)(uintptr_t)p;
         // (the records were written by a game thread on another core: fetch ahead, each one was a cache miss here)
@@ -6786,6 +6944,10 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_XFB_BIND: if (r->x[0] < 4) { st.xfb_addr[r->x[0]] = r->x[1]; st.xfb_size[r->x[0]] = r->x[2]; } break;
         case CMD_SET_RASTER_DISCARD: st.raster_discard = r->x[0] != 0; break;
         case CMD_SET_DEPTH_CLAMP: st.depth_clamp = r->x[0] != 0; break;
+        case CMD_UI:
+            st.ui = (uint32_t)r->x[0], st.ui_img = (uint32_t)r->x[1], st.ui_copy = (int)r->x[2];
+            memcpy(st.ui_cf, r->f, 16), memcpy(&st.ui_cf[4], &r->x[3], 4);
+            break;
         case CMD_OBJECT: st.obj = r->x[0]; st.obj_draw = 0; { static int d; if (ENV("LARECOMP_OBJDBG") && vk_frame_counter() == 1450 && d++ < 80) LOG("[objdbg] depth %d object %llx\n", depth,(unsigned long long)r->x[0]); } break;
         case CMD_JUMP: p = r->x[0]; __builtin_prefetch((const void *)(uintptr_t)(p + 64)); __builtin_prefetch((const void *)(uintptr_t)(p + 128)); continue;
         case CMD_CALL: {

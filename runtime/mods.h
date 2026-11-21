@@ -3,6 +3,8 @@
 //
 //   mods/<name>/romfs/...                                  the game's RomFS paths (bin/message/English/...)
 //   mods/<name>/texpack/<key>.png                          a texture pack (runtime/nvn/vulkan/texpack.c)
+//   mods/<name>/lua/*.lua                                  scripts (contrib/legendslua: Legends Lua is loaded for them)
+//   mods/<name>/ui/<layout>.ini                            the game's interface edited (runtime/gameui.h)
 //   mods/<name>/atmosphere/contents/<title id>/romfs/...   (or any folder holding a romfs/ up to 4 levels down:
 //                                                           a download unpacked as it came)
 #pragma once
@@ -14,7 +16,7 @@ extern "C" {
 #endif
 
 #define MODS_MAX 32
-// The folders under mods/ that hold a romfs/: names[i] (up to MODS_MAX). Returns how many.
+// The folders under mods/ that hold a romfs/ (or a texpack/, lua/): names[i] (up to MODS_MAX). Returns how many.
 int mods_list(char names[][128], int max);
 // The mods that are on, in load order (LARECOMP_MOD, else g_settings.mod: names separated by commas; the first wins
 // where two change the same file): names[i]. Returns how many.
@@ -25,6 +27,9 @@ const char *mod_romfs_dir(void);  // (the first of them, or NULL)
 // Their texture packs, mods/<name>/texpack/ (<key>.dds / .png replacements: Legends Studio's texexport, tools/
 // texpack_upscale.py, texpackbuild; runtime/nvn/vulkan/texpack.c loads them), in that order. Returns how many.
 int mod_texpack_dirs(char dirs[][160], int max);
+// Their scripts' folders, mods/<name>/lua/ (Legends Lua runs them: contrib/legendslua, docs/lua-api.md), in that order.
+// Returns how many.
+int mod_lua_dirs(char dirs[][256], int max);
 // path: a RomFS path ("bin/message/English/..."). True with the host file when a mod replaces it (the first that has it).
 bool mod_romfs_override(const char *path, char *out, size_t cap);
 // The language whose texts a mod replaces (its romfs/bin/message/<language>/), as a language code ("en-US"), or NULL

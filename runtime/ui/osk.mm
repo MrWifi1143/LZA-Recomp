@@ -38,6 +38,8 @@ bool ui_text_busy(void) {
 }
 
 bool ui_input_text_cancelled(void) { return s_cancelled_now; }
+static bool s_osk_ok_now;
+bool ui_input_text_osk_ok(void) { return s_osk_ok_now; }
 
 // (test) LARECOMP_FIELD_FOCUS=<label>:<n>[:edit]: the n-th time field <label> is drawn it gets the nav cursor (a
 // controller's A - LARECOMP_HOST_INPUT sdlpad:east - then opens the keyboard); :edit starts typing in it instead.
@@ -67,9 +69,9 @@ bool ui_input_text(const char *label, char *buf, size_t size, ImGuiInputTextFlag
     static std::string last;  // (test runs: what the field holds, as it changes)
     const char *tf = getenv("LARECOMP_FIELD_FOCUS");
     if (tf && !strncmp(tf, label, strlen(label)) && tf[strlen(label)] == ':' && last != buf) { last = buf; fprintf(stderr, "[osk] test: %s = \"%s\"%s\n", label, buf, g.ActiveId == id ? " (typing)" : ""); }
-    s_cancelled_now = false;
+    s_cancelled_now = s_osk_ok_now = false;
     if (s.done && s.done_field == id && ImGui::GetFrameCount() - s.done_frame <= 1) {
-        if (s.done > 0) r = true;
+        if (s.done > 0) r = true, s_osk_ok_now = true;
         else s_cancelled_now = true;
         s.done = 0, s.done_field = 0;
     }
@@ -87,13 +89,16 @@ bool ui_input_text(const char *label, char *buf, size_t size, ImGuiInputTextFlag
     return r;
 }
 
-int osk_keys(char *text, size_t cap, int max_chars, bool appearing, float scale, ImFont *big, bool upper_first) {
-    static bool upper = true;
-    if (appearing) upper = upper_first;
+int osk_keys(char *text, size_t cap, int max_chars, bool appearing, float scale, ImFont *big, bool upper_first, bool masked) {
+    static bool upper = true, symbols;
+    if (appearing) upper = upper_first, symbols = false;
     ImGuiIO &io = ImGui::GetIO();
-    // B deletes: owning it keeps ImGui's nav cancel (which drops the cursor off the keys) from seeing it
+    // B deletes: owning it keeps ImGui's nav cancel (which drops the cursor off the keys) from seeing it. B is the
+    // right face button - or the bottom one where the menu swaps them for a Switch layout (A = east: the launcher's
+    // ConfigNavSwapGamepadButtons) - else A both typed nothing and deleted
     ImGuiID own = ImGui::GetID("##oskkeys");
-    ImGui::SetKeyOwner(ImGuiKey_GamepadFaceRight, own);
+    ImGuiKey del_key = io.ConfigNavSwapGamepadButtons ? ImGuiKey_GamepadFaceDown : ImGuiKey_GamepadFaceRight;
+    ImGui::SetKeyOwner(del_key, own);
     if (max_chars <= 0 || max_chars > (int)cap - 1) max_chars = (int)cap - 1;
     int len = (int)strlen(text), r = 0;
     auto add = [&](char ch) { if (len < max_chars) text[len++] = ch, text[len] = 0; };
@@ -106,14 +111,21 @@ int osk_keys(char *text, size_t cap, int max_chars, bool appearing, float scale,
     if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) r = 1;
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) r = -1;
     if (ImGui::IsKeyPressed(ImGuiKey_GamepadStart, false)) r = 1;
-    if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, ImGuiInputFlags_Repeat, own)) del();
+    if (ImGui::IsKeyPressed(del_key, ImGuiInputFlags_Repeat, own)) del();
 
     ImGui::PushFont(big);
-    ImGui::Text("%s_", text);
+    if (masked) {  // (a password: dots, never the text)
+        char dots[130];
+        int n = len < (int)sizeof dots - 1 ? len : (int)sizeof dots - 1;
+        memset(dots, '*', (size_t)n), dots[n] = 0;
+        ImGui::Text("%s_", dots);
+    } else ImGui::Text("%s_", text);
     ImGui::PopFont();
     static const char *rows_u[] = {"ABCDEFGHIJ", "KLMNOPQRST", "UVWXYZ-.'!", "0123456789"};
     static const char *rows_l[] = {"abcdefghij", "klmnopqrst", "uvwxyz-.'!", "0123456789"};
-    const char **rows = upper ? rows_u : rows_l;
+    // (the symbols: a server's address "host:port", an account's password - every printable ASCII character is a key)
+    static const char *rows_s[] = {"!@#$%^&*()", "_+=[]{}:;/", "\"<>,.?|~`\\", "0123456789"};
+    const char **rows = symbols ? rows_s : upper ? rows_u : rows_l;
     float k = 70 * scale;
     for (int row = 0; row < 4; row++) {
         for (int i = 0; rows[row][i]; i++) {
@@ -126,13 +138,21 @@ int osk_keys(char *text, size_t cap, int max_chars, bool appearing, float scale,
             if (ImGui::Button(lbl, ImVec2(k, k))) add(rows[row][i]);
         }
     }
-    if (ImGui::Button(upper ? "abc" : "ABC", ImVec2(k * 2, k))) upper = !upper;
+    if (ImGui::Button(symbols ? "ABC" : upper ? "abc" : "ABC", ImVec2(k * 2, k))) {
+        if (symbols) symbols = false;
+        else upper = !upper;
+    }
     ImGui::SameLine();
-    if (ImGui::Button("Space", ImVec2(k * 3, k)) && len > 0) add(' ');
+    if (ImGui::Button(symbols ? "abc" : "#+=", ImVec2(k * 1.5f, k))) {
+        if (symbols) symbols = false, upper = false;
+        else symbols = true;
+    }
     ImGui::SameLine();
-    if (ImGui::Button("Delete", ImVec2(k * 2, k))) del();
+    if (ImGui::Button("Space", ImVec2(k * 2.5f, k)) && len > 0) add(' ');
     ImGui::SameLine();
-    if (ImGui::Button("Cancel", ImVec2(k * 2, k))) r = -1;
+    if (ImGui::Button("Delete", ImVec2(k * 1.5f, k))) del();
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(k * 1.5f, k))) r = -1;
     ImGui::SameLine();
     if (ImGui::Button("OK", ImVec2(k * 2, k))) r = 1;
     ImGui::TextDisabled("A  type      B  delete      Start / +  OK      (%d / %d)", len, max_chars);
@@ -144,6 +164,11 @@ static void finish(int result) {
     if (result > 0 && s.buf && s.size) {
         if (s.flags & ImGuiInputTextFlags_CharsUppercase)
             for (char *p = s.text; *p; p++) *p = (char)toupper((unsigned char)*p);
+        if (s.flags & ImGuiInputTextFlags_CharsNoBlank) {  // (an address / a name: no spaces, as the field itself takes them)
+            char *w = s.text;
+            for (const char *p = s.text; *p; p++) if (*p != ' ' && *p != '\t') *w++ = *p;
+            *w = 0;
+        }
         snprintf(s.buf, s.size, "%s", s.text);
     }
     s.done = result, s.done_field = s.field, s.done_frame = ImGui::GetFrameCount();
@@ -176,7 +201,9 @@ void osk_draw(ImFont *big, float scale) {
     ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", s.title);
     ImGui::PopFont();
     int max = (int)(s.size < sizeof s.text ? s.size : sizeof s.text) - 1;
-    int r = cancel ? -1 : osk_keys(s.text, sizeof s.text, max, s.appearing, scale, big);
+    // (lower case first: our fields take addresses, account names (lower case only) and passwords - not names)
+    int r = cancel ? -1 : osk_keys(s.text, sizeof s.text, max, s.appearing, scale, big, (s.flags & ImGuiInputTextFlags_CharsUppercase) != 0,
+                                   (s.flags & ImGuiInputTextFlags_Password) != 0);
     s.appearing = false;
     if (r) {
         ImGui::CloseCurrentPopup();

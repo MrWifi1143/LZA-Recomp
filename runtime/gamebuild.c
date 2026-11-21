@@ -284,6 +284,20 @@ static PlatProc start_compile(const Tools *t, const Unit *u) {
     return p;
 }
 
+// The compiler's first errors into our log (the unit's own log is in .gamebuild, which a player rarely finds)
+static void log_errors(const char *path) {
+    FILE *f = fopen(path, "r");
+    char line[400];
+    int n = 0;
+    while (f && n < 6 && fgets(line, sizeof line, f))
+        if (strstr(line, "error")) {
+            line[strcspn(line, "\r\n")] = 0;
+            LOG("[gamebuild]   %s\n", line);
+            n++;
+        }
+    if (f) fclose(f);
+}
+
 // ------------------------------------------------------------------ the build
 bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size_t why_size) {
     uint64_t t0 = plat_now_ns();
@@ -427,6 +441,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
                 char last[300];
                 log_tail(u->log, last, sizeof last);
                 LOG("[gamebuild] compiling %s failed: %s\n", u->src, last);
+                log_errors(u->log);
                 snprintf(why, why_size, "the game code didn't compile");
                 ok = false;
             }
