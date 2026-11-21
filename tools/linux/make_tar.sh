@@ -22,7 +22,7 @@ rm -rf "$D" && mkdir -p "$D/lib" "$D/licenses" "$D/plugins" "$D/gamelib-src" "$D
 cp build/linrel/lasrecomp "$D/"
 patchelf --force-rpath --set-rpath '$ORIGIN/lib' "$D/lasrecomp" 2>/dev/null || true
 cp build/linrel/plugins/libsteamrelay.so build/linrel/plugins/steamrelay-helper "$D/plugins/"  # (the Steam relay + its helper: off until switched on in the Mods page)
-cp build/linrel/plugins/liblegendslua.so "$D/plugins/"  # (Legends Lua: mods' scripts - loaded for a mod that has them; as in the Windows zip)
+cp build/linrel/plugins/liblegendslua.so "$D/plugins/"  # (Legends Lua: off until switched on in the Mods page; as in the Windows zip)
 
 # lib/: everything lasrecomp and its plugin need except the Vulkan loader (the system's: it finds the GPU drivers)
 python3 - "$D" "$L/deps/lib" <<'PY'
