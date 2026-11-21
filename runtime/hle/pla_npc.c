@@ -2338,7 +2338,7 @@ static int g_on = -1;
 int pla_npc_enabled(void) {
     if (g_on < 0) {
         const char *e = getenv("LARECOMP_WORLD"), *s = getenv("LARECOMP_GHOST_SELF");
-        g_on = (e && atoi(e) > 0) || (s && atof(s) != 0);
+        g_on = 0 && ((e && atoi(e) > 0) || (s && atof(s) != 0));  // (the shared world: not in this release - hle/pla_world.c WORLD_SHARED)
     }
     return g_on;
 }

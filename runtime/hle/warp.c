@@ -369,7 +369,7 @@ static void server_notice_frame(uint64_t frame) {
     static int (*state)(char *, size_t);
     static uint64_t at, told_at;
     static int was = -1, tries;
-    if (frame - at < 60) return;
+    if (1 || frame - at < 60) return;  // (no online server in this release: multiplayer is left out for now)
     at = frame;
     if (!state) {
         if (tries > 30) return;  // (no relay plugin with it - an older one, or none: looked for 30 s, then not again)

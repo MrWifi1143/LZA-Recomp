@@ -14,8 +14,6 @@ in the Windows release, in the `licenses/` folder next to the program.
 | [SMAA](https://github.com/iryoku/smaa) | - | MIT | Jorge Jimenez, Jose I. Echevarria, Belen Masia, Fernando Navarro, Diego Gutierrez |
 | [Baloo 2](https://github.com/EkType/Baloo2) font | - | SIL Open Font License 1.1 | The Baloo 2 Project Authors |
 | [Lua](https://www.lua.org) (in the Lua scripting plugin, `contrib/legendslua`) | 5.3.6 | MIT | Lua.org, PUC-Rio |
-| [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) (online server accounts and save sync over TLS; `third_party/mbedtls` holds only the sources its configuration uses) | 3.6.8 | Apache 2.0 (or GPL 2.0 or later) | The Mbed TLS Contributors |
-| [Monocypher](https://monocypher.org) (Argon2id password hashing in the online server, `contrib/lzaserver` - not in the game) | 4.0.2 | BSD-2-Clause or CC0 | Loup Vaillant, Michael Savage, Fabio Scotoni |
 
 ## Libraries shipped with the Windows release (unmodified, dynamically linked)
 

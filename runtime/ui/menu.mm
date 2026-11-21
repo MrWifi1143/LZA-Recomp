@@ -395,16 +395,7 @@ extern "C" int menu_keyboard_run(const char *initial, int max_len, const char *t
     input_reset();
     g_kbd = 1;
     // (test) LARECOMP_KBD_AUTO=<text>: answer at once
-    // (test) LARECOMP_KBD_AUTO=@: answer at once with the text it opened with (a Discord invite's Link Code)
-    if (getenv("LARECOMP_KBD_AUTO") && !strcmp(getenv("LARECOMP_KBD_AUTO"), "@")) g_kbd = 2;
-    // (test) LARECOMP_KBD_AUTO=/path: answer at once with that file's first line, read now (a Private Battle's passcode,
-    // known only once the other copy's room is up)
-    else if (getenv("LARECOMP_KBD_AUTO") && getenv("LARECOMP_KBD_AUTO")[0] == '/') {
-        FILE *f = fopen(getenv("LARECOMP_KBD_AUTO"), "r");
-        if (f && fgets(g_kbd_text, sizeof g_kbd_text, f)) g_kbd_text[strcspn(g_kbd_text, "\r\n")] = 0, g_kbd = 2;
-        if (f) fclose(f);
-    }
-    else if (getenv("LARECOMP_KBD_AUTO")) { snprintf(g_kbd_text, sizeof g_kbd_text, "%s", getenv("LARECOMP_KBD_AUTO")); g_kbd = 2; }
+    if (getenv("LARECOMP_KBD_AUTO")) { snprintf(g_kbd_text, sizeof g_kbd_text, "%s", getenv("LARECOMP_KBD_AUTO")); g_kbd = 2; }
     else if (input_replay_text(g_kbd_text, (int)sizeof g_kbd_text)) g_kbd = 2;  // (LARECOMP_REPLAY: the recorded name)
     while (g_kbd.load() == 1 && !g_rt_unwind) {  // ~60 Hz (a reboot cancels)
         uint64_t t0 = SDL_GetTicks();
