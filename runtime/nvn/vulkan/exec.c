@@ -4865,8 +4865,10 @@ static void draw_(CmdRec *r, bool indexed) {
                 // (a pane as big as the layout - a fade, a dimming - covers the whole image; so does one across its whole
                 // height on a taller screen. One across its whole width on a wider screen - a band: a header bar, a menu's
                 // tint over the top or bottom half - stays in the box and has both edges continued (below): an ornament
-                // in the bar - Arceus' tab bar diamond - stays where it was, next to its title)
-                if ((spans_x && spans_y) || (spans_y && ky > 1.001f && !(ui_anchor & 12))) {
+                // in the bar - Arceus' tab bar diamond - stays where it was, next to its title. Not in a layout anchored at
+                // an edge - a HUD piece: Z-A's minimap map is a picture far bigger than the layout (5120 x 5120 and up,
+                // cut round by a mask) - stretched over the image it came out an oval, off its ring)
+                if (!(ui_anchor & 15) && ((spans_x && spans_y) || (spans_y && ky > 1.001f))) {
                     composite = true;
                 } else {
                     vp_sx = bw_ / rt0->width, vp_sy = bh_ / rt0->height;

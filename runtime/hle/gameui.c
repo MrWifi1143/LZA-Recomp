@@ -949,9 +949,12 @@ int gameui_api_clone(const char *layout, const char *src, const char *name) {
 // interface stays in the middle 16:9). Per game: the layouts and how (gameui.h's ini keys).
 typedef struct { const char *layout, *pane, *kv; } Builtin;
 static const Builtin k_wide_za[] = {
+    // (the minimap: _field_01 is the field's at night, _dungeon_b_00 the third dungeon map - each draws its own map disc)
     {"hud_minimap_field_00", "", "anchor=left"},
+    {"hud_minimap_field_01", "", "anchor=left"},
     {"hud_minimap_top_00", "", "anchor=left"},
     {"hud_minimap_dungeon_a_00", "", "anchor=left"},
+    {"hud_minimap_dungeon_b_00", "", "anchor=left"},
     {"hud_minimap_dungeon_c_00", "", "anchor=left"},
     {"hud_pokelist_00", "", "anchor=left"},
     // (world markers: the field's action icons and the aiming reticle - placed by the game where the thing is on a
