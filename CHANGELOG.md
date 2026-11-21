@@ -6,6 +6,40 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsA`)
 
+## 2026-11-21: LegendsA-v1.4.0
+
+Previous release: LegendsA-v1.3.4 (1.3.5 was prepared but never released; its fixes are in this one). Game version:
+Pokemon Legends: Arceus 1.1.1. Same game code as 1.3.0, so nothing is rebuilt on start.
+
+- Ultrawide: Options > Display > Aspect ratio "Fill the window" (and the game's Graphics settings) fills a window or
+  screen wider than 16:9 with more of the world (Hor+), not black bars. The interface is fitted to it: the field HUD at
+  the nearest screen edge, menus (the Satchel, the tab and guide bars, the Pokedex) continued to the edges, the map
+  across the screen, battles fitted (health bars and plates on their Pokemon, commands at the right). The title screen
+  stays 16:9.
+- Linux: the Legends Lua research plugin is now in the Linux release too (plugins/liblegendslua.so, off until switched
+  on, as on Windows), and the AppImage finds its plugins (they were only looked for in the data folder,
+  ~/.local/share/<game>: the Steam relay never loaded there either).
+- Experimental: "New menu mouse pointer" under Options > Display > Experimental settings (off by default): our own
+  pointer drawn in the game's menus, the window keeps the mouse, hovering picks (the Satchel's grid lands exactly),
+  menu keys of their own (Controls > In menus). It could break things; off is the menu mouse as before.
+- Aiming a Poke Ball with the mouse: holding the mouse button while aiming threw the ball at the first mouse move (the
+  mouse was let go whenever the camera stopped turning: aiming, a lock-on, cutscenes). Now it is held until a menu
+  with buttons is up; the ball goes at the release and the reticle follows the mouse. Reported on Discord.
+- Jubilife at Very High / Max draw distance: villagers behind the camera are hidden again (they were animated and
+  drawn into the shadow maps even off screen), without the edge-of-screen pop-in the game's own hiding had - about a
+  quarter less CPU work and ~15% fewer draws a frame walking around the village (72 fps holds more easily).
+- Setup: an extracted copy of another Arceus version (exefs / romfs folders) beside the .nsp / .xci files no longer
+  makes setup refuse the folder - the packages are read instead.
+- GPU crash reports: when the graphics driver stops ("device lost"), lasrecomp.log now names the shaders and the
+  render pass the GPU was on, and a note (gpucrash.json next to the log) makes the next start check those shaders more
+  closely (about 10% slower until 30 minutes pass without a crash). A shader that crashed the GPU twice on the same
+  driver is skipped from then on (never a common or full-screen one; a driver update clears the list): that effect is
+  missing, but the game keeps going. LARECOMP_GPU_AUTOSKIP=0 turns the skipping off, LARECOMP_GPUCRASH_RESET=1 clears
+  the note. For the driver crashes some RTX cards report at a few story moments.
+- A freeze when the game shows an error page: it opened a system applet and waited for it forever. Applets now end at
+  once, as in Z-A.
+- lasrecomp.log: a "[mem]" line every 30 s (the game's RAM, the PC's free RAM, the GPU heaps' use and budget).
+
 ## 2026-11-17: LegendsA-v1.3.4
 
 Previous release: LegendsA-v1.3.3. Game version: Pokemon Legends: Arceus 1.1.1. A hotfix: same game code as 1.3.0, so
