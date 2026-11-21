@@ -1,5 +1,12 @@
 # Lua mods: the mod API
 
+> **Before you start:** Legends Studio, the editor these mods and quests were made with, isn't public yet. Modding
+> works without it, but it **will be much harder to use without the release of Legends Studio**: without it you write
+> every script, quest and layout edit by hand from this page.
+>
+> **Multiplayer isn't in this release** (Z-A 1.3.0 / Arceus 1.4.0): `net.send`, `net.receive` and `chat.say` stop the
+> script with "not available in this release", and `players.list()` is empty.
+
 Mods can carry Lua scripts. A script can make **new characters** that the game itself creates (they look, move and
 animate like the game's own people), dress them, pose them, walk them around, make **Pokémon**, give **items**, set the
 **time of day**, read and set the story's progress values, run the game's **own script commands** (Z-A: message
@@ -693,6 +700,10 @@ Same in both games, with any differences noted. Much of it runs the game's own s
 so **those answers come a frame later, to a callback** (`world.trace(a, b, function(hit) ... end)`).
 
 ## Networking: `net`, `players`, `chat`
+
+> **Not available in this release** (Z-A 1.3.0 / Arceus 1.4.0): multiplayer comes in a later update. `net.send`,
+> `net.receive` and `chat.say` raise "not available in this release", `players.list()` is empty and `players.online()`
+> is false. The rest of this section describes how it will work.
 
 Over the shared world: the online server's relay (Options > Online, `world_players`), the same link the other players'
 stand-ins come over. Without a shared world nothing is sent (`net.send` returns false).

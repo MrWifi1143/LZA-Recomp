@@ -17,11 +17,12 @@ ZIG=${ZIG_LINUX:-$L/zig-linux}
 [ -x "$ZIG/zig" ] || { echo "no zig for Linux at $ZIG"; exit 1; }
 PY=$(ls "$L"/dl/cpython-3.12.*-x86_64-unknown-linux-gnu-install_only.tar.gz | tail -1)
 
-make -s -j"$(nproc)" B=build/linrel DEPS="$L/deps" SHADERC=-lshaderc_shared build/linrel/lasrecomp steamrelay
+make -s -j"$(nproc)" B=build/linrel DEPS="$L/deps" SHADERC=-lshaderc_shared build/linrel/lasrecomp steamrelay legendslua
 rm -rf "$D" && mkdir -p "$D/lib" "$D/licenses" "$D/plugins" "$D/gamelib-src" "$D/gen"
 cp build/linrel/lasrecomp "$D/"
 patchelf --force-rpath --set-rpath '$ORIGIN/lib' "$D/lasrecomp" 2>/dev/null || true
 cp build/linrel/plugins/libsteamrelay.so build/linrel/plugins/steamrelay-helper "$D/plugins/"  # (the Steam relay + its helper: off until switched on in the Mods page)
+cp build/linrel/plugins/liblegendslua.so "$D/plugins/"  # (Legends Lua: mods' scripts - loaded for a mod that has them; as in the Windows zip)
 
 # lib/: everything lasrecomp and its plugin need except the Vulkan loader (the system's: it finds the GPU drivers)
 python3 - "$D" "$L/deps/lib" <<'PY'
@@ -36,7 +37,7 @@ def find(name):
         p = os.path.join(d, name)
         if os.path.exists(p): return os.path.realpath(p)
     raise SystemExit('missing library: ' + name)
-todo, seen = [os.path.join(D, 'lasrecomp'), os.path.join(D, 'plugins', 'libsteamrelay.so')], set()
+todo, seen = [os.path.join(D, 'lasrecomp'), os.path.join(D, 'plugins', 'libsteamrelay.so'), os.path.join(D, 'plugins', 'liblegendslua.so')], set()
 for extra in ('ld-linux-x86-64.so.2', 'libmvec.so.1', 'libpthread.so.0', 'libdl.so.2', 'librt.so.1'):
     seen.add(extra); shutil.copy(find(extra), os.path.join(D, 'lib', extra))  # (glibc's parts SDL may dlopen)
 while todo:

@@ -1,5 +1,12 @@
 # Legends Lua
 
+> **Before you start:** Legends Studio, the editor these mods and quests were made with, isn't public yet. Modding
+> works without it, but it **will be much harder to use without the release of Legends Studio**: without it you write
+> every script, quest and layout edit by hand from this page.
+>
+> **Multiplayer isn't in this release** (Z-A 1.3.0 / Arceus 1.4.0): `net.send`, `net.receive` and `chat.say` stop the
+> script with "not available in this release", and `players.list()` is empty.
+
 Lua 5.3 scripting for the recompiled games (Pokémon Legends: Z-A and Legends: Arceus). It's a runtime plugin with two
 layers:
 
