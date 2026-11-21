@@ -3,6 +3,7 @@
 // Menus (the overlay, the start screen) never use these: they keep the fixed default layout, so no binding can lock
 // the player out.
 #pragma once
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -29,13 +30,19 @@ enum {
     BIND_MOUSE_BASE = 512 /* SDL_SCANCODE_COUNT */, BIND_MOUSE_LEFT, BIND_MOUSE_MIDDLE, BIND_MOUSE_RIGHT, BIND_MOUSE_X1,
     BIND_MOUSE_X2, BIND_WHEEL_UP, BIND_WHEEL_DOWN, BIND_KEYCODE_COUNT
 };
-enum { BIND_DEV_PAD, BIND_DEV_KEY };
+// BIND_DEV_MENU: the keyboard (and mouse) in the game's menus - its own keys for the 16 buttons; the sticks stay the
+// field's (BIND_DEV_KEY). A key means one thing out in the world and another in a menu, as in PC games.
+enum { BIND_DEV_PAD, BIND_DEV_KEY, BIND_DEV_MENU };
 // Controller binding values: an SDL_GamepadButton, or the analog triggers as buttons
 enum { PADB_LTRIGGER = 26 /* SDL_GAMEPAD_BUTTON_COUNT */, PADB_RTRIGGER, PADB_HOST_COUNT };
 
 extern int16_t g_bind_pad[BIND_PAD_COUNT];  // PADB value per Switch button
 extern int16_t g_bind_key[BIND_KEY_COUNT];  // SDL_Scancode (or BIND_MOUSE_*) per input (0 = none)
 extern const int16_t g_bind_key2[BIND_PAD_COUNT];  // fixed second keys (Enter = A, Backspace = B, 1 / 3 = ZL / ZR)
+extern int16_t g_bind_menu[BIND_PAD_COUNT];  // the keys in the game's menus (BIND_DEV_MENU)
+// The game's menus are up (runtime/hle/menu_mouse.c says so each frame: a menu with buttons on screen): the keyboard's
+// buttons come from g_bind_menu. Set from the game's thread; read anywhere.
+extern _Atomic int g_bind_in_menu;
 
 const char *bind_input_name(int slot);         // "A", "D-pad Up", "Left stick Up"
 const char *bind_pad_label(int host, int fam); // controller button in the pad family's own words (fam: input_pad_family)

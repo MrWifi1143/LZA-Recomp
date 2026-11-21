@@ -26,6 +26,8 @@ extern "C" {
 #include "../bubble.h"
 void input_reset(void);
 bool input_finger_cursor(float *x, float *y, bool *down);  // runtime/hle/input.c
+bool input_mouse_cursor(float *x, float *y);               // runtime/hle/input.c (our pointer in a game menu)
+int bind_in_menu(void);                                    // runtime/hle/bindings.c (one of the game's menus is up)
 void input_rec_text(const char *text);                   // (LARECOMP_REC / LARECOMP_REPLAY: the names typed)
 bool input_replay_text(char *out, int cap);
 uint64_t renderer_game_frame(void);  // runtime/nvn: presents the game has made (the fps counter)
@@ -153,8 +155,9 @@ bool menu_handle_event(const SDL_Event *e) {
     }
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN:
+        // (Esc in one of the game's menus is the game's: back - g_bind_menu; F1 opens this anywhere)
         if (!e->key.repeat && (e->key.scancode == SDL_SCANCODE_F1 ||
-                               (e->key.scancode == SDL_SCANCODE_ESCAPE && !g_open.load() && !(scriptinput_grabbed() && !typing)))) {
+                               (e->key.scancode == SDL_SCANCODE_ESCAPE && !g_open.load() && !(scriptinput_grabbed() && !typing) && !bind_in_menu()))) {
             if (!typing) set_open(!g_open.load());  // (Esc with the question up goes to it below: "Não")
             return true;
         }
@@ -578,8 +581,10 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool open = g_open.load(), kbd = g_kbd.load() == 1;
     float fx, fy;
     bool fdown, finger = !open && input_finger_cursor(&fx, &fy, &fdown);
+    float mx, my;
+    bool mcur = !open && !kbd && input_mouse_cursor(&mx, &my);  // (our pointer: the held mouse in a game menu)
     bool notice = SDL_GetTicks() < g_notice_until.load(), bubbles = bubble_count() > 0, hud = hud_wanted();
-    if (!open && !kbd && !g_settings.show_fps && !finger && !notice && !bubbles && !hud) {
+    if (!open && !kbd && !g_settings.show_fps && !finger && !notice && !bubbles && !hud && !mcur) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
@@ -650,6 +655,33 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         float r = 26 * scale;
         dl->AddCircleFilled(ImVec2(fx, fy), r, fdown ? IM_COL32(255, 255, 255, 170) : IM_COL32(255, 255, 255, 60));
         dl->AddCircle(ImVec2(fx, fy), r, IM_COL32(255, 255, 255, 235), 0, 4 * scale);
+    }
+    if (mcur) {  // our pointer: an arrow, its tip on the point, in the game's own menu colours (Z-A: white, navy edge,
+        // the lime of its selection marker inside; Arceus: cream, dark brown edge, the gold of its chevron) and a soft
+        // shadow, so it shows on any menu
+        static const bool za = strstr(RT_APP_NAME, "Z-A") != NULL;
+        const ImU32 fill = za ? IM_COL32(255, 255, 255, 250) : IM_COL32(246, 240, 216, 250);
+        const ImU32 edge = za ? IM_COL32(24, 32, 74, 255) : IM_COL32(58, 44, 28, 255);
+        const ImU32 accent = za ? IM_COL32(176, 222, 52, 255) : IM_COL32(222, 190, 64, 255);
+        ImDrawList *dl = ImGui::GetForegroundDrawList();
+        float k = 1.5f * scale;
+        // three filled shapes, no strokes (thick lines at the arrow's sharp inner corners drew spikes and a blob at its
+        // back): the arrow 1.3 bigger in the edge colour, the arrow in the accent, 1.1 smaller in the fill colour
+        // (clockwise on screen, as ImGui's fill needs: counter-clockwise, its triangulator dropped the arrow's tail)
+        static const float out[][2] = {{-1.3f, -3.14f}, {18.14f, 16.3f}, {10.55f, 16.3f}, {14.25f, 24.16f}, {8.33f, 26.7f},
+                                       {4.58f, 18.26f}, {-1.3f, 24.14f}};
+        static const float mid[][2] = {{0, 0}, {15, 15}, {8.5f, 15}, {12.5f, 23.5f}, {9, 25}, {5, 16}, {0, 21}};
+        static const float in[][2] = {{1.1f, 2.66f}, {12.34f, 13.9f}, {6.77f, 13.9f}, {11.02f, 22.94f}, {9.56f, 23.56f},
+                                      {5.35f, 14.09f}, {1.1f, 18.34f}};
+        ImVec2 p[7];
+        auto shape = [&](const float (*v)[2], float dx, float dy, ImU32 col) {
+            for (int i = 0; i < 7; i++) p[i] = ImVec2(mx + (v[i][0] + dx) * k, my + (v[i][1] + dy) * k);
+            dl->AddConcavePolyFilled(p, 7, col);
+        };
+        shape(out, 1.6f, 2, IM_COL32(0, 0, 0, 60));  // (the shadow)
+        shape(out, 0, 0, edge);
+        shape(mid, 0, 0, accent);
+        shape(in, 0, 0, fill);
     }
     if (open) quit_draw(io, scale);
     if (kbd) keyboard_draw(io, scale);
