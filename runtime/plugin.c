@@ -193,10 +193,25 @@ bool plugin_enabled(const char *name) {
     return plugin_opt_in(name) ? plugin_listed(g_settings.plugins_on, name) : !plugin_listed(g_settings.plugins_off, name);
 }
 
+// Where the plugins are: plugins/ in the data root (the Windows zip and the Linux folder: the data root is the game's
+// folder), else plugins/ beside the program - the AppImage keeps its data in ~/.local/share/<game>, and its plugins
+// (the Steam relay, Legends Lua) inside the read-only image, next to lasrecomp.
+#include <sys/stat.h>
+bool rt_resource(const char *name, const char *dev_rel, char *out, size_t n);
+static const char *plugins_dir(void) {
+    static char dir[1100];
+    if (!dir[0]) {
+        struct stat st;
+        if (!(stat("plugins", &st) == 0 && S_ISDIR(st.st_mode)) && rt_resource("plugins", NULL, dir, sizeof dir)) {}
+        else snprintf(dir, sizeof dir, "plugins");
+    }
+    return dir;
+}
+
 // The plugin files in plugins/ (names only, sorted), on or off: what the start screen lists
 int plugins_files(char (*names)[64], int max) {
     int n = 0;
-    DIR *d = opendir("plugins");
+    DIR *d = opendir(plugins_dir());
     if (!d) return 0;
     for (struct dirent *e; (e = readdir(d)) && n < max;) {
         size_t k = strlen(e->d_name);
@@ -244,14 +259,14 @@ void plugins_load(void) {
 #endif
     }
     settings_load();  // (plugins_off; the working directory is the data root)
-    DIR *d = opendir("plugins");
+    DIR *d = opendir(plugins_dir());
     for (struct dirent *e; d && (e = readdir(d));) {  // (ones removed on the start screen while loaded: gone now)
         size_t n = strlen(e->d_name);
         char path[1024];
-        snprintf(path, sizeof path, "plugins/%s", e->d_name);
+        snprintf(path, sizeof path, "%s/%s", plugins_dir(), e->d_name);
         if (n > 8 && !strcmp(e->d_name + n - 8, ".removed")) remove(path);
     }
-    if (d) closedir(d), d = opendir("plugins");
+    if (d) closedir(d), d = opendir(plugins_dir());
     if (d) {
         for (struct dirent *e; (e = readdir(d));) {
             size_t n = strlen(e->d_name);
@@ -263,7 +278,7 @@ void plugins_load(void) {
                 if (strstr(e->d_name, "legendslua") && !plugin_listed(g_settings.plugins_on, e->d_name))
                     LOG("[plugin] plugins/%s: on for the scripts of the mods that are on\n", e->d_name);
                 char path[1024];
-                snprintf(path, sizeof path, "plugins/%s", e->d_name);
+                snprintf(path, sizeof path, "%s/%s", plugins_dir(), e->d_name);
                 load_one(path);
             }
         }
