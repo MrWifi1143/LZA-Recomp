@@ -26,11 +26,6 @@
 #include "../hle.h"
 #include "../settings.h"
 
-// THIS RELEASE (Arceus 1.4.0): multiplayer is left out for now - the shared world can't be turned on (WORLD_SHARED 0: no
-// setting, no online server in the relay plugin, the research switches LARECOMP_WORLD / LARECOMP_GHOST_SELF ignored).
-// The code stays: the Lua mod API's characters are drawn, dressed and walked by it (pla_world_track_skeletons, hle/pla_npc.c).
-#define WORLD_SHARED 0
-
 void rt_register_fnhook_at(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
 void rt_call_original(Cpu *c, uint64_t addr);
 bool warp_player_pos(float out[3]);
@@ -924,7 +919,7 @@ int pla_world_enabled(void) {
     if (g_on < 0) {
         const char *e = getenv("LARECOMP_WORLD"), *s = getenv("LARECOMP_GHOST_SELF");
         g_self_ahead = s ? (float)atof(s) : 0;
-        g_on = WORLD_SHARED && ((e && atoi(e) > 0) || g_self_ahead != 0);
+        g_on = (e && atoi(e) > 0) || g_self_ahead != 0;
     }
     return g_on;
 }
@@ -936,7 +931,7 @@ __attribute__((constructor)) static void pla_world_init(void) {
 // The launcher's Online tab: "Show other players walking around" (larecomp.ini world_players = 1) - read once the
 // settings are (runtime/main.c boot, before the game runs; LARECOMP_WORLD=1 turned it on already at load)
 void pla_world_settings(void) {
-    if (!WORLD_SHARED || pla_world_enabled() || getenv("LARECOMP_HIDE_PLAYER")) return;  // (world_players: not in this release)
+    if (pla_world_enabled() || !g_settings.world_players || getenv("LARECOMP_HIDE_PLAYER")) return;
     LOG("[world] shared world on (Online tab)\n");
     g_on = 1;
     world_hooks();

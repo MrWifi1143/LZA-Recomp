@@ -11,6 +11,8 @@ bool ui_input_text(const char *label, char *buf, size_t size, ImGuiInputTextFlag
                    const char *title = NULL);
 // true (once) after the on-screen keyboard of the field just drawn with ui_input_text was cancelled
 bool ui_input_text_cancelled(void);
+// true (once) after the field just drawn got its text from the on-screen keyboard's OK (not typed Enter)
+bool ui_input_text_osk_ok(void);
 
 // Once per frame, after the rest of the UI, at the root (outside any window), in the context the field was drawn in.
 void osk_draw(ImFont *big, float scale);
@@ -24,4 +26,6 @@ bool ui_text_busy(void);
 // The typed text (big font) and the key grid, drawn into the current window: d-pad / stick move, A types, B deletes,
 // Start / + OK; typed keys work too (Enter OK, Esc cancel). text: ASCII, at most max_chars. Returns 1 OK, -1 cancel,
 // 0 still typing.
-int osk_keys(char *text, size_t cap, int max_chars, bool appearing, float scale, ImFont *big, bool upper_first = true);
+// The "#+=" key shows the symbols (every printable ASCII character can be typed); masked: a password, shown as '*'.
+int osk_keys(char *text, size_t cap, int max_chars, bool appearing, float scale, ImFont *big, bool upper_first = true,
+             bool masked = false);

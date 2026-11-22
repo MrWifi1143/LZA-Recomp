@@ -42,7 +42,7 @@ static int g_n;
 static void *g_handles[MAX_PLUGINS];
 
 // A function a loaded plugin exports by name (the first that has it; NULL: none) - optional extras outside the API
-// struct
+// struct (the Steam relay's larecomp_relay_invite / larecomp_relay_join: runtime/discord.c)
 void *plugins_symbol(const char *name) {
     for (int i = 0; i < g_n; i++) {
         void *f = g_handles[i] ? dl_sym(g_handles[i], name) : NULL;
