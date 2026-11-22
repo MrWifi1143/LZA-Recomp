@@ -164,15 +164,199 @@ static int slotstate_hook(Cpu *c, uint64_t addr) {
 }
 
 // NPCs popping out and in while the camera turns (the user's village shots, 2026-11-08): the two per-frame NPC
-// updates, f_700173740c(slot, frustum) and f_7001736bfc(slot, frustum), test the NPC against the camera and, when they
-// decide it isn't seen, set slot state 0x80 (hidden, not animated) through f_70014916d0(slot, 1, 0x80) (lr 70017377c4 /
-// 7001736d38); the applied state (+0x354) follows the asked one (+0x358) a few frames later. NPCs by a building went
-// away while still on screen and came back late. Widening the frustum (plane w + 10 m) cut it 18 -> 13 hides on the
-// village pan but the far kids by the stall still went: with the planes 1000 m out, 4 hides were left - the decision
-// takes more than the planes. So those two "not seen" requests are refused: NPCs inside their load radius stay on
-// (the renderer still culls what's off screen; clears and every other caller - events, story - go through).
-// LARECOMP_PLA_NPC_KEEP=0: the game's. 60 fps on the village pan, hides 0.
+// updates, f_700173740c(slot, frustum) (people, states 2..7) and f_7001736bfc(slot, frustum) (field objects, states 9 /
+// 10), test the NPC's bounding sphere against the camera and, when they decide it isn't seen, set slot state 0x80
+// (hidden: not animated, not drawn) through f_70014916d0(slot, 1, 0x80, 4) (lr 70017377c4 / 7001736d38; x3 = fade
+// frames, 0 = at once). 09b425b refused both hide requests: every NPC inside its load radius stayed on - animated on the
+// game's threads and drawn into the shadow passes even off screen. That was the cost of Very High in Jubilife (x3 radius
+// = the whole village, ~130 slots, ~90 hide requests a frame; player report 2026-11-17, RX 6600 XT / 12 threads: 72 fps
+// not held): village walk + pan 165 M instructions and ~1870 draws a frame vs ~103 M / ~1300 with the game's hides.
+// The game's hides aren't usable as they are: people well inside the view (3-50 m inside the planes) get hide requests
+// too, and the people's sphere (~1 m) is smaller than the body, so one at the screen edge went while part of it was on
+// screen and faded back in after its centre got in (LARECOMP_PLA_NPC_POPS: ~2700 in-view pop-ins and ~600 vanishes per
+// 100 s of the village pan; the dithered fade-in at the edge is in the screenshots).
+// Now each hide request is decided here, on the camera the update tests against (its x1: +0x00 the camera position,
+// +0x20..+0x70 six planes n.p + w > 0 inside - 4 sides, near, far): hidden only when the sphere + 1 m is outside a side or
+// the near plane by more than a margin - each plane turned out by 4 deg + 2 frames of the camera's current turn (stick
+// turns 1 - 3 deg a frame at ~40-72 fps, peaks ~10) - and over 6 m from the camera. Any other request becomes a clear
+// with no fade, so one hidden earlier is back, whole, before it reaches the screen edge. Out-of-range slots: below.
+// Result (Jubilife walk + pan, Very High, 72 fps cap): 0 in-view pop-ins / vanishes (09b425b 0, the game's ~3300);
+// ~120 M instructions and ~1500 draws a frame.
+// LARECOMP_PLA_NPC_KEEP=0: the game's hides; =1: 09b425b's (none). Research: LARECOMP_PLA_NPC_MARGIN=<deg> (a fixed
+// margin), _BASE / _LEAD / _NEAR / _PAD (the numbers above), LARECOMP_PLA_NPC_STATS=1 (counts; 2: each slot shown
+// against the game's request, once), LARECOMP_PLA_NPC_POPS=1 (below).
+uint64_t renderer_game_frame(void);
 static int g_npc_keep = -1;
+static float g_npc_near = 6.0f, g_npc_pad = 1.0f;
+static int g_npc_stats;
+static volatile long g_npc_n[4];  // (stats: hidden as the game asked, shown instead, no sphere / camera (shown), clears)
+
+static bool npc_ptr_ok(uint64_t p) { return p >= 0x7000000000ull && p < 0x8000000000ull && !(p & 7); }
+
+// the bounding sphere the updates test (centre, radius)
+static bool npc_sphere(uint64_t slot, float out[4]) {
+    uint64_t o = *(const uint64_t *)(uintptr_t)(slot + 0x268);
+    if (!npc_ptr_ok(o)) return false;
+    uint64_t b = *(const uint64_t *)(uintptr_t)(o + 0x18);
+    if (!npc_ptr_ok(b)) return false;
+    uint64_t k = *(const uint64_t *)(uintptr_t)(b + 0x1a0);
+    if (!npc_ptr_ok(k)) return false;
+    uint64_t m = *(const uint64_t *)(uintptr_t)(k + 0x18);
+    if (!npc_ptr_ok(m)) return false;
+    memcpy(out, (const void *)(uintptr_t)(m + 0x240), 16);
+    return out[3] >= 0.0f && out[3] < 1000.0f && isfinite(out[0] + out[1] + out[2]);
+}
+
+// 1: the sphere is more than sin_m x distance outside one of the side / near planes and further than near metres from
+// the camera; 0: not; -1: no sphere or camera
+static volatile long g_npc_why[4];  // (stats: no sphere, camera not finite, a plane not unit)
+static int npc_outside(uint64_t slot, uint64_t fr, float sin_m, float near, float pad) {
+    float sp[4];
+    if (!npc_sphere(slot, sp)) { g_npc_why[0]++; return -1; }
+    const float *cam = (const float *)(uintptr_t)fr, *pl = (const float *)(uintptr_t)(fr + 0x20);
+    if (!isfinite(cam[0] + cam[1] + cam[2])) { g_npc_why[1]++; return -1; }
+    float r = sp[3] + pad, dx = sp[0] - cam[0], dy = sp[1] - cam[1], dz = sp[2] - cam[2];
+    float d = sqrtf(dx * dx + dy * dy + dz * dz);
+    if (d - r < near) return 0;
+    float slack = d * sin_m;
+    for (int i = 0; i < 5; i++) {  // (the 4 sides and the near plane, each turned out by the margin)
+        const float *n = pl + i * 4;
+        float l = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+        if (!(l > 0.9f && l < 1.1f)) { g_npc_why[2]++; return -1; }  // (not the layout this was found in)
+        if (n[0] * sp[0] + n[1] * sp[1] + n[2] * sp[2] + n[3] + r < -slack) return 1;
+    }
+    return 0;
+}
+
+// (research) LARECOMP_PLA_NPC_POPS=1: each NPC whose applied state (+0x354) turns hidden -> shown ("pop in") or shown ->
+// hidden ("vanish") while its sphere is inside the camera's real frustum (no margin): "[npcpop]" lines and counts - the
+// pop-in A/B without pictures (occluded ones count too). Frames from the first clear asked to the applied change.
+static struct { uint64_t slot; uint32_t hidden; uint64_t asked, last; } g_pop[1024];
+static volatile long g_pop_n[2];
+static void npc_pop_check(uint64_t slot, uint64_t fr, bool set_asked) {
+    uint64_t h = (slot >> 4) * 0x9e3779b97f4a7c15ull >> 54;
+    int i = (int)h, tries = 0;
+    while (g_pop[i].slot && g_pop[i].slot != slot && tries++ < 1024) i = (i + 1) & 1023;
+    if (tries >= 1024) return;
+    uint32_t hid = *(const uint32_t *)(uintptr_t)(slot + 0x354) & 0x80;
+    uint64_t now = renderer_game_frame();
+    if (g_pop[i].slot != slot) { g_pop[i].slot = slot, g_pop[i].hidden = hid, g_pop[i].asked = 0, g_pop[i].last = now; return; }
+    uint64_t gap = now - g_pop[i].last;
+    g_pop[i].last = now;
+    if (hid && !set_asked && !g_pop[i].asked) g_pop[i].asked = now;
+    if (hid != g_pop[i].hidden) {
+        int in = npc_outside(slot, fr, 0.0f, 0.0f, 1.0f) == 0;  // (+1 m: a person's sphere is ~0.6 m, the body taller)
+        float sp[4] = {0}, d = 0, u = -1, v = -1;
+        if (npc_sphere(slot, sp)) {
+            const float *cam = (const float *)(uintptr_t)fr, *pl = (const float *)(uintptr_t)(fr + 0x20);
+            d = sqrtf((sp[0] - cam[0]) * (sp[0] - cam[0]) + (sp[1] - cam[1]) * (sp[1] - cam[1]) + (sp[2] - cam[2]) * (sp[2] - cam[2]));
+            float e[4];  // (where on screen: the side planes' distances, 0..1 across - +0x20/+0x30 and +0x40/+0x50 pairs)
+            for (int j = 0; j < 4; j++) e[j] = pl[j * 4] * sp[0] + pl[j * 4 + 1] * sp[1] + pl[j * 4 + 2] * sp[2] + pl[j * 4 + 3];
+            if (e[0] + e[1] != 0) u = e[0] / (e[0] + e[1]);
+            if (e[2] + e[3] != 0) v = e[2] / (e[2] + e[3]);
+        }
+        if (in) {
+            long t = __atomic_add_fetch(&g_pop_n[hid ? 1 : 0], 1, __ATOMIC_RELAXED);
+            LOG("[npcpop] frame %llu slot %llx %s in view, %.1f m r %.1f at %.2f %.2f st %u gap %llu (asked %lld frames before); pop-ins %ld vanishes %ld\n",
+                (unsigned long long)now, (unsigned long long)slot, hid ? "VANISH" : "POP-IN", d, sp[3], u, v,
+                *(const uint32_t *)(uintptr_t)(slot + 0x220), (unsigned long long)gap,
+                hid || !g_pop[i].asked ? -1ll : (long long)(now - g_pop[i].asked), hid ? g_pop_n[0] : t, hid ? t : g_pop_n[1]);
+        }
+        g_pop[i].hidden = hid, g_pop[i].asked = 0;
+    }
+}
+
+// the camera of the NPC update running on this thread (its x1; a copy on that thread's stack, valid only inside it)
+static __thread uint64_t t_npc_fr;
+static int npc_update_hook(Cpu *c, uint64_t addr) {
+    uint64_t was = t_npc_fr;
+    t_npc_fr = c->x[1];
+    rt_call_original(c, addr);
+    t_npc_fr = was;
+    return 1;
+}
+
+// How fast the camera turns, for the margin: each new camera the updates see (its forward, the near plane's normal at
+// +0x60, changed) gives the angle from the last one; the peak decays by 0.85 a frame. The margin is g_npc_base degrees +
+// g_npc_lead frames of that turn (an NPC a turn brings into view within that many frames is shown already). A cut (over
+// 90 deg) isn't a turn: the update after it tests against the new camera and shows what is in view at once.
+static float g_npc_base = 4.0f, g_npc_lead = 2.0f, g_npc_fixed = -1;
+static float g_npc_fwd[3], g_npc_peak;
+static uint64_t g_npc_peak_frame;
+static float npc_margin_sin(uint64_t fr) {
+    if (g_npc_fixed >= 0) return g_npc_fixed;
+    const float *n = (const float *)(uintptr_t)(fr + 0x60);
+    uint64_t f = renderer_game_frame();
+    float dot = n[0] * g_npc_fwd[0] + n[1] * g_npc_fwd[1] + n[2] * g_npc_fwd[2];
+    if (dot < 0.9999999f) {  // (a new camera: this frame's)
+        float deg = acosf(fmaxf(-1.0f, fminf(1.0f, dot))) * 57.29578f;
+        if (deg > 90.0f) deg = 0.0f;  // (a cut, or the first: no turn to follow)
+        float now = g_npc_peak * powf(0.85f, (float)(f - g_npc_peak_frame));
+        if (deg >= now) g_npc_peak = deg, g_npc_peak_frame = f;
+        memcpy(g_npc_fwd, n, 12);
+    }
+    float turn = g_npc_peak * powf(0.85f, (float)(f - g_npc_peak_frame));
+    return sinf(fminf(g_npc_base + g_npc_lead * turn, 60.0f) * 0.01745329f);
+}
+
+// The field's NPC loop (around 0x7001d84e08) updates a slot only near the player: f_7001736bfc within +0x3c0 + r and
+// f_700173740c within +0x3c0 + r' by the horizontal distance it keeps squared at +0x330 (slot position +0x340, the
+// player's at its context +0x110). r, r' = the slot's +0x450 / +0x454 (what npc_radius_hook sets: r, r - 10) or, for a
+// slot without (0: the field objects of state 9 / 10), its context's +0x68 / +0x70 (100 / 60 m). Only f_700173740c
+// (people, states 2..7) and f_7001736bfc for states 9 / 10 ask for 0x80. Past its range a slot isn't tested at all and
+// keeps its state: one hidden there stayed hidden while the camera turned to it and came back only when the player
+// walked in again (far NPCs ~105 m away popping in at Very High, 2026-11-17). Those are looked after here instead: the
+// loop reads every slot's +0x3c0 (f_700173d12c from lr 7001d84e50) each frame, in range or not; for one out of range
+// the same test decides and the game's own setter is called (f_70014916d0(slot, 1 / 0, 0x80, 0): at once), on that
+// thread, at the point the update would have run.
+static volatile uint64_t g_npc_ctx;
+static int npc_ctx_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    if (c->x[30] == 0x7001d84da8ull) g_npc_ctx = *(const uint64_t *)(uintptr_t)c->sp;
+    return 0;
+}
+// true: the slot's hide test runs this frame (it is inside the range of the update that asks for 0x80)
+static bool npc_in_range(uint64_t slot) {
+    const int32_t *r = (const int32_t *)(uintptr_t)(slot + 0x450);
+    uint32_t st = *(const uint32_t *)(uintptr_t)(slot + 0x220);
+    bool objs = st == 9 || st == 10;
+    float r0 = *(const float *)(uintptr_t)(slot + 0x3c0), d2 = *(const float *)(uintptr_t)(slot + 0x330), range;
+    if (!(r0 >= 0.0f && r0 < 1000.0f)) return true;  // (not the layout this was found in: left to the game)
+    if (r[0] > 0) range = (float)(objs ? r[0] : r[1]);
+    else {
+        uint64_t ctx = g_npc_ctx;
+        if (!npc_ptr_ok(ctx)) return true;
+        range = (float)(int32_t)*(const float *)(uintptr_t)(ctx + (objs ? 0x68 : 0x70));
+    }
+    float edge = r0 + range;
+    return edge > 0.0f && d2 <= edge * edge;
+}
+static float npc_margin_sin(uint64_t fr);
+static void npc_pop_check(uint64_t slot, uint64_t fr, bool set_asked);
+static int g_npc_pops;
+static volatile long g_npc_far[2];  // (stats: out-of-range slots hidden / shown by npc_far_hook)
+static int npc_far_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    if (c->x[30] != 0x7001d84e50ull) return 0;
+    uint64_t slot = c->x[0], hold = *(const uint64_t *)(uintptr_t)(c->sp + 0x30);
+    if (!npc_ptr_ok(slot) || !npc_ptr_ok(hold)) return 0;
+    uint64_t fr = *(const uint64_t *)(uintptr_t)(hold + 8);
+    uint32_t st = *(const uint32_t *)(uintptr_t)(slot + 0x220);
+    if (!npc_ptr_ok(fr) || !((st >= 2 && st <= 7) || st == 9 || st == 10) || npc_in_range(slot)) return 0;
+    if (*(const uint8_t *)(uintptr_t)(fr + 0x141)) return 0;  // (the loop's own "no frustum test" flag)
+    if (g_npc_pops) npc_pop_check(slot, fr, false);
+    int o = npc_outside(slot, fr, npc_margin_sin(fr), g_npc_near, g_npc_pad);
+    if (o < 0) return 0;
+    bool hidden = (*(const uint32_t *)(uintptr_t)(slot + 0x358) & 0x80) != 0;
+    if (hidden == (o == 1)) return 0;
+    Cpu saved = *c;
+    c->x[0] = slot, c->x[1] = o == 1, c->x[2] = 0x80, c->x[3] = 0;  // (0: at once, no fade)
+    guest_call(c, 0x70014916d0ull);
+    *c = saved;
+    if (g_npc_stats) __atomic_add_fetch(&g_npc_far[o == 1 ? 0 : 1], 1, __ATOMIC_RELAXED);
+    return 0;
+}
+
 static int npc_hide_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     if ((uint32_t)c->x[2] != 0x80) return 0;
@@ -190,7 +374,56 @@ static int npc_hide_hook(Cpu *c, uint64_t addr) {
                 (unsigned long long)c->x[0]);
         }
     }
-    if (g_npc_keep && (c->x[1] & 1) && (c->x[30] == 0x70017377c4ull || c->x[30] == 0x7001736d38ull)) return 1;
+    uint64_t lr = c->x[30];
+    int who = lr == 0x70017377c4ull ? 1 : lr == 0x7001736d38ull ? 2 : 0;
+    uint64_t fr = t_npc_fr;
+    if (g_npc_pops) {
+        if (npc_ptr_ok(fr) && npc_ptr_ok(c->x[0])) npc_pop_check(c->x[0], fr, c->x[1] & 1);
+        if (c->x[1] & 1 && !who) {  // (other callers hiding: each logged once)
+            static uint64_t seen[32];
+            static int n;
+            bool dup = false;
+            for (int i = 0; i < n && !dup; i++) dup = seen[i] == lr;
+            if (!dup && n < 32) seen[n++] = lr, LOG("[npcpop] SET 0x80 from lr %llx (in an update: %d)\n", (unsigned long long)lr, fr != 0);
+        }
+    }
+    if (!g_npc_keep || !who) return 0;
+    if (!(c->x[1] & 1)) {
+        if (g_npc_stats) __atomic_add_fetch(&g_npc_n[3], 1, __ATOMIC_RELAXED);
+        return 0;
+    }
+    if (g_npc_keep == 1) return 1;  // (09b425b: refused)
+    int k;
+    if (!npc_ptr_ok(fr) || !npc_ptr_ok(c->x[0])) k = 2;
+    else {
+        int o = npc_outside(c->x[0], fr, npc_margin_sin(fr), g_npc_near, g_npc_pad);
+        k = o == 1 ? 0 : o == 0 ? 1 : 2;
+    }
+    if (g_npc_stats) {
+        long t = __atomic_add_fetch(&g_npc_n[k], 1, __ATOMIC_RELAXED);
+        if (k == 0 && t % 20000 == 0)
+            LOG("[npckeep] hidden %ld, shown instead %ld, no sphere / camera %ld (sphere %ld, camera %ld, planes %ld), clears %ld; "
+                "out of range: hidden %ld, shown %ld\n", g_npc_n[0], g_npc_n[1], g_npc_n[2], g_npc_why[0], g_npc_why[1], g_npc_why[2],
+                g_npc_n[3], g_npc_far[0], g_npc_far[1]);
+    }
+    if (g_npc_stats > 1 && k == 1) {  // (LARECOMP_PLA_NPC_STATS=2: each slot shown instead, once, with its numbers)
+        static uint64_t seen[64];
+        static int n;
+        bool dup = false;
+        for (int i = 0; i < n && !dup; i++) dup = seen[i] == c->x[0];
+        float sp[4];
+        if (!dup && n < 64 && npc_sphere(c->x[0], sp)) {
+            seen[n++] = c->x[0];
+            const float *cam = (const float *)(uintptr_t)fr, *pl = (const float *)(uintptr_t)(fr + 0x20);
+            float v[5];
+            for (int i = 0; i < 5; i++) v[i] = pl[i * 4] * sp[0] + pl[i * 4 + 1] * sp[1] + pl[i * 4 + 2] * sp[2] + pl[i * 4 + 3] + sp[3];
+            LOG("[npckeep] shown instead: slot %llx who %d st %u r %.1f cam dist %.1f planes %.1f %.1f %.1f %.1f %.1f 45c %u\n",
+                (unsigned long long)c->x[0], who, *(const uint32_t *)(uintptr_t)(c->x[0] + 0x220), sp[3],
+                sqrtf((sp[0] - cam[0]) * (sp[0] - cam[0]) + (sp[1] - cam[1]) * (sp[1] - cam[1]) + (sp[2] - cam[2]) * (sp[2] - cam[2])),
+                v[0], v[1], v[2], v[3], v[4], *(const uint8_t *)(uintptr_t)(c->x[0] + 0x45c));
+        }
+    }
+    if (k) c->x[1] &= ~1ull, c->x[3] = 0;  // (the request becomes a clear, x3 0 = at once, no fade-in)
     return 0;
 }
 
@@ -517,8 +750,19 @@ void pla_drawdist_configure(void) {
     rt_register_fnhook_at(0x7002b17bd4ull, getenv("LARECOMP_PLA_TERRFN") ? terrfn_hook : terrain_hook);
     if (pla_shadow_res()) rt_register_fnhook_at(0x7001a34908ull, shadow_size_hook);
     if (getenv("LARECOMP_PLA_SLOTWATCH")) rt_register_fnhook_at(0x7001738c14ull, slotstate_hook);
-    g_npc_keep = !getenv("LARECOMP_PLA_NPC_KEEP") || atoi(getenv("LARECOMP_PLA_NPC_KEEP")) != 0;
-    if (g_npc_keep || getenv("LARECOMP_PLA_SLOTWATCH")) rt_register_fnhook_at(0x70014916d0ull, npc_hide_hook);
+    g_npc_keep = getenv("LARECOMP_PLA_NPC_KEEP") ? atoi(getenv("LARECOMP_PLA_NPC_KEEP")) : 2;
+    if (getenv("LARECOMP_PLA_NPC_MARGIN")) g_npc_fixed = sinf((float)atof(getenv("LARECOMP_PLA_NPC_MARGIN")) * 3.14159265f / 180.0f);
+    if (getenv("LARECOMP_PLA_NPC_BASE")) g_npc_base = (float)atof(getenv("LARECOMP_PLA_NPC_BASE"));
+    if (getenv("LARECOMP_PLA_NPC_LEAD")) g_npc_lead = (float)atof(getenv("LARECOMP_PLA_NPC_LEAD"));
+    if (getenv("LARECOMP_PLA_NPC_NEAR")) g_npc_near = (float)atof(getenv("LARECOMP_PLA_NPC_NEAR"));
+    if (getenv("LARECOMP_PLA_NPC_PAD")) g_npc_pad = (float)atof(getenv("LARECOMP_PLA_NPC_PAD"));
+    g_npc_stats = getenv("LARECOMP_PLA_NPC_STATS") ? atoi(getenv("LARECOMP_PLA_NPC_STATS")) : 0;
+    g_npc_pops = getenv("LARECOMP_PLA_NPC_POPS") != NULL;
+    if (g_npc_keep || g_npc_pops || getenv("LARECOMP_PLA_SLOTWATCH")) rt_register_fnhook_at(0x70014916d0ull, npc_hide_hook);
+    if (g_npc_keep >= 2 || g_npc_pops)
+        rt_register_fnhook_at(0x700173740cull, npc_update_hook), rt_register_fnhook_at(0x7001736bfcull, npc_update_hook),
+            rt_register_fnhook_at(0x700173d4a8ull, npc_ctx_hook);
+    if (g_npc_keep >= 2) rt_register_fnhook_at(0x700173d12cull, npc_far_hook);
     if (getenv("LARECOMP_PLA_TERRHIST"))
         rt_register_fnhook_at(0x7002471048ull, terrhist_hook), rt_register_fnhook_at(0x7002b1b248ull, terrwalk_hook),
             rt_register_fnhook_at(0x7002b1b6ecull, terremit_hook);

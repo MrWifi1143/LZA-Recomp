@@ -90,6 +90,19 @@ static const struct { int slot; const char *en, *pt; } k_actions[] = {
     {BIND_WALK, "Walk (hold)", "Andar (segurar)"},
 };
 
+// The same buttons in the game's menus (bindings.c g_bind_menu): a key can mean one thing out in the world and another
+// in a menu. The sticks (WASD...) stay the world's; the mouse there is the pointer (left click picks, right goes back).
+static const struct { int slot; const char *en, *pt; } k_menu_actions[] = {
+    {BIND_A, "Pick (A, or Enter)", "Escolher (A, ou Enter)"},          {BIND_ZL, "Previous tab (ZL, or 1)", "Aba anterior (ZL, ou 1)"},
+    {BIND_B, "Back (B, or Backspace)", "Voltar (B, ou Backspace)"},     {BIND_ZR, "Next tab (ZR, or 3)", "Próxima aba (ZR, ou 3)"},
+    {BIND_X, "X", "X"},                                                {BIND_L, "Previous page (L)", "Página anterior (L)"},
+    {BIND_Y, "Y", "Y"},                                                {BIND_R, "Next page (R)", "Próxima página (R)"},
+    {BIND_UP, "Up", "Cima"},                                           {BIND_PLUS, "+", "+"},
+    {BIND_DOWN, "Down", "Baixo"},                                      {BIND_MINUS, "-", "-"},
+    {BIND_LEFT, "Left", "Esquerda"},                                   {BIND_LSTICK, "Left stick press", "Clique analógico esq."},
+    {BIND_RIGHT, "Right", "Direita"},                                  {BIND_RSTICK, "Right stick press", "Clique analógico dir."},
+};
+
 static const char *key_name(int sc) {
     switch (sc) {
     case SDL_SCANCODE_SPACE: return T("Space", "Espaço");
@@ -104,39 +117,58 @@ static const char *key_name(int sc) {
 }
 
 static void focus_first(void);
+// The keys in menus have a set of their own only with the experimental menu pointer (runtime/hle/menu_mouse_pick.c);
+// the Options page keeps this in step with its checkboxes.
+static bool s_ptr_keys;
 static void keys_section(void) {
     int cap_dev, cap_slot, ms_left;
     bind_capture_active(&cap_dev, &cap_slot, &ms_left);
     focus_first();
+    // two sets: out in the world, and in the game's menus
+    static int set = 0;  // (0 the world: BIND_DEV_KEY, 1 the menus: BIND_DEV_MENU)
+    if (!s_ptr_keys) set = 0;
+    else {  // (only the experimental menu pointer has menu keys of its own)
+        ImGui::RadioButton(T("In the world", "No mundo"), &set, 0);
+        ImGui::SameLine();
+        ImGui::RadioButton(T("In menus", "Nos menus"), &set, 1);
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", set ? T("(the mouse is the pointer: left click picks, right click goes back, the wheel scrolls)",
+                                          "(o mouse é o ponteiro: clique esquerdo escolhe, direito volta, a roda rola)")
+                                      : T("(the keys in menus are set apart: In menus)", "(as teclas nos menus ficam à parte: Nos menus)"));
+    }
+    int dev = set ? BIND_DEV_MENU : BIND_DEV_KEY;
+    const int16_t *tab = set ? g_bind_menu : g_bind_key;
+    size_t na = set ? sizeof k_menu_actions / sizeof k_menu_actions[0] : sizeof k_actions / sizeof k_actions[0];
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 2));
     ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(ImGui::GetStyle().CellPadding.x, 1));
     if (ImGui::BeginTable("##keys", 4, ImGuiTableFlags_SizingFixedFit)) {
-        for (size_t i = 0; i < sizeof k_actions / sizeof k_actions[0]; i++) {
-            int slot = k_actions[i].slot;
+        for (size_t i = 0; i < na; i++) {
+            int slot = set ? k_menu_actions[i].slot : k_actions[i].slot;
             ImGui::TableNextColumn();
             ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted(T(k_actions[i].en, k_actions[i].pt));
+            ImGui::TextUnformatted(set ? T(k_menu_actions[i].en, k_menu_actions[i].pt) : T(k_actions[i].en, k_actions[i].pt));
             ImGui::TableNextColumn();
-            bool waiting = cap_dev == BIND_DEV_KEY && cap_slot == slot;
+            bool waiting = cap_dev == dev && cap_slot == slot;
             char lbl[96];
             if (waiting) snprintf(lbl, sizeof lbl, "%s %d##k%d", T("Press a key or mouse button...", "Aperte uma tecla ou botão do mouse..."), (ms_left + 999) / 1000, slot);
-            else snprintf(lbl, sizeof lbl, "%s##k%d", key_name(g_bind_key[slot]), slot);
+            else snprintf(lbl, sizeof lbl, "%s##k%d", key_name(tab[slot]), slot);
             int pushed = 0;
             if (waiting) { ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.42f, 0.12f, 1)); pushed++; }
-            if (!bind_is_default_slot(BIND_DEV_KEY, slot)) { ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.98f, 0.82f, 0.38f, 1)); pushed++; }
+            if (!bind_is_default_slot(dev, slot)) { ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.98f, 0.82f, 0.38f, 1)); pushed++; }
             if (ImGui::Button(lbl, ImVec2(230, 0))) {
                 if (waiting) bind_capture_cancel();
-                else bind_capture_begin(BIND_DEV_KEY, slot);
+                else bind_capture_begin(dev, slot);
             }
             ImGui::PopStyleColor(pushed);
         }
         ImGui::EndTable();
     }
     ImGui::PopStyleVar(2);
-    if (cap_dev == BIND_DEV_KEY)
+    if (cap_dev == BIND_DEV_KEY || cap_dev == BIND_DEV_MENU)
         ImGui::TextDisabled("%s", T("Press the new key, mouse button or wheel. Esc cancels; one already in use swaps over.",
                                     "Aperte a nova tecla, botão ou roda do mouse. Esc cancela; uma já usada troca de lugar."));
-    if (!bind_is_default(BIND_DEV_KEY) && ImGui::Button(T("Restore default keys", "Restaurar teclas padrão"))) bind_reset(BIND_DEV_KEY);
+    if (!bind_is_default(dev) && ImGui::Button(set ? T("Restore default menu keys", "Restaurar teclas padrão dos menus")
+                                                  : T("Restore default keys", "Restaurar teclas padrão"))) bind_reset(dev);
     ImGui::PushItemWidth(420);
     ImGui::Checkbox(T("Mouse camera (click the game to take the mouse, Esc lets it go)",
                       "Câmera no mouse (clique no jogo para prender o mouse, Esc solta)"), &g_settings.mouse_camera);
@@ -534,17 +566,31 @@ static void game_files_section(SDL_Window *win) {
         if (ImGui::SmallButton(T("Change...", "Trocar..."))) SDL_ShowOpenFolderDialog(picked_game, NULL, win, NULL, false);
         if (st < SETUP_FAIL_NOT_FOUND) return;  // (a failed change: why, below - the game files set up before still play)
     }
+    // (game files set up by an earlier release from another Arceus version: asked for again, as a failed setup would)
+    if (!ready && st < SETUP_FAIL_NOT_FOUND && game_pla_unsupported("extracted/exefs")) st = SETUP_FAIL_PLA_VERSION;
+    // (and an image whose tables don't find the game's files - a base game dump the update doesn't fit: the same)
+    if (!ready && st < SETUP_FAIL_NOT_FOUND && game_romfs_broken()) st = SETUP_FAIL_ROMFS;
     if (st >= SETUP_FAIL_NOT_FOUND) {
         static const char *const en[] = {"No game files found in that folder.", "Those are compressed game files (.nsz / .xcz).",
                                          "That's not a supported game (Pokémon Legends: Arceus).", "The files couldn't be copied.",
                                          "The game code didn't build.", "The game code builder is missing from this copy.",
                                          "No keys found for those game files (prod.keys).", "Your keys can't open those game files.",
-                                         "Only the update was found, not the base game.", "Those game files couldn't be read."};
+                                         "Only the update was found, not the base game.", "Those game files couldn't be read.",
+                                         "This needs Pokémon Legends: Arceus version 1.1.1 (the base game and the 1.1.1 update); those files are another version.",
+                                         "The game can't find its own files in those: the base game doesn't fit the update.",
+                                         "Your base game file is damaged or altered: what's in it doesn't match its own checksum.",
+                                         "Your 1.1.1 update file is damaged or altered: what's in it doesn't match its own checksum.",
+                                         "Your game files are intact, but the base game and the update don't fit together (or they're packed in a way the setup doesn't expect)."};
         static const char *const pt[] = {"Nenhum arquivo do jogo nessa pasta.", "Esses são arquivos do jogo comprimidos (.nsz / .xcz).",
                                          "Esse não é um jogo suportado (Pokémon Legends: Arceus).", "Os arquivos não puderam ser copiados.",
                                          "O código do jogo não compilou.", "O compilador do código do jogo não está nesta cópia.",
                                          "Nenhuma chave encontrada para esses arquivos (prod.keys).", "As suas chaves não abrem esses arquivos.",
-                                         "Só a atualização foi encontrada, não o jogo base.", "Esses arquivos do jogo não puderam ser lidos."};
+                                         "Só a atualização foi encontrada, não o jogo base.", "Esses arquivos do jogo não puderam ser lidos.",
+                                         "É preciso o Pokémon Legends: Arceus versão 1.1.1 (o jogo base e a atualização 1.1.1); esses arquivos são de outra versão.",
+                                         "O jogo não encontra os próprios arquivos neles: o jogo base não combina com a atualização.",
+                                         "O arquivo do seu jogo base está danificado ou alterado: o conteúdo não bate com o próprio checksum.",
+                                         "O arquivo da sua atualização 1.1.1 está danificado ou alterado: o conteúdo não bate com o próprio checksum.",
+                                         "Os arquivos do seu jogo estão intactos, mas o jogo base e a atualização não se encaixam (ou estão empacotados de um jeito que a instalação não espera)."};
         static const char *const en_h[] = {"Choose the folder with your .nsp / .xci files, or the one that holds exefs and romfs.",
                                            "Decompress them first (nsz -D), or dump them as .nsp / .xci.",
                                            "Pick the folder of your own Pokémon Legends: Arceus.", "Check there are about 6 GB free and try again.",
@@ -552,7 +598,12 @@ static void game_files_section(SDL_Window *win) {
                                            "Dump prod.keys from your own Switch and put it next to the game files (or in .switch in your home folder).",
                                            "Dump prod.keys again from your Switch on its current system version; details in lasrecomp.log.",
                                            "Put the base game's .nsp / .xci in the same folder as the update.",
-                                           "The dump may be damaged; details in lasrecomp.log."};
+                                           "The dump may be damaged; details in lasrecomp.log.",
+                                           "Update the game to 1.1.1 on your Switch, dump the base game and the update, and put both in one folder (README).",
+                                           "Dump the base game again from your own Switch (cartridge or installed game), put it in one folder with the 1.1.1 update and pick that folder; details in lasrecomp.log.",
+                                           "Dump the base game again from your own Switch (cartridge or installed game), put it in one folder with the 1.1.1 update and pick that folder.",
+                                           "Dump the 1.1.1 update again from your own Switch, put it in one folder with the base game and pick that folder.",
+                                           "Please send lasrecomp.log (in the recomp's folder) in a bug report on Discord so we can fix it. A fresh dump of the base game from your own Switch may also help."};
         static const char *const pt_h[] = {"Escolha a pasta com os seus arquivos .nsp / .xci, ou a que tem exefs e romfs.",
                                            "Descomprima antes (nsz -D), ou faça o dump como .nsp / .xci.",
                                            "Escolha a pasta do seu Pokémon Legends: Arceus.", "Confira se há uns 6 GB livres e tente de novo.",
@@ -560,18 +611,25 @@ static void game_files_section(SDL_Window *win) {
                                            "Faça o dump do prod.keys do seu próprio Switch e coloque junto dos arquivos do jogo (ou em .switch na sua pasta pessoal).",
                                            "Faça o dump do prod.keys de novo no Switch com a versão atual do sistema; detalhes no lasrecomp.log.",
                                            "Coloque o .nsp / .xci do jogo base na mesma pasta da atualização.",
-                                           "O dump pode estar danificado; detalhes no lasrecomp.log."};
+                                           "O dump pode estar danificado; detalhes no lasrecomp.log.",
+                                           "Atualize o jogo para a 1.1.1 no Switch, faça o dump do jogo base e da atualização e coloque os dois numa pasta (README).",
+                                           "Faça o dump do jogo base de novo no seu próprio Switch (cartucho ou jogo instalado), coloque numa pasta com a atualização 1.1.1 e escolha essa pasta; detalhes no lasrecomp.log.",
+                                           "Faça o dump do jogo base de novo no seu próprio Switch (cartucho ou jogo instalado), coloque numa pasta com a atualização 1.1.1 e escolha essa pasta.",
+                                           "Faça o dump da atualização 1.1.1 de novo no seu próprio Switch, coloque numa pasta com o jogo base e escolha essa pasta.",
+                                           "Envie o lasrecomp.log (na pasta do recomp) num relatório de bug no Discord para a gente corrigir. Um dump novo do jogo base do seu próprio Switch também pode ajudar."};
         int k = st - SETUP_FAIL_NOT_FOUND;
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 900);
         ImGui::TextColored(k_red, "%s", T(en[k], pt[k]));
+        if ((st == SETUP_FAIL_DAMAGED_BASE || st == SETUP_FAIL_DAMAGED_UPDATE) && setup_fail_file()[0])
+            ImGui::Text(g_pt ? "Arquivo: %s" : "File: %s", setup_fail_file());
         ImGui::TextDisabled("%s", T(en_h[k], pt_h[k]));
         if (k_discord_url[0] && ImGui::SmallButton(T("Get help on Discord", "Pedir ajuda no Discord"))) SDL_OpenURL(k_discord_url);  // (always: a failed setup is when it's needed)
         ImGui::PopTextWrapPos();
     } else {
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 900);
-        ImGui::TextUnformatted(T("Select the folder with your own Pokémon Legends: Arceus: the dumped base game and update "
+        ImGui::TextUnformatted(T("Select the folder with your own Pokémon Legends: Arceus: the dumped base game and 1.1.1 update "
                                  "(.nsp / .xci, with your prod.keys), or the extracted exefs and romfs.",
-                                 "Selecione a pasta com o seu Pokémon Legends: Arceus: o dump do jogo base e da atualização "
+                                 "Selecione a pasta com o seu Pokémon Legends: Arceus: o dump do jogo base e da atualização 1.1.1 "
                                  "(.nsp / .xci, com o seu prod.keys), ou o exefs e o romfs extraídos."));
         ImGui::PopTextWrapPos();
     }
@@ -949,11 +1007,13 @@ extern "C" void launcher_lg_run(const char *root) {
     for (int i = 0; i < 6; i++) if (res_lines[i] == g_settings.res_height) res = i;
     bool full = g_settings.fullscreen, smaa = g_settings.antialias == AA_SMAA, wildb = g_settings.wild_battle, showfps = g_settings.show_fps, realtime = !g_settings.fixed_steps;
     // (72: half a 144 Hz screen's refresh - every frame shown for exactly 2 refreshes, where 60 alternates 2 and 3)
-    static const int fps_vals[] = {30, 60, 72, 120, 144, FPS_UNLIMITED};
-    auto fps_index = [](int f) { for (int i = 0; i < 6; i++) if (fps_vals[i] == f) return i; return 0; };
+    static const int fps_vals[] = {30, 45, 60, 72, 120, 144, FPS_UNLIMITED};  // (45: PCs that dip under 60)
+    auto fps_index = [](int f) { for (int i = 0; i < 7; i++) if (fps_vals[i] == f) return i; return 0; };
     int fps_i = fps_index(g_settings.fps);
     int wide_i = g_settings.ultrawide ? 1 : 0;  // (Aspect ratio: 0 16:9, 1 fill the window - nvn/output_scale.c)
     bool experimental = g_settings.experimental;
+    bool menu_ptr = g_settings.menu_pointer;  // (Experimental settings: the new menu mouse pointer)
+    s_ptr_keys = experimental && menu_ptr;
     // Recommended settings for this PC (from Z-A's start screen; by the GPU, the CPU threads and the RAM): shown with an
     // Apply button, and applied at once on a first start (no larecomp.ini yet)
     struct Rec { int res, fps, nowait; char text[120]; } rec;
@@ -984,7 +1044,7 @@ extern "C" void launcher_lg_run(const char *root) {
     int detail_i = g_settings.detail >= 0 && g_settings.detail <= 3 ? g_settings.detail : 0;
     int shadows_i = g_settings.shadows >= 0 && g_settings.shadows <= 2 ? g_settings.shadows : 0;
     int sharp_i = g_settings.sharpen >= 0 && g_settings.sharpen <= 3 ? g_settings.sharpen : 0;
-    auto apply_rec = [&]() { res = rec.res, fps_i = rec.fps, shl_i = rec.nowait; };
+    auto apply_rec = [&]() { res = rec.res, fps_i = fps_index(rec.fps ? 60 : 30), shl_i = rec.nowait; };
     if (g_settings_fresh) apply_rec();
     int bg_i = g_settings.background >= 0 && g_settings.background <= 2 ? g_settings.background : 0;
     int pk_i = g_settings.pkhex_link >= 0 && g_settings.pkhex_link <= 2 ? g_settings.pkhex_link : 0;
@@ -1000,6 +1060,7 @@ extern "C" void launcher_lg_run(const char *root) {
         res = 0;
         for (int i = 0; i < 6; i++) if (res_lines[i] == d.res_height) res = i;
         full = d.fullscreen, smaa = d.antialias == AA_SMAA, showfps = d.show_fps, realtime = !d.fixed_steps, experimental = d.experimental;
+        menu_ptr = d.menu_pointer, s_ptr_keys = false;
         wide_i = d.ultrawide ? 1 : 0;
         fps_i = fps_index(d.fps);
         wildb = d.wild_battle, prompts_i = d.button_prompts, smooth_sh = d.shadow_smooth, shcol_i = d.shadow_color, bg_i = d.background, pk_i = d.pkhex_link;
@@ -1101,13 +1162,13 @@ extern "C" void launcher_lg_run(const char *root) {
         }
         if (ImGui::Checkbox(T("Fullscreen", "Tela cheia"), &full) && classic) SDL_SetWindowFullscreen(win, full);  // (launcher: at Play)
         ImGui::Checkbox(T("Anti-aliasing (SMAA)", "Suavizar serrilhado (SMAA)"), &smaa);
-        static const char *const fps_names_en[] = {"30 fps", "60 fps", "72 fps", "120 fps", "144 fps", "Unlimited"};  // (above 60: Experimental settings)
-        static const char *const fps_names_pt[] = {"30 fps", "60 fps", "72 fps", "120 fps", "144 fps", "Ilimitada"};
-        if (!experimental && fps_i > 1) fps_i = 1;
-        ImGui::Combo(T("Frame rate", "Taxa de quadros"), &fps_i, g_pt ? fps_names_pt : fps_names_en, experimental ? 6 : 2);
-        if (fps_i >= 1 && fps_i <= 4)  // (Unlimited: always real time, hle/fps60.c)
+        static const char *const fps_names_en[] = {"30 fps", "45 fps", "60 fps", "72 fps", "120 fps", "144 fps", "Unlimited"};  // (above 60: Experimental settings)
+        static const char *const fps_names_pt[] = {"30 fps", "45 fps", "60 fps", "72 fps", "120 fps", "144 fps", "Ilimitada"};
+        if (!experimental && fps_i > 2) fps_i = 2;
+        ImGui::Combo(T("Frame rate", "Taxa de quadros"), &fps_i, g_pt ? fps_names_pt : fps_names_en, experimental ? 7 : 3);
+        if (fps_i >= 1 && fps_i <= 5)  // (Unlimited: always real time, hle/fps60.c)
             ImGui::Checkbox(T("Keep full speed when the frame rate dips", "Manter a velocidade total quando a taxa de quadros cai"), &realtime);
-        if (fps_i >= 2)  // (72 / 120 / 144 / Unlimited: the game's own logic was made for 30; some of it counts frames)
+        if (fps_i >= 3)  // (72 / 120 / 144 / Unlimited: the game's own logic was made for 30; some of it counts frames)
             ImGui::TextColored(k_yellow, "%s",
                                T("Above 60 fps is experimental. Some scripted scenes can stall at these rates\n"
                                               "(a cutscene that walks you somewhere may never let go of you). If that happens,\n"
@@ -1125,6 +1186,22 @@ extern "C" void launcher_lg_run(const char *root) {
                                    "Configurações ainda não terminadas: taxas de quadros acima de 60 (72, 120, 144, Ilimitada). Aparecem "
                                    "aqui e nas configurações do jogo só com isto ligado."));
         ImGui::PopStyleColor();
+        if (experimental) {  // (runtime/hle/menu_mouse_pick.c: picked when the game starts)
+            ImGui::Checkbox(T("New menu mouse pointer (experimental)", "Novo ponteiro do mouse nos menus (experimental)"), &menu_ptr);
+            const char *ptr_help = T("Our own pointer drawn in the game's menus: the window keeps the mouse, hovering picks, "
+                                     "the menus get keys of their own (Controls). Experimental - it could break things: a menu "
+                                     "may not react right to the mouse or the keys. Off: the menu mouse as before. "
+                                     "Applies the next time the game starts.",
+                                     "Um ponteiro próprio desenhado nos menus do jogo: a janela fica com o mouse, passar por cima "
+                                     "escolhe, os menus têm teclas próprias (Controles). Experimental - pode quebrar coisas: um "
+                                     "menu pode não responder direito ao mouse ou às teclas. Desligado: o mouse nos menus como "
+                                     "antes. Vale a partir da próxima vez que o jogo iniciar.");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", ptr_help);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("%s", ptr_help);
+            ImGui::PopStyleColor();
+        }
+        s_ptr_keys = experimental && menu_ptr;
         ImGui::Unindent(ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x);
     };
     auto settings_graphics = [&]() {  // (the game's Settings rows of the same names: runtime/hle/pla_options.c)
@@ -1471,6 +1548,22 @@ extern "C" void launcher_lg_run(const char *root) {
                 const char *name = game_name("extracted/exefs");
                 ImGui::TextColored(k_green, g_pt ? "Pokémon %s - pronto para jogar" : "Pokémon %s - ready to play", name ? name : "Legends: Arceus");
                 ImGui::TextDisabled("%s", pc);
+            } else if (st == SETUP_FAIL_PLA_VERSION || (st < SETUP_FAIL_NOT_FOUND && game_pla_unsupported("extracted/exefs"))) {
+                ImGui::TextColored(k_red, "%s", T("This needs Pokémon Legends: Arceus version 1.1.1; those files are another version.",
+                                                  "É preciso o Pokémon Legends: Arceus versão 1.1.1; esses arquivos são de outra versão."));
+                ImGui::TextDisabled("%s", T("Open Game Files for what to do.", "Abra Arquivos do jogo para ver o que fazer."));
+            } else if (st == SETUP_FAIL_ROMFS || (st < SETUP_FAIL_NOT_FOUND && game_romfs_broken())) {
+                ImGui::TextColored(k_red, "%s", T("The game can't find its own files: the base game doesn't fit the update.",
+                                                  "O jogo não encontra os próprios arquivos: o jogo base não combina com a atualização."));
+                ImGui::TextDisabled("%s", T("Open Game Files for what to do.", "Abra Arquivos do jogo para ver o que fazer."));
+            } else if (st == SETUP_FAIL_DAMAGED_BASE || st == SETUP_FAIL_DAMAGED_UPDATE) {
+                ImGui::TextColored(k_red, "%s", st == SETUP_FAIL_DAMAGED_BASE ? T("Your base game file is damaged or altered.", "O arquivo do seu jogo base está danificado ou alterado.")
+                                                                             : T("Your 1.1.1 update file is damaged or altered.", "O arquivo da sua atualização 1.1.1 está danificado ou alterado."));
+                ImGui::TextDisabled("%s", T("Open Game Files for what to do.", "Abra Arquivos do jogo para ver o que fazer."));
+            } else if (st == SETUP_FAIL_MISMATCH) {
+                ImGui::TextColored(k_red, "%s", T("Your game files are intact, but the base game and the update don't fit together.",
+                                                  "Os arquivos do seu jogo estão intactos, mas o jogo base e a atualização não se encaixam."));
+                ImGui::TextDisabled("%s", T("Open Game Files for what to do.", "Abra Arquivos do jogo para ver o que fazer."));
             } else if (st >= SETUP_FAIL_NOT_FOUND) {
                 ImGui::TextColored(k_red, "%s", T("The game files couldn't be set up.", "Os arquivos do jogo não puderam ser preparados."));
                 ImGui::TextDisabled("%s", T("Open Game Files for why.", "Abra Arquivos do jogo para ver o motivo."));
@@ -1655,9 +1748,10 @@ extern "C" void launcher_lg_run(const char *root) {
     g_settings.fullscreen = full;
     g_settings.ultrawide = wide_i == 1;
     g_settings.antialias = smaa ? AA_SMAA : AA_OFF;
-    if (!experimental && fps_i > 1) fps_i = 1;
+    if (!experimental && fps_i > 2) fps_i = 2;
     g_settings.experimental = experimental;
-    g_settings.fps = fps_vals[fps_i >= 0 && fps_i < 6 ? fps_i : 0];
+    g_settings.menu_pointer = menu_ptr;
+    g_settings.fps = fps_vals[fps_i >= 0 && fps_i < 7 ? fps_i : 0];
     g_settings.wild_battle = wildb;
     g_settings.show_fps = showfps;
     g_settings.fixed_steps = !realtime;

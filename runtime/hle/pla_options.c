@@ -58,20 +58,20 @@ enum { CHOICE, BAR10 };
 typedef struct {
     const char *name, *info;
     int kind, n;
-    const char *choice[6];
+    const char *choice[7];
     int (*get)(void);
     void (*set)(int);
     void (*act)(int);  // (A on the row: runs it for the choice shown)
 } Row;
 
-static const int k_fps[] = {30, 60, 72, 120, 144, FPS_UNLIMITED},  // (72: half of 144 Hz, every frame 2 refreshes)
+static const int k_fps[] = {30, 45, 60, 72, 120, 144, FPS_UNLIMITED},  // (45: PCs that dip under 60; 72: half of 144 Hz)
                  k_lines[] = {0, 540, 720, 1080, 1440, 2160};  // (540p: weak GPUs, ~half 1080p's GPU time)
 static int find(const int *v, int n, int x) {
     for (int i = 0; i < n; i++) if (v[i] == x) return i;
     return 0;
 }
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
-static int get_fps(void) { return find(k_fps, 6, g_settings.next_fps ? g_settings.next_fps : g_settings.fps); }
+static int get_fps(void) { return find(k_fps, 7, g_settings.next_fps ? g_settings.next_fps : g_settings.fps); }
 // (120 / 144: the game's own logic was made for 30 and some of it counts frames; the row's description says so while
 // one of them is chosen - drawn again right after the change, settings_screen_buttons)
 static const char *const k_fps_warning = "Experimental: scripted scenes can stall at this rate. If you get stuck, set 60 or 30 fps.";
@@ -137,8 +137,8 @@ static void set_vol(int v) { g_settings.volume = (float)v / 10; }
 static const Row k_rows[] = {
     {"Controls", "Press A to see and change the key and the controller button for each action.", CHOICE, 2,
      {"Keyboard", "Controller"}, ctl_col, ctl_open},
-    {"Frame Rate", "Choose how many frames are drawn a second.", CHOICE, 6,
-     {"30 fps", "60 fps", "72 fps", "120 fps", "144 fps", "Unlimited"}, get_fps, set_fps},
+    {"Frame Rate", "Choose how many frames are drawn a second. 45 suits a PC that can't hold 60.", CHOICE, 7,
+     {"30 fps", "45 fps", "60 fps", "72 fps", "120 fps", "144 fps", "Unlimited"}, get_fps, set_fps},
     {"Frame Timing", "Choose whether the game keeps full speed when the frame rate dips (Real Time) or slows down with it.",
      CHOICE, 2, {"Real Time", "Fixed"}, get_steps, set_steps},
     {"Resolution (Next Start)", "Choose the resolution the game is drawn at. It applies the next time you start the game.", CHOICE, 6,
@@ -184,7 +184,7 @@ static const Row k_rows[] = {
 };
 #define NROWS (int)(sizeof k_rows / sizeof *k_rows)
 // A row's choices as offered: the frame rate's above 60 only with the start screen's Experimental settings on
-static int nchoice(const Row *w) { return w->get == get_fps && !g_settings.experimental ? 2 : w->n; }
+static int nchoice(const Row *w) { return w->get == get_fps && !g_settings.experimental ? 3 : w->n; }
 static int g_first[NROWS];  // CHOICE rows of more than 3: the first of the three shown
 
 static int row_of(uint32_t id) { return id >= FIRST_ID && id < FIRST_ID + (uint32_t)NROWS ? (int)(id - FIRST_ID) : -1; }
@@ -401,7 +401,7 @@ static int description_hook(Cpu *c, uint64_t addr) {  // (view, id) -> [x8] stri
     c->x[1] = 0;
     rt_call_original(c, addr);
     uint8_t *str = (uint8_t *)(uintptr_t)*(const uint64_t *)(uintptr_t)out;
-    if (str) put_text(str, k_rows[r].get == get_fps && get_fps() >= 2 ? k_fps_warning : k_rows[r].info, 48);
+    if (str) put_text(str, k_rows[r].get == get_fps && get_fps() >= 3 ? k_fps_warning : k_rows[r].info, 48);
     return 1;
 }
 

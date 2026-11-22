@@ -33,6 +33,7 @@ typedef struct NvnTexture {
     uint64_t debug_id;
     uint64_t obj;   // the game's NVNtexture object it was initialized in (objects.c: the pool slots index)
     char label[64];
+    bool finalized;  // (objects.c: set by the finalize job on the render thread; textures.c logs a use after it)
 } NvnTexture;
 
 typedef struct {
@@ -112,6 +113,8 @@ typedef struct {
     uint64_t obj_tag;  // frame interpolation: the game object the list's last CMD_OBJECT named (cmdbuf.c)
     void *last_prog;   // (research, LARECOMP_LOG_XFB) the host program last bound while recording
     uint8_t xfb_active;
+    uint32_t ui_mode;  // the game's interface layout the list's last CMD_UI named (runtime/gameui.h gameui_draw_mode)
+    uint32_t ui_ver;   // (and the image / copy it named: gameui_draw_extra's number)
 } NvnCmdBuf;
 
 // One recorded command: header, the call's integer and float arguments, then copied data.
@@ -140,6 +143,7 @@ enum {
     CMD_DISCARD_DEPTH_STENCIL, CMD_SET_COPY_STRIDES, CMD_DRAW_TEXTURE, CMD_RESOLVE_DEPTH,
     CMD_OBJECT,  // (ours) x[0]: the game object the following draws belong to, 0 = none (frame interpolation)
     CMD_XFB_BEGIN, CMD_XFB_END, CMD_XFB_BIND, CMD_SET_RASTER_DISCARD, CMD_SET_DEPTH_CLAMP,
+    CMD_UI,  // (ours) x[0]: how the following draws - an interface layout's - fit a screen that isn't 16:9 (gameui.h)
     CMD_COUNT
 };
 
@@ -150,6 +154,9 @@ void backend_init(void);
 void backend_execute(uint64_t handle);            // run a recorded command list
 void backend_present(NvnTexture *tex);            // show a texture in the window
 void backend_texture_destroyed(NvnTexture *tex);
+// objects.c: is t still the live texture it was when a command list was recorded (its debug_id then)? A list recorded once
+// and called every frame keeps the host objects it named; the game may finalize one and still call the list once more.
+bool nvn_texture_alive(const NvnTexture *t, uint64_t id);
 void backend_pool_written(uint64_t addr, uint64_t size);
 // render thread (vulkan/renderthread.c): with LARECOMP_RENDER_THREAD off these run the backend call on the spot
 bool rt_active(void);

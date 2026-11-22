@@ -18,6 +18,7 @@
 #include "shaders.h"
 #include "../../plugin.h"
 #include "vk.h"
+#include "gpudiag.h"
 #include "../../platform.h"
 #include "../renderer.h"
 #include "../../settings.h"
@@ -91,6 +92,7 @@ void vk_wait_seq(uint64_t seq) {
     VkResult r = vkWaitSemaphores(g_vk.dev, &wi, 10ull * 1000000000ull);
     stat_wait_ns += SDL_GetTicksNS() - t0;
     cum_wait += SDL_GetTicksNS() - t0;
+    if (r == VK_SUCCESS && seq > g_gd_done) g_gd_done = seq;  // (the crash report: what the GPU had finished)
     if (r == VK_TIMEOUT) LOG("[vk] GPU did not finish submission %llu within 10 s (device lost?)\n", (unsigned long long)seq);
     else if (r != VK_SUCCESS) {
         extern void vk_devlost_dump(void);
@@ -146,6 +148,7 @@ VkCommandBuffer vk_cmd(void) {
     if (!s->main_begun) {
         begin_cb(&s->main, &s->main_begun);
         gp_mark(s->main, "(submission start; includes GPU idle before it)");
+        gd_mark(s->main, GD_M_CB, 0, 0, 0, 0);
         if (prof_qp) {
             vkCmdResetQueryPool(s->main, prof_qp, (uint32_t)cur_sub * 2, 2);
             vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_NONE, prof_qp, (uint32_t)cur_sub * 2);
@@ -333,6 +336,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     }
     pthread_mutex_lock(&seq_lock);
     submit_seq++;
+    g_gd_seq = submit_seq + 1;  // (gpudiag marks: the submission they are in)
     cur_sub = (cur_sub + 1) % SUBS;
     pthread_cond_broadcast(&seq_cond);
     pthread_mutex_unlock(&seq_lock);
@@ -344,6 +348,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
 }
 
 void renderer_submit(void) { vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE); }
+void vk_gd_frame(void) { gd_frame(g_draws_total); }  // (device.c, each present: gpudiag.c)
 void renderer_wait_seq(uint64_t seq);
 uint64_t renderer_fence_seq(void);
 
@@ -752,6 +757,10 @@ static struct {
     uint64_t copy_row_stride, copy_image_stride;
     uint64_t obj;       // frame interpolation: the game object the current draws belong to (CMD_OBJECT), 0 = none
     uint32_t obj_draw;  // draws of that object so far in this run of it
+    uint32_t ui;        // the interface layout being drawn, fitted by the game layer (CMD_UI, runtime/gameui.h): 0 none
+    uint32_t ui_img;    // (its pane's image: runtime/hle/gameui.c's id, 0 none)
+    int ui_copy;        // (a copy of a pane drawn again: ui_cf = offset x y, scale, the pane's centre x y; -1..1 space)
+    float ui_cf[5];
     bool xfb_active, raster_discard;  // transform feedback (CMD_XFB_*), SetRasterizerDiscard
     bool depth_clamp;                 // SetDepthClamp (a pipeline key bit)
     uint64_t xfb_addr[4], xfb_size[4];
@@ -1179,6 +1188,9 @@ static void begin_pass(void) {
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = layers,
                           .colorAttachmentCount = pass_ncolor, .pColorAttachments = ca,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
+    {   // (GPU crash reports: a checkpoint at each pass, gpudiag.c)
+        gd_mark(cb, GD_M_PASS, minw, minh, pass_rt[0] ? pass_rt[0]->format : 0, (int)pass_ncolor);
+    }
     vkCmdBeginRendering(cb, &ri);
     in_pass = true;
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
@@ -1395,7 +1407,31 @@ typedef struct {
     uint64_t fs_hash;   // vk_fs_hash of the fragment program (draw_: made on first use, fs_hash_ok)
     bool fs_hash_ok;
     bool warm;          // (vk_warm_program's: released right after, no pipeline parts)
+    uint64_t gd_key;    // gpudiag.h: the program's identity for GPU crash reports and the skip list (made with fs_hash)
+    int8_t gd_skip;     // on the GPU crash skip list (index + 1; 0 not)
+    bool gd_iso;        // (the deeper mode after a crash: drawn in a pass of its own between full barriers, gpudiag.c)
 } Prog;
+
+// What this thread is building, for a crash inside the driver (rt_fatal_trace -> vk_crash_note): NVIDIA's compiler dying
+// on one program (Windows: an access violation in nvoglv64.dll under vkCreateGraphicsPipelines on a shader worker) then
+// names that program and puts its GLSL in the log - the code to reproduce it with
+static __thread const Prog *tl_build_prog;
+static __thread const char *tl_build_what, *tl_build_glsl;  // (glsl: a compute program's)
+#define BUILDING(p, what) (tl_build_prog = (p), tl_build_what = (what), tl_build_glsl = NULL)
+#define BUILT() (tl_build_prog = NULL)
+uint64_t vk_fs_hash(uint64_t fs);
+void vk_crash_note(void) {
+    const Prog *p = tl_build_prog;
+    if (!p) return;
+    bool vs = strstr(tl_build_what, "vertex") || strstr(tl_build_what, "whole") || strstr(tl_build_what, "link");
+    bool fs = strstr(tl_build_what, "fragment") || strstr(tl_build_what, "whole") || strstr(tl_build_what, "link");
+    fprintf(stderr, "[vk] this thread was in the driver building %s of the program vs %llx fs %llx (fs hash %016llx)\n", tl_build_what,
+            (unsigned long long)p->code[0], (unsigned long long)p->code[1], p->code[1] && !p->warm ? (unsigned long long)vk_fs_hash(p->code[1]) : 0ull);  // (a warm-up's copy: too short to hash)
+    if (vs && p->vi && p->vi->msl) fprintf(stderr, "[vk] ---- its vertex GLSL ----\n%s\n[vk] ---- end ----\n", p->vi->msl);
+    if (fs && p->fi && p->fi->msl) fprintf(stderr, "[vk] ---- its fragment GLSL ----\n%s\n[vk] ---- end ----\n", p->fi->msl);
+    if (tl_build_glsl) fprintf(stderr, "[vk] ---- its compute GLSL ----\n%s\n[vk] ---- end ----\n", tl_build_glsl);
+    fflush(stderr);
+}
 
 static VkPipelineLayout make_layout(Prog *p, int nsets, VkShaderStageFlags s0, VkShaderStageFlags s1) {
     p->set_layout[0] = vk_set_layout(p->binds, p->nbinds, 0, s0);
@@ -2055,6 +2091,11 @@ static void translate_program(void *arg) {
             if (nlog++ < 400) LOG("[pla] plants x%d: vs %llx\n", dk, (unsigned long long)p->code[0]);
         }
     }
+    if (p->code[1] && !p->warm && ENV("LARECOMP_TEST_GPUCRASH")) {  // (test only: this program crashes the GPU, gpudiag.c)
+        extern uint64_t vk_fs_hash(uint64_t fs);
+        char *t = gd_test_inject(p->vi->msl, vk_fs_hash(p->code[1]));
+        if (t) p->vi->msl = t;
+    }
     if (p->vkey.xfb_count[0]) xfb_rewrite(p);
     p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
     save_glsl(p->vi->msl, p->code[0], "vs");
@@ -2069,8 +2110,55 @@ static void translate_program(void *arg) {
     compile_program(p);  // (this worker: queued again it would wait behind the other translations)
 }
 
-#define PROG_TAB 4096
-static struct { uint64_t key; Prog *prog; } prog_tab[PROG_TAB];
+// The render thread's lookup tables (programs by their key, pipelines by theirs): open addressing, doubled when half
+// full, so a lookup always ends at the key or a free slot. They were fixed arrays: programs 4096 slots that replaced an
+// entry after 64 probes, pipelines 8192 slots with no limit at all. In a long session (each area, battle and effect
+// brings programs: ~4000 after an hour or so) two programs begin replacing each other every frame (a new program,
+// translation and pipeline for each, 2 a frame), which fills the pipeline table within minutes - and the next new
+// pipeline's lookup then goes round the full table forever: the render thread stops in the middle of a command list,
+// the game waits on it (a freeze, no crash). Same fix as Z-A's. Entries are never removed (the objects live on: keys
+// hold their pointers), only all at once by vk_exec_reset.
+typedef struct { uint64_t key; void *val; } MapEnt;
+typedef struct { MapEnt *e; uint32_t cap, n; const char *what; } Map;
+static uint32_t map_slot(uint64_t key, uint32_t cap) { return (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> 32) & (cap - 1); }
+static uint32_t map_first_cap(void) {  // (LARECOMP_TEST_MAP=<slots>: research, small tables to see them grow)
+    static int v = -1;
+    if (v < 0) { const char *e = ENV("LARECOMP_TEST_MAP"); v = e ? atoi(e) : 0; if (v < 16 || (v & (v - 1))) v = 0; }
+    return v ? (uint32_t)v : 4096;
+}
+static void *map_get(const Map *m, uint64_t key) {  // (key != 0)
+    if (!m->e) return NULL;
+    for (uint32_t s = map_slot(key, m->cap);; s = (s + 1) & (m->cap - 1)) {
+        if (m->e[s].key == key) return m->e[s].val;
+        if (!m->e[s].key) return NULL;
+    }
+}
+static void map_put(Map *m, uint64_t key, void *val) {  // (key != 0, not in the table)
+    if ((m->n + 1) * 2 > m->cap) {
+        uint32_t cap = m->cap ? m->cap * 2 : map_first_cap();
+        MapEnt *e = calloc(cap, sizeof *e);
+        if (!e) FATAL("out of memory (%s table, %u entries)\n", m->what, m->n);
+        for (uint32_t i = 0; i < m->cap; i++) {
+            if (!m->e[i].key) continue;
+            uint32_t s = map_slot(m->e[i].key, cap);
+            while (e[s].key) s = (s + 1) & (cap - 1);
+            e[s] = m->e[i];
+        }
+        free(m->e);
+        m->e = e;
+        if (m->cap) LOG("[vk] %s table: %u entries, now %u slots\n", m->what, m->n, cap);
+        m->cap = cap;
+    }
+    uint32_t s = map_slot(key, m->cap);
+    while (m->e[s].key) s = (s + 1) & (m->cap - 1);
+    m->e[s].key = key, m->e[s].val = val;
+    m->n++;
+}
+static void map_clear(Map *m) {
+    if (m->e) memset(m->e, 0, (size_t)m->cap * sizeof *m->e);
+    m->n = 0;
+}
+static Map prog_map = {.what = "program"};
 
 // BindProgram(program, stages): the stages in the mask come from `program` (NULL: unbound), the others stay. A bind
 // that leaves one program's stages and nothing else uses that program itself (as before); a mix of stages from
@@ -2120,12 +2208,8 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     h = hash_words(h, fkey->img_kind, 8);
     h = hash_words(h, vkey, sizeof *vkey);
     if (!h) h = 1;
-    uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
-    for (int probe = 0; prog_tab[slot].key && prog_tab[slot].key != h; probe++) {
-        if (probe == 64) { prog_tab[slot].key = 0; break; }  // (full run of slots: the entry is replaced, its Prog kept)
-        slot = (slot + 1) & (PROG_TAB - 1);
-    }
-    if (prog_tab[slot].key) return prog_tab[slot].prog;
+    Prog *found = map_get(&prog_map, h);
+    if (found) return found;
     {   // an address seen before with other code: the old address-only key would have handed back that shader
         static struct { uint64_t addr, content; } seen[8192];
         static uint64_t nother;
@@ -2155,8 +2239,7 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
             (unsigned long long)*(uint64_t *)fkey->img_kind, vkey->tex_stencil, fkey->tex_stencil);
     }
     Prog *p = calloc(1, sizeof *p);
-    prog_tab[slot].key = h;
-    prog_tab[slot].prog = p;
+    map_put(&prog_map, h, p);
     for (int i = 0; i < 2; i++) {
         p->code[i] = np->stages[i].code_addr;
         p->cmax[i] = np->stages[i].const_offset ? np->stages[i].const_offset : 0x10000;
@@ -2401,8 +2484,7 @@ typedef struct {
     VkPipeline parts[4];             // (g_vk.gpl: the libraries it was linked from)
     _Atomic(VkPipeline) optimized;   // (gpl_optimize: the same, link-time optimized - swapped in by the next draw)
 } Pipe;
-#define PIPE_TAB 8192
-static struct { uint64_t key; Pipe *pipe; } pipe_tab[PIPE_TAB];
+static Map pipe_map = {.what = "pipeline"};  // (above: map_get / map_put)
 
 // 8 bytes a step (PipeKey is ~700 bytes, hashed per draw); in-memory tables only - hmix values are compared with
 // stored constants (fragment-shader hashes) and must not change.
@@ -2625,7 +2707,7 @@ static void lib_build(Lib *l, int part, const PipeKey *k) {
     {
         PipeInfo s;
         pipe_info(&s, k);
-        static const VkPipelineRenderingCreateInfo no_targets = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+        VkPipelineRenderingCreateInfo no_targets = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
         VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pDynamicState = &s.dy};
         switch (part) {
         case VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT:
@@ -2643,7 +2725,11 @@ static void lib_build(Lib *l, int part, const PipeKey *k) {
             pi.pNext = &s.ri, pi.pColorBlendState = &s.cb, pi.pMultisampleState = &s.ms;
             break;
         }
+        BUILDING(k->prog, part == VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT ? "the vertex shader part"
+                          : part == VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT ? "the fragment shader part"
+                          : part == VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT ? "the vertex input part" : "the output part");
         lib_create(l, &pi, (VkGraphicsPipelineLibraryFlagsEXT)part);
+        BUILT();
     }
 }
 
@@ -2691,7 +2777,9 @@ static bool gpl_link(Pipe *pp) {
     VkPipelineLibraryCreateInfoKHR li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR, .libraryCount = 4, .pLibraries = parts};
     VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &li, .layout = k->prog->layout};
     uint64_t t0 = SDL_GetTicksNS();
+    BUILDING(k->prog, "the link");
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, VK_NULL_HANDLE, 1, &pi, NULL, &pp->pipe);
+    BUILT();
     atomic_fetch_add(&stat_link_ns, SDL_GetTicksNS() - t0);
     atomic_fetch_add(&stat_links, 1);
     if (r != VK_SUCCESS) {
@@ -2711,10 +2799,12 @@ static void gpl_optimize(void *arg) {  // (gpl_lto: the pipeline linked again, o
                                        .flags = VK_PIPELINE_CREATE_LINK_TIME_OPTIMIZATION_BIT_EXT, .layout = pp->k.prog->layout};
     uint64_t t0 = SDL_GetTicksNS();
     VkPipeline p = VK_NULL_HANDLE;
+    BUILDING(pp->k.prog, "the optimized link");
     if (vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p) == VK_SUCCESS) {
         atomic_fetch_add(&new_pipes, 1);
         atomic_store(&pp->optimized, p);
     }
+    BUILT();
     atomic_fetch_add(&stat_opt_ns, SDL_GetTicksNS() - t0);
     atomic_fetch_add(&stat_opts, 1);
 }
@@ -2754,7 +2844,9 @@ static void build_pipeline(void *arg) {
     uint64_t tp = SDL_GetTicksNS();
     extern bool g_pipe_exec_stats;
     if (g_pipe_exec_stats) s.pi.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
+    BUILDING(k->prog, "the whole pipeline");
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, tl_warm ? VK_NULL_HANDLE : g_vk.pcache, 1, &s.pi, NULL, &pp->pipe);
+    BUILT();
     atomic_fetch_add(&stat_pipe_ns, SDL_GetTicksNS() - tp);
     if (r == VK_SUCCESS && g_pipe_exec_stats) pipe_exec_report(pp->pipe, k->prog->code[0], k->prog->code[1]);
     if (r != VK_SUCCESS) {
@@ -3670,7 +3762,10 @@ static bool gpuw_unknown;
 static void gpuw_stores(const ShaderInfo *si, const Range *sbufs, int n, const char *what, uint64_t code) {
     if (!si || !si->gmem_stores) return;
     bool any = false;
-    for (int i = 0; i < n; i++) if (sbufs[i].addr) { gpuw_note(sbufs[i].addr, sbufs[i].size); any = true; }
+    // (a lazily backed heap - gpuheap.c: an output in a chunk nothing has touched yet is backed first; unbacked, the
+    // sparse heap buffer drops the GPU's writes there and whatever reads them later gets zeros)
+    extern void gpuheap_touch(uint64_t addr, uint64_t n);
+    for (int i = 0; i < n; i++) if (sbufs[i].addr) { gpuheap_touch(sbufs[i].addr, sbufs[i].size); gpuw_note(sbufs[i].addr, sbufs[i].size); any = true; }
     if (!any && !gpuw_unknown) {
         gpuw_unknown = true;
         LOG("[vk] %s %llx stores to global memory without a storage buffer: vertex and index data is read in place from now on\n", what, (unsigned long long)code);
@@ -3749,8 +3844,8 @@ static int g_cs_n;  // (compute program table below)
 // programs, shared copies - and the heap import: its pages are replaced (re-imported on first use).
 void vk_exec_reset(void) {
     vcache_reset();
-    memset(prog_tab, 0, sizeof prog_tab);
-    memset(pipe_tab, 0, sizeof pipe_tab);
+    map_clear(&prog_map);
+    map_clear(&pipe_map);
     g_cs_n = 0;
     ngpuw = 0;  // (guest memory is replaced)
     gcopy_gen++;
@@ -4127,7 +4222,9 @@ static void build_compute(void *arg) {
                                                 .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main",
                                                 .pSpecializationInfo = &spec},
                                       .layout = cp->p.layout};
+    BUILDING(&cp->p, "the compute pipeline"), tl_build_glsl = cp->si->msl;
     VkResult r = vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &ci, NULL, &cp->pipe);
+    BUILT();
     atomic_fetch_add(&stat_compiles, 1);
     if (r == VK_SUCCESS) atomic_fetch_add(&new_pipes, 1);
     atomic_store(&cp->p.state, r == VK_SUCCESS ? 1 : 2);
@@ -4182,6 +4279,15 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     }
     CsProg *cp = compute_program(st.program);
     if (!cp || atomic_load(&cp->p.state) != 1) { stat_skipped++; return; }
+    if (!cp->p.gd_key) {  // (GPU crash reports, gpudiag.c: the compute program by its code)
+        uint64_t cs = st.program->stages[5].code_addr;
+        uint64_t ch = hmix(1469598103934665603ull, (const void *)(uintptr_t)(cs + 0x30), 0x200);
+        cp->p.gd_key = gd_key_cs(ch);
+        gd_register(cp->p.gd_key, 2, 0, ch, 0, cs, NULL, cp->si ? cp->si->msl : NULL);
+        cp->p.gd_skip = (int8_t)gd_skip_lookup(cp->p.gd_key);
+        cp->p.gd_iso = gd_isolate_lookup(cp->p.gd_key);
+    }
+    if (cp->p.gd_skip && gd_skip_hit(cp->p.gd_skip - 1)) { stat_skipped++; return; }
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
@@ -4210,7 +4316,10 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     VkDescriptorSet ds = stage_set(&cp->p, cp->p.set_layout[0], 0, 5, cp->si, NULL, NULL, gx, gy, gz, NULL);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, 0, 1, &ds, 0, NULL);
+    if (!g_gd_drawmarks) gd_mark(cb, GD_M_DISPATCH, gx, gy, 0, 0);  // (per-draw marks: gd_op sets one)
+    gd_op(cb, cp->p.gd_key, GD_I_DISPATCH);
     vkCmdDispatch(cb, gx, gy, gz);
+    if (cp->p.gd_iso) hz_all = true;  // (the deeper mode: the next pass waits for it, gpudiag.c)
     stat_dispatches++;
 }
 
@@ -4302,7 +4411,9 @@ static uint64_t prof_tp_;
 // Known by their first instructions: c[3][0x210] / c[3][0x214] loaded at pc 0x8 / 0x18, the FFMAs with c[3][0x218] /
 // c[3][0x21c] soon after (registers and places vary; the same in Z-A and Arceus). A pane that covers the whole layout -
 // the screen fades, a menu's dimming of the world - is drawn over the whole image instead of the box (the sides went
-// undimmed). Wider-than-the-layout panels (Z-A's Settings sheet) are stretched to the sides with it; their contents stay.
+// undimmed). One across the layout's whole width (a menu's tint bands, header and footer bars) or ending at its left or
+// right edge (a header tab, a side panel, a guide line) stays in the box with its edges continued to the image's edges
+// (ui_extend_edges). Contents stay in the box.
 static bool layout_vs(uint64_t code) {
     static struct { uint64_t code; bool yes; } cache[256];
     uint32_t h = (uint32_t)((code >> 4) * 0x9E3779B1u) >> 24;
@@ -4316,11 +4427,14 @@ static bool layout_vs(uint64_t code) {
     cache[h].code = code, cache[h].yes = yes;
     return yes;
 }
-static bool layout_fullscreen_pane(void) {
+// (kx, ky: the layout's projection made that much wider / taller by the game layer - runtime/hle/gameui.c "wide": a
+// pane as big as the layout covers 1 / kx of the image's width)
+// (its place in the layout's projected space, -1..1: x lo[0] .. hi[0], y lo[1] .. hi[1])
+static bool layout_pane_rect(float lo[2], float hi[2]) {
     if (!st.program || !layout_vs(st.program->stages[0].code_addr)) return false;
     const float *c = (const float *)(uintptr_t)st.ubuf[0][0].addr;  // (the vertex stage's c3: ubuf[0][0])
     if (!c || st.ubuf[0][0].size < 136 * 4) return false;
-    float lo[2] = {1e9f, 1e9f}, hi[2] = {-1e9f, -1e9f};
+    lo[0] = lo[1] = 1e9f, hi[0] = hi[1] = -1e9f;
     for (int k = 0; k < 4; k++) {
         float lx = (float)(k & 1) * c[132] + c[134], ly = -(float)(k >> 1) * c[133] + c[135];
         float wx = c[16] * lx + c[17] * ly + c[19], wy = c[20] * lx + c[21] * ly + c[23], wz = c[24] * lx + c[25] * ly + c[27];
@@ -4330,11 +4444,42 @@ static bool layout_fullscreen_pane(void) {
         lo[0] = fminf(lo[0], nx), hi[0] = fmaxf(hi[0], nx), lo[1] = fminf(lo[1], ny), hi[1] = fmaxf(hi[1], ny);
     }
     if (g_debug_frame) LOG("[draw]   layout pane: x %.3f .. %.3f, y %.3f .. %.3f\n", lo[0], hi[0], lo[1], hi[1]);
-    return lo[0] <= -0.99f && hi[0] >= 0.99f && lo[1] <= -0.99f && hi[1] >= 0.99f;
+    return true;
+}
+static bool layout_pane_covers(float kx, float ky) {
+    float lo[2], hi[2];
+    return layout_pane_rect(lo, hi) && lo[0] <= -0.99f / kx && hi[0] >= 0.99f / kx && lo[1] <= -0.99f / ky && hi[1] >= 0.99f / ky;
+}
+static bool layout_fullscreen_pane(void) { return layout_pane_covers(1, 1); }
+// (draw_, ultrawide: an interface pane that ends at its 16:9 box's left / right edge drawn again over the side between the box
+// and the image's edge, through a viewport so wide that only the pane's edge - a few texels - falls there: the edge goes on
+// to the screen's edge as on a 16:9 screen. Clipped to that side: nothing is drawn twice over)
+static void ui_extend_edges(VkCommandBuffer cb, int sides, const float img_x[2], const float vp[4], float zn, float zf, bool use_index,
+                            uint32_t count, uint32_t icount, uint32_t inst, uint32_t first, int32_t base_vertex, uint32_t base_inst) {
+    VkRect2D sc = scissor_rect();  // (the pane's own clip, in the box: it must reach the edge too)
+    const VkPhysicalDeviceLimits *L = &g_vk.props.limits;
+    float maxw = fminf((float)L->maxViewportDimensions[0], L->viewportBoundsRange[1]) * 0.95f;
+    for (int side = 0; side < 2; side++) {
+        if (!(sides & (1 << side)) || vp[2] < 1) continue;
+        float edge = side ? vp[0] + vp[2] : vp[0], out = img_x[side];
+        int a = side ? (int)ceilf(edge) : (int)floorf(out), b = side ? (int)ceilf(out) : (int)floorf(edge);
+        if (b - a < 1) continue;
+        if (side ? sc.offset.x + (int)sc.extent.width < (int)edge - 1 : sc.offset.x > (int)edge + 1) continue;
+        float w = maxw;
+        w = side ? fminf(w, out - L->viewportBoundsRange[0] * 0.95f) : fminf(w, L->viewportBoundsRange[1] * 0.95f - out);
+        if (w <= vp[2] * 1.5f) continue;
+        set_viewport(side ? out - w : out, vp[1], w, vp[3], zn, zf);
+        VkRect2D r = {{a, sc.offset.y}, {(uint32_t)(b - a), sc.extent.height}};
+        vkCmdSetScissor(cb, 0, 1, &r);
+        if (!use_index) vkCmdDraw(cb, count, inst, first, base_inst);
+        else vkCmdDrawIndexed(cb, icount, inst, 0, base_vertex, base_inst);
+    }
 }
 
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
+    int ui_ext = 0;  // (an interface pane ending at the box's left (1) / right (2) edge: continued to the image's - below)
+    float ui_ext_x[2] = {0, 0}, ui_ext_vp[4] = {0, 0, 0, 0};
     if (!st.program) { SKIP(0); return; }
     if (ip_rec()) {  // (frame interpolation, stereo: what identifies this draw from one frame to the next)
         // what the draw is (program, vertex buffer, parameters), and which game object it belongs to: the same mesh
@@ -4393,7 +4538,17 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
         uint64_t fs = st.program->stages[1].code_addr;
-        if (!pr->fs_hash_ok) pr->fs_hash = fs ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(fs + 0x30), 0x200) : 0, pr->fs_hash_ok = true;
+        if (!pr->fs_hash_ok) {
+            pr->fs_hash = fs ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(fs + 0x30), 0x200) : 0, pr->fs_hash_ok = true;
+            // (GPU crash reports, gpudiag.c: the program by both its shaders; on the skip list?)
+            uint64_t vs = st.program->stages[0].code_addr;
+            uint64_t vh = vs ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(vs + 0x30), 0x200) : 0;
+            pr->gd_key = gd_key_draw(pr->fs_hash, vh);
+            gd_register(pr->gd_key, 1, vh, pr->fs_hash, vs, fs, pr->vi ? pr->vi->msl : NULL, pr->fi ? pr->fi->msl : NULL);
+            pr->gd_skip = (int8_t)gd_skip_lookup(pr->gd_key);
+            pr->gd_iso = gd_isolate_lookup(pr->gd_key);
+        }
+        if (pr->gd_skip && gd_skip_hit(pr->gd_skip - 1)) { stat_skipped++; return; }  // (crashed the GPU twice: gpudiag.c)
         uint64_t last_hash = pr->fs_hash;
         static uint64_t skip[16];
         static int nskip = -1;
@@ -4457,6 +4612,7 @@ static void draw_(CmdRec *r, bool indexed) {
     snap_reason = "draw-colorwrite";
     for (int i = 0; i < st.rt.ncolor; i++)
         if (st.rt.color[i] && ((st.channel_mask >> (i * 4)) & 0xF)) snapshots_invalidate(st.rt.color[i]);
+    if (pr->gd_iso) vk_end_pass(), hz_all = true;  // (on the GPU at the last crash: alone, gpudiag.c)
     begin_pass();
     hz_draw(pr, true);
     VkCommandBuffer cb = vk_cmd();
@@ -4518,15 +4674,12 @@ static void draw_(CmdRec *r, bool indexed) {
     k.depth_clamp = st.depth_clamp && g_vk.depth_clamp;
     uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
     if (!ph) ph = 1;
-    uint32_t pslot = (uint32_t)(ph ^ (ph >> 29)) & (PIPE_TAB - 1);
-    while (pipe_tab[pslot].key && pipe_tab[pslot].key != ph) pslot = (pslot + 1) & (PIPE_TAB - 1);
-    Pipe *pp = pipe_tab[pslot].pipe;
+    Pipe *pp = map_get(&pipe_map, ph);
     if (!pp) {
         pp = calloc(1, sizeof *pp);
         pp->k = k;
         pp->t_asked = SDL_GetTicksNS();
-        pipe_tab[pslot].key = ph;
-        pipe_tab[pslot].pipe = pp;
+        map_put(&pipe_map, ph, pp);
         run_job(build_pipeline, pp);
     }
     wait_built(&pp->state);
@@ -4618,6 +4771,16 @@ static void draw_(CmdRec *r, bool indexed) {
     PROF_ADD(prof_sets);
     VkDescriptorImageInfo fii[64];
     uint64_t prof_tx_ = prof ? SDL_GetTicksNS() : 0;
+    if (st.ui_img && pr->fi->ntex > 0 && st.tpool) {  // (a game UI pane's image: its first texture replaced - runtime/hle/gameui.c)
+        extern void vk_texture_gameui_image(NvnTexture *t, uint32_t img);
+        int slot = ((int)pr->fi->tex[0].handle_offset - 0x20) / 8;
+        uint64_t h = slot >= 0 && slot < 32 ? st.tex[1][slot] : 0;
+        uint32_t tic = h & 0xFFFFF;
+        if (h && tic < (uint32_t)st.tpool->count) {
+            NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
+            if (e->tex) vk_texture_gameui_image(e->tex, st.ui_img);
+        }
+    }
     for (int i = 0; i < pr->fi->ntex && i < 64; i++) {
         float sc[2]; uint32_t wh[2];
         texture_info(1, pr->fi, i, &fii[i], sc, wh);
@@ -4672,6 +4835,56 @@ static void draw_(CmdRec *r, bool indexed) {
             fade_fill = black || white;
         }
         bool composite = reads_scene || fade_fill || (fullscreen_fill && wide_frame == renderer_present_count());
+        int pw_, ph_;
+        pass_size(&pw_, &ph_);
+        float bw_ = fminf(img_w, img_h * (16.0f / 9.0f)), bh_ = fminf(img_h, img_w * (9.0f / 16.0f));
+        int ui_mode = (int)(st.ui & 0xff) - 1, ui_anchor = (int)(st.ui >> 8) & 0xff;
+        if (ui_mode >= 0) composite = reads_scene;  // (a layout's pane: its shape tells - below - not the quad guesses)
+        if (ui_mode == 0 && composite) {
+            // (a pane that reads a screen-sized image is a backdrop - the blurred capture behind a menu - only when it is as
+            // big as the layout: Arceus' satchel grid icons read a screen-sized mask (its scissor) and were drawn
+            // stretched over the whole image, two of them left of the 16:9 box)
+            float lo[2], hi[2];
+            if (layout_pane_rect(lo, hi) && !(lo[0] <= -0.99f && hi[0] >= 0.99f && lo[1] <= -0.99f && hi[1] >= 0.99f)) composite = false;
+        }
+        if (ui_mode >= 0 && !composite) {
+            // A layout the game layer fits itself (runtime/hle/gameui.c; modes as gameui.h's GUI_MODE_*): 0 the box,
+            // moved to the edge it is anchored at; 1 "wide" - its projection already as wide as the image: the whole
+            // image, a pane as big as the layout stretched over it; 2 stretched over the whole image.
+            float kx = img_w / bw_, ky = img_h / bh_;
+            float x0 = (pw_ - img_w) * 0.5f, y0 = (ph_ - img_h) * 0.5f;  // (the image in the pass)
+            bool keep = (ui_anchor & 0x10) != 0;  // (the layout's "fill 0": no pane of it stretched)
+            if (ui_mode == 1 || ui_mode == 2) {
+                vp_sx = img_w / rt0->width, vp_sy = img_h / rt0->height, vp_ox = x0, vp_oy = y0;
+                if (ui_mode == 1 && !keep && layout_pane_covers(kx, ky))
+                    vp_sx *= kx, vp_sy *= ky, vp_ox -= (kx - 1) * img_w * 0.5f, vp_oy -= (ky - 1) * img_h * 0.5f;
+            } else {
+                float lo[2], hi[2];
+                bool rect = !keep && layout_pane_rect(lo, hi);
+                bool spans_x = rect && lo[0] <= -0.99f && hi[0] >= 0.99f, spans_y = rect && lo[1] <= -0.99f && hi[1] >= 0.99f;
+                // (a pane as big as the layout - a fade, a dimming - covers the whole image; so does one across its whole
+                // height on a taller screen. One across its whole width on a wider screen - a band: a header bar, a menu's
+                // tint over the top or bottom half - stays in the box and has both edges continued (below): an ornament
+                // in the bar - Arceus' tab bar diamond - stays where it was, next to its title. Not in a layout anchored at
+                // an edge - a HUD piece: Z-A's minimap map is a picture far bigger than the layout (5120 x 5120 and up,
+                // cut round by a mask) - stretched over the image it came out an oval, off its ring)
+                if (!(ui_anchor & 15) && ((spans_x && spans_y) || (spans_y && ky > 1.001f))) {
+                    composite = true;
+                } else {
+                    vp_sx = bw_ / rt0->width, vp_sy = bh_ / rt0->height;
+                    vp_ox = ui_anchor & 1 ? x0 : ui_anchor & 2 ? x0 + img_w - bw_ : (pw_ - bw_) * 0.5f;
+                    vp_oy = ui_anchor & 4 ? y0 : ui_anchor & 8 ? y0 + img_h - bh_ : (ph_ - bh_) * 0.5f;
+                    // (one that ends at the layout's left or right edge: a narrow upright strip - an accent bar on a header's
+                    // end - goes to the image's edge; anything else - a header tab, a side panel, a line running off the screen
+                    // - has its edge go on to the image's edge: drawn again after itself, its edge stretched over the side)
+                    int edge = rect && kx > 1.001f && !(ui_anchor & 3) && !st.ui_copy ? (lo[0] <= -0.99f ? 1 : 0) | (hi[0] >= 0.99f ? 2 : 0) : 0;
+                    float pw_px = (hi[0] - lo[0]) * 0.5f * bw_, ph_px = (hi[1] - lo[1]) * 0.5f * bh_;
+                    if ((edge == 1 || edge == 2) && pw_px <= bw_ * 0.045f && ph_px >= pw_px * 2.5f) vp_ox = edge == 1 ? x0 : x0 + img_w - bw_;
+                    else if (edge) ui_ext = edge, ui_ext_x[0] = x0, ui_ext_x[1] = x0 + img_w;
+                }
+            }
+            if (!composite) wide_frame = ~0ull;
+        } else {
         // (an interface pane as big as the whole layout - a fade, a menu's dimming - covers the whole image)
         if (!composite && layout_fullscreen_pane()) composite = true;
         if (!composite) wide_frame = ~0ull;
@@ -4685,6 +4898,7 @@ static void draw_(CmdRec *r, bool indexed) {
             vp_sx = bw / rt0->width, vp_sy = bh / rt0->height;
             vp_ox = (pw - bw) * 0.5f;
             vp_oy = (ph - bh) * 0.5f;
+        }
         }
     }
     {   // (research, LARECOMP_COUNT_FS=<fs hash>: draws with that fragment shader per frame, logged when the count changes)
@@ -4711,8 +4925,16 @@ static void draw_(CmdRec *r, bool indexed) {
         if (overlay) vp_ox -= g_plugin_overlay_px;  // (pixels of the image as drawn, as vp_ox)
     }
     {
-        float vx = vp[0] * vp_sx + vp_ox, vw = vp[2] * vp_sx;
-        set_viewport(vx, vp[1] * vp_sy + vp_oy, vw, vp[3] * vp_sy, zn, zf);
+        float vx = vp[0] * vp_sx + vp_ox, vw = vp[2] * vp_sx, vy = vp[1] * vp_sy + vp_oy, vh = vp[3] * vp_sy;
+        if (st.ui_copy) {  // (a copy of a game UI pane: its draws again, moved and scaled about the pane's centre)
+            float sc = st.ui_cf[2] > 0 ? st.ui_cf[2] : 1;
+            float px = vx + (st.ui_cf[3] + 1) * 0.5f * vw, py = vy + (1 - st.ui_cf[4]) * 0.5f * vh;  // (layout y up)
+            vx = px + (vx - px) * sc + st.ui_cf[0] * 0.5f * vw;
+            vy = py + (vy - py) * sc - st.ui_cf[1] * 0.5f * vh;
+            vw *= sc, vh *= sc;
+        }
+        set_viewport(vx, vy, vw, vh, zn, zf);
+        ui_ext_vp[0] = vx, ui_ext_vp[1] = vy, ui_ext_vp[2] = vw, ui_ext_vp[3] = vh;
         if (g_debug_frame) {
             VkRect2D sr = scissor_rect();
             LOG("[draw]   vp %.2f %.2f %.2f %.2f (fs hash %016llx) scissor %d %d %u %u | guest sc %d %d %d %d | pass %ux%u s %.4f %.4f\n",
@@ -4863,6 +5085,17 @@ static void draw_(CmdRec *r, bool indexed) {
     // lie in the imported heap (gmem_buf); the draws that read them as vertex data later read them in place (gpuw).
     bool xfb_on = st.xfb_active && g_vk.xfb && pr->vkey.xfb_count[0];
     if (xfb_on) {
+        // (a lazily backed heap - gpuheap.c: the capture's buffers in chunks nothing has touched yet are backed first, so
+        // gmem_info below binds them; skipped, the draws that read the captured vertices got stale memory - a Radeon
+        // on Linux: models stretched into huge slabs, a wall of a hat and a bystander, after ~20 min of play)
+        extern void gpuheap_touch(uint64_t addr, uint64_t n);
+        extern unsigned gpuheap_backed_mb(void);
+        unsigned before = g_vk.gpuheap || g_vk.lazyhost ? gpuheap_backed_mb() : 0;
+        for (int b = 0; b < 4 && pr->vkey.xfb_count[b]; b++) gpuheap_touch(st.xfb_addr[b], st.xfb_size[b]);
+        if (before && gpuheap_backed_mb() != before) {
+            static int told;
+            if (told++ < 10) LOG("[xfb] buffer %llx in a heap chunk not backed yet: backed now (%u MB)\n", (unsigned long long)st.xfb_addr[0], gpuheap_backed_mb());
+        }
         VkDescriptorBufferInfo gi = gmem_info();
         VkBuffer bufs[4];
         VkDeviceSize offs[4], sizes[4];
@@ -4878,21 +5111,24 @@ static void draw_(CmdRec *r, bool indexed) {
             bufs[nb] = gmem_buf; offs[nb] = a - HEAP_BASE; sizes[nb] = n; nb++;
         }
         static int logged;
-        if (!xfb_on && logged++ < 10) LOG("[xfb] capture skipped: buffer %llx outside the imported heap\n", (unsigned long long)st.xfb_addr[0]);
+        if (!xfb_on && logged++ < 10) LOG("[xfb] capture skipped: buffer %llx (%llu bytes) outside the imported heap\n", (unsigned long long)st.xfb_addr[0], (unsigned long long)st.xfb_size[0]);
         if (xfb_on) {
             g_vk.bind_xfb(cb, 0, nb, bufs, offs, sizes);
             g_vk.begin_xfb(cb, 0, 0, NULL, NULL);
         }
     }
+    gd_op(cb, pr->gd_key, GD_I_DRAW | (!use_index && count <= 4 && inst <= 1 ? GD_I_FULL : 0) | (inst > 65535 ? 65535u : inst) << 16);
     if (exp_hit && exp_mode == 1) { /* skipped */ }
     else if (!use_index) vkCmdDraw(cb, count, inst_eff, first, base_inst);
     else vkCmdDrawIndexed(cb, icount, inst_eff, 0, base_vertex, base_inst);
+    if (ui_ext && !exp_hit && !xfb_on) ui_extend_edges(cb, ui_ext, ui_ext_x, ui_ext_vp, zn, zf, use_index, count, icount, inst_eff, first, base_vertex, base_inst);
     if (xfb_on) {
         g_vk.end_xfb(cb, 0, 0, NULL, NULL);
         for (int b = 0; b < 4 && pr->vkey.xfb_count[b]; b++) gpuw_note(st.xfb_addr[b], st.xfb_size[b]);
     }
     if (gp_q) { vkCmdEndQuery(cb, gps_qp, (uint32_t)gps_n); gp_stat[gp_n - 1] = gps_n + 1; gps_n++; }
     if (exp_hit && exp_mode == 2) apply_scissor();
+    if (pr->gd_iso) vk_end_pass(), hz_all = true;  // (and nothing else on the GPU beside it)
     stat_draws++;
     g_draws_total++;
     cum_draws++;
@@ -5047,7 +5283,41 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
 }
 
 // ================================================================== texture copies
-typedef struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; } TexRefRec;
+typedef struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; uint64_t id; } TexRefRec;
+
+// A texture a command list names (its host object and debug_id when recorded: cmdbuf.c): the object itself if it is still
+// that texture, else NULL - a list recorded once and called every frame can outlive a texture it names (objects.c
+// nvnTextureFinalize). LARECOMP_TEXFIN_CHECK=0: not checked (research: the old crash).
+static NvnTexture *rec_tex(uint64_t p, uint64_t id) {
+    NvnTexture *t = (NvnTexture *)(uintptr_t)p;
+    static int check = -1;
+    if (check < 0) check = !ENV("LARECOMP_TEXFIN_CHECK") || atoi(ENV("LARECOMP_TEXFIN_CHECK")) != 0;
+    if (!t || !check || nvn_texture_alive(t, id)) return t;
+    static uint64_t n;
+    n++;
+    if (!(n & (n - 1))) LOG("[vk] a command list names a texture finalized since: left out (%llu)\n", (unsigned long long)n);
+    return NULL;
+}
+static const TexRefRec *rec_ref(const TexRefRec *in, TexRefRec *out) {  // (the same for a copy's texture)
+    *out = *in;
+    out->tex = (uint64_t)(uintptr_t)rec_tex(in->tex, in->id);
+    return out;
+}
+
+// The finalize job (render thread, textures.c backend_texture_destroyed): the running pass and the target state may still
+// name the texture (state lasts from list to list) - the pass ends while it is still there, the state forgets it.
+void vk_exec_texture_gone(NvnTexture *t) {
+    bool hit = false;
+    for (int i = 0; i < 9; i++) hit |= pass_rt[i] == t;
+    for (int i = 0; i < 8; i++) hit |= st.rt.color[i] == t;
+    hit |= st.rt.depth == t;
+    if (!hit) return;
+    vk_end_pass();
+    for (int i = 0; i < 9; i++) if (pass_rt[i] == t) pass_rt[i] = NULL;
+    for (int i = 0; i < 8; i++) if (st.rt.color[i] == t) st.rt.color[i] = NULL;
+    if (st.rt.depth == t) st.rt.depth = NULL;
+    st.rt_dirty = true;
+}
 
 static void copy_region_dims(NvnTexture *t, const TexRefRec *ref, const FormatInfo **fi, int32_t rg[6], int *level,
                              uint64_t *row, uint64_t *img) {
@@ -5634,7 +5904,7 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
 // ================================================================== executor (renderer.m exec_list)
 static void exec_list(uint64_t handle, int depth) {
     uint64_t p = handle;
-    if (depth == 0) st.obj = 0, st.obj_draw = 0;  // (a submitted list starts with no object; its called lists inherit)
+    if (depth == 0) st.obj = 0, st.obj_draw = 0, st.ui = 0, st.ui_img = 0, st.ui_copy = 0;  // (a submitted list starts with no object; its called lists inherit)
     for (int guard = 0; guard < 10000000; guard++) {
         CmdRec *r = (CmdRec *)(uintptr_t)p;
         // (the records were written by a game thread on another core: fetch ahead, each one was a cache miss here)
@@ -5651,6 +5921,10 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_XFB_BIND: if (r->x[0] < 4) { st.xfb_addr[r->x[0]] = r->x[1]; st.xfb_size[r->x[0]] = r->x[2]; } break;
         case CMD_SET_RASTER_DISCARD: st.raster_discard = r->x[0] != 0; break;
         case CMD_SET_DEPTH_CLAMP: st.depth_clamp = r->x[0] != 0; break;
+        case CMD_UI:
+            st.ui = (uint32_t)r->x[0], st.ui_img = (uint32_t)r->x[1], st.ui_copy = (int)r->x[2];
+            memcpy(st.ui_cf, r->f, 16), memcpy(&st.ui_cf[4], &r->x[3], 4);
+            break;
         case CMD_OBJECT: st.obj = r->x[0]; st.obj_draw = 0; { static int d; if (ENV("LARECOMP_OBJDBG") && vk_frame_counter() == 1450 && d++ < 80) LOG("[objdbg] depth %d object %llx\n", depth,(unsigned long long)r->x[0]); } break;
         case CMD_JUMP: p = r->x[0]; continue;
         case CMD_CALL: {
@@ -5702,16 +5976,16 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_SET_SAMPLER_POOL: st.spool = (NvnDescPool *)(uintptr_t)r->x[0]; break;
         case CMD_SET_RENDER_TARGETS: {
             const struct { uint64_t tex[8]; NvnTextureView views[8]; uint8_t has_view[8]; uint64_t depth;
-                           NvnTextureView dview; uint8_t has_dview; } *rt = x;
+                           NvnTextureView dview; uint8_t has_dview; uint64_t id[8], depth_id; } *rt = x;
             RtState prev = st.rt;  // the same targets again: keep the pass (a restart = full barrier + reload)
             memset(&st.rt, 0, sizeof st.rt);
             st.rt.ncolor = (int)r->x[0] > 8 ? 8 : (int)r->x[0];
             for (int i = 0; i < st.rt.ncolor; i++) {
-                st.rt.color[i] = (NvnTexture *)(uintptr_t)rt->tex[i];
+                st.rt.color[i] = rec_tex(rt->tex[i], rt->id[i]);
                 st.rt.cview[i] = rt->views[i];
                 st.rt.has_cview[i] = rt->has_view[i];
             }
-            st.rt.depth = (NvnTexture *)(uintptr_t)rt->depth;
+            st.rt.depth = rec_tex(rt->depth, rt->depth_id);
             st.rt.dview = rt->dview;
             st.rt.has_dview = rt->has_dview;
             static int always = -1;
@@ -5775,8 +6049,8 @@ static void exec_list(uint64_t handle, int depth) {
         }
         case CMD_CLEAR_TEXTURE: {
             // ClearTexture(cmd, texture, view, region, color, mask): a render-target clear of the texture alone (renderer.m)
-            const struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; float color[4]; } *ct = x;
-            NvnTexture *t = (NvnTexture *)(uintptr_t)ct->tex;
+            const struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; float color[4]; uint64_t id; } *ct = x;
+            NvnTexture *t = rec_tex(ct->tex, ct->id);
             if (!t) break;
             snap_reason = "clear-texture"; snapshots_invalidate(NULL);
             RtState saved = st.rt;
@@ -5881,10 +6155,11 @@ static void exec_list(uint64_t handle, int depth) {
                         s_ ? s_->format : 0, t[0].region[0], t[0].region[1], t[0].region[3], t[0].region[4], d_->width, d_->height,
                         d_->format, t[1].region[0], t[1].region[1], t[1].region[3], t[1].region[4]);
             }
-            copy_texture(&t[0], &t[1], r->x[6]);
+            TexRefRec a, b;
+            copy_texture(rec_ref(&t[0], &a), rec_ref(&t[1], &b), r->x[6]);
             break;
         }
-        case CMD_DOWNSAMPLE: { const TexRefRec *t = x; copy_texture(&t[0], &t[1], 1); break; }
+        case CMD_DOWNSAMPLE: { const TexRefRec *t = x; TexRefRec a, b; copy_texture(rec_ref(&t[0], &a), rec_ref(&t[1], &b), 1); break; }
         case CMD_COPY_BUFFER_TO_TEXTURE: {
             if (ENV("LARECOMP_LOG_SMALL_PASSES")) {
                 const TexRefRec *t = x;
@@ -5894,10 +6169,11 @@ static void exec_list(uint64_t handle, int depth) {
                     LOG("[copy] buffer %llx -> tex %ux%u f%#x (%d,%d %dx%d)\n", (unsigned long long)r->x[0], d_->width, d_->height,
                         d_->format, t->region[0], t->region[1], t->region[3], t->region[4]);
             }
-            copy_buffer_to_texture(r->x[0], x);
+            TexRefRec a;
+            copy_buffer_to_texture(r->x[0], rec_ref(x, &a));
             break;
         }
-        case CMD_COPY_TEXTURE_TO_BUFFER: copy_texture_to_buffer(x, r->x[3]); break;
+        case CMD_COPY_TEXTURE_TO_BUFFER: { TexRefRec a; copy_texture_to_buffer(rec_ref(x, &a), r->x[3]); break; }
         case CMD_COPY_BUFFER_TO_BUFFER:
             renderer_flush();
             memmove((void *)(uintptr_t)r->x[1], (void *)(uintptr_t)r->x[0], r->x[2]);

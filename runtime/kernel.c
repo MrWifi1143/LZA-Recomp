@@ -481,7 +481,10 @@ static uint64_t lock_spin_ns(void) {
     if (ns < 0) {
         const char *e = getenv("LARECOMP_LOCK_SPIN_US");
         long us = e ? atol(e) : 40;
-        if (!e && plat_cpu_count() < 4) us = 0;  // (the owner would have to run on the spinner's CPU: sleep at once)
+        // (4 threads or fewer: sleep at once - the owner would often have to run on the spinner's CPU. Measured on a
+        // 4-thread CPU held to one core's worth of time, Jubilife at 30 fps: spinning 41.8 ms a frame, 725 frames over
+        // 50 ms in a minute; sleeping 40.0 ms, 654. With time to spare no difference.)
+        if (!e && plat_cpu_count() <= 4) us = 0;
         ns = us > 0 ? us * 1000 : 0;
     }
     return (uint64_t)ns;

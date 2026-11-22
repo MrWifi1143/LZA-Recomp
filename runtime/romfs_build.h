@@ -15,6 +15,13 @@ extern "C" {
 bool romfs_build(const char *dir, const char *out, void (*progress)(uint64_t done, uint64_t total), char *why,
                  size_t why_size);
 
+// Checks a RomFS image's tables the way the game's RomFS code uses them: every file in the file table found again by
+// its path, through the directory and file hash tables. false = the game wouldn't find (some of) its own files (why:
+// how many, the first one). An update's patch takes parts of the tables from the base game, so a base game whose
+// RomFS isn't the one the update was made for gives an image like that: it boots, and the game stops at its first
+// file ("path not found" - a reporter's 1.1.1 crash at the shader loading, 2026-11-17).
+bool romfs_check(const char *image, char *why, size_t why_size);
+
 // Bytes of file data under dir (the image is about this plus its tables).
 uint64_t romfs_dir_bytes(const char *dir);
 

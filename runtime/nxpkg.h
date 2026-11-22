@@ -45,8 +45,32 @@ bool nxpkg_write_exefs(NxPkg *p, int upd, const char *dir, char *why, size_t why
 // Writes the RomFS image (the base game's, with update upd's patch applied) to the file out. progress may be NULL.
 bool nxpkg_write_romfs(NxPkg *p, int upd, const char *out, void (*progress)(uint64_t done, uint64_t total), char *why,
                        size_t why_size);
-// Writes the add-on content's RomFS image (the first found for the title) to out; false = none found or failed.
+// Writes the add-on content's RomFS image (the first found for the title) to out; false = none found or failed (also
+// when its file is damaged or altered: the checks below).
 bool nxpkg_write_dlc(NxPkg *p, const char *out, char *why, size_t why_size);
+
+// What nxpkg_write_romfs checked while it read and wrote (all in the same pass, logged): each NCA it used, hashed
+// whole as stored (SHA-256) against its name - the content id, the hash's first 16 bytes - and against the record its
+// meta has of it; and the image against its section's hash tree (IVFC). base / update: the base game's program NCA (and
+// the meta naming it) / the update's; image: the RomFS image written. A damaged or altered NCA is BAD; NCAs that are
+// fine but an image that isn't: the base game isn't the one the update was made for, or a packing this doesn't read.
+enum {
+    NXPKG_CHECK_NONE,     // not checked (not used, or no checks: out of memory)
+    NXPKG_CHECK_OK,
+    NXPKG_CHECK_BAD,
+    NXPKG_CHECK_UNNAMED,  // hashed, but its file name isn't a content id (renamed) and no meta names it: nothing to compare
+    NXPKG_CHECK_UNREAD,   // a read error while hashing
+};
+typedef struct {
+    int base, update, image;                       // NXPKG_CHECK_*
+    char base_file[256], update_file[256];         // the packages they're in (file names)
+    char detail[256];                              // the image check's result
+} NxCheck;
+const NxCheck *nxpkg_check(const NxPkg *p);
+// For a report when the files are fine but the image isn't (a packing to fix the reader for): the NCAs' headers,
+// section tables, key generations, the update's patch tables, and the image's RomFS header and where its tables came
+// from (romfs: the image written).
+void nxpkg_log_details(NxPkg *p, int upd, const char *romfs);
 
 #ifdef __cplusplus
 }

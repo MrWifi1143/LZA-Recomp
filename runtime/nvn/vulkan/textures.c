@@ -437,6 +437,12 @@ static TexBackend *tex_backend(NvnTexture *t) {
         }
         return b;
     }
+    if (t->finalized) {  // (objects.c nvnTextureFinalize: a use after the finalize job - its host object is about to be freed)
+        static uint64_t n;
+        n++;
+        if (!(n & (n - 1))) LOG("[vk] texture %ux%u fmt %#x used after its finalize (%llu)\n", t->width, t->height, t->format,
+                                (unsigned long long)n);
+    }
     vk_collect_dead();
     b = calloc(1, sizeof *b);
     b->scalable = tex_scalable(t);
@@ -464,7 +470,9 @@ void vk_tex_unscale(NvnTexture *t) {
     }
 }
 
+void vk_exec_texture_gone(NvnTexture *t);  // exec.c
 void backend_texture_destroyed(NvnTexture *t) {
+    vk_exec_texture_gone(t);  // (the running pass / target state: before the image goes)
     TexBackend *b = t->backend;
     if (b) {
         live_remove(b);
@@ -673,6 +681,24 @@ static bool texpack_apply(TexBackend *b, const TexLoaded *r) {
     }
     vk_full_barrier(cb);
     return true;
+}
+
+// A game UI image (runtime/hle/gameui.c "image"): the texture a pane draws with becomes this file's - as a texture
+// pack's replacement does (everywhere the texture is used), read on this thread the first time (small UI pictures)
+const char *gameui_image_path(uint32_t id);
+void vk_texture_gameui_image(NvnTexture *t, uint32_t img) {
+    static struct { NvnTexture *t; uint32_t img; } done[64];
+    for (int i = 0; i < 64; i++)
+        if (done[i].t == t && done[i].img == img) return;
+    TexBackend *b = t ? (TexBackend *)t->backend : NULL;
+    const char *path = gameui_image_path(img);
+    if (!b || !path) return;
+    TexLoaded *r = texpack_load_path(path);
+    bool ok = r && texpack_apply(b, r);
+    texpack_free(r);
+    static int n;
+    LOG("[gameui] image %s on texture %ux%u: %s\n", path, t->width, t->height, ok ? "put" : "not taken (unreadable?)");
+    done[n++ & 63].t = t, done[(n - 1) & 63].img = img;
 }
 
 static void upload_texture(NvnTexture *t, TexBackend *b) {

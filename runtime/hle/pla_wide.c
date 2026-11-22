@@ -13,6 +13,7 @@
 // The update's hook is this one: hle/warp.c's (LARECOMP_WARP / LARECOMP_LIVE) runs from it.
 #include <math.h>
 
+#include "../gameui.h"
 #include "../hle.h"
 #include "../nvn/output_scale.h"
 
@@ -44,6 +45,7 @@ static int cam_hook(Cpu *c, uint64_t addr) {
     widen(a, want);
     static float logged;
     if (want != logged) {
+        gameui_set_screen(want > 0 ? want / (16.0f / 9.0f) : 1.0f);  // (the HUD at the real edges: hle/gameui.c)
         if (want) LOG("[wide] scene camera aspect %.4f (16:9 x %.3f; field of view %.1f degrees high)\n", want, want / (16.0f / 9.0f),
                       cam[CAM_FOV / 4] * 57.29578f);
         else LOG("[wide] scene camera aspect 16:9 again\n");
@@ -53,4 +55,22 @@ static int cam_hook(Cpu *c, uint64_t addr) {
     return 1;
 }
 
-void pla_wide_configure(void) { rt_register_fnhook_at(PLA_CAM_UPDATE, cam_hook); }
+// The interface's layouts (runtime/gameui.h, hle/gameui.c): nn::ui2d in 1.1.1 (its class tables found by their RTTI
+// names, N2nn4ui2d4PaneE...; Calculate / Draw the Layout table's slots 21 / 12). Its DrawInfo doesn't say the target's
+// size: the whole interface is drawn for 1920 x 1080 (the runtime fits it to the image) - the screen's shape comes from
+// the camera hook above.
+static void pla_gameui_init(void) {
+    static const GameUiGame g = {
+        .game = "pla", .layout_calc = 0x7000134e38ull, .layout_draw = 0x70001353e0ull,
+        .lay_name = 0x30, .di_proj = 0x10, .di_target = 0,
+        .vt = {0x700404be40ull, 0x700404c0a0ull, 0x700404c2e8ull, 0x700404c648ull, 0x700404bf78ull, 0x700404b3d8ull,
+               0x700404b248ull, 0, 0x700404b510ull},
+        .pane_draw = 0x7000143ed8ull,
+    };
+    gameui_init(&g);
+}
+
+void pla_wide_configure(void) {
+    rt_register_fnhook_at(PLA_CAM_UPDATE, cam_hook);
+    pla_gameui_init();
+}

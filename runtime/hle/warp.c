@@ -114,6 +114,17 @@ static uint32_t *work_node(uint64_t h, uint16_t at) {
 #undef RD
 }
 
+// the mod API's game.work: a work (map +0x1d8) or, named "flag:<name>", a flag (+0x1b8) read or written in place
+int warp_work(const char *name, int set, int64_t value, int64_t *out) {
+    uint16_t map = WORKS_MAP;
+    if (!strncmp(name, "flag:", 5)) name += 5, map = FLAGS_MAP;
+    uint32_t *v = work_node(fnv1a64(name), map);
+    if (!v) return 0;
+    if (out) *out = *v;
+    if (set) *v = (uint32_t)value, LOG("[warp] script: %s %s = %lld\n", map == FLAGS_MAP ? "flag" : "work", name, (long long)value);
+    return 1;
+}
+
 // the works written where the game keeps them: by the map above; failing that a scan of game memory for the hash twice
 // (the ranges as LARECOMP_LIVE's "find" takes them: the heaps, then the game's own .data / .bss), written only when
 // unique - other maps keyed by the same hashes have such nodes too, and a write into one of those crashed the game
@@ -166,11 +177,28 @@ static void works_write(void) {
 }
 
 static volatile uint64_t g_seen_body;  // (the player's body as last found, warp or not: LARECOMP_LIVE's state shows it)
+static int g_world;  // (hle/pla_world.c, the shared world prototype: the player followed all the time)
+static volatile int g_api;  // (the mod API: scripts' characters made here too, the player followed - warp_api_start)
 
 // (the camera update's hook is hle/pla_wide.c's - one hook an address - which calls this first)
 int warp_cam_hook(Cpu *c, uint64_t addr) {
     (void)addr;
-    if ((g_state == 0 || g_state == 3) && in_heap(c->x[0])) g_cam = c->x[0];
+    if ((g_state == 0 || g_state == 3 || g_world || g_api) && in_heap(c->x[0])) g_cam = c->x[0];
+    {   // speech bubbles (runtime/bubble.h) are placed with this camera: the render camera following the player (its
+        // target +0x320 the player's position; eye +0x260 then the view's columns; field of view / aspect +0x23c /
+        // +0x240 - LegendsVR camera.c). What its last update made (this runs before the game's): half a frame old.
+        extern int bubble_count(void);
+        extern void bubble_camera(const float *eye);
+        bool warp_player_now(float pos[3], float *yaw);
+        float me[3];
+        extern volatile int g_scene_cam_wanted;  // (also positional sounds, scripts' to_screen: hle/bubble.c)
+        if ((g_scene_cam_wanted || bubble_count()) && in_heap(c->x[0]) && warp_player_now(me, NULL)) {
+            const float *t = (const float *)(uintptr_t)(c->x[0] + 0x320);
+            float dx = t[0] - me[0], dy = t[1] - me[1], dz = t[2] - me[2];
+            if (dx * dx + dz * dz < 9.0f && fabsf(dy) < 3.0f) bubble_camera((const float *)(uintptr_t)(c->x[0] + 0x260));
+        }
+    }
+    if (g_world || g_api) { extern void pla_npc_cam(Cpu *); pla_npc_cam(c); }  // (characters of our own are made here: hle/pla_npc.c)
     if (g_area_state == 2) {
         g_area_state = 0;
         if (g_works_state == 1) works_write();  // (the story point before the area change: it loads with it)
@@ -182,7 +210,7 @@ int warp_cam_hook(Cpu *c, uint64_t addr) {
 static int body_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     uint64_t o = c->x[0], cam = g_cam;
-    if ((g_state != 0 && g_state != 3) || !cam || !in_heap(o) || *(const uint64_t *)(uintptr_t)o != BODY_VTABLE) return 0;
+    if ((g_state != 0 && g_state != 3 && !g_world && !g_api) || !cam || !in_heap(o) || *(const uint64_t *)(uintptr_t)o != BODY_VTABLE) return 0;
     const float *p = (const float *)(uintptr_t)(o + 0x90), *t = (const float *)(uintptr_t)(cam + 0x320);
     if (fabsf(p[0] - t[0]) + fabsf(p[1] - t[1]) + fabsf(p[2] - t[2]) < 1e-3f) g_seen_body = o, g_body = g_state == 0 ? o : g_body;
     return 0;
@@ -261,9 +289,11 @@ __attribute__((constructor)) static void warp_init(void) {
     }
     if (getenv("LARECOMP_HIDE_PLAYER"))
         rt_register_fnhook_at(0x7002a6ba60ull, hide_player_hook), rt_register_fnhook_at(0x70029c983cull, hide_palette_hook);
+    extern int pla_world_enabled(void);
+    g_world = pla_world_enabled() && !getenv("LARECOMP_HIDE_PLAYER");
     const char *w = getenv("LARECOMP_WARP");
     if (!w || sscanf(w, "%f %f %f", &g_to[0], &g_to[1], &g_to[2]) != 3) {
-        if (!getenv("LARECOMP_LIVE")) return;
+        if (!getenv("LARECOMP_LIVE") && !g_world) return;
         g_state = 3;  // (no warp: only following the player, for LARECOMP_LIVE)
     } else g_state = 0;
     const char *a = getenv("LARECOMP_WARP_AREA");
@@ -286,6 +316,38 @@ __attribute__((constructor)) static void warp_init(void) {
     rt_register_fnhook_at(0x7002fee4e0ull, body_hook);
 }
 
+// The shared world switched on by the launcher's Online tab (hle/pla_world.c pla_world_settings, after the settings are
+// read): the player followed all the time, as LARECOMP_WORLD=1 does from the start
+void warp_world_start(void) {
+    if (g_world) return;
+    g_world = 1;
+    if (g_state < 0) g_state = 3;
+    // (the camera update: hle/pla_wide.c's hook runs warp_cam_hook)
+    rt_register_fnhook_at(0x7002fee4e0ull, body_hook);
+}
+
+// The mod API (hle/modapi.c): the player followed (its body found as for the warp) and scripts' characters made from
+// the camera update (hle/pla_npc.c)
+void warp_api_start(void) {
+    if (g_api) return;
+    g_api = 1;
+    if (g_state < 0) g_state = 3;
+    // (the camera update: hle/pla_wide.c's hook runs warp_cam_hook)
+    rt_register_fnhook_at(0x7002fee4e0ull, body_hook);
+}
+// where the player is and which way it faces (its body's z axis, +0x80), for scripts
+bool warp_player_now(float pos[3], float *yaw) {
+    uint64_t b = g_seen_body;
+    if (!b || *(const uint64_t *)(uintptr_t)b != BODY_VTABLE) return false;
+    memcpy(pos, (const float *)(uintptr_t)(b + 0x90), 12);
+    const float *z = (const float *)(uintptr_t)(b + 0x80);
+    if (yaw) *yaw = atan2f(z[0], z[2]) * 57.29578f;
+    return true;
+}
+// a script's teleport: the body written for 10 frames (as the warp does: the game settles it there)
+static float g_tp[3];
+static volatile int g_tp_n;
+void warp_teleport(const float p[3]) { memcpy(g_tp, p, 12), g_tp_n = 10; }
 // where the player is (LARECOMP_LIVE's state file): false before the body is found
 bool warp_player_pos(float out[3]) {
     uint64_t b = g_seen_body;
@@ -294,9 +356,56 @@ bool warp_player_pos(float out[3]) {
     return true;
 }
 
+uint64_t warp_player_body(void) {  // (the player's body object, 0 before it is found: hle/pla_world.c)
+    uint64_t b = g_seen_body;
+    return b && *(const uint64_t *)(uintptr_t)b == BODY_VTABLE ? b : 0;
+}
+
+// ---- Is the online server there? (the relay plugin's larecomp_server_state: every hello it sends is answered -
+// lzaserver - so it knows within ~8 s). The player is told when it can't be reached, when it drops, when this copy has
+// to sign in to play there (an lzaserver lets only signed-in players in: runtime/acct.c) and when it's back.
+void menu_notice_for(const char *text, unsigned ms);
+static void server_notice_frame(uint64_t frame) {
+    static int (*state)(char *, size_t);
+    static uint64_t at, told_at;
+    static int was = -1, tries;
+    if (1 || frame - at < 60) return;  // (no online server in this release: multiplayer is left out for now)
+    at = frame;
+    if (!state) {
+        if (tries > 30) return;  // (no relay plugin with it - an older one, or none: looked for 30 s, then not again)
+        tries++;
+        void *plugins_symbol(const char *name);
+        if (!(state = (int (*)(char *, size_t))plugins_symbol("larecomp_server_state"))) return;
+    }
+    char name[256] = "";
+    int st = state(name, sizeof name);
+    bool away = st == 3 || st == 4 || st == 5;
+    if (st == was && !(away && frame - told_at >= 7200)) return;
+    char t[400];
+    const char *lt = "";  // (the log's words: never the server's address)
+    t[0] = 0;
+    if (st == 3) snprintf(t, sizeof t, "Can't reach the online server (%s) - online play waits for it. Is the address right, and the server running?", name), lt = "can't reach the server";
+    else if (st == 4) snprintf(t, sizeof t, "Lost the connection to the online server (%s) - trying again...", name), lt = "lost the server";
+    else if (st == 5) snprintf(t, sizeof t, "The online server's name (%s) can't be found - check the address (launcher > Options > Online) and your connection.", name), lt = "the server's name doesn't resolve";
+    else if (st == 6) snprintf(t, sizeof t, "Sign in to %s to play online there: launcher > Options > Online. (Playing offline needs no account.)", name), lt = "sign in to play on that server";
+    else if (st == 2 && was == 6) snprintf(t, sizeof t, "Signed in on %s: online play is on.", name), lt = "signed in: online play on";
+    // (back after it couldn't be reached: online play just carries on - nothing to tell, the notice said it waits for it)
+    if (t[0]) menu_notice_for(t, st == 2 ? 5000 : st == 6 ? 12000 : 10000), told_at = frame, LOG("[online] told: %s\n", lt);
+    else if (st != was) LOG("[online] the server: %s\n", st == 1 ? "asked, no answer yet" : st != 2 ? "not in use" : was == 4 ? "answering again (not told)" : was == 3 || was == 5 ? "reached (not told)" : "answering");
+    was = st;
+}
+
 void warp_frame(uint64_t frame) {  // (each game frame: runtime/hle/input.c)
     g_frame_now = frame;
+    if (g_api) { extern void pla_npc_api_frame(uint64_t); pla_npc_api_frame(frame); }
+    if (g_tp_n > 0) {  // (a script's teleport)
+        uint64_t b = g_seen_body;
+        if (!b || *(const uint64_t *)(uintptr_t)b != BODY_VTABLE) g_tp_n = 0, LOG("[warp] teleport: the player has no body yet\n");
+        else if (memcpy((void *)(uintptr_t)(b + 0x90), g_tp, 12), --g_tp_n == 0) LOG("[warp] the player put at %.2f %.2f %.2f\n", g_tp[0], g_tp[1], g_tp[2]);
+    }
+    server_notice_frame(frame);
     { extern void pla_slot_watch(uint64_t); pla_slot_watch(frame); }  // (research: hle/pla_drawdist.c)
+    { extern void heapsnap_frame(void); heapsnap_frame(); }  // (research: hle/heapsnap.c)
     {   // (research) LARECOMP_LOG_PLAYER=<n>: the player's position every n frames ("[player] frame f x y z")
         static long every = -2;
         if (every == -2) every = getenv("LARECOMP_LOG_PLAYER") ? atol(getenv("LARECOMP_LOG_PLAYER")) : 0;
@@ -304,6 +413,7 @@ void warp_frame(uint64_t frame) {  // (each game frame: runtime/hle/input.c)
         if (every > 0 && frame % (uint64_t)every == 0 && warp_player_pos(p))
             LOG("[player] frame %llu %.2f %.2f %.2f\n", (unsigned long long)frame, p[0], p[1], p[2]);
     }
+    { extern void pla_world_frame(uint64_t); pla_world_frame(frame); }
     if (g_state < 0 || g_state >= 2) return;
     static uint64_t body, since, still_since, writes;
     static float last[3];

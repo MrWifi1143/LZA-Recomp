@@ -146,6 +146,8 @@ def main():
     if os.path.isdir('docs/icon/steam'):  # (Add to Steam's library artwork: runtime/steam_shortcut.c)
         shutil.copytree('docs/icon/steam', os.path.join(D, 'steam'), dirs_exist_ok=True)
     shutil.copy('third_party/fonts/Baloo2/Baloo2-SemiBold.ttf', D)
+    shutil.copy('third_party/fonts/NotoSansJP/NotoSansCJKjp-Regular-subset.otf', D)  # (the overlay's Japanese / emoji)
+    shutil.copy('third_party/fonts/NotoEmoji/NotoEmoji-Regular.ttf', D)
     if os.path.isfile('data/shader_manifest.txt'):  # (the warm-up's first programs: runtime/nvn/vulkan/warmup.c)
         shutil.copy('data/shader_manifest.txt', D)
     if os.path.isdir('contrib/steamrelay'):  # (the Steam relay plugin: shipped, off until switched on in the Mods page)
@@ -174,7 +176,7 @@ def main():
         shutil.copy(f, Ls)
     for src, dst in (('third_party/imgui/LICENSE.txt', 'imgui-LICENSE.txt'),
                      ('third_party/vma/LICENSE.txt', 'VulkanMemoryAllocator-LICENSE.txt'),
-                     ('third_party/smaa/LICENSE.txt', 'SMAA-LICENSE.txt'), ('third_party/fonts/Baloo2/OFL.txt', 'Baloo2-OFL.txt'),
+                     ('third_party/smaa/LICENSE.txt', 'SMAA-LICENSE.txt'), ('third_party/fonts/Baloo2/OFL.txt', 'Baloo2-OFL.txt'), ('third_party/fonts/NotoSansJP/OFL.txt', 'NotoSansCJK-OFL.txt'), ('third_party/fonts/NotoEmoji/OFL.txt', 'NotoEmoji-OFL.txt'),
                      (os.path.join(P, 'LICENSE.txt'), 'Python-LICENSE.txt'), (os.path.join(D, 'zig', 'LICENSE'), 'zig-LICENSE.txt'),
                      (glob.glob(os.path.join(sp, 'capstone-*.dist-info', 'LICENSE.TXT'))[0], 'capstone-LICENSE.txt'),
                      (glob.glob(os.path.join(sp, 'lz4-*.dist-info', 'licenses', 'LICENSE'))[0], 'python-lz4-LICENSE.txt'),
