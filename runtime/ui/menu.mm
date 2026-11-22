@@ -24,6 +24,7 @@ extern "C" {
 #include "menu.h"
 #include "../paths.h"
 #include "../bubble.h"
+#include "../update.h"
 void input_reset(void);
 bool input_finger_cursor(float *x, float *y, bool *down);  // runtime/hle/input.c
 bool input_mouse_cursor(float *x, float *y);               // runtime/hle/input.c (our pointer in a game menu)
@@ -459,13 +460,33 @@ static void quit_draw(ImGuiIO &io, float scale) {
 }
 
 // A short notice in the corner for a few seconds (the screenshot key: runtime/nvn/vulkan/device.c). Any thread.
-static char g_notice[320];
+static char g_notice[192];
 static std::atomic<uint64_t> g_notice_until{0};
 extern "C" void menu_notice_for(const char *text, unsigned ms) {
     snprintf(g_notice, sizeof g_notice, "%s", text);
     g_notice_until.store(SDL_GetTicks() + ms);
 }
 extern "C" void menu_notice(const char *text) { menu_notice_for(text, 2500); }
+
+// A newer release, when the launcher was skipped (its update line never showed): once, 15 s into the game, for 12 s -
+// the update itself is a click in the launcher ("Leave the game?" -> Launcher)
+extern "C" bool g_launcher_skipped;  // (ui/launcher_lg.mm)
+static void update_notice_once(void) {
+    static uint64_t first;
+    static bool told;
+    if (told || !g_launcher_skipped) return;
+    uint64_t now = SDL_GetTicks();
+    if (!first) first = now;
+    if (now - first < 15000 || update_state() != UPD_AVAILABLE) return;
+    told = true;
+    char t[192];
+    snprintf(t, sizeof t, M("%s %s is out - update from the launcher (Esc -> Launcher)",
+                            "%s %s saiu - atualize pelo launcher (Esc -> Launcher)",
+                            "Вышла версия %s %s - обновите в лаунчере (Esc -> Лаунчер)"),
+             RT_APP_NAME, update_version());
+    menu_notice_for(t, 12000);
+    fprintf(stderr, "[update] told in the game: %s\n", t);
+}
 
 // A script's text prompt (the mod API's text_prompt: Lua input.text): the name entry's dialog - typed with a keyboard,
 // the on-screen keyboard with a controller - without holding the game up. 1 opened, 0 busy (another one is up).
@@ -581,6 +602,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool open = g_open.load(), kbd = g_kbd.load() == 1;
     float fx, fy;
     bool fdown, finger = !open && input_finger_cursor(&fx, &fy, &fdown);
+    update_notice_once();
     float mx, my;
     bool mcur = !open && !kbd && input_mouse_cursor(&mx, &my);  // (our pointer: the held mouse in a game menu)
     bool notice = SDL_GetTicks() < g_notice_until.load(), bubbles = bubble_count() > 0, hud = hud_wanted();
