@@ -12,7 +12,8 @@ tools/discord_fixes.json at that tag) get their posts closed and a "Fixed in <ga
     python3 lzabot.py --announce <tag> [-n]   post that release in #releases now
     python3 lzabot.py --updates-button [-n]   post the "Get update pings" button message in #releases (once)
     python3 lzabot.py --test-build <post id> --file x.zip [--what ..] [--try ..] [-n]   stage a test build (testbuilds.py)
-    python3 lzabot.py --reply <post id> --text "..." [--file ..] [-n]   stage a reply in the bot's voice (testbuilds.py)
+    python3 lzabot.py --reply <post id> --text "..." [--file ..] [--ping <user id>] [-n]   stage a reply in the bot's voice
+                                    (testbuilds.py; --ping: someone else in the thread instead of its author)
     python3 lzabot.py --local      run here for testing: buttons only (no release polling, no command sync)
 
 Each new full release (not a release candidate) also gets one short post in #releases: the version as a link to the
@@ -326,6 +327,7 @@ def main():
     ap.add_argument("--try", dest="try_", default="", help="(--test-build) what to do to check it")
     ap.add_argument("--reply", metavar="POST_ID", help="stage a reply in the bot's voice for that report")
     ap.add_argument("--text", default="", help="(--reply) the message; @file reads it from a file")
+    ap.add_argument("--ping", default="", metavar="USER_ID", help="(--reply) ping this user instead of the post's author")
     ap.add_argument("--recheck", action="store_true", help="what /recheck does (digest of new report messages)")
     ap.add_argument("--local", action="store_true", help="test run: buttons only, no polling / command sync")
     a = ap.parse_args()
@@ -336,7 +338,7 @@ def main():
         text = open(a.text[1:]).read().strip() if a.text.startswith("@") else a.text
         if not text:
             sys.exit("--reply needs --text")
-        testbuilds.stage_reply(a.reply, text, a.file, a.dry_run)
+        testbuilds.stage_reply(a.reply, text, a.file, a.dry_run, ping=a.ping or None)
         return
     if a.test_build:
         testbuilds.stage(a.test_build, a.file, a.what, a.try_, a.game, a.dry_run, why=a.why, fix=a.fix)

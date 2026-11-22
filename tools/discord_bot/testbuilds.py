@@ -109,16 +109,18 @@ def _thread(post):
     return t
 
 
-def _card(kind, post, t, title, text, files, note, dry_run, log):
+def _card(kind, post, t, title, text, files, note, dry_run, log, ping=None):
+    ping = str(ping or t['owner_id'])  # (who the post pings: the reporter, or someone else in their thread)
     for f in files:
         if os.path.getsize(f) > MAX_FILE:
             sys.exit(f"{f}: {os.path.getsize(f) >> 20} MB, over Discord's {MAX_FILE >> 20} MB - ship only the changed files")
-    fields = [{"name": "Goes to", "value": f"<#{post}> (pings <@{t['owner_id']}>)", "inline": False}]
+    fields = [{"name": "Goes to", "value": f"<#{post}> (pings <@{ping}>)", "inline": False}]
     if files:
         fields.append({"name": "Files", "value": "\n".join(f"`{os.path.basename(f)}` ({max(1, os.path.getsize(f) // 1024)} KB)"
                                                            for f in files), "inline": False})
     embed = {"title": f"{title}: {t['name']}"[:256], "url": thread_url(post, t.get("guild_id")), "description": text,
-             "color": 0xF1C40F, "fields": fields, "footer": {"text": f"waiting for the owner · reporter {t['owner_id']}"}}
+             "color": 0xF1C40F, "fields": fields, "footer": {"text": f"waiting for the owner · reporter {t['owner_id']}" +
+                                                  (f" · ping {ping}" if ping != str(t['owner_id']) else "")}}
     payload = {"content": note, "embeds": [embed], "allowed_mentions": {"parse": []},
                "components": [{"type": 1, "components": [
                    button("Approve" if kind == "tb" else "Send as bot", f"lzabot:{kind}:ok:{post}", 3),
@@ -143,11 +145,11 @@ def stage(post, files, what="", try_="", game="", dry_run=False, log=print, why=
                  "New test build - approve to post it in the report.", dry_run, log)
 
 
-def stage_reply(post, text, files=(), dry_run=False, log=print):
+def stage_reply(post, text, files=(), dry_run=False, log=print, ping=None):
     """A reply in the bot's voice (no fix needed: asking for a log, saying what's going on): the same card, and
     "Send as bot" posts it in the report, pinging the reporter."""
     return _card("rp", post, _thread(post), "Reply for", text, list(files),
-                 "Reply drafted - send it as the bot, edit it, or reply yourself.", dry_run, log)
+                 "Reply drafted - send it as the bot, edit it, or reply yourself.", dry_run, log, ping)
 
 
 def results(limit=200):
@@ -324,6 +326,9 @@ def items(discord, log):
             thread = interaction.client.get_channel(self.post) or await interaction.client.fetch_channel(self.post)
             files = [discord.File(io.BytesIO(await a.read()), filename=a.filename) for a in msg.attachments]
             reporter = thread.owner_id
+            m = re.search(r"ping (\d+)", (e.footer.text or "") if e.footer else "")
+            if m:  # (a reply for someone else in the thread, staged with --ping)
+                reporter = int(m.group(1))
             view = discord.utils.MISSING
             if self.kind == "tb":
                 view = discord.ui.View(timeout=None)
