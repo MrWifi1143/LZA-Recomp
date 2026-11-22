@@ -39,6 +39,15 @@ static void time_shmem_map(KSharedMem *s) {
     // 0xC8 automatic correction enabled
     *(uint32_t *)(m + 0xC8) = 0;
     m[0xCC] = 0;
+    // 0xD0 (newer SDKs, Legends Z-A): LockFreeAtomicType<ContinuousAdjustmentTimePoint{s64 base_time, s64 multiplier,
+    // s64 shift, s64 lower, s64 upper, uuid}>. Z-A's SDK reads its steady and system clocks through it: steady ns = now +
+    // clamp(((now - base_time) * multiplier >> shift) + lower, upper), so all zero = the tick clock as it is. Its uuid must be
+    // the system clock contexts' (else result 0xcc74). Left zeroed, clock_gettime(CLOCK_REALTIME) /
+    // std::chrono::system_clock::now() gave 0: Mega Dimension donuts were stored with creation time 0, which the game reads
+    // as an empty slot - crafted donuts never reached the satchel and the next one overwrote them.
+    *(uint32_t *)(m + 0xD0) = 0;
+    memset(m + 0xD8, 0, 0x28);
+    memcpy(m + 0xD8 + 0x28, clock_uuid, 16);
 }
 
 static void system_clock(Service *s, IpcReq *req, IpcResp *resp) {
