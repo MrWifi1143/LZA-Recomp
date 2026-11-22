@@ -735,7 +735,9 @@ static void filesystem(Service *s, IpcReq *req, IpcResp *resp) {
         ipc_return_object(resp, dsvc);
         break;
     }
-    case 10: {  // Commit (the save's)
+    case 10: {  // Commit (the save's: an online server account's sync uploads it, runtime/acct.c)
+        extern void acct_save_committed(const char *fs_root);
+        acct_save_committed(fs->root);
         extern void modapi_save_committed(void);  // (scripts' per-save values written now: hle/modapi_ext.c)
         modapi_save_committed();
         break;

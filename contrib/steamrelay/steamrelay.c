@@ -17,12 +17,25 @@
 // what a friend sends is replayed over loopback from 127.0.4.<k>:<their port> to this copy, where ldn.c receives it as
 // from any LAN player. A host advertises itself in its Steam rich presence (key "lzarecomp" = "hosting" - Z-A; Arceus:
 // "plarecomp", so the two games never see each other's rooms - LARECOMP_RELAY_KEY, set for the helper); a scan asks
-// every friend showing it. Only friends: messages from anyone else are refused (their sessions not accepted).
+// every friend showing it. Only friends: messages from anyone else are refused (their sessions not accepted) - except
+// a Discord invite's (runtime/discord.c): a host's invite carries its Steam id and a token made for this game; whoever
+// joins with it sends that token first (a hello), and the host lets that player in like a friend for this session.
+// Plugin -> helper 'K' the token (8 bytes), 'J' join (u64 host id + its token); helper -> plugin 'G' a guest joined (u64).
+//
+// An online server instead of Steam (contrib/lzaserver; larecomp.ini online_server = <host>[:port], the launcher's
+// Options > Online tab, or LARECOMP_RELAY_SERVER): no Steam, no friends list - players who enter the same Link Code meet
+// in a lobby on the server, which passes their traffic on (larecomp_relay_code: runtime/hle/swkbd.c tells the code);
+// a Private Battle's host and joiners meet in its room's lobby (larecomp_relay_room: the passcode).
+// An lzaserver with accounts lets only signed-in players play: the hello carries a play ticket from runtime/acct.c
+// (larecomp_server_ticket; acct_proto.h). The server's address is never written to the log.
 //
 // The Steam API is not shipped: libsteam_api.so is loaded from the Steam install (Steam's own copy - SteamVR's - or any
 // game's), or LARECOMP_STEAM_API=<path>. LARECOMP_RELAY_FAKE=<this port>,<peer port> (tests): no Steam - the relay's
 // messages go over UDP on 127.0.0.1 between two copies of the game, the peer at 127.0.4.1.
 #define _GNU_SOURCE
+#ifdef _WIN32
+#define _CRT_RAND_S  // (rand_s: the Discord invite token)
+#endif
 #include <pthread.h>
 #include <errno.h>
 #include <stdbool.h>
@@ -30,6 +43,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -53,6 +67,7 @@ static __attribute__((unused)) void nonblocking(sock_t s) { u_long on = 1; ioctl
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netdb.h>
 #include <strings.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -88,6 +103,7 @@ static __attribute__((unused)) const char *relay_key(void) {
 #endif
 #else
 #include "../../runtime/plugin.h"
+#include "../../runtime/acct_proto.h"  // (the play ticket's MAC in the hello)
 
 static const LarecompPluginApi *A;
 #define LOG(...) A->log(__VA_ARGS__)
@@ -202,6 +218,35 @@ static void *g_msgs, *g_friends;
 static volatile int g_quit;
 #define FRIEND_IMMEDIATE 4
 #define SEND_UNRELIABLE_NO_NAGLE_AUTORESTART (1 | 32)
+#define SEND_RELIABLE 8
+
+// ---- Discord invites: players let in like friends for this session (a guest who sent this copy's token, or the host
+// whose invite this copy took), and the hello that carries a token
+static uint64_t g_trusted[32];
+static int g_ntrusted, g_npending;
+static uint8_t g_token[8];
+static bool g_have_token;
+static uint64_t g_hello_to;
+static uint8_t g_hello_token[8];
+static int g_hello_left;
+static const uint8_t k_hello[8] = {0xFF, 0xFF, 0xFF, 0xFF, 'L', 'Z', 'J', '1'};
+static bool trusted(uint64_t id) {
+    for (int i = 0; i < g_ntrusted; i++)
+        if (g_trusted[i] == id) return true;
+    return false;
+}
+static void trust(uint64_t id) {
+    if (!trusted(id) && g_ntrusted < 32) g_trusted[g_ntrusted++] = id;
+}
+static bool allowed(uint64_t id) { return S.HasFriend(g_friends, id, FRIEND_IMMEDIATE) || trusted(id); }
+static void send_hello(void) {
+    uint8_t m[16];
+    memcpy(m, k_hello, 8), memcpy(m + 8, g_hello_token, 8);
+    Identity who;
+    memset(&who, 0, sizeof who);
+    S.SetSteamID64(&who, g_hello_to);
+    S.Send(g_msgs, &who, m, sizeof m, SEND_RELIABLE, 0);
+}
 
 // Where Steam keeps games: its own folder and every library folder (steamapps/libraryfolders.vdf "path" lines)
 static int steam_libraries(char (*out)[512], int max) {
@@ -384,6 +429,15 @@ static void *from_game(void *arg) {  // (the plugin's frames: sends and the host
             S.Send(g_msgs, &who, buf + 8, n - 8, SEND_UNRELIABLE_NO_NAGLE_AUTORESTART, 0);
         } else if (h[0] == 'P' && n >= 1) {
             S.SetRichPresence(g_friends, relay_key(), buf[0] ? "hosting" : "");
+        } else if (h[0] == 'K' && n == 8) {  // (this copy's invite token: guests who send it are let in)
+            memcpy(g_token, buf, 8);
+            g_have_token = true;
+        } else if (h[0] == 'J' && n == 16) {  // (an invite taken: the host is let in, and told so with its token)
+            memcpy(&g_hello_to, buf, 8), memcpy(g_hello_token, buf + 8, 8);
+            trust(g_hello_to);
+            g_hello_left = 10;  // (again every ~2 s until the host answers, 10 times at most: Discord's join comes first)
+            send_hello();
+            LOG("[steamrelay] joining %llu (a Discord invite)\n", (unsigned long long)g_hello_to);
         }
         pthread_mutex_unlock(&g_steam_lock);
     }
@@ -413,8 +467,12 @@ int main(void) {
             if (cb.id == 1251 && cb.param) {  // SteamNetworkingMessagesSessionRequest_t: a friend's first message
                 const Identity *who = (const Identity *)cb.param;
                 uint64_t id = S.GetSteamID64(who);
-                if (S.HasFriend(g_friends, id, FRIEND_IMMEDIATE)) S.Accept(g_msgs, who);
-                else LOG("[steamrelay] refused a session from %llu (not a friend)\n", (unsigned long long)id);
+                if (allowed(id)) S.Accept(g_msgs, who);
+                else if (g_have_token && g_npending < 16) {  // (maybe a Discord invite's guest: its first message says)
+                    g_npending++;
+                    S.Accept(g_msgs, who);
+                    LOG("[steamrelay] a session from %llu (not a friend): only an invite's hello gets through\n", (unsigned long long)id);
+                } else LOG("[steamrelay] refused a session from %llu (not a friend)\n", (unsigned long long)id);
             }
             S.MD_FreeLast(pipe);
         }
@@ -422,16 +480,35 @@ int main(void) {
         int32_t n = S.Receive(g_msgs, 0, msg, 64);
         for (int i = 0; i < n; i++) {
             uint64_t id = S.GetSteamID64(&msg[i]->peer);
-            if (S.HasFriend(g_friends, id, FRIEND_IMMEDIATE)) out_frame('M', &id, 8, msg[i]->data, (size_t)msg[i]->size);
+            const uint8_t *d = msg[i]->data;
+            bool hello = msg[i]->size == 16 && !memcmp(d, k_hello, 8);
+            if (hello && g_have_token && !memcmp(d + 8, g_token, 8) && !allowed(id)) {
+                trust(id);
+                LOG("[steamrelay] %llu joined with this copy's Discord invite\n", (unsigned long long)id);
+                out_frame('G', &id, 8, NULL, 0);
+            } else if (!hello && allowed(id)) {
+                if (id == g_hello_to) g_hello_left = 0;  // (the host answered)
+                out_frame('M', &id, 8, msg[i]->data, (size_t)msg[i]->size);
+            }
             S.Release(msg[i]);
         }
         if (tick % 4000 == 0) {  // (~every 4 s: friends' rich presence kept fresh)
             int nf = S.FriendCount(g_friends, FRIEND_IMMEDIATE);
             for (int i = 0; i < nf; i++) S.RequestRichPresence(g_friends, S.FriendByIndex(g_friends, i, FRIEND_IMMEDIATE));
         }
+        if (tick % 2000 == 0 && g_hello_left > 0) g_hello_left--, send_hello();
         if (tick % 500 == 0) {  // (~every 0.5 s: who is hosting, for the game's scans)
             static uint8_t list[64 * 300];
             size_t k = 0;
+            for (int i = 0; i < g_ntrusted && k + 300 <= sizeof list; i++) {  // (Discord invites: their rooms are asked too)
+                if (S.HasFriend(g_friends, g_trusted[i], FRIEND_IMMEDIATE)) continue;
+                const char *name = S.FriendName(g_friends, g_trusted[i]);
+                if (!name || !name[0]) name = "a Discord friend";
+                size_t nl = strlen(name);
+                if (nl > 255) nl = 255;
+                memcpy(list + k, &g_trusted[i], 8), list[k + 8] = (uint8_t)nl, memcpy(list + k + 9, name, nl);
+                k += 9 + nl;
+            }
             int nf = S.FriendCount(g_friends, FRIEND_IMMEDIATE);
             for (int i = 0; i < nf && k + 300 <= sizeof list; i++) {
                 uint64_t f = S.FriendByIndex(g_friends, i, FRIEND_IMMEDIATE);
@@ -457,6 +534,184 @@ int main(void) {
 // ---- the fake relay (LARECOMP_RELAY_FAKE=<this port>,<peer port>): UDP on 127.0.0.1, the peer id = its port
 static sock_t g_fake = NO_SOCK;
 static uint16_t g_fake_peer;
+// ---- an online server (contrib/lzaserver): UDP to it, lobbies by Link Code
+static sock_t g_srv = NO_SOCK;
+static uint64_t g_srv_id;
+static uint8_t g_srv_game;            // (1 Arceus, 2 Z-A)
+static char g_srv_code[9];            // (the lobby: the Link Code last entered)
+// Entering a lobby over a lossy link (2026-11-18): a Private Battle's joiner scans ONCE, right after typing the passcode,
+// and the room's host is known only from the server's member list ('M') - its 'L' (in the hello) or the server's
+// answer lost = "No room could be found!" (1 in 2 joins through a 10 %-loss proxy). So a lobby entered is said 4 times
+// in its first second, and a scan in a Private Battle room's lobby's first 5 s waits for its member list (up to 2.5 s).
+// LARECOMP_RELAY_LOBBY_WAIT=0 (research): neither - as before.
+static volatile uint64_t g_lobby_at, g_lobby_m_at;  // (ms: this copy entered a lobby; the first member list heard since)
+static int lobby_wait_on(void) {
+    static int on = -1;
+    if (on < 0) on = !(getenv("LARECOMP_RELAY_LOBBY_WAIT") && atoi(getenv("LARECOMP_RELAY_LOBBY_WAIT")) == 0);
+    return on;
+}
+static volatile int g_srv_hosting;
+// The shared world (lzaserver 'W' / 'X'): the game's other players walking around, opt-in (runtime/hle/warp.c). What
+// arrives waits in a small queue for the game to take (larecomp_world_recv) - only the newest per player matters.
+static volatile int g_world_on;
+static struct { uint64_t from; uint8_t n, p[96]; } g_wq[64];
+static int g_wq_head, g_wq_tail;
+static pthread_mutex_t g_wq_lock = PTHREAD_MUTEX_INITIALIZER;
+// (the address is looked up again every 10 s until it is found - a game started before the PC was online, or while the
+// server's name didn't resolve yet, still gets online play once it is - and then every 60 s (every 10 s while the server
+// doesn't answer): a home server on a dynamic-DNS name that gets a new address is followed. The look-ups run on a
+// thread of their own - a slow DNS answer never holds up the game's traffic.)
+// IPv6 (2026-11-18): the socket is a dual-stack IPv6 one (IPv4 alone where the PC has no IPv6); the server's name may
+// give IPv6 and IPv4 addresses (AAAA / A, in the system's order of preference - usually IPv6 first where the PC has it).
+// One is used at a time; while the server doesn't answer, the next is tried every 4 s - a server whose IPv6 is broken is
+// reached over IPv4 a few seconds later. "[v6 address]:port" and a bare IPv6 address are taken as the server too.
+typedef struct sockaddr_in6 SrvAddr;  // (IPv4 as ::ffff:a.b.c.d)
+static char g_srv_host[256];
+static unsigned g_srv_port = 39200;
+static int g_srv_fam = AF_INET6;      // (our socket's family)
+static pthread_mutex_t g_sa_lock = PTHREAD_MUTEX_INITIALIZER;
+static SrvAddr g_srv_sa;              // (the server's address in use, under g_sa_lock; port 0: not found yet)
+static SrvAddr g_srv_list[8];         // (all its name gave; resolver thread only)
+static int g_srv_nlist, g_srv_pick;
+static volatile int g_srv_resolved;  // (an address known)
+// Is the server there? Every hello (2 s) is answered with a cookie ('C', lzaserver 2026-11-17); anything heard counts.
+// larecomp_server_state (runtime/hle/warp.c tells the player): 1 not heard yet, 2 answering, 3 never answered (8 s),
+// 4 stopped answering (8 s), 5 the name doesn't resolve.
+static uint64_t now_ms(void);
+static volatile int g_srv_quit;  // (the game is ending: the look-up thread stops)
+static volatile uint64_t g_srv_heard, g_srv_since;  // (ms: the last packet from it; when we started asking)
+static volatile int g_srv_ever;
+// Return routability: the server answers each hello with this address's cookie; ours carries the last one back. Until
+// it does, the server sends us no more than we send it (it can't tell us from someone forging our address) - with it,
+// everything. An older server never sends one (the 8 more bytes of our hello it ignores).
+static uint8_t g_srv_cookie[8];
+static volatile int g_srv_have_cookie, g_srv_hello_now;
+// Signed in (acct_proto.h "Play tickets"): an lzaserver with accounts lets only signed-in players play. The game's
+// runtime (runtime/acct.c) gets a ticket over TLS for the account signed in on this server and hands it here
+// (larecomp_server_ticket); each hello carries its id and a MAC keyed by it (the key itself never goes out). The server
+// answers 'A': 0 in, 1 sign-in needed, 2 ticket not known (the runtime asks for a new one: larecomp_server_auth).
+static pthread_mutex_t g_tk_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint8_t g_tk_id[8], g_tk_key[16];
+static int g_tk_have;
+static volatile int g_srv_auth;               // (the last 'A': 0 none heard, 1 in, 2 sign-in needed, 3 ticket not known)
+static volatile uint64_t g_srv_auth_at, g_srv_out_since;  // (ms: the last 'A'; since when not in)
+static bool sa_v4(const SrvAddr *a) {
+    static const uint8_t pre[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+    return !memcmp(a->sin6_addr.s6_addr, pre, 12);
+}
+static void sa_from(SrvAddr *o, const struct sockaddr *a) {  // (as IPv6; family 0: neither)
+    memset(o, 0, sizeof *o);
+    if (a->sa_family == AF_INET || a->sa_family == AF_INET6) o->sin6_family = AF_INET6;
+    if (a->sa_family == AF_INET) {
+        const struct sockaddr_in *v4 = (const struct sockaddr_in *)a;
+        o->sin6_addr.s6_addr[10] = o->sin6_addr.s6_addr[11] = 0xff;
+        memcpy(o->sin6_addr.s6_addr + 12, &v4->sin_addr, 4), o->sin6_port = v4->sin_port;
+    } else if (a->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *v6 = (const struct sockaddr_in6 *)a;
+        o->sin6_addr = v6->sin6_addr, o->sin6_port = v6->sin6_port, o->sin6_scope_id = v6->sin6_scope_id;
+    }
+}
+static bool sa_same(const SrvAddr *a, const SrvAddr *b) {
+    return a->sin6_port == b->sin6_port && !memcmp(&a->sin6_addr, &b->sin6_addr, sizeof a->sin6_addr);
+}
+static void sa_use(const SrvAddr *a, const char *why) {  // (resolver thread: the address to talk to)
+    pthread_mutex_lock(&g_sa_lock);
+    bool had = g_srv_sa.sin6_port != 0, same = sa_same(&g_srv_sa, a);
+    g_srv_sa = *a;
+    pthread_mutex_unlock(&g_sa_lock);
+    if (same) return;
+    if (had) LOG("[steamrelay] online server: %s - its %s address now\n", why, sa_v4(a) ? "IPv4" : "IPv6");
+    g_srv_have_cookie = 0;  // (another address: its own cookie)
+    g_srv_hello_now = 1;
+}
+static bool server_resolve(void) {
+    struct addrinfo hints = {0}, *res = NULL;
+    hints.ai_family = g_srv_fam == AF_INET6 ? AF_UNSPEC : AF_INET, hints.ai_socktype = SOCK_DGRAM;
+    if (getaddrinfo(g_srv_host, NULL, &hints, &res) || !res) return false;
+    SrvAddr list[8];
+    int n = 0;
+    for (struct addrinfo *r = res; r && n < 8; r = r->ai_next) {
+        SrvAddr a;
+        sa_from(&a, r->ai_addr);
+        if (!a.sin6_family) continue;
+        a.sin6_port = htons((uint16_t)g_srv_port);
+        bool dup = false;
+        for (int i = 0; i < n; i++) dup |= sa_same(&list[i], &a);
+        if (!dup) list[n++] = a;
+    }
+    freeaddrinfo(res);
+    if (!n) return false;
+    pthread_mutex_lock(&g_sa_lock);
+    SrvAddr cur = g_srv_sa;
+    pthread_mutex_unlock(&g_sa_lock);
+    int keep = -1;  // (the address in use is still one of its: kept - else the first)
+    for (int i = 0; i < n; i++)
+        if (cur.sin6_port && sa_same(&list[i], &cur)) keep = i;
+    memcpy(g_srv_list, list, sizeof list), g_srv_nlist = n, g_srv_pick = keep >= 0 ? keep : 0;
+    sa_use(&g_srv_list[g_srv_pick], "its address changed - following it");
+    g_srv_resolved = 1;
+    return true;
+}
+static void *resolver(void *arg) {
+    (void)arg;
+    uint64_t last = now_ms(), picked = last;
+    while (!g_srv_quit) {
+        nap_ms(500);
+        uint64_t t = now_ms(), heard = g_srv_heard;
+        bool quiet = !heard || t - heard > 8000;
+        if (quiet && g_srv_nlist > 1 && t - picked >= 4000 && (!heard || heard < picked)) {  // (no answer on this one: the next)
+            g_srv_pick = (g_srv_pick + 1) % g_srv_nlist, picked = t;
+            sa_use(&g_srv_list[g_srv_pick], "no answer there");
+        }
+        if (t - last < (!g_srv_resolved || quiet ? 10000u : 60000u)) continue;
+        last = t;
+        bool had = g_srv_resolved;
+        if (server_resolve()) { if (!had) LOG("[steamrelay] online server: address found (%s)\n", sa_v4(&g_srv_sa) ? "IPv4" : "IPv6"), picked = t; }
+        else if (had) LOG("[steamrelay] online server: the name didn't resolve this time (the last address kept)\n");
+    }
+    return NULL;
+}
+static void srv_send(const void *p, size_t n) {
+    pthread_mutex_lock(&g_sa_lock);
+    SrvAddr a = g_srv_sa;
+    pthread_mutex_unlock(&g_sa_lock);
+    if (!a.sin6_port) return;  // (its address not found yet: server_resolve)
+    if (g_srv_fam == AF_INET6) {
+        sendto(g_srv, (const char *)p, (int)n, 0, (const struct sockaddr *)&a, sizeof a);
+        return;
+    }
+    struct sockaddr_in v4 = {0};
+    v4.sin_family = AF_INET, v4.sin_port = a.sin6_port;
+    memcpy(&v4.sin_addr, a.sin6_addr.s6_addr + 12, 4);
+    sendto(g_srv, (const char *)p, (int)n, 0, (const struct sockaddr *)&v4, sizeof v4);
+}
+static void srv_hello(void) {
+    uint8_t b[ACCT_HELLO_AUTH_LEN] = {'H', 1};
+    memcpy(b + 2, &g_srv_id, 8), b[10] = g_srv_game;
+    size_t n = 11;
+    if (g_srv_have_cookie) {
+        memcpy(b + 11, g_srv_cookie, 8), n = 19;
+        pthread_mutex_lock(&g_tk_lock);
+        if (g_tk_have) {  // (the play ticket: its id and the MAC over the hello so far - acct_proto.h)
+            memcpy(b + 19, g_tk_id, 8);
+            uint64_t mac = acct_siphash(g_tk_key, b, 27);
+            memcpy(b + 27, &mac, 8), n = ACCT_HELLO_AUTH_LEN;
+        }
+        pthread_mutex_unlock(&g_tk_lock);
+    }
+    srv_send(b, n);
+    if (g_srv_code[0]) {
+        uint8_t l[17] = {'L'};
+        memcpy(l + 1, &g_srv_id, 8), memcpy(l + 9, g_srv_code, 8);
+        srv_send(l, sizeof l);
+    }
+    uint8_t h[10] = {'P'};
+    memcpy(h + 1, &g_srv_id, 8), h[9] = (uint8_t)g_srv_hosting;
+    srv_send(h, sizeof h);
+    uint8_t w[10] = {'W'};
+    memcpy(w + 1, &g_srv_id, 8), w[9] = (uint8_t)g_world_on;
+    srv_send(w, sizeof w);
+}
 
 // ---- the helper (plugins/steamrelay-helper[.exe]): started with pipes for its stdin / stdout, its stderr the game's log
 #ifdef _WIN32
@@ -571,6 +826,58 @@ static struct { uint64_t id; char name[64]; } g_hosts[64];
 static int g_nhosts;
 static pthread_mutex_t g_hosts_lock = PTHREAD_MUTEX_INITIALIZER;
 
+// ---- Each game packet twice, over an online server (2026-11-17). Over the internet some packets are lost, and the game's
+// Link Play session (Pia) joins in a handshake of several steps, each one resent only after 0.5-1 s when lost: through a
+// lagged server with a few % loss per leg the join took 3-4 s, and the joining game gives up on a session that isn't up
+// in about that time ("No one could be found!" - its LeaveSession right after Pia's JoinSession completed, traced with
+// testout/za-mp12/tools/pia.lua). A second copy of every game packet DUP_MS later (not of ldn.c's control messages: they
+// ask again themselves) makes a loss need both copies lost - a few % becomes a few per thousand. The receiving copy drops
+// the second one it gets (same bytes from the same player within DUP_KEEP_MS: Pia's packets carry a counter and a nonce,
+// so two real ones are never the same). An older copy without this gets both - Pia takes a duplicate like any UDP one.
+// LARECOMP_RELAY_DUP=0: off (tests).
+#define LDN_CTRL_PORT 39100
+#define DUP_MS 25
+#define DUP_KEEP_MS 400
+static int dup_on(void) {
+    static int on = -1;
+    if (on < 0) on = !(getenv("LARECOMP_RELAY_DUP") && atoi(getenv("LARECOMP_RELAY_DUP")) == 0);
+    return on;
+}
+static struct { uint64_t due; uint16_t n; uint8_t p[1600]; } g_dup[128];  // (waiting second copies, sent by the pump)
+static int g_dup_head, g_dup_tail;
+static pthread_mutex_t g_dup_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t now_ms(void);
+static void dup_later(const uint8_t *p, size_t n) {
+    if (n > sizeof g_dup[0].p) return;  // (a big one: once - none this big in Link Play)
+    pthread_mutex_lock(&g_dup_lock);
+    int nt = (g_dup_tail + 1) % 128;
+    if (nt != g_dup_head) {  // (full: this one goes once)
+        g_dup[g_dup_tail].due = now_ms() + DUP_MS, g_dup[g_dup_tail].n = (uint16_t)n;
+        memcpy(g_dup[g_dup_tail].p, p, n);
+        g_dup_tail = nt;
+    }
+    pthread_mutex_unlock(&g_dup_lock);
+}
+static void dup_send_due(uint64_t now) {  // (the pump)
+    pthread_mutex_lock(&g_dup_lock);
+    while (g_dup_head != g_dup_tail && g_dup[g_dup_head].due <= now) {
+        srv_send(g_dup[g_dup_head].p, g_dup[g_dup_head].n);
+        g_dup_head = (g_dup_head + 1) % 128;
+    }
+    pthread_mutex_unlock(&g_dup_lock);
+}
+static bool dup_seen(int k, const uint8_t *m, size_t n) {  // (deliver: a copy of one already delivered)
+    static struct { uint64_t h, at; } ring[256];
+    static int pos;
+    uint64_t h = 1469598103934665603ull ^ (uint64_t)k;
+    for (size_t i = 0; i < n; i++) h = (h ^ m[i]) * 1099511628211ull;
+    uint64_t now = now_ms();
+    for (int i = 0; i < 256; i++)
+        if (ring[i].h == h && now - ring[i].at < DUP_KEEP_MS) return true;
+    ring[pos].h = h, ring[pos].at = now, pos = (pos + 1) % 256;
+    return false;
+}
+
 // ---- the relay
 static void relay_send(uint32_t to, uint16_t from_port, uint16_t to_port, const void *p, size_t n) {
     int k = peer_k(to);
@@ -581,7 +888,16 @@ static void relay_send(uint32_t to, uint16_t from_port, uint16_t to_port, const 
     if (!m) return;
     m[0] = (uint8_t)(from_port >> 8), m[1] = (uint8_t)from_port, m[2] = (uint8_t)(to_port >> 8), m[3] = (uint8_t)to_port;
     memcpy(m + 4, p, n);
-    if (g_fake != NO_SOCK) {
+    if (g_srv != NO_SOCK) {
+        uint8_t *d = malloc(n + 4 + 17);
+        if (d) {
+            d[0] = 'D';
+            memcpy(d + 1, &g_srv_id, 8), memcpy(d + 9, &id, 8), memcpy(d + 17, m, n + 4);
+            srv_send(d, n + 4 + 17);
+            if (to_port != LDN_CTRL_PORT && dup_on()) dup_later(d, n + 4 + 17);
+            free(d);
+        }
+    } else if (g_fake != NO_SOCK) {
         struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)id), .sin_addr.s_addr = htonl(0x7F000001u)};
         sendto(g_fake, (const char *)m, (int)(n + 4), 0, (struct sockaddr *)&a, sizeof a);
     } else {
@@ -589,8 +905,27 @@ static void relay_send(uint32_t to, uint16_t from_port, uint16_t to_port, const 
     }
     free(m);
 }
+static volatile uint64_t g_scan_ms;  // (the game's last scan: it is looking for a room)
+static uint64_t now_ms(void) {
+#ifdef _WIN32
+    return GetTickCount64();
+#else
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000 + (uint64_t)t.tv_nsec / 1000000;
+#endif
+}
 static int relay_targets(uint32_t *out, int max) {
     int n = 0;
+    g_scan_ms = now_ms();
+    if (g_srv != NO_SOCK && g_srv_code[0] == 'B' && lobby_wait_on() && g_lobby_at && g_scan_ms - g_lobby_at < 5000 && !g_lobby_m_at) {
+        // (above: the member list first - a Private Battle room's lobby only: a walk-up trade's joiner looks again and
+        // again by itself, runtime/services/ldn.c join_scan, and Pia's own look for a room lasts 2 s whatever a scan takes)
+        uint64_t t0 = now_ms();
+        while (!g_lobby_m_at && now_ms() - t0 < 2500) nap_ms(10);
+        LOG("[steamrelay] online server: the lobby's member list %s (waited %llu ms)\n", g_lobby_m_at ? "came" : "didn't come",
+            (unsigned long long)(now_ms() - t0));
+    }
     if (g_fake != NO_SOCK) {
         if (max > 0) out[n++] = peer_addr(peer_of(g_fake_peer));
         return n;
@@ -603,8 +938,15 @@ static int relay_targets(uint32_t *out, int max) {
     pthread_mutex_unlock(&g_hosts_lock);
     return n;
 }
+static volatile int g_hosting;
+static uint64_t g_me;            // (this copy's Steam id; the fake relay: its port)
+static uint8_t g_invite[8];      // (this copy's Discord invite token)
 static void relay_hosting(int on) {
-    if (g_fake == NO_SOCK) {
+    g_hosting = on;
+    if (g_srv != NO_SOCK) {
+        g_srv_hosting = on;
+        srv_hello();
+    } else if (g_fake == NO_SOCK) {
         uint8_t b = on ? 1 : 0;
         to_helper('P', &b, 1, NULL, 0);
     }
@@ -617,6 +959,8 @@ static const LdnRelay k_relay = {relay_send, relay_targets, relay_hosting, relay
 static void deliver(uint64_t from, const uint8_t *m, size_t n) {
     if (n < 4) return;
     int k = peer_of(from);
+    if (k && g_srv != NO_SOCK && (uint16_t)(m[2] << 8 | m[3]) != LDN_CTRL_PORT && dup_seen(k, m, n)) return;  // (the second copy: above;
+    // ldn.c's control messages aren't sent twice - and their own repeats, a scan or a join asked again, are meant)
     if (k) replay(k, (uint16_t)(m[0] << 8 | m[1]), (uint16_t)(m[2] << 8 | m[3]), m + 4, n - 4);
 }
 
@@ -624,7 +968,70 @@ static volatile int g_quit;
 static void *pump(void *arg) {
     (void)arg;
     static uint8_t m[70000];
+    uint64_t last_hello = 0, last_now = 0;
     while (!g_quit) {
+        if (g_srv != NO_SOCK) {
+            uint64_t t = now_ms();
+            if (g_srv_hello_now && t - last_now >= 250) g_srv_hello_now = 0, last_now = t, last_hello = 0;  // (a new address or cookie:
+            if (t - last_hello >= 2000 || (lobby_wait_on() && g_lobby_at && t - g_lobby_at < 1100 && t - last_hello >= 300))  //  hello at once;
+                last_hello = t, srv_hello();                                                                 //  a new lobby: 4x)
+            dup_send_due(t);
+            struct sockaddr_storage a;
+            socklen_t al = sizeof a;
+            int n;
+            pthread_mutex_lock(&g_sa_lock);
+            SrvAddr srv = g_srv_sa;
+            pthread_mutex_unlock(&g_sa_lock);
+            while ((n = (int)recvfrom(g_srv, (char *)m, sizeof m, 0, (struct sockaddr *)&a, &al)) > 0) {
+                SrvAddr from;
+                sa_from(&from, (const struct sockaddr *)&a);
+                if (!srv.sin6_port || !sa_same(&from, &srv)) { al = sizeof a; continue; }
+                g_srv_heard = t ? t : 1, g_srv_ever = 1;
+                if (m[0] == 'C' && n >= 9) {  // (our address's cookie: the next hello carries it - a new one at once)
+                    if (!g_srv_have_cookie || memcmp(g_srv_cookie, m + 1, 8)) {
+                        if (!g_srv_have_cookie) LOG("[steamrelay] online server: answering (cookie taken)\n");
+                        memcpy(g_srv_cookie, m + 1, 8), g_srv_have_cookie = 1, g_srv_hello_now = 1;
+                    }
+                } else if (m[0] == 'A' && n >= 2) {  // (signed in or not: see g_tk_lock)
+                    int st = m[1] == 0 ? 1 : m[1] == 1 ? 2 : 3, was = g_srv_auth;
+                    if (st != 1 && (was == 1 || !g_srv_out_since)) g_srv_out_since = t ? t : 1;
+                    if (st == 1) g_srv_out_since = 0;
+                    g_srv_auth = st, g_srv_auth_at = t;
+                    if (st != was) LOG("[steamrelay] online server: %s\n", st == 1 ? "signed in - online play on"
+                                                                      : st == 2 ? "it needs an account - no play ticket (yet): signed in on it? (launcher > Options > Online)"
+                                                                                : "it doesn't know our play ticket (expired / restarted) - asking for a new one");
+                } else if (m[0] == 'X' && n >= 9 && n <= 9 + 96) {
+                    pthread_mutex_lock(&g_wq_lock);
+                    int nt = (g_wq_tail + 1) % 64;
+                    if (nt == g_wq_head) g_wq_head = (g_wq_head + 1) % 64;  // (full: the oldest dropped)
+                    memcpy(&g_wq[g_wq_tail].from, m + 1, 8), g_wq[g_wq_tail].n = (uint8_t)(n - 9);
+                    memcpy(g_wq[g_wq_tail].p, m + 9, (size_t)n - 9);
+                    g_wq_tail = nt;
+                    pthread_mutex_unlock(&g_wq_lock);
+                } else if (m[0] == 'D' && n >= 9) {
+                    uint64_t from;
+                    memcpy(&from, m + 1, 8);
+                    deliver(from, m + 9, (size_t)n - 9);
+                } else if (m[0] == 'M' && n >= 2) {
+                    // (a server since 2026-11-18 ends the list with its lobby's code: one still on its way from the lobby
+                    // left before - a mistyped passcode, then the right one - isn't this lobby's)
+                    if (n >= 2 + 9 * m[1] + 8 && memcmp(m + 2 + 9 * m[1], g_srv_code, 8)) { al = sizeof a; continue; }
+                    if (g_lobby_at && !g_lobby_m_at) g_lobby_m_at = t ? t : 1;
+                    pthread_mutex_lock(&g_hosts_lock);
+                    g_nhosts = 0;
+                    for (int i = 0; i < m[1] && 2 + 9 * i + 9 <= n && g_nhosts < 64; i++) {
+                        memcpy(&g_hosts[g_nhosts].id, m + 2 + 9 * i, 8);
+                        snprintf(g_hosts[g_nhosts].name, sizeof g_hosts[g_nhosts].name, "an online player (%s)",
+                                 m[2 + 9 * i + 8] ? "hosting" : "searching");
+                        g_nhosts++;
+                    }
+                    pthread_mutex_unlock(&g_hosts_lock);
+                }
+                al = sizeof a;
+            }
+            nap_ms(1);
+            continue;
+        }
         if (g_fake != NO_SOCK) {
             struct sockaddr_in a;
             socklen_t al = sizeof a;
@@ -642,6 +1049,10 @@ static void *pump(void *arg) {
             uint64_t from;
             memcpy(&from, m, 8);
             deliver(from, m + 8, n - 8);
+        } else if (h[0] == 'G' && n >= 8) {
+            uint64_t id;
+            memcpy(&id, m, 8);
+            LOG("[steamrelay] a player joined with this copy's Discord invite (%llu)\n", (unsigned long long)id);
         } else if (h[0] == 'H') {
             pthread_mutex_lock(&g_hosts_lock);
             g_nhosts = 0;
@@ -656,16 +1067,189 @@ static void *pump(void *arg) {
             pthread_mutex_unlock(&g_hosts_lock);
         }
     }
-    if (g_fake == NO_SOCK && !g_quit) LOG("[steamrelay] the Steam helper ended: online play off until the game starts again\n");
+    if (g_fake == NO_SOCK && g_srv == NO_SOCK && !g_quit) LOG("[steamrelay] the Steam helper ended: online play off until the game starts again\n");
     return NULL;
 }
 
 // At exit: the helper told to stop (its stdin closed: it shuts Steam down and ends), then the pump
-static pthread_t g_pump;
+static pthread_t g_pump, g_resolver;
+static volatile int g_resolver_on;
 static void quit(void) {  // (hooks.shutdown: from exit())
-    g_quit = 1;
-    if (g_fake == NO_SOCK) helper_stop();
+    g_quit = 1, g_srv_quit = 1;
+    if (g_fake == NO_SOCK && g_srv == NO_SOCK) helper_stop();
     pthread_join(g_pump, NULL);
+    if (g_resolver_on) pthread_join(g_resolver, NULL);  // (at most a DNS look-up's wait)
+}
+
+// ---- Discord invites (runtime/discord.c finds these by name in the loaded plugins)
+// While this copy hosts or looks for a room (a Link Code entered: the game searches, then hosts if it found none): the
+// invite's secret "<Steam id hex>.<token hex>" (1), or nothing to invite to (0)
+int larecomp_relay_invite(char *out, size_t size) {
+    if (!(g_hosting || (g_scan_ms && now_ms() - g_scan_ms < 10000)) || !g_me || size < 40) return 0;
+    char t[17];
+    for (int i = 0; i < 8; i++) snprintf(t + 2 * i, 3, "%02x", g_invite[i]);
+    snprintf(out, size, "%llx.%s", (unsigned long long)g_me, t);
+    return 1;
+}
+// An invite taken (its secret): the host is let in and asked for its rooms like a friend's (1), or a bad secret (0)
+int larecomp_relay_join(const char *secret) {
+    unsigned long long id = 0;
+    char t[17] = "";
+    if (!secret || sscanf(secret, "%llx.%16[0-9a-f]", &id, t) != 2 || strlen(t) != 16 || !id) return 0;
+    uint8_t b[16];
+    memcpy(b, &id, 8);
+    for (int i = 0; i < 8; i++) {
+        unsigned v;
+        sscanf(t + 2 * i, "%2x", &v);
+        b[8 + i] = (uint8_t)v;
+    }
+    if (g_fake != NO_SOCK || g_srv != NO_SOCK) return 1;  // (the fake relay's peer is there; a server: the code's lobby)
+    to_helper('J', b, 16, NULL, 0);
+    return 1;
+}
+// A Link Code entered (runtime/hle/swkbd.c, 8 digits): with an online server, this copy's lobby there
+void larecomp_relay_code(const char *code) {
+    if (g_srv == NO_SOCK || !code || strlen(code) != 8 || strspn(code, "0123456789") != 8) return;
+    memcpy(g_srv_code, code, 9);
+    g_lobby_m_at = 0, g_lobby_at = now_ms();
+    srv_hello();
+    LOG("[steamrelay] online server: in the lobby of this Link Code\n");
+}
+
+// A Private Battle's room (4-digit passcode - the host's from its room's advertise data, runtime/services/ldn.c; a
+// joiner's as typed, runtime/hle/swkbd.c): with an online server, this copy's lobby there is the room's, "B000" +
+// passcode (lzaserver: a 'B' lobby never meets a Link Code's 8 digits). Before 2026-11-18 neither side of a Private
+// Battle entered a lobby, so "Nearby" battles never found each other through a server.
+void larecomp_relay_room(const char *pass) {
+    if (g_srv == NO_SOCK || !pass || strlen(pass) != 4 || strspn(pass, "0123456789") != 4) return;
+    char c[9];
+    snprintf(c, sizeof c, "B000%s", pass);
+    if (!strcmp(c, g_srv_code)) return;
+    memcpy(g_srv_code, c, 9);
+    g_lobby_m_at = 0, g_lobby_at = now_ms();
+    srv_hello();
+    LOG("[steamrelay] online server: in the lobby of this Private Battle room\n");
+}
+
+// In a Private Battle room's lobby on an online server (1): runtime/services/ldn.c gives a scan longer for its host's answer
+int larecomp_relay_battle_lobby(void) { return g_srv != NO_SOCK && g_srv_code[0] == 'B'; }
+
+// The online server's state (runtime/hle/warp.c tells the player when it can't be reached, drops or comes back): 0 no
+// server in use, 1 not heard from yet, 2 answering, 3 never answered in 8 s, 4 stopped answering 8 s ago, 5 its name
+// doesn't resolve (8 s in). `name` gets the server as it was given (host[:port]).
+// 6: it answers, but needs an account and this copy isn't signed in on it (5 s: a ticket on its way isn't counted).
+int larecomp_server_state(char *name, size_t size) {
+    if (g_srv == NO_SOCK) return 0;
+    if (name && size) snprintf(name, size, "%s", g_srv_host);
+    uint64_t t = now_ms(), heard = g_srv_heard, since = g_srv_since, out = g_srv_out_since;
+    if (!g_srv_resolved) return t - since >= 8000 ? 5 : 1;
+    if (heard && t - heard < 8000) return g_srv_auth >= 2 && t - g_srv_auth_at < 8000 && out && t - out >= 5000 ? 6 : 2;
+    if (t - since < 8000) return 1;
+    return g_srv_ever ? 4 : 3;
+}
+
+// Signed in on the server (runtime/acct.c): the play ticket for this server's account (NULL: none - signed out), and the
+// server's last word on it: 0 nothing heard (or a server that needs no account), 1 in, 2 sign-in needed, 3 the ticket
+// isn't known (ask for a new one)
+void larecomp_server_ticket(const uint8_t *id, const uint8_t *key) {
+    pthread_mutex_lock(&g_tk_lock);
+    g_tk_have = id && key;
+    if (g_tk_have) memcpy(g_tk_id, id, 8), memcpy(g_tk_key, key, 16);
+    else memset(g_tk_key, 0, sizeof g_tk_key);
+    pthread_mutex_unlock(&g_tk_lock);
+    g_srv_hello_now = 1;  // (said at once)
+}
+int larecomp_server_auth(void) {
+    if (g_srv == NO_SOCK) return 0;
+    return g_srv_auth_at && now_ms() - g_srv_auth_at < 8000 ? g_srv_auth : 0;
+}
+
+// The shared world (runtime/hle/warp.c): 1 when an online server is in use (the world needs one)
+int larecomp_world_available(void) { return g_srv != NO_SOCK; }
+void larecomp_world_enable(int on) {
+    if (g_srv == NO_SOCK || g_world_on == !!on) return;
+    g_world_on = !!on;
+    srv_hello();
+    LOG("[steamrelay] online server: %s the shared world\n", on ? "in" : "out of");
+}
+void larecomp_world_send(const void *p, size_t n) {  // (to everyone in the shared world; up to 96 bytes)
+    if (g_srv == NO_SOCK || !g_world_on || n > 96) return;
+    uint8_t b[9 + 96] = {'X'};
+    memcpy(b + 1, &g_srv_id, 8), memcpy(b + 9, p, n);
+    srv_send(b, 9 + n);
+}
+uint64_t larecomp_world_self(void) { return g_srv_id; }  // (our id in the shared world: what the others' recv says sent ours)
+int larecomp_world_recv(uint64_t *from, void *p, size_t cap) {  // (the oldest waiting: its length, 0 none)
+    int n = 0;
+    pthread_mutex_lock(&g_wq_lock);
+    if (g_wq_head != g_wq_tail) {
+        *from = g_wq[g_wq_head].from;
+        n = g_wq[g_wq_head].n < cap ? g_wq[g_wq_head].n : (int)cap;
+        memcpy(p, g_wq[g_wq_head].p, (size_t)n);
+        g_wq_head = (g_wq_head + 1) % 64;
+    }
+    pthread_mutex_unlock(&g_wq_lock);
+    return n;
+}
+
+// The online server's address: LARECOMP_RELAY_SERVER, or larecomp.ini's online_server (the launcher's Options > Online tab)
+static bool server_config(char *out, size_t size) {
+    const char *e = getenv("LARECOMP_RELAY_SERVER");
+    if (e && e[0]) { snprintf(out, size, "%s", e); return true; }
+    char path[1100], line[512];
+    snprintf(path, sizeof path, "%s/larecomp.ini", A && A->abi >= 4 && A->data_root ? A->data_root() : ".");
+    FILE *f = fopen(path, "r");
+    bool ok = false;
+    while (f && !ok && fgets(line, sizeof line, f)) {
+        char v[256] = "";
+        if (sscanf(line, " online_server = %255s", v) == 1 && v[0]) snprintf(out, size, "%s", v), ok = true;
+    }
+    if (f) fclose(f);
+    return ok;
+}
+static bool server_start(const char *spec) {
+    // "host", "host:port", "[v6]:port", "[v6]", or a bare IPv6 address (more than one ':')
+    if (spec[0] == '[' && strchr(spec, ']')) {
+        const char *e = strchr(spec, ']');
+        snprintf(g_srv_host, sizeof g_srv_host, "%.*s", (int)(e - spec - 1), spec + 1);
+        if (e[1] == ':') g_srv_port = (unsigned)atoi(e + 2);
+    } else {
+        snprintf(g_srv_host, sizeof g_srv_host, "%s", spec);
+        char *c = strrchr(g_srv_host, ':');
+        if (c && strchr(g_srv_host, ':') == c) g_srv_port = (unsigned)atoi(c + 1), *c = 0;
+    }
+    g_srv = socket(AF_INET6, SOCK_DGRAM, 0);  // (dual-stack: IPv4 servers too, as ::ffff:a.b.c.d)
+    if (g_srv != NO_SOCK) {
+        int off = 0;
+        if (setsockopt(g_srv, IPPROTO_IPV6, IPV6_V6ONLY, (const char *)&off, sizeof off)) sock_close(g_srv), g_srv = NO_SOCK;
+    }
+    if (g_srv == NO_SOCK) g_srv = socket(AF_INET, SOCK_DGRAM, 0), g_srv_fam = AF_INET;  // (no IPv6 on this PC)
+    if (g_srv == NO_SOCK) return false;
+    nonblocking(g_srv);
+    if (!server_resolve()) LOG("[steamrelay] online server: address not found (yet) - trying again every 10 s\n");
+    return true;
+}
+
+static void invite_token(void) {  // (random: who has it can join this copy's rooms)
+    bool ok = false;
+#ifdef _WIN32
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    uint64_t x = (uint64_t)q.QuadPart ^ ((uint64_t)GetCurrentProcessId() << 32) ^ (uint64_t)(uintptr_t)&q ^ GetTickCount64() * 0x9E3779B97F4A7C15ull;
+    for (int i = 0; i < 8; i++) {  // (splitmix64)
+        x += 0x9E3779B97F4A7C15ull;
+        uint64_t z = x;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull, z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        g_invite[i] = (uint8_t)(z ^ (z >> 31));
+    }
+    unsigned int r;
+    for (int i = 0; i < 2 && !rand_s(&r); i++) memcpy(g_invite + 4 * i, &r, 4), ok = true;
+#else
+    FILE *f = fopen("/dev/urandom", "rb");
+    ok = f && fread(g_invite, 1, 8, f) == 8;
+    if (f) fclose(f);
+#endif
+    (void)ok;
 }
 
 int larecomp_plugin_init(const LarecompPluginApi *api, LarecompPluginHooks *hooks) {
@@ -681,12 +1265,26 @@ int larecomp_plugin_init(const LarecompPluginApi *api, LarecompPluginHooks *hook
 #endif
     const char *fake = getenv("LARECOMP_RELAY_FAKE");
     unsigned mine, peer;
-    if (fake && sscanf(fake, "%u,%u", &mine, &peer) == 2) {
+    char server[256];
+    if (server_config(server, sizeof server)) {  // (an online server: no Steam)
+        if (!server_start(server)) return 1;
+        invite_token();
+        memcpy(&g_srv_id, g_invite, 8);  // (a random id; the invite token is made again below)
+        invite_token();
+        g_me = g_srv_id;
+        g_srv_game = api->title_id && api->title_id() == 0x01001F5010DFA000ull ? 1 : 2;
+        g_srv_since = now_ms();
+        srv_hello();
+        g_resolver_on = !pthread_create(&g_resolver, NULL, resolver, NULL);
+        LOG("[steamrelay] online play through an online server (players with the same Link Code meet there; the address "
+            "isn't logged)\n");
+    } else if (fake && sscanf(fake, "%u,%u", &mine, &peer) == 2) {
         g_fake = socket(AF_INET, SOCK_DGRAM, 0);
         struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)mine), .sin_addr.s_addr = htonl(0x7F000001u)};
         if (g_fake == NO_SOCK || bind(g_fake, (struct sockaddr *)&a, sizeof a)) { LOG("[steamrelay] fake relay: can't bind %u\n", mine); return 1; }
         nonblocking(g_fake);
         g_fake_peer = (uint16_t)peer;
+        g_me = mine;
         LOG("[steamrelay] fake relay (tests): port %u, the peer at %u is 127.0.4.%d\n", mine, peer, peer_of(peer));
     } else {
         env_set("LARECOMP_RELAY_KEY", api->title_id && api->title_id() == 0x01001F5010DFA000ull ? "plarecomp" : "lzarecomp");
@@ -703,6 +1301,9 @@ int larecomp_plugin_init(const LarecompPluginApi *api, LarecompPluginHooks *hook
         }
         uint64_t me;
         memcpy(&me, b, 8);
+        g_me = me;
+        invite_token();
+        to_helper('K', g_invite, 8, NULL, 0);
         LOG("[steamrelay] online play with friends on, as Spacewar (in the helper: the game keeps its own Steam Input "
             "controller setup) - id %llu\n", (unsigned long long)me);
     }

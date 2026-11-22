@@ -58,6 +58,10 @@ typedef struct {
     char mod[1024];      // the mods that are on (mods/<name>/), in load order, separated by commas; empty = none (runtime/mods.h)
     char plugins_off[256];  // plugins/ files left out, comma-separated (runtime/plugin.c)
     char plugins_on[256];   // ... and the opt-in ones switched on ("steamrelay.dll"; plugin_opt_in)
+    char online_server[128];  // an online server for Link Play (contrib/lzaserver: "<host>[:port]"; "" Steam friends) - the relay plugin reads it
+    int world_players;        // 1: on an online server, show the other players walking around the world (opt-in; hle/warp.c)
+    bool sync_saves;          // with an account on the online server: its save kept there, synced at start / save (runtime/acct.c)
+    int world_rate;           // our position sent this many times a second in the shared world: 20 (0 = 20, the default) or 30
     int next_fps, next_res_height;  // set in game (hle/za_options.c; the height + 1), 0 = not: for the ini, from the next start
 } Settings;
 

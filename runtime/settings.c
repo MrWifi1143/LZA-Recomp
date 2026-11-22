@@ -30,6 +30,7 @@ static const char *settings_file(void) {
     .show_fps = false,                                                      \
     .discord_presence = true,                                               \
     .check_updates = true,                                               \
+    .sync_saves = true,  /* (only with an account on the online server) */  \
     .render_thread = true,                                                  \
     .vertex_read = VREAD_AUTO,                                              \
     .job_workers = -1,                                                      \
@@ -48,6 +49,11 @@ static void parse_line(const char *line) {
     char key[64];
     char val[1024];  // (mod: several names)
     if (sscanf(line, " %63[^= ] = %1023[^\n]", key, val) < 1) return;
+    if (!strcmp(key, "online_server")) {  // (may be empty)
+        if (sscanf(line, " %63[^= ] = %1023s", key, val) != 2) val[0] = 0;
+        strlcpy(g_settings.online_server, val, sizeof g_settings.online_server);
+        return;
+    }
     if (!strcmp(key, "game_lang") || !strcmp(key, "mod") || !strcmp(key, "plugins_off") || !strcmp(key, "plugins_on")) {  // (may be empty)
         if (sscanf(line, " %63[^= ] = %1023[^\n]", key, val) != 2) val[0] = 0;
         if (key[0] == 'g') strlcpy(g_settings.game_lang, val, sizeof g_settings.game_lang);
@@ -58,6 +64,10 @@ static void parse_line(const char *line) {
     }
     if (!strcmp(key, "fullscreen")) g_settings.fullscreen = atoi(val) != 0;
     else if (!strcmp(key, "fps")) { int f = atoi(val); g_settings.fps = f == 45 || f == 60 || f == 72 || f == 120 || f == 144 || f == FPS_UNLIMITED ? f : 30; }
+    else if (!strcmp(key, "world_players")) g_settings.world_players = atoi(val) != 0;
+    else if (!strcmp(key, "sync_saves")) g_settings.sync_saves = atoi(val) != 0;
+    else if (!strcmp(key, "world_rate")) g_settings.world_rate = atoi(val) == 30 ? 30 : 20;
+    else if (!strcmp(key, "world_own_npc")) {}  // (old test builds wrote it: their own townsperson is always on now)
     else if (!strcmp(key, "experimental")) g_settings.experimental = atoi(val) != 0, g_experimental_seen = true;
     else if (!strcmp(key, "menu_pointer")) g_settings.menu_pointer = atoi(val) != 0;
     else if (!strcmp(key, "frame_timing")) g_settings.fixed_steps = !strcmp(val, "fixed");
@@ -155,6 +165,10 @@ void settings_save(void) {
     fprintf(f, "mod = %s\n", g_settings.mod);
     fprintf(f, "plugins_off = %s\n", g_settings.plugins_off);
     fprintf(f, "plugins_on = %s\n", g_settings.plugins_on);
+    fprintf(f, "online_server = %s\n", g_settings.online_server);
+    fprintf(f, "world_players = %d\n", g_settings.world_players);
+    fprintf(f, "sync_saves = %d\n", g_settings.sync_saves);
+    fprintf(f, "world_rate = %d\n", g_settings.world_rate == 30 ? 30 : 20);
     fprintf(f, "mouse_sens = %.3f\n", g_settings.mouse_sens);
     fprintf(f, "stick_deadzone = %.2f\n", g_settings.stick_deadzone);
     fprintf(f, "volume = %.2f\n", g_settings.volume);
