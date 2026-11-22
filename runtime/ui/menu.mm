@@ -509,6 +509,7 @@ static void update_notice_once(void) {
              RT_APP_NAME, update_version());
     menu_notice_for(t, 12000);
     fprintf(stderr, "[update] told in the game: %s\n", t);
+}
 // A script's text prompt (the mod API's text_prompt: Lua input.text): the name entry's dialog - typed with a keyboard,
 // the on-screen keyboard with a controller - without holding the game up. 1 opened, 0 busy (another one is up).
 extern "C" int menu_text_prompt(const char *title, const char *text, int max_chars) {
