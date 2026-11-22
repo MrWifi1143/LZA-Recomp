@@ -1,8 +1,8 @@
 # Legends Lua
 
-> **Before you start:** Legends Studio, the editor these mods were made with, isn't public yet. Modding
+> **Before you start:** Legends Studio, the editor these mods and quests were made with, isn't public yet. Modding
 > works without it, but it **will be much harder to use without the release of Legends Studio**: without it you write
-> every script and layout edit by hand from this page. Quests come with Legends Studio.
+> every script, quest and layout edit by hand from this page.
 >
 > **Multiplayer isn't in this release** (Z-A 1.3.0 / Arceus 1.4.0): `net.send`, `net.receive` and `chat.say` stop the
 > script with "not available in this release", and `players.list()` is empty.
