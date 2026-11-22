@@ -5,6 +5,14 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsZA`)
 
+## 2026-11-21: LegendsZA-v1.3.1
+
+A hotfix.
+
+- **Fixed: crafted donuts never reached the Satchel** (Mega Dimension). The recomp's clock gave the game a timestamp of 0
+  for new donuts, and the game treats a donut without one as an empty slot, so the next donut overwrote it. Donuts made
+  before this fix can't be recovered; new ones land in the Donuts pocket.
+
 ## 2026-11-21: LegendsZA-v1.3.0
 
 Previous release: LegendsZA-v1.2.4 (1.2.5 was prepared but never released; its fixes are in this one). Game version:
