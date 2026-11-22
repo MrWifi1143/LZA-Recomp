@@ -1385,8 +1385,15 @@ extern "C" void launcher_lg_run(const char *root) {
                     struct stat tsb;
                     snprintf(tp, sizeof tp, "mods/%s/texpack", mods[i]);
                     bool pack = !stat(tp, &tsb) && S_ISDIR(tsb.st_mode);
-                    snprintf(about, sizeof about, "%s%s%s", pack ? T("Texture pack", "Pacote de texturas") : T("Replaces game files", "Substitui arquivos do jogo"),
-                             lang ? T(" - texts: ", " - textos: ") : "", lang ? lang : "");
+                    snprintf(tp, sizeof tp, "mods/%s/lua", mods[i]);  // (a mod with Lua scripts: runtime/mods.c mod_lua_dirs)
+                    bool lua = !stat(tp, &tsb) && S_ISDIR(tsb.st_mode);
+                    snprintf(tp, sizeof tp, "mods/%s/romfs", mods[i]);
+                    bool files = !stat(tp, &tsb) && S_ISDIR(tsb.st_mode);
+                    const char *kind = pack ? T("Texture pack", "Pacote de texturas")
+                                       : lua && !files ? T("Lua scripts", "Scripts Lua")
+                                       : lua ? T("Replaces game files, Lua scripts", "Substitui arquivos do jogo, scripts Lua")
+                                             : T("Replaces game files", "Substitui arquivos do jogo");
+                    snprintf(about, sizeof about, "%s%s%s", kind, lang ? T(" - texts: ", " - textos: ") : "", lang ? lang : "");
                 } else snprintf(about, sizeof about, "%s", plugin_about(plugs[i]));
                 ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
                 ImGui::TextWrapped("%s", about);
