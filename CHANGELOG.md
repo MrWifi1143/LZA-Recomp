@@ -5,6 +5,105 @@ branch `LegendsZA`). The Windows zips hold no game files and no game code.
 
 ## Unreleased (branch `LegendsZA`)
 
+## 2026-11-21: LegendsZA-v1.3.1
+
+A hotfix.
+
+- **Fixed: crafted donuts never reached the Satchel** (Mega Dimension). The recomp's clock gave the game a timestamp of 0
+  for new donuts, and the game treats a donut without one as an empty slot, so the next donut overwrote it. Donuts made
+  before this fix can't be recovered; new ones land in the Donuts pocket.
+
+## 2026-11-21: LegendsZA-v1.3.0
+
+Previous release: LegendsZA-v1.2.4 (1.2.5 was prepared but never released; its fixes are in this one). Game version:
+Pokemon Legends: Z-A 2.0.2. Same game code as 1.2.0, so nothing is rebuilt on start.
+
+- Ultrawide: Options > Display > Aspect ratio "Fill the window" (and the game's Graphics settings; from the next start)
+  fills a window or screen wider than 16:9 with more of the world (Hor+), not black bars. The interface is fitted to
+  it: the minimap and party at the screen's left edge, world markers and townspeople's speech bubbles over the right
+  spots, menus (Items, Summary, Boxes, Outfit, shops, the Pokedex, Settings, Help) continued to the screen's edges
+  instead of ending in a 16:9 box, the map across the screen, battles fitted (plates on their Pokemon, the move
+  palette at the right). The title screen stays 16:9.
+- Linux: the Legends Lua research plugin is now in the Linux release too (plugins/liblegendslua.so, off until switched
+  on, as on Windows), and the AppImage finds its plugins (they were only looked for in the data folder,
+  ~/.local/share/<game>: the Steam relay never loaded there either).
+- Experimental: "New menu mouse pointer" under Options > Display > Experimental settings (off by default): our own
+  pointer drawn in the game's menus, the window keeps the mouse, hovering picks, menu keys of their own (Controls >
+  In menus). It could break things; off is the menu mouse as before.
+- Mouse: a held mouse is no longer let go while aiming, locked on or in cutscenes - only for a menu with buttons.
+- Missing characters and text on PCs with little memory to spare (reported on Discord by a player on a GTX 1650 laptop
+  with 8 GB of RAM; their log shows the driver refusing exactly this): 1.2.4's bigger 3.5 GB game memory block made the
+  part of it the graphics card reads from system memory 3.75 GB. Where the graphics driver won't set aside that much,
+  the card read zeros - no player, no NPCs or stretched shapes, empty speech bubbles and name plates. On NVIDIA cards
+  the in-parts sharing meant for small-memory PCs never worked. Now the game's memory is shared in parts as it is used
+  (about 2.5 GB in Lumiose) wherever all of it would take more than half of the system memory the driver offers,
+  NVIDIA included; lasrecomp.log lists the GPU's memory at the start and says plainly when the driver refuses.
+- Where the game's memory is shared in parts, some of Lumiose's GPU-placed scenery was skipped (several hundred draws
+  every 2 seconds). They're drawn now.
+- GPU crash reports: when the graphics driver stops ("device lost"), lasrecomp.log now names the shaders and the
+  render pass the GPU was on, and a note (gpucrash.json next to the log) makes the next start check those shaders more
+  closely (about 10% slower until 30 minutes pass without a crash). A shader that crashed the GPU twice on the same
+  driver is skipped from then on (never a common or full-screen one; a driver update clears the list): that effect is
+  missing, but the game keeps going. LARECOMP_GPU_AUTOSKIP=0 turns the skipping off, LARECOMP_GPUCRASH_RESET=1 clears
+  the note.
+- lasrecomp.log: a "[mem]" line every 30 s (the game's RAM, the PC's free RAM, the GPU heaps' use and budget), and a
+  failed game-code build puts the compiler's first errors in the log.
+
+## 2026-11-17: LegendsZA-v1.2.4
+
+Previous release: LegendsZA-v1.2.3. Game version: Pokemon Legends: Z-A 2.0.2. A hotfix: same game code as 1.2.0, so
+nothing is rebuilt on start (the hotfix zip is enough on Windows).
+
+- The crash after some minutes of play ("svcBreak" in the error box) is fixed: the game ran out of its own memory. It
+  got a fixed 2.75 GB block, and at 720p on Switch settings it already uses 2.6-2.75 GB walking Lumiose, so a busier
+  spot failed a texture load and the game stopped itself. The block is now 3.5 GB (more with higher settings, as
+  before). Where the game's memory runs out anyway, the error box now says so. Reported on Discord by a player on a
+  laptop with RX Vega 8 graphics, and on a Steam Deck after 3.5 hours of play (the block's free space gets cut into
+  pieces over a long session until a load can't find room - not the Deck's sleep, and not a leak).
+- A crash on the render thread as a Link trade's box closed (found in two-player testing): a command list the game
+  recorded once and replays every frame could still name the trade portrait's texture after the game freed it. Such a
+  texture is now left out of the list ("[vk] a command list names a texture finalized since: left out" in the log).
+- At 72 fps (Real Time), a spot that can't hold 72 now steps down to 48 fps instead of straight to 36.
+- Setup checks the game files it reads: each .nsp / .xci's game data is checked against its own checksums and the
+  game's file table against the update, in the same pass (a few seconds more). A damaged or altered base game or update
+  file is named ("dump it again"), a base game the update doesn't fit is refused with what to do, instead of crashing
+  in game later. An install set up before with such files opens the start screen with the message instead of the game.
+  New --prepare exit codes 31-34 for launchers. (Port of the Arceus 1.3.4 check.)
+- A picked romfs.bin that's a symbolic link is linked as its file: a later setup can no longer write through it.
+- NVIDIA crash reports: the game's indirect draws and gathers now ask for the two Vulkan features they use
+  (drawIndirectFirstInstance, shaderImageGatherExtended - undefined behaviour without them); a crash inside the driver
+  while building a shader names the shader and logs its code; the log shows each GPU's driver version; and
+  LARECOMP_VK_DEVLOST_TRACE=1 makes a device-lost crash log the draws the GPU was on. Two crash reports (an RTX 4060 Ti,
+  an RTX 5060 Laptop GPU) are not reproduced yet - these are for the next logs.
+
+## 2026-11-17: LegendsZA-v1.2.3
+
+Previous release: LegendsZA-v1.2.2. Game version: Pokemon Legends: Z-A 2.0.2. A hotfix: same game code as 1.2.0, so
+nothing is rebuilt on start (the hotfix zip is enough on Windows).
+
+- The freeze after 30+ minutes (often in a battle as a move is chosen, music playing on) is fixed. The table of
+  shader pipelines had a fixed size; late in a long session it filled up and the next new pipeline searched it
+  forever. The shader tables now grow instead. Reported on Discord by players on an RTX 4070 SUPER and an RTX 4060 Ti.
+- A Link Play room (Private Battle) no longer hangs the GPU (device lost) now and then: indirect draws whose
+  arguments hold garbage are skipped for that frame instead of drawing billions of instances.
+- Steam Deck and other screens below 1536x864: the broadcast hologram and the title screen no longer show garbage
+  down the right and bottom edges.
+- A freeze without a crash now writes a report to lasrecomp.log ([hang] lines: what every thread waits on, and the
+  render thread's call stack), so a freeze can be tracked down from the log.
+
+## 2026-11-15: LegendsZA-v1.2.2
+
+Previous release: LegendsZA-v1.2.1. Game version: Pokemon Legends: Z-A 2.0.2. Same game
+code as 1.2.0, so nothing is rebuilt on start (the hotfix zip is enough on Windows).
+
+- New: a 45 fps setting (launcher, the game's Settings, larecomp.ini `fps = 45`). A PC that can't hold 60 dropped to
+  30 and bounced back; 45 holds steady instead. The opening's cinematics run at the right speed at 45.
+- The Z-A Royale card's photo is no longer black. The game builds the card picture on the CPU from a copy of the
+  frame, which stayed on the GPU. Photos taken before stay black until they're retaken.
+- Radeon and others: stretched models, a "wall" of a hat and a bystander's spikes are gone (transform feedback
+  captures were lost when their buffer sat in a part of the GPU heap that wasn't backed yet). Reported on Discord.
+- Low-end CPUs (4 threads or fewer): the game's threads no longer spin while they wait, they sleep at once.
+
 ## 2026-11-15: LegendsZA-v1.2.1
 
 Previous release: LegendsZA-v1.2.0. Game version: Pokemon Legends: Z-A 2.0.2. A Linux hotfix: same game code as 1.2.0, and the program

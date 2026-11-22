@@ -158,7 +158,11 @@
     "27": "No keys were found for your game files. Add the prod.keys dumped from your own Switch.",
     "28": "Your keys can't open those game files. Dump prod.keys again from your Switch on its current system version.",
     "29": "Only the update was found, not the base game. Add the base game's .nsp / .xci too.",
-    "30": "Those game files couldn't be read. The dump may be damaged; details in lasrecomp.log."
+    "30": "Those game files couldn't be read. The dump may be damaged; details in lasrecomp.log.",
+    "31": "The game can't find its own files in those: the base game doesn't fit the update. Dump the base game again from your own Switch; details in lasrecomp.log.",
+    "32": "Your base game file is damaged or altered (what's in it doesn't match its own checksum). Dump the base game again from your own Switch.",
+    "33": "Your 2.0.2 update file is damaged or altered (what's in it doesn't match its own checksum). Dump the 2.0.2 update again from your own Switch.",
+    "34": "Your game files are intact, but the base game and the update don't fit together (or are packed in a way the setup doesn't expect). Please send lasrecomp.log in a bug report on Discord; a fresh dump of the base game may also help."
   },
   "groups": [
     {

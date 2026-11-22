@@ -516,6 +516,12 @@ static Service *open_romfs_storage(void) {
         snprintf(path, sizeof path, "%s.bin", g_romfs_dir);  // extracted/romfs.bin
         romfs_fd = open(path, O_RDONLY);
         if (romfs_fd < 0) FATAL("cannot open %s (set up the game files on the start screen)\n", path);
+        // (tables that don't find the game's own files - a base game dump the update doesn't fit - would stop the game at
+        // its first file with "accessing 0"; the start screen refuses such an image, this is for starts that skip it)
+        char why[700];
+        if (!romfs_check(path, why, sizeof why))
+            FATAL("The game can't find its own files in %s (%s): the base game doesn't fit the update. Dump the base game "
+                  "again from your own Switch and set up the game files again on the start screen.\n", path, why);
         rom_index(romfs_fd);
     }
     Storage *st = calloc(1, sizeof *st);
@@ -729,7 +735,11 @@ static void filesystem(Service *s, IpcReq *req, IpcResp *resp) {
         ipc_return_object(resp, dsvc);
         break;
     }
-    case 10: break;  // Commit
+    case 10: {  // Commit (the save's)
+        extern void modapi_save_committed(void);  // (scripts' per-save values written now: hle/modapi_ext.c)
+        modapi_save_committed();
+        break;
+    }
     case 11: case 12: OUT(int64_t, 0) = 0x40000000; resp_size(resp, 8); break;
     case 13: rm_rf(p, true); break;
     case 14: memset(resp->data, 0, 0x20); resp_size(resp, 0x20); break;

@@ -657,6 +657,12 @@ static void *renderer_tick(void *arg) {
         pthread_mutex_lock(&r->lock);
         if (r->state == 0) {
             render_frame(r, out);
+            {   // scripts' own sounds, into the first renderer's output (runtime/hle/modsound.c)
+                static Renderer *mixer;
+                extern void modsound_mix_f32(float *out, int frames, int rate);
+                if (!mixer) mixer = r;
+                if (mixer == r) modsound_mix_f32(out, (int)N, (int)r->sample_rate);
+            }
             r->elapsed_frames++;
         } else {
             memset(out, 0, frame_bytes);
@@ -1131,6 +1137,23 @@ static void *audout_thread(void *arg) {
         pthread_mutex_unlock(&a->lock);
         if (!size) { struct timespec ts = {0, 1000000}; nanosleep(&ts, NULL); continue; }
         uint64_t frames = size / (2 * ch);
+        {   // scripts' own sounds, into the first output's buffers (a copy: the game's buffer stays as it gave it -
+            // runtime/hle/modsound.c)
+            static AudioOut *mixer;
+            static int16_t *mixbuf;
+            static uint64_t mixcap;
+            extern bool modsound_active(void);
+            extern void modsound_mix_s16(int16_t *buf, int frames, int ch, int rate);
+            if (!mixer) mixer = a;
+            if (mixer == a && data && modsound_active()) {
+                if (size > mixcap) { free(mixbuf); mixbuf = malloc(size); mixcap = mixbuf ? size : 0; }
+                if (mixbuf) {
+                    memcpy(mixbuf, (const void *)(uintptr_t)data, size);
+                    modsound_mix_s16(mixbuf, (int)frames, (int)ch, (int)(a->rate ? a->rate : 48000));
+                    data = (uint64_t)(uintptr_t)mixbuf;
+                }
+            }
+        }
         if (a->stream) {
             apply_gain(a->stream);
             if (a->played && SDL_GetAudioStreamQueued(a->stream) == 0) underruns++;  // ran dry: an audible gap

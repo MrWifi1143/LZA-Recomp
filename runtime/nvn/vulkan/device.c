@@ -14,6 +14,7 @@
 #include "../../settings.h"
 #include "../../ui/menu.h"
 #include "vk.h"
+#include "gpudiag.h"
 void rt_trace(char ev, uint64_t arg);  // (renderthread.c: research timeline)
 #include "../../plugin.h"
 #include "../output_scale.h"
@@ -102,8 +103,15 @@ static void pick_device(void) {
     for (uint32_t i = 0; i < n; i++) {
         VkPhysicalDeviceProperties p;
         vkGetPhysicalDeviceProperties(pd[i], &p);
-        LOG("[vk] gpu %u: %s (api %u.%u.%u)\n", i, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
-            VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion));
+        char drv[32];  // (the driver's version as its vendor writes it: a crash report then says which driver)
+        uint32_t dv = p.driverVersion;
+        if (p.vendorID == 0x10DE) snprintf(drv, sizeof drv, "%u.%02u", dv >> 22, (dv >> 14) & 0xff);
+#ifdef _WIN32
+        else if (p.vendorID == 0x8086) snprintf(drv, sizeof drv, "%u.%u", dv >> 14, dv & 0x3fff);
+#endif
+        else snprintf(drv, sizeof drv, "%u.%u.%u", VK_API_VERSION_MAJOR(dv), VK_API_VERSION_MINOR(dv), VK_API_VERSION_PATCH(dv));
+        LOG("[vk] gpu %u: %s (api %u.%u.%u, driver %s)\n", i, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
+            VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion), drv);
         if (p.apiVersion < VK_API_VERSION_1_3) continue;
         int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 3 : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2 : 1;
         if ((int)i == want) score = 100;
@@ -131,10 +139,9 @@ static void pick_device(void) {
 }
 
 static bool g_fault_ext;
-// After VK_ERROR_DEVICE_LOST: what the driver says faulted (VK_EXT_device_fault), into the log.
-void vk_device_fault_report(void) {
-    static int once;
-    if (once++ || !g_fault_ext) return;
+// After VK_ERROR_DEVICE_LOST: what the driver says faulted (VK_EXT_device_fault), into the log; then the GPU crash
+// report (gpudiag.c: what was on the GPU, the crash note). desc gets a one-line summary.
+static void fault_info(char *desc, size_t n) {
     PFN_vkGetDeviceFaultInfoEXT get = (PFN_vkGetDeviceFaultInfoEXT)vkGetDeviceProcAddr(g_vk.dev, "vkGetDeviceFaultInfoEXT");
     if (!get) return;
     VkDeviceFaultCountsEXT c = {.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
@@ -147,13 +154,23 @@ void vk_device_fault_report(void) {
     VkDeviceFaultInfoEXT info = {.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT, .pAddressInfos = addr, .pVendorInfos = vend};
     if (get(g_vk.dev, &c, &info) != VK_SUCCESS && 0) return;
     LOG("[vk] device fault: %s\n", info.description);
+    size_t l = (size_t)snprintf(desc, n, "%s", info.description[0] ? info.description : "a fault");
     static const char *const kind[] = {"none", "read invalid", "write invalid", "execute invalid", "ip unknown", "ip invalid", "ip valid"};
-    for (uint32_t i = 0; i < c.addressInfoCount; i++)
-        LOG("[vk]   address %s %#llx (precision %#llx)\n", addr[i].addressType < 7 ? kind[addr[i].addressType] : "?",
-            (unsigned long long)addr[i].reportedAddress, (unsigned long long)addr[i].addressPrecision);
+    for (uint32_t i = 0; i < c.addressInfoCount; i++) {
+        const char *k = addr[i].addressType < 7 ? kind[addr[i].addressType] : "?";
+        LOG("[vk]   address %s %#llx (precision %#llx)\n", k, (unsigned long long)addr[i].reportedAddress, (unsigned long long)addr[i].addressPrecision);
+        if (l < n) l += (size_t)snprintf(desc + l, n - l, "; address %s %#llx", k, (unsigned long long)addr[i].reportedAddress);
+    }
     for (uint32_t i = 0; i < c.vendorInfoCount; i++)
         LOG("[vk]   vendor: %s (code %#llx data %#llx)\n", vend[i].description, (unsigned long long)vend[i].vendorFaultCode,
             (unsigned long long)vend[i].vendorFaultData);
+}
+void vk_device_fault_report(void) {
+    static atomic_int once;
+    if (atomic_exchange(&once, 1)) return;
+    char desc[512] = "";
+    if (g_fault_ext) fault_info(desc, sizeof desc);
+    gd_device_lost(desc[0] ? desc : NULL);
 }
 
 static bool g_display_csv;
@@ -220,9 +237,20 @@ static void create_device(void) {
     {   // LARECOMP_VK_DEVLOST_TRACE=1: NVIDIA's checkpoints too - how far the GPU got in each command list (exec.c dl_mark)
         extern bool g_vk_checkpoints;
         const char *t = ENV("LARECOMP_VK_DEVLOST_TRACE");
-        g_vk_checkpoints = t && atoi(t) && has_ext(ep, ne, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
-        if (g_vk_checkpoints) ext[n_ext++] = VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME;
+        bool has_cp = has_ext(ep, ne, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+        g_vk_checkpoints = t && atoi(t) && has_cp;
         if (t && atoi(t)) LOG("[vk] device-lost trace on%s\n", g_vk_checkpoints ? ", with NVIDIA checkpoints" : " (no checkpoints on this driver)");
+        // GPU crash diagnostics (gpudiag.c): NVIDIA checkpoints at each pass / dispatch (every draw after a crash) - the
+        // trace's own when it is on
+        uint32_t dv = g_vk.props.driverVersion;
+        char drv[32];
+        if (g_vk.props.vendorID == 0x10DE) snprintf(drv, sizeof drv, "%u.%02u", dv >> 22, (dv >> 14) & 0xff);
+#ifdef _WIN32
+        else if (g_vk.props.vendorID == 0x8086) snprintf(drv, sizeof drv, "%u.%u", dv >> 14, dv & 0x3fff);
+#endif
+        else snprintf(drv, sizeof drv, "%u.%u.%u", VK_API_VERSION_MAJOR(dv), VK_API_VERSION_MINOR(dv), VK_API_VERSION_PATCH(dv));
+        bool gd = gd_setup(&g_vk.props, drv, has_cp, g_vk_checkpoints);
+        if (g_vk_checkpoints || gd) ext[n_ext++] = VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME;
     }
     // LARECOMP_PIPE_STATS: what the driver says about each compiled shader (registers, spills, ...), exec.c pipe_exec_report
     g_pipe_exec_stats = ENV("LARECOMP_PIPE_STATS") && has_ext(ep, ne, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
@@ -361,6 +389,8 @@ static void create_device(void) {
     b->robustBufferAccess = h->robustBufferAccess;  // guest shaders index cbufs freely: keep OOB reads harmless
     if (ENV("LARECOMP_NO_ROBUST")) b->robustBufferAccess = VK_FALSE;  // (research: what the bounds checks cost)
     b->shaderClipDistance = h->shaderClipDistance;
+    b->shaderImageGatherExtended = h->shaderImageGatherExtended;  // (TLD4 with offsets: textureGatherOffset(s) - the validation layer)
+    b->drawIndirectFirstInstance = h->drawIndirectFirstInstance;  // (the game's indirect draws start at instance 250000+)
     extern bool g_maxwell_gmem_table;  // (the chunk table needs no sparse buffer)
     if (g_vk.lazyhost && !g_maxwell_gmem_table && !(h->sparseBinding && h->sparseResidencyBuffer)) {  // (a plugin's device: not the one gpuheap.c looked at)
         extern void gpuheap_host_cancel(void);
@@ -378,6 +408,7 @@ static void create_device(void) {
                              .pQueueCreateInfos = &qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
+    gd_device_ready(g_vk.dev, g_vk.queue);
     plugins_vk_ready(g_vk.inst, g_vk.phys, g_vk.dev, g_vk.qfam, g_vk.queue);
     if (g_vk.xfb) {
         g_vk.bind_xfb = (PFN_vkCmdBindTransformFeedbackBuffersEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdBindTransformFeedbackBuffersEXT");
@@ -391,6 +422,24 @@ static void create_device(void) {
                                  .vulkanApiVersion = VK_API_VERSION_1_3,
                                  .flags = g_vk.mem_budget ? VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT : 0};
     VK_CHECK(vmaCreateAllocator(&ai, &g_vk.vma));
+    {   // the GPU's memory as the driver reports it at the start: what a "missing characters / text" report needs first
+        // (the game's memory is imported from the system-memory heap: exec.c gmem_import, gpuheap.c)
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT bud = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+        VkPhysicalDeviceMemoryProperties2 mp2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2,
+                                                 .pNext = g_vk.mem_budget ? &bud : NULL};
+        vkGetPhysicalDeviceMemoryProperties2(g_vk.phys, &mp2);
+        char line[512];
+        int n = 0;
+        for (uint32_t h = 0; h < mp2.memoryProperties.memoryHeapCount && n < (int)sizeof line - 96; h++) {
+            const VkMemoryHeap *mh = &mp2.memoryProperties.memoryHeaps[h];
+            n += snprintf(line + n, sizeof line - n, "%s heap %u %s %llu MB", h ? ";" : "", h,
+                          mh->flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ? "GPU" : "system", (unsigned long long)(mh->size >> 20));
+            if (g_vk.mem_budget)
+                n += snprintf(line + n, sizeof line - n, " (budget %llu, in use %llu)", (unsigned long long)(bud.heapBudget[h] >> 20),
+                              (unsigned long long)(bud.heapUsage[h] >> 20));
+        }
+        LOG("[vk] memory:%s\n", line);
+    }
 
     VkSemaphoreTypeCreateInfo st = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
                                     .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE, .initialValue = 0};
@@ -955,6 +1004,16 @@ void backend_present(NvnTexture *t) {
                 snprintf(lpath, sizeof lpath, "build/frames/%s_%ld.png", final ? "fin" : "mid", list[i]);
                 path = lpath;
             }
+        {   // (testing) LARECOMP_LIVE=<dir>: <dir>/wshot appears -> the next window image, the overlay on it (notices,
+            // speech bubbles, the menu), as <dir>/win_<frame>.png; the request file is removed once taken
+            static char wpath[600];
+            const char *dir = ENV("LARECOMP_LIVE");
+            if (final && dir && !path && total_frames % 4 == 0) {
+                char req[560];
+                snprintf(req, sizeof req, "%s/wshot", dir);
+                if (!remove(req)) snprintf(wpath, sizeof wpath, "%s/win_%06llu.png", dir, (unsigned long long)total_frames), path = wpath;
+            }
+        }
         vk_frame_end(path);
         if (final && shot && ENV("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
     } else {
@@ -964,6 +1023,7 @@ void backend_present(NvnTexture *t) {
     }
     extern void vk_prof_frame(uint64_t frame, uint64_t present_ns);
     vk_prof_frame(total_frames, SDL_GetTicksNS() - t0);
+    { extern void vk_gd_frame(void); vk_gd_frame(); }  // (GPU crash diagnostics: gpudiag.c)
     frames++;
     total_frames++;
     g_frame_counter++;
@@ -1706,6 +1766,10 @@ int ui_run(void) {
                 if (bind_capture_event(&e)) continue;
             }
             if (menu_handle_event(&e)) continue;
+            {   // (scripts' keyboard / mouse: runtime/hle/scriptinput.c - a script's menu keeps the mouse from the game)
+                extern bool scriptinput_event(const SDL_Event *e);
+                if (scriptinput_event(&e)) continue;
+            }
             input_handle_event(&e);
         }
         menu_apply_window_requests(window);

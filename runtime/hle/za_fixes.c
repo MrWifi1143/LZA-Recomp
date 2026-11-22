@@ -28,6 +28,7 @@
 #include <time.h>
 #include <stdatomic.h>
 
+#include "../gameui.h"
 #include "../hle.h"
 #include "../settings.h"
 #include "../platform.h"
@@ -170,6 +171,12 @@ static int timeline_step(Cpu *c, uint64_t addr) {
     // at 144 fps (the trainer's ball behind her arm; "You are challenged by ...!" not taking A for seconds)
     float by_time = s1 * 60.0f * s2;
     if (by_time > 0 && fabsf((t - old) - by_time) <= 0.1f * by_time) return 0;
+    // (and the ones it steps by our frame time at 30 frames a second: s1 the table step itself, the advance s1 x 30 x
+    // rate - at 45 fps the opening's cinematics (rate 1, 0.667 an update), scaled again they ran 1.33x fast. In the
+    // game's own 30 fps mode s1 is its 1/30 s, not our step: those still get scaled)
+    extern uint64_t pla60_last_step_ns(void);
+    float step_s = (float)((double)pla60_last_step_ns() / 1e9), by_step = s1 * 30.0f * s2;
+    if (step_s > 0 && fabsf(s1 - step_s) <= 0.05f * step_s && by_step > 0 && fabsf((t - old) - by_step) <= 0.1f * by_step) return 0;
     // the real time since this player's last update (the audio plays in real time: a frame late - a stutter, a shader
     // compiled - is made up on the next one), our frame time on its first, 100 ms at most
     static struct { uint64_t player, at; } last[32];
@@ -182,7 +189,8 @@ static int timeline_step(Cpu *c, uint64_t addr) {
     extern uint64_t pla60_nominal_ns(void);  // (the game's own step: 33.3 ms in its 30 fps mode, 16.7 in its own 60)
     float scale = (float)((double)dt / (double)pla60_nominal_ns()), nt = old + (t - old) * scale;
     static int seen;
-    if (seen < 6 && getenv("LARECOMP_ZA_CUTSCENE_LOG")) seen++, LOG("[za] timeline %g -> %g (was %g)\n", old, nt, t);
+    if (seen < 6 && getenv("LARECOMP_ZA_CUTSCENE_LOG"))
+        seen++, LOG("[za] timeline %g -> %g (was %g; s1 %g s2 %g, by time %g, by step %g)\n", old, nt, t, s1, s2, by_time, by_step);
     {   // (LARECOMP_ZA_CUTSCENE_LOG=2: each player's calls, real time and advance, once a second)
         static int lv = -1;
         if (lv < 0) lv = getenv("LARECOMP_ZA_CUTSCENE_LOG") ? atoi(getenv("LARECOMP_ZA_CUTSCENE_LOG")) : 0;
@@ -302,9 +310,34 @@ static int res_scale_hook(Cpu *c, uint64_t addr) {
 // reflection's of another shape keep theirs. Hor+: the vertical field of view stays, the sides see more. (A VR plugin's
 // shape: the plugin sets the cameras itself.)
 #define ZA_CAM_UPDATE 0x70018cff60ull
+// Speech bubbles (runtime/bubble.h) are placed with the scene camera: of the cameras this update serves, the one looking
+// at the player - its target (+0x280) the player's head, ~1.5 m over the feet (the others: interface cameras at the
+// origin, shadows); eye +0x1c0 then the view's columns, field of view / aspect 0x24 / 0x20 before it (as LegendsVR).
+// What it had from its last update (this runs before the game's): half a frame old at most.
+static volatile int g_bubble_cam;
+static void bubble_cam(uint64_t cam) {
+    extern int bubble_count(void);
+    extern void bubble_camera(const float *eye);
+    extern bool warp_player_now(float pos[3], float *yaw);
+    extern volatile int g_scene_cam_wanted;  // (also positional sounds, scripts' to_screen: hle/bubble.c)
+    if (!bubble_count() && !g_scene_cam_wanted) return;
+    const float *t = (const float *)(uintptr_t)(cam + 0x280);
+    float p[3];
+    if (!warp_player_now(p, NULL)) return;
+    float dx = t[0] - p[0], dy = t[1] - p[1], dz = t[2] - p[2];
+    if (dx * dx + dz * dz > 4.0f || dy < -0.5f || dy > 3.0f) return;
+    // (and looking at it from away: after an area load - the night change - a second camera with the same target but its
+    // eye at the player's feet and no view of it is served after the scene's every frame, until the camera moves; taken,
+    // it put everything behind the camera: markers and bubbles gone - traced with a Legends Lua hook here, 2026-11-20)
+    const float *e = (const float *)(uintptr_t)(cam + 0x1c0);
+    float vx = t[0] - e[0], vy = t[1] - e[1], vz = t[2] - e[2], d = sqrtf(vx * vx + vy * vy + vz * vz);
+    if (d < 1.8f || -(vx * e[6] + vy * e[10] + vz * e[14]) / d < 0.5f) return;  // (Z = e[6], e[10], e[14]: the view's back)
+    bubble_camera(e);
+}
 static int wide_cam_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     extern volatile float g_plugin_render_shape;
+    if (g_bubble_cam) bubble_cam(c->x[0]);
     if (g_plugin_render_shape > 0 || !g_wide_cam) return 0;
     float *a = (float *)(uintptr_t)(c->x[0] + 0x1a0);
     if (fabsf(*a - 16.0f / 9.0f) < 0.002f) {
@@ -313,6 +346,11 @@ static int wide_cam_hook(Cpu *c, uint64_t addr) {
         *a = g_wide_cam;
     }
     return 0;
+}
+void za_bubble_cam_on(void) {  // (the first speech bubble: runtime/hle/modapi.c)
+    if (g_bubble_cam) return;
+    g_bubble_cam = 1;
+    rt_register_fnhook_at(ZA_CAM_UPDATE, wide_cam_hook);
 }
 static void za_wide_engage(uint64_t sw, uint64_t sh) {
     extern volatile float g_plugin_render_shape;
@@ -324,6 +362,7 @@ static void za_wide_engage(uint64_t sw, uint64_t sh) {
         return;
     }
     g_wide_cam = (float)a, g_game_image_aspect = (float)a;
+    gameui_set_screen((float)(a / (16.0 / 9.0)));  // (the HUD at the real edges: runtime/hle/gameui.c)
     static bool hooked;
     if (!hooked) hooked = true, rt_register_fnhook_at(ZA_CAM_UPDATE, wide_cam_hook);
     LOG("[wide] fill the window: screen %llux%llu, shape %.3f x 16:9, scene camera aspect %.4f; interface in a centred 16:9 box\n",
@@ -333,6 +372,18 @@ static void za_wide_engage(uint64_t sw, uint64_t sh) {
 // The engine's system config (read by 0x7001b2fc30 (config table, engine info, ...) into the info struct): +0x10 / +0x18
 // the output width / height (1920 x 1080 unless the data sets them), +0x58 the worker core count (hle/za_jobs.c).
 // (the output size: set by the screen size, below)
+// The interface's layouts (runtime/gameui.h, hle/gameui.c): nn::ui2d in 2.0.2 (its class tables found by their RTTI
+// names, N2nn4ui2d4PaneE...; Calculate / Draw the Layout table's slots 23 / 18)
+static void za_gameui_init(void) {
+    static const GameUiGame g = {
+        .game = "za", .layout_calc = 0x7002634188ull, .layout_draw = 0x7002634720ull,
+        .lay_name = 0x30, .di_proj = 0x10, .di_target = 0x138,
+        .vt = {0x7003c93b08ull, 0x7003c93db8ull, 0x7003c94028ull, 0x7003c943b0ull, 0x7003c93c68ull, 0, 0, 0, 0x7003c931b8ull},
+        .pane_draw = 0x7002644c40ull,
+    };
+    gameui_init(&g);
+}
+
 #define ZA_CONFIG_READ 0x7001b2fc30ull
 #define ZA_SCREEN_SIZES 0x70031a14e0ull  // (u32 handheld w, docked w, handheld h, docked h: 1280, 1920, 720, 1080)
 static int config_read(Cpu *c, uint64_t addr) {
@@ -352,6 +403,10 @@ static int config_read(Cpu *c, uint64_t addr) {
     za_wide_engage(sw, sh);
     if (sw != 1920 || sh != 1080) {
         g_res_sw = sw, g_res_sh = sh;
+        // a smaller screen: targets the game sizes from the Switch's 1920 x 1080 that come out larger are fitted to it
+        // (nvn/vulkan/textures.c tex_fit: the broadcast's 1536 x 864 against the screen's depth)
+        extern uint32_t g_tex_fit_w, g_tex_fit_h;
+        if (sw < 1536 || sh < 864) g_tex_fit_w = (uint32_t)sw, g_tex_fit_h = (uint32_t)sh;
         static bool hooked;
         if (!hooked) hooked = true, rt_register_fnhook_at(ZA_RES_SCALE, res_scale_hook);
         uint64_t *w = (uint64_t *)(uintptr_t)(info + 0x10), *h = (uint64_t *)(uintptr_t)(info + 0x18);
@@ -686,6 +741,7 @@ void za_fixes_configure(const char *exefs) {
     }
     if (done || memcmp(id, ZA_MAIN, 8)) return;
     done = true;
+    za_gameui_init();
     rt_register_fnhook_at(0x70010e3ed0ull, sensor_make);  // (the props' streaming distances)
     rt_register_fnhook_at(0x70010930d4ull, model_cull_set);  // (models' culling distances)
     rt_register_fnhook_at(0x7001108570ull, collision_make);  // (NPC spawners' trigger radius)
@@ -717,6 +773,15 @@ void za_fixes_configure(const char *exefs) {
         if (e) g_stdheap_size = strtoull(e, NULL, 0) << 20;
         else if (sh > 2160) g_stdheap_size = HEAP_MAX;  // (capped to the window by heaps.c)
         else if (sh > 1440) g_stdheap_size = 0x120000000ull;  // 4.5 GB (4K's route ran in 4 GB, not in 2.75)
+        // 1440p and below: 3.5 GB, not the 2.75 GB thought Switch-like. At 720p and Switch settings the game holds 2.58 GB
+        // right after a load and swings between 2.6 and 2.74 GB walking Rouge (LARECOMP_LOG_HEAPUSE=1), so a busier spot
+        // ran it out within minutes (a laptop RX Vega 8, Windows: texture loads failing at 2.75 GB -> the game's abort ->
+        // "svcBreak"). On the Switch the allocator gets 12 GB of address space (Initialize(NULL, 0x300000000)) backed page
+        // by page out of the ~3.2 GB the console gives the game, so it isn't held to 2.75 GB, and a gap between its
+        // blocks costs no memory there - in one fixed block it does (largest free piece 21 MB at 2.75 GB used). Costs
+        // nothing until used where the block is backed / imported as it's touched (integrated GPUs, small heaps, RADV);
+        // a whole import (discrete GPUs with RAM to spare) pins 768 MB more of it.
+        else g_stdheap_size = 0xE0000000ull;
         if (!e && g_settings.shadows > 0)  // (bigger shadow maps come out of it too: 2048 +60 MB, 4096 +240 MB)
             g_stdheap_size += g_settings.shadows == 2 ? 0x10000000ull : 0x4000000ull;
         // (and the characters Draw Distance lets in: Max at 1440p with Ultra shadows ran out opening the menu)

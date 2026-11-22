@@ -42,8 +42,10 @@ static _Atomic int g_state;
 static _Atomic float g_progress;
 static _Atomic bool g_running;
 static char g_folder[1024];
+static char g_fail_file[256];  // (SETUP_FAIL_DAMAGED_*: which file)
 
 int setup_state(void) { return g_state; }
+const char *setup_fail_file(void) { return g_fail_file; }
 float setup_progress(void) { return g_progress; }
 bool setup_running(void) { return g_running; }
 
@@ -123,8 +125,28 @@ const char *game_name(const char *exefs) {
     return id == TITLE_EEVEE ? "Eevee" : id == TITLE_PIKACHU ? "Pikachu" : id == TITLE_PLA ? "Legends: Arceus" : id == TITLE_ZA ? "Legends: Z-A" : NULL;
 }
 
+bool game_romfs_broken(void) {
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    static uint64_t seen_size;
+    static int64_t seen_time;
+    static bool broken;
+    struct stat sb;
+    if (stat(ROOT "/romfs.bin", &sb) || !S_ISREG(sb.st_mode)) return false;  // (no image: not set up, said elsewhere)
+    pthread_mutex_lock(&lock);
+    if ((uint64_t)sb.st_size != seen_size || (int64_t)sb.st_mtime != seen_time) {  // (checked once per image)
+        char why[700] = "";
+        broken = !romfs_check(ROOT "/romfs.bin", why, sizeof why);
+        if (broken) LOG("[setup] " ROOT "/romfs.bin: %s - the base game doesn't fit the update (or the image is damaged)\n", why);
+        seen_size = (uint64_t)sb.st_size, seen_time = (int64_t)sb.st_mtime;
+    }
+    bool b = broken;
+    pthread_mutex_unlock(&lock);
+    return b;
+}
+
 bool setup_ready(void) {
-    return game_ok(ROOT "/exefs") && !game_za_unsupported(ROOT "/exefs") && is_file(ROOT "/romfs.bin") && gamelib_present(ROOT);
+    return game_ok(ROOT "/exefs") && !game_za_unsupported(ROOT "/exefs") && is_file(ROOT "/romfs.bin") && gamelib_present(ROOT) &&
+           !game_romfs_broken();
 }
 
 typedef struct { char exefs[1024], romfs[1024], romfs_bin[1024]; bool package; } Found;
@@ -233,13 +255,45 @@ static bool from_packages(void) {
     g_phase0 = 0, g_phase1 = 0.15f;
     why[0] = 0;
     bool read_err = false;
+    Uint64 t0 = SDL_GetTicks();
     if (ok && !nxpkg_write_romfs(p, pick, ROOT "/romfs.bin", copy_progress, why, sizeof why)) {
         LOG("[setup] romfs image: %s\n", why);
         ok = false, read_err = !strstr(why, "can't");  // (else: the image couldn't be written - disk space)
     }
+    // The checks nxpkg ran on the way (each NCA used against its content id, the image against its hash tree), then
+    // the image's tables (romfs_check): the update's patch takes parts of the RomFS tables from the base game, so a
+    // base game dump other than the one the update was made for gives an image whose tables don't find the game's
+    // files, and the game stops at its first. Which it is decides what the player is told: a file damaged or altered
+    // (dump that one again) / files fine but not fitting together - or a packing the reader gets wrong (send the log).
+    const NxCheck *c = nxpkg_check(p);
+    bool tables_bad = ok && !romfs_check(ROOT "/romfs.bin", why, sizeof why);
+    if (ok) LOG("[setup] romfs image written and checked in %.1f s\n", (double)(SDL_GetTicks() - t0) / 1000);
+    int fail = 0;
+    g_fail_file[0] = 0;
+    if (ok && (c->base == NXPKG_CHECK_BAD || c->update == NXPKG_CHECK_BAD)) {
+        bool b = c->base == NXPKG_CHECK_BAD;
+        snprintf(g_fail_file, sizeof g_fail_file, "%s", b ? c->base_file : c->update_file);
+        LOG("[setup] the %s's file (%s) is damaged or altered: what's in it doesn't match its own content id - dump it again\n",
+            b ? "base game" : "update", g_fail_file);
+        fail = b ? SETUP_FAIL_DAMAGED_BASE : SETUP_FAIL_DAMAGED_UPDATE;
+    } else if (ok && (tables_bad || c->image == NXPKG_CHECK_BAD)) {
+        bool fine = c->base == NXPKG_CHECK_OK && (c->update == NXPKG_CHECK_OK || pick == 0);
+        if (tables_bad) LOG("[setup] romfs image: %s - the game wouldn't find its own files\n", why);
+        if (c->image == NXPKG_CHECK_BAD) LOG("[setup] romfs image: %s\n", c->detail);
+        LOG("[setup] %s - details for a report:\n",
+            fine ? "the files themselves are fine (their hashes match): the base game and the update don't fit together, or they're "
+                   "packed in a way the setup doesn't read right"
+                 : "the base game doesn't fit the update (or the image is damaged)");
+        nxpkg_log_details(p, pick, ROOT "/romfs.bin");
+        fail = fine ? SETUP_FAIL_MISMATCH : SETUP_FAIL_ROMFS;
+    }
+    if (fail) ok = false;
+    // (an image that's wrong but whose tables look fine would play into a later crash: not kept for a code rebuild -
+    // one whose tables don't find the files is, game_romfs_broken says why on the next start)
+    if (fail && !(fail == SETUP_FAIL_ROMFS && tables_bad)) remove(ROOT "/romfs.bin");
     if (ok && nxpkg_write_dlc(p, ROOT "/dlc.bin", why, sizeof why)) LOG("[setup] add-on content written\n");
     nxpkg_close(p);
-    if (!ok) g_state = read_err ? SETUP_FAIL_UNPACK : SETUP_FAIL_COPY;
+    if (!ok) g_state = fail ? fail : read_err ? SETUP_FAIL_UNPACK : SETUP_FAIL_COPY;
     return ok;
 }
 
@@ -283,7 +337,8 @@ static void *setup_thread(void *arg) {
     (void)arg;
     g_progress = 0;
     if (!g_folder[0]) {  // only the game code (files set up already, e.g. a new version of the app)
-        if (build_code()) g_state = setup_ready() ? SETUP_DONE : SETUP_FAIL_BUILD;
+        if (game_romfs_broken()) g_state = SETUP_FAIL_ROMFS;  // (not built for nothing)
+        else if (build_code()) g_state = setup_ready() ? SETUP_DONE : SETUP_FAIL_BUILD;
         g_running = false;
         return NULL;
     }
@@ -337,6 +392,9 @@ static void *setup_thread(void *arg) {
         ok = romfs_build(f.romfs, ROOT "/romfs.bin", copy_progress, why, sizeof why);
         if (!ok) LOG("[setup] romfs image: %s\n", why);
     }
+    char why2[700] = "";
+    bool tables_bad = ok && !romfs_check(ROOT "/romfs.bin", why2, sizeof why2);  // (a romfs.bin or romfs/ picked: the same check)
+    if (tables_bad) LOG("[setup] romfs image: %s\n", why2), ok = false;
     if (ok) {  // (optional: the add-on's RomFS files - Z-A's Mega Dimension, services/fs.c - made into dlc.bin)
         char game[1100], up[1100], dlc[1200];
         const char *sl = strrchr(f.exefs, '/');
@@ -349,7 +407,8 @@ static void *setup_thread(void *arg) {
             else LOG("[setup] add-on content %s skipped: %s\n", dlc, why);
         } else LOG("[setup] add-on content: none (no dlc folder beside exefs, in %s or beside %s)\n", g_folder, game);
     }
-    if (!ok) g_state = SETUP_FAIL_COPY;
+    if (tables_bad) g_state = SETUP_FAIL_ROMFS;
+    else if (!ok) g_state = SETUP_FAIL_COPY;
     else if (build_code()) g_state = setup_ready() ? SETUP_DONE : SETUP_FAIL_BUILD;
     LOG("[setup] %s\n", g_state == SETUP_DONE ? "ready" : "failed");
     g_running = false;
@@ -361,6 +420,7 @@ void setup_start(const char *folder) {
     snprintf(g_folder, sizeof g_folder, "%s", folder ? folder : "");
     for (char *c = g_folder; *c; c++) if (*c == '\\') *c = '/';
     g_running = true;
+    g_fail_file[0] = 0;
     g_state = SETUP_LOOKING;
     pthread_t t;
     pthread_create(&t, NULL, setup_thread, NULL);
@@ -376,7 +436,12 @@ int setup_prepare(const char *game, FILE *out) {
                                        "The game code didn't build (lasrecomp.log)", "The game code builder is missing from this copy",
                                        "This needs Pokemon Legends: Z-A version 2.0.2 (the base game and the 2.0.2 update)",
                                        "No keys found for the game files (prod.keys)", "Your keys can't open the game files",
-                                       "Only the update was found, not the base game", "The game files couldn't be read"};
+                                       "Only the update was found, not the base game", "The game files couldn't be read",
+                                       "The game can't find its own files in those (the base game doesn't fit the update): dump the base game again from your Switch",
+                                       "Your base game file is damaged or altered (what's in it doesn't match its own checksum): dump the base game again from your Switch",
+                                       "Your update file is damaged or altered (what's in it doesn't match its own checksum): dump the 2.0.2 update again from your Switch",
+                                       "Your game files are intact, but the base game and the update don't fit together (or are packed in a way the setup doesn't "
+                                       "expect): please send lasrecomp.log in a bug report on Discord; a fresh dump of the base game may also help"};
     if (!game || !*game) { fprintf(out, "progress 0 No game given (--game <folder or .nsp / .xci>)\n"); return 2; }
     LOG("[setup] --prepare %s\n", game);
     setup_start(game);
@@ -397,7 +462,9 @@ int setup_prepare(const char *game, FILE *out) {
     if (st == SETUP_DONE) { fprintf(out, "progress 1 Ready to play\n"); fflush(out); return 0; }
     int k = st - SETUP_FAIL_NOT_FOUND;
     bool known = k >= 0 && k < (int)(sizeof fail / sizeof *fail);
-    fprintf(out, "progress %.2f %s\n", p, known ? fail[k] : "The setup failed (lasrecomp.log)");
+    bool damaged = st == SETUP_FAIL_DAMAGED_BASE || st == SETUP_FAIL_DAMAGED_UPDATE;
+    fprintf(out, "progress %.2f %s%s%s%s\n", p, known ? fail[k] : "The setup failed (lasrecomp.log)", damaged ? " (" : "", damaged ? g_fail_file : "",
+            damaged ? ")" : "");
     fflush(out);
     return known ? 20 + k : 1;
 }

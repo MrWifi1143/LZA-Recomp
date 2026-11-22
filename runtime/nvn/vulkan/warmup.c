@@ -844,7 +844,7 @@ static void cap_manifest(int from_prog) {
 }
 
 static void *cap_worker(void *arg) {
-    (void)arg;
+    { extern void hangwatch_thread(const char *name, int index); hangwatch_thread("shader warm-up worker", (int)(intptr_t)arg); }
 #ifdef _WIN32
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
 #else
@@ -910,7 +910,7 @@ static void capture(uint64_t base, uint32_t size) {
         if (nt > 8) nt = 8;
         for (int i = 0; i < nt; i++) {
             pthread_t t;
-            pthread_create(&t, NULL, cap_worker, NULL);
+            pthread_create(&t, NULL, cap_worker, (void *)(intptr_t)i);
             pthread_detach(t);
         }
     }

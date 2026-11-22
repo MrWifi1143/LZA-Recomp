@@ -46,6 +46,8 @@ typedef struct {
     bool skip_start;     // the start screen goes straight to the game once it's ready (Shift held at start: shown)
     bool experimental;   // "Experimental settings" (start screen): frame rates above 60 offered - 120, 144, Unlimited - in the
                          // start screen and the game's Settings; off: 60 at most
+    bool menu_pointer;   // (experimental, only with experimental on) the new menu mouse pointer: ours drawn in the game's
+                         // menus, the window keeps the mouse, menu keys of their own (runtime/hle/menu_mouse_pick.c); off
     bool dpad_move;      // the d-pad (and arrow keys) move the player like the stick
     bool render_thread;  // the backend runs on its own thread (runtime/nvn/vulkan/renderthread.c); default on
     int vertex_read;     // VREAD_*: where the GPU reads vertex and index data (runtime/nvn/vulkan/exec.c)

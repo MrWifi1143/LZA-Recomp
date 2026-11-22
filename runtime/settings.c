@@ -57,8 +57,9 @@ static void parse_line(const char *line) {
         return;
     }
     if (!strcmp(key, "fullscreen")) g_settings.fullscreen = atoi(val) != 0;
-    else if (!strcmp(key, "fps")) { int f = atoi(val); g_settings.fps = f == 60 || f == 72 || f == 120 || f == 144 || f == FPS_UNLIMITED ? f : 30; }
+    else if (!strcmp(key, "fps")) { int f = atoi(val); g_settings.fps = f == 45 || f == 60 || f == 72 || f == 120 || f == 144 || f == FPS_UNLIMITED ? f : 30; }
     else if (!strcmp(key, "experimental")) g_settings.experimental = atoi(val) != 0, g_experimental_seen = true;
+    else if (!strcmp(key, "menu_pointer")) g_settings.menu_pointer = atoi(val) != 0;
     else if (!strcmp(key, "frame_timing")) g_settings.fixed_steps = !strcmp(val, "fixed");
     else if (!strcmp(key, "render_height")) g_settings.res_height = atoi(val) >= 360 && atoi(val) <= 4320 ? atoi(val) : 0;
     else if (!strcmp(key, "aspect_ratio")) g_settings.ultrawide = !strcmp(val, "fill");
@@ -165,6 +166,7 @@ void settings_save(void) {
     fprintf(f, "check_updates = %d\n", g_settings.check_updates);
     fprintf(f, "skip_start_screen = %d\n", g_settings.skip_start);
     fprintf(f, "experimental = %d\n", g_settings.experimental);
+    fprintf(f, "menu_pointer = %d\n", g_settings.menu_pointer);
     fprintf(f, "mouse_camera = %d\n", g_settings.mouse_camera);
     fprintf(f, "mouse_invert_x = %d\nmouse_invert_y = %d\n", g_settings.mouse_invert_x, g_settings.mouse_invert_y);
     fprintf(f, "background = %d\n", g_settings.background);

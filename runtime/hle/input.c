@@ -44,9 +44,12 @@ static bool host_test;  // (then a real controller is left out: the player's own
 // The wheel has no "held": a notch holds its binding for WHEEL_MS
 #define WHEEL_MS 90
 static _Atomic uint64_t wheel_until[2];  // (SDL_GetTicks: up, down)
+// Keys held when the game's menus come up or go (g_bind_in_menu): the other set's meaning of them waits until they
+// are let go - a Q held as B as a menu opens isn't ZL in it.
+static uint8_t keys_stale[BIND_KEYCODE_COUNT];
 static int held_key(int sc) {
     if (sc == BIND_WHEEL_UP || sc == BIND_WHEEL_DOWN) return SDL_GetTicks() < wheel_until[sc - BIND_WHEEL_UP];
-    return sc > 0 && sc < BIND_KEYCODE_COUNT && (keys_down[sc] || test_keys[sc]);
+    return sc > 0 && sc < BIND_KEYCODE_COUNT && ((keys_down[sc] && !keys_stale[sc]) || test_keys[sc]);
 }
 
 // Keyboard and mouse or controller: the one used last (the button prompts' Auto, runtime/nvn/glyphs.c). Without a
@@ -58,8 +61,9 @@ int input_last_was_kbm(void) { return last_kbm || !pad; }
 // a rebind applies at once.
 static void recompute_keyboard(void) {
     uint64_t b = 0;
+    const int16_t *t = g_bind_in_menu ? g_bind_menu : g_bind_key;  // (the game's menus: their own keys)
     for (int i = 0; i < BIND_PAD_COUNT; i++)
-        if (held_key(g_bind_key[i]) || held_key(g_bind_key2[i])) b |= 1ull << i;
+        if (held_key(t[i]) || held_key(g_bind_key2[i])) b |= 1ull << i;
     key_buttons = b;
     // diagonals at the same speed (not sqrt 2 faster); Walk (held) at half tilt
     int dx = held_key(g_bind_key[BIND_LS_RIGHT]) - held_key(g_bind_key[BIND_LS_LEFT]);
@@ -125,13 +129,16 @@ static _Atomic int64_t mouse_acc_x, mouse_acc_y;  // motion not yet applied to t
 static _Atomic int64_t cam_acc_x, cam_acc_y;      // motion not yet read as the camera stick, in 1/1000 pixel
 static _Atomic int touch_down;
 static void mouse_release(void) {
-    if (mouse_win) SDL_SetWindowRelativeMouseMode(mouse_win, false);
+    if (mouse_win) SDL_SetWindowRelativeMouseMode(mouse_win, false), LOG("[mouse] let go\n");
     mouse_win = NULL;
     for (int b = BIND_MOUSE_LEFT; b <= BIND_MOUSE_X2; b++) keys_down[b] = 0;
     cam_acc_x = cam_acc_y = 0;
     touch_down = 0;
     recompute_keyboard();
 }
+
+// (a script's menu took the input - runtime/hle/scriptinput.c, the window's thread: a held mouse is let go)
+void input_mouse_let_go(void) { if (mouse_win) mouse_release(); }
 
 // The game window's focus (its events here), for Settings.background: muted (services/audio.c) or paused at the next
 // present (nvn/objects.c) while another window has it. LARECOMP_LIVE's dir file "unfocused" (0 / 1) stands in (tests).
@@ -208,7 +215,8 @@ static _Atomic int32_t touch_x = 960, touch_y = 540;
 // The free pointer in a menu (runtime/hle/menu_mouse.c): how often it moved, the clicks and wheel notches not yet taken
 static _Atomic uint32_t ptr_moves;
 static _Atomic int ptr_clicks, ptr_rclicks, ptr_wheel;
-bool menu_mouse_active(void);
+bool menu_mouse_active(void), menu_mouse_buttons_up(void);
+bool menu_pointer_on(void);  // (runtime/hle/menu_mouse_pick.c: the experimental menu pointer - off by default)
 static void touch_at(SDL_Window *w, float mx, float my) {
     float d = w ? SDL_GetWindowPixelDensity(w) : 1;
     if (d <= 0) d = 1;
@@ -219,10 +227,46 @@ static void touch_at(SDL_Window *w, float mx, float my) {
     touch_y = (int32_t)(y < 0 ? 0 : y > TOUCH_H - 1 ? TOUCH_H - 1 : y);
 }
 
+// Our own pointer: the window keeps the mouse it holds (the mouse camera) through the game's menus too - a menu with
+// buttons up, the held mouse's motion moves this pointer over the game image (touch_x / touch_y, the same the free
+// pointer sets) and ui/menu.mm draws it; clicks and the wheel go to the menu as the free pointer's did. Letting go of
+// the mouse for each menu showed the system pointer and took the focus off the game. It starts on the button the game's
+// cursor is on (hovering selects: from anywhere else the selection would jump).
+static _Atomic int vcur_live;
+static bool vcur_active(void) {
+    bool on = mouse_win && menu_pointer_on() && menu_mouse_buttons_up();  // (only the experimental pointer)
+    if (on && !atomic_exchange(&vcur_live, 1)) {
+        void menu_mouse_game_cursor(float *x, float *y);
+        float x, y;
+        menu_mouse_game_cursor(&x, &y);
+        touch_x = (int32_t)(x < 0 ? 0 : x > touch_w() - 1 ? touch_w() - 1 : x);
+        touch_y = (int32_t)(y < 0 ? 0 : y > TOUCH_H - 1 ? TOUCH_H - 1 : y);
+    } else if (!on) atomic_store(&vcur_live, 0);
+    return on;
+}
+bool input_mouse_cursor(float *x, float *y) {  // (ui/menu.mm: our pointer, in the window's pixels)
+    if (!vcur_active()) return false;
+    *x = (float)(g_present_rect[0] + touch_x / touch_w() * g_present_rect[2]);
+    *y = (float)(g_present_rect[1] + touch_y / TOUCH_H * g_present_rect[3]);
+    return true;
+}
+
+// The game's menus came up or went (runtime/hle/menu_mouse.c, each frame): the keyboard's other set of keys
+// (g_bind_menu / g_bind_key); keys held now keep their old meaning out until let go; the prompts redraw
+// (runtime/nvn/glyphs.c follows g_bind_in_menu).
+void input_set_menu_context(bool on) {
+    if ((g_bind_in_menu != 0) == on) return;
+    for (int i = 0; i < BIND_KEYCODE_COUNT; i++) keys_stale[i] = keys_down[i];
+    g_bind_in_menu = on;
+    recompute_keyboard();
+    static int told;
+    if (told++ < 20) LOG("[input] the keyboard's %s keys\n", on ? "menu" : "field");
+}
+
 bool input_menu_pointer(int32_t *x, int32_t *y, uint32_t *moves, int *clicks, int *rclicks, int *wheel) {
     *x = touch_x, *y = touch_y, *moves = ptr_moves;
     *clicks = atomic_exchange(&ptr_clicks, 0), *rclicks = atomic_exchange(&ptr_rclicks, 0), *wheel = atomic_exchange(&ptr_wheel, 0);
-    return !mouse_win;
+    return !mouse_win || vcur_active();
 }
 
 // Forget held keys (the menu took focus) and let the mouse go; the gamepad is re-read on its next event.
@@ -254,7 +298,12 @@ void input_live_mouse(const char *cmd) {
     float gx, gy, d = SDL_GetWindowPixelDensity(w);
     if (d <= 0) d = 1;
     char kname[64];
-    if (sscanf(cmd, "key %63[^\n]", kname) == 1) {  // ("key <SDL key name>": pressed and let go)
+    int hold = !strncmp(cmd, "keydown ", 8) ? 1 : !strncmp(cmd, "keyup ", 6) ? 0 : -1;  // ("keydown / keyup <name>": held)
+    if (hold >= 0 && sscanf(cmd + (hold ? 8 : 6), "%63[^\n]", kname) == 1) {
+        e.type = hold ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP, e.key.which = TEST_DEVICE, e.key.windowID = SDL_GetWindowID(w);
+        e.key.scancode = SDL_GetScancodeFromName(kname), e.key.down = hold;
+        SDL_PushEvent(&e);
+    } else if (sscanf(cmd, "key %63[^\n]", kname) == 1) {  // ("key <SDL key name>": pressed and let go)
         for (int down = 1; down >= 0; down--) {
             e.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP, e.key.which = TEST_DEVICE, e.key.windowID = SDL_GetWindowID(w);
             e.key.scancode = SDL_GetScancodeFromName(kname), e.key.down = down;
@@ -424,7 +473,10 @@ void input_handle_event(const SDL_Event *e) {
             if (e->key.scancode == SDL_SCANCODE_F5) { g_heal_tex = 1; LOG("[heal] F5: textures re-checked\n"); }
             if (e->key.scancode == SDL_SCANCODE_F6) { g_heal_vtx = 1; LOG("[heal] F6: vertex data in place\n"); }
         }
-        if (e->key.scancode < SDL_SCANCODE_COUNT) keys_down[e->key.scancode] = e->type == SDL_EVENT_KEY_DOWN;
+        if (e->key.scancode < SDL_SCANCODE_COUNT) {
+            keys_down[e->key.scancode] = e->type == SDL_EVENT_KEY_DOWN;
+            if (e->type == SDL_EVENT_KEY_UP) keys_stale[e->key.scancode] = 0;
+        }
         if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat) last_kbm = 1;
         recompute_keyboard();
         break;
@@ -432,20 +484,58 @@ void input_handle_event(const SDL_Event *e) {
         bool motion = e->type == SDL_EVENT_MOUSE_MOTION, wheel = e->type == SDL_EVENT_MOUSE_WHEEL;
         SDL_Window *w = SDL_GetWindowFromID(motion ? e->motion.windowID : wheel ? e->wheel.windowID : e->button.windowID);
         bool cam = g_settings.mouse_camera, down = e->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
-        bool menu = menu_mouse_active();  // (a menu is up: the pointer is for it - a held mouse is let go)
+        bool menu = menu_mouse_active();  // (a menu is up, or the player's camera stopped: a free pointer is for it)
+        (void)menu;
+        // The menu mouse as released (the default): a held mouse is let go only for a menu with buttons to point at - not
+        // for aiming (its own camera: the aim needs the held mouse, the virtual gyro), a lock-on (ZL, the right button), a
+        // dialogue or a cutscene (6add078: the Poke Ball couldn't be aimed with the mouse).
+        // The experimental pointer (menu_pointer_on): a held mouse is never let go for the game: in a menu with buttons it
+        // moves our pointer (vcur_active). It was
+        // let go whenever the player's camera stopped - aiming (its own camera: the aim needs the held mouse, the virtual
+        // gyro), a lock-on (ZL, the right button), dialogues, cutscenes, every menu: the system pointer showed up and the
+        // focus came off the game; the Poke Ball couldn't be aimed with the mouse.
         // aiming takes the mouse (the gyro); with the mouse camera a click does too (and is only that: no press)
         // (a scripted test run - LARECOMP_INPUT / LARECOMP_REPLAY - never takes the mouse: the pointer stays the user's
         // while a test window aims beside what they're doing)
         static int scripted = -1;
         if (scripted < 0) scripted = getenv("LARECOMP_INPUT") || getenv("LARECOMP_REPLAY") || getenv("LARECOMP_NO_MOUSE_GRAB");
-        if (!mouse_win && w && !menu && !scripted && (gyro_aiming || (cam && down))) {
+        static int test_hold = -1;  // (LARECOMP_TEST_MOUSE_HOLD=1, tests: held as far as the game goes, the pointer not taken)
+        if (test_hold < 0) test_hold = getenv("LARECOMP_TEST_MOUSE_HOLD") != NULL;
+        bool ptr = menu_pointer_on(), buttons = menu_mouse_buttons_up();
+        if (!mouse_win && w && (ptr || !buttons) && (!scripted || test_hold) && (gyro_aiming || (cam && down))) {
             mouse_win = w;
-            SDL_SetWindowRelativeMouseMode(w, true);
+            if (!test_hold) SDL_SetWindowRelativeMouseMode(w, true);
+            LOG("[mouse] held by the window (%s)\n", gyro_aiming ? "aiming" : "a click");
             touch_down = 0;
             last_kbm = 1;
-            if (down && !gyro_aiming) break;
-        } else if (mouse_win && (menu || (!gyro_aiming && !cam))) {
+            // (the click that takes the mouse is only that - except on a screen with no buttons to point at, the title
+            // screen say: there it is the press too)
+            int menu_cursor_items(void);
+            if (down && !gyro_aiming && !(ptr && buttons && !menu_cursor_items())) break;
+        } else if (mouse_win && ((!ptr && buttons) || (!gyro_aiming && !cam))) {
             mouse_release();
+        }
+        bool vcur = vcur_active();
+        if (vcur) {  // (our pointer: the held mouse is the menu's)
+            if (motion) {
+                float d = w ? SDL_GetWindowPixelDensity(w) : 1;
+                double r2 = g_present_rect[2] > 0 ? g_present_rect[2] : 1, r3 = g_present_rect[3] > 0 ? g_present_rect[3] : 1;
+                double x = touch_x + e->motion.xrel * (d > 0 ? d : 1) / r2 * touch_w(), y = touch_y + e->motion.yrel * (d > 0 ? d : 1) / r3 * TOUCH_H;
+                touch_x = (int32_t)(x < 0 ? 0 : x > touch_w() - 1 ? touch_w() - 1 : x);
+                touch_y = (int32_t)(y < 0 ? 0 : y > TOUCH_H - 1 ? TOUCH_H - 1 : y);
+                if (e->motion.xrel || e->motion.yrel) ptr_moves++, last_kbm = 1;
+                break;
+            }
+            if (wheel) {
+                if (e->wheel.y) ptr_wheel += e->wheel.y > 0 ? 1 : -1;
+                break;
+            }
+            uint8_t b = e->button.button;
+            if (b >= 1 && b <= 5 && keys_down[BIND_MOUSE_BASE + b] && !down) keys_down[BIND_MOUSE_BASE + b] = 0, recompute_keyboard();
+            if (down && b == SDL_BUTTON_LEFT) ptr_clicks++;
+            if (down && b == SDL_BUTTON_RIGHT) ptr_rclicks++;
+            if (down) last_kbm = 1;
+            break;
         }
         if (motion) {
             if (mouse_win) {
@@ -475,7 +565,7 @@ void input_handle_event(const SDL_Event *e) {
             break;
         }
         if (!mouse_win && b == SDL_BUTTON_LEFT) { touch_at(w, e->button.x, e->button.y); touch_down = down; break; }
-        if (b >= 1 && b <= 5) keys_down[BIND_MOUSE_BASE + b] = down;
+        if (b >= 1 && b <= 5) keys_down[BIND_MOUSE_BASE + b] = down, keys_stale[BIND_MOUSE_BASE + b] &= down;
         if (down) last_kbm = 1;
         recompute_keyboard();
         break;
@@ -700,17 +790,20 @@ static uint64_t g_pad_obj;
 volatile int g_inject_plus;  // frames to hold Plus for the game (movie.c: A / B skip the opening movie too)
 RT_ON_RESET(input_reboot_reset) { g_pad_obj = 0; g_inject_plus = 0; }  // (reboot: the controller object was guest memory)
 // The scripted-input queue: LARECOMP_LIVE's commands and input_macro()'s (lines "<frames> <keys>" or "<n>ms <keys>")
-static struct { long len; bool ms; char keys[120]; } g_mq[256];
+static struct { long len; bool ms, macro; char keys[120]; } g_mq[256];  // (macro: an input_macro() line)
 static int g_mqh, g_mqt;
 static bool g_mq_active;
 static bool g_mq_macro;  // (input_macro's lines queued: busy until the queue is empty)
-static void mq_push_line(const char *line) {
+static bool g_mq_now_macro;  // (the line pressing now is input_macro()'s: never swallowed)
+static void mq_push_line_as(const char *line, bool macro) {
     long len;
     char keys[120], unit[8] = "";
     bool ms = sscanf(line, "%ld%7[ms] %119s", &len, unit, keys) == 3 && !strcmp(unit, "ms");
     if ((ms || sscanf(line, "%ld %119s", &len, keys) == 2) && (g_mqt + 1) % 256 != g_mqh)
-        g_mq[g_mqt].len = len, g_mq[g_mqt].ms = ms, snprintf(g_mq[g_mqt].keys, 120, "%s", keys), g_mqt = (g_mqt + 1) % 256;
+        g_mq[g_mqt].len = len, g_mq[g_mqt].ms = ms, g_mq[g_mqt].macro = macro, snprintf(g_mq[g_mqt].keys, 120, "%s", keys),
+        g_mqt = (g_mqt + 1) % 256;
 }
+static void mq_push_line(const char *line) { mq_push_line_as(line, false); }
 // Buttons pressed for the player, on top of their own input (the input thread: from input_frame's callees only)
 void input_macro(const char *lines) {
     for (const char *l = lines; l && *l;) {
@@ -718,7 +811,7 @@ void input_macro(const char *lines) {
         char line[160];
         size_t n = e ? (size_t)(e - l) : strlen(l);
         snprintf(line, sizeof line, "%.*s", (int)(n < sizeof line - 1 ? n : sizeof line - 1), l);
-        mq_push_line(line);
+        mq_push_line_as(line, true);
         l = e ? e + 1 : NULL;
     }
     g_mq_macro = true;
@@ -727,7 +820,8 @@ bool input_macro_busy(void) {
     if (g_mq_macro && !g_mq_active && g_mqh == g_mqt) g_mq_macro = false;
     return g_mq_macro;
 }
-volatile uint64_t g_input_swallow;  // buttons kept from the game (the player's own; not the queue's)
+volatile uint64_t g_input_swallow;  // buttons kept from the game (the player's own, and the test queue's - LARECOMP_LIVE
+                                    // presses as a player's would be; never input_macro()'s own)
 
 void input_frame(uint64_t frame) {
     if (g_pad_obj && getenv("LARECOMP_DUMP_PAD") && frame % 600 == 0) {
@@ -748,8 +842,12 @@ void input_frame(uint64_t frame) {
     host_test_frame(frame);
     extern void warp_frame(uint64_t frame);  // (LARECOMP_WARP: hle/warp.c)
     warp_frame(frame);
+    extern void newnpc_frame(uint64_t frame);  // (LARECOMP_NEWNPC research: hle/newnpc.c)
+    newnpc_frame(frame);
     extern void plugins_game_frame(uint64_t frame);  // (runtime/plugin.h hooks.game_frame)
     plugins_game_frame(frame);
+    extern void scriptinput_live_poll(uint64_t frame);  // (testing: <live>/sdl - window events, hle/scriptinput.c)
+    scriptinput_live_poll(frame);
     {   // LARECOMP_LIVE=<dir> (testing): steered while it runs - lines appended to <dir>/cmd, "<frames> <keys>" with keys
         // LARECOMP_INPUT's names joined by '+' (A, STICK_UP, STICK_45 = left stick at 45 degrees, RSTICK_LEFT...; "-": none),
         // run one after another; <dir>/state says the frame and what's left (screenshots: <dir>/shot, nvn/vulkan/device.c)
@@ -826,6 +924,7 @@ void input_frame(uint64_t frame) {
 #undef qt
 #undef active
             script_buttons = b, script_lx = lx, script_ly = ly, script_rx = rx, script_ry = ry;
+            g_mq_now_macro = g_mq_active && g_mq[g_mqh].macro;
             if (dir || g_mq_active || g_mqh != g_mqt) return;
         }
     }
@@ -1013,11 +1112,14 @@ static void fill_state(Cpu *c) {
         g_watch_hi = c->x[1] - 8 - 0x98 + hi;
         LOG("[input] watching controller object %llx\n", c->x[1] - 8);
     }
-    bool menu = menu_input_captured();  // the overlay menu / name entry has the controls (typing there isn't for the game)
+    extern bool scriptinput_grabbed(void);  // (runtime/hle/scriptinput.c: a script's menu holds the input too)
+    bool menu = menu_input_captured() || scriptinput_grabbed();  // the overlay menu / name entry has the controls (typing there isn't for the game)
     bool input_pad_finger_on(void);
     const uint64_t zr = input_pad_finger_on() ? 1ull << BTN_ZR : 0;  // (with the finger on, the controller's ZR touches)
     if (wheel_until[0] || wheel_until[1]) recompute_keyboard();  // (a wheel notch's binding lets go by time)
-    uint64_t b = menu ? script_buttons & ~zr : ((key_buttons | plugin_buttons | (pad_buttons & ~zr)) & ~g_input_swallow) | (script_buttons & ~zr);
+    bool grab = scriptinput_grabbed();  // (a script's menu: the test harness' buttons - <live>/cmd - are its too)
+    uint64_t b = menu ? (grab ? 0 : script_buttons & ~zr) : ((key_buttons | plugin_buttons | (pad_buttons & ~zr)) & ~g_input_swallow) |
+                                               (script_buttons & ~zr & (g_mq_now_macro ? ~0ull : ~g_input_swallow));
     {
         uint64_t menu_mouse_buttons(Cpu *c);  // (runtime/hle/menu_mouse.c: the mouse in the game's menus)
         uint64_t m = menu_mouse_buttons(c);
@@ -1031,10 +1133,10 @@ static void fill_state(Cpu *c) {
         if (g_inject_plus > 0) { until = renderer_game_frame() + 10; g_inject_plus = 0; }
         if (renderer_game_frame() < until) b |= 1ull << BTN_PLUS;
     }
-    int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx + plugin_lx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly + plugin_ly) + script_ly);
+    int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx + plugin_lx) + (grab ? 0 : script_lx)), ly = clamp_axis((menu ? 0 : key_ly + pad_ly + plugin_ly) + (grab ? 0 : script_ly));
     int32_t mrx = 0, mry = 0;
     mouse_stick(&mrx, &mry);
-    int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx + plugin_rx + mrx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry + plugin_ry + mry) + script_ry);
+    int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx + plugin_rx + mrx) + (grab ? 0 : script_rx)), ry = clamp_axis((menu ? 0 : key_ry + pad_ry + plugin_ry + mry) + (grab ? 0 : script_ry));
     // d-pad / arrow keys walk (setting) while the stick is at rest. "At rest" has a dead zone: a controller's stick
     // never reads exactly 0 (a DualSense rests at a few hundred), which used to turn the d-pad off altogether.
     if (!menu && g_settings.dpad_move && (int64_t)lx * lx + (int64_t)ly * ly < 8000ll * 8000) {
@@ -1043,6 +1145,10 @@ static void fill_state(Cpu *c) {
         int dy = (int)((d >> BTN_UP) & 1) - (int)((d >> BTN_DOWN) & 1);
         int32_t m = dx && dy ? 23170 : 32767;  // diagonals: same speed (32767 / sqrt 2)
         if (dx || dy) lx = dx * m, ly = dy * m;
+    }
+    {   // (a script holding the player still / walking them - the world API's input_hold / input_stick, hle/worldcommon.c)
+        void world_input_filter(uint64_t *b, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry);
+        if (!menu) world_input_filter(&b, &lx, &ly, &rx, &ry);
     }
     // stick directions also appear as buttons (bits 16-23)
     if (lx < -16000) b |= 1ull << 16;
@@ -1151,7 +1257,8 @@ static bool touch_now(int32_t *x, int32_t *y) {
     }
     if (pad_finger(x, y)) return true;
     *x = touch_x, *y = touch_y;
-    return touch_down && !menu_input_captured();
+    extern bool scriptinput_grabbed(void);
+    return touch_down && !menu_input_captured() && !scriptinput_grabbed();
 }
 // The controller as a finger (a controller has no touch screen, and Play with Eevee pets with one): the right stick
 // moves it over the screen - the overlay draws it (runtime/ui/menu.mm) - and ZR held touches there. ZR then doesn't
@@ -1181,7 +1288,8 @@ static bool pad_finger(int32_t *x, int32_t *y) {
         finger_y = finger_y < 0 ? 0 : finger_y > TOUCH_H - 1 ? TOUCH_H - 1 : finger_y;
         finger_seen_ns = now;
     }
-    bool down = ((pad_buttons | script_buttons) >> BTN_ZR & 1) && !menu_input_captured();
+    extern bool scriptinput_grabbed(void);
+    bool down = ((pad_buttons | script_buttons) >> BTN_ZR & 1) && !menu_input_captured() && !scriptinput_grabbed();
     if (down) finger_seen_ns = now;
     finger_down = down;
     *x = (int32_t)finger_x, *y = (int32_t)finger_y;

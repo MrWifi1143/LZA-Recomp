@@ -141,7 +141,8 @@ static int effective_family(void) {
 // what drives Switch input `slot` in that family: a controller button, or a key / mouse button (its first binding)
 static bool wanted_label(int fam, int slot, Label *o) {
     if (fam != FAMILY_KEYBOARD) return label_of(fam, bind_prompt_host(slot), o);
-    return key_label(g_bind_key[slot] ? g_bind_key[slot] : g_bind_key2[slot], o);
+    const int16_t *t = g_bind_in_menu ? g_bind_menu : g_bind_key;  // (in the game's menus: its menu keys)
+    return key_label(t[slot] ? t[slot] : g_bind_key2[slot], o);
 }
 
 // ---- the generation: changes whenever an icon would be drawn differently (the setting, the controller, a remap)
@@ -150,7 +151,7 @@ static uint64_t g_sig;
 uint32_t glyphs_generation(void) {
     int fam = effective_family();
     uint64_t s = (uint64_t)fam + 7;
-    for (int i = 0; i < BIND_PAD_COUNT; i++) s = s * 131 + (uint64_t)((fam == FAMILY_KEYBOARD ? g_bind_key[i] : bind_prompt_host(i)) + 3);
+    for (int i = 0; i < BIND_PAD_COUNT; i++) s = s * 131 + (uint64_t)((fam == FAMILY_KEYBOARD ? (g_bind_in_menu ? g_bind_menu[i] : g_bind_key[i]) : bind_prompt_host(i)) + 3);
     if (s != g_sig) {
         if (g_sig) g_gen++;
         g_sig = s;

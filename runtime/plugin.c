@@ -7,6 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "modapi.h"
+#include "worldapi.h"
+#include "mods.h"
 #include "paths.h"
 #include "plugin.h"
 #include "rt.h"
@@ -36,6 +39,17 @@ uint64_t game_title_id(void);
 #define MAX_PLUGINS 8
 static LarecompPluginHooks g_hooks[MAX_PLUGINS];
 static int g_n;
+static void *g_handles[MAX_PLUGINS];
+
+// A function a loaded plugin exports by name (the first that has it; NULL: none) - optional extras outside the API
+// struct
+void *plugins_symbol(const char *name) {
+    for (int i = 0; i < g_n; i++) {
+        void *f = g_handles[i] ? dl_sym(g_handles[i], name) : NULL;
+        if (f) return f;
+    }
+    return NULL;
+}
 static pthread_mutex_t g_queue = PTHREAD_MUTEX_INITIALIZER;
 
 void vk_queue_lock(void) { pthread_mutex_lock(&g_queue); }
@@ -139,8 +153,15 @@ static void load_one(const char *path) {
     LarecompPluginHooks hk = {0};
     int r = init(&g_api, &hk);
     if (r) { LOG("[plugin] %s stays out (%d)\n", path, r); dl_close(h); return; }
+    g_handles[g_n] = h;
     g_hooks[g_n++] = hk;
     if (hk.cbuf_bound) g_plugins_cbuf = 1;
+    // (the mod API - npc / player / ui for scripts, runtime/modapi.h: to a plugin that asks for it)
+    void (*take)(const LarecompModApi *) = (void (*)(const LarecompModApi *))dl_sym(h, "larecomp_plugin_modapi");
+    if (take) take(modapi_get());
+    // (the world API - networking, the player held, the party, battles, traces, weather, runtime/worldapi.h: the same way)
+    void (*take_w)(const LarecompWorldApi *) = (void (*)(const LarecompWorldApi *))dl_sym(h, "larecomp_plugin_worldapi");
+    if (take_w) take_w(worldapi_get());
     LOG("[plugin] loaded %s\n", path);
 }
 
@@ -161,10 +182,25 @@ bool plugin_enabled(const char *name) {
     return plugin_opt_in(name) ? plugin_listed(g_settings.plugins_on, name) : !plugin_listed(g_settings.plugins_off, name);
 }
 
+// Where the plugins are: plugins/ in the data root (the Windows zip and the Linux folder: the data root is the game's
+// folder), else plugins/ beside the program - the AppImage keeps its data in ~/.local/share/<game>, and its plugins
+// (the Steam relay, Legends Lua) inside the read-only image, next to lasrecomp.
+#include <sys/stat.h>
+bool rt_resource(const char *name, const char *dev_rel, char *out, size_t n);
+static const char *plugins_dir(void) {
+    static char dir[1100];
+    if (!dir[0]) {
+        struct stat st;
+        if (!(stat("plugins", &st) == 0 && S_ISDIR(st.st_mode)) && rt_resource("plugins", NULL, dir, sizeof dir)) {}
+        else snprintf(dir, sizeof dir, "plugins");
+    }
+    return dir;
+}
+
 // The plugin files in plugins/ (names only, sorted), on or off: what the start screen lists
 int plugins_files(char (*names)[64], int max) {
     int n = 0;
-    DIR *d = opendir("plugins");
+    DIR *d = opendir(plugins_dir());
     if (!d) return 0;
     for (struct dirent *e; (e = readdir(d)) && n < max;) {
         size_t k = strlen(e->d_name);
@@ -212,14 +248,14 @@ void plugins_load(void) {
 #endif
     }
     settings_load();  // (plugins_off; the working directory is the data root)
-    DIR *d = opendir("plugins");
+    DIR *d = opendir(plugins_dir());
     for (struct dirent *e; d && (e = readdir(d));) {  // (ones removed on the start screen while loaded: gone now)
         size_t n = strlen(e->d_name);
         char path[1024];
-        snprintf(path, sizeof path, "plugins/%s", e->d_name);
+        snprintf(path, sizeof path, "%s/%s", plugins_dir(), e->d_name);
         if (n > 8 && !strcmp(e->d_name + n - 8, ".removed")) remove(path);
     }
-    if (d) closedir(d), d = opendir("plugins");
+    if (d) closedir(d), d = opendir(plugins_dir());
     if (d) {
         for (struct dirent *e; (e = readdir(d));) {
             size_t n = strlen(e->d_name);
@@ -229,7 +265,7 @@ void plugins_load(void) {
                     continue;
                 }
                 char path[1024];
-                snprintf(path, sizeof path, "plugins/%s", e->d_name);
+                snprintf(path, sizeof path, "%s/%s", plugins_dir(), e->d_name);
                 load_one(path);
             }
         }
