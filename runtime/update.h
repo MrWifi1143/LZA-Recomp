@@ -5,7 +5,8 @@
 extern "C" {
 #endif
 enum { UPD_IDLE, UPD_CHECKING, UPD_NONE, UPD_AVAILABLE, UPD_DOWNLOADING, UPD_INSTALLING, UPD_DONE, UPD_FAILED };
-void update_check_start(void);    // once, in the background (check_updates off: nothing)
+bool update_by_launcher(void);    // RECOMPLAUNCHER=1: the launcher brings the releases (no look, no checkbox)
+void update_check_start(void);    // once, in the background (check_updates off or RECOMPLAUNCHER=1: nothing)
 void update_cleanup(void);        // at start: the files the last update set aside
 int update_state(void);
 const char *update_version(void); // the newer release's version ("1.2.2")

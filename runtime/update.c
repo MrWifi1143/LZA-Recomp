@@ -1,7 +1,7 @@
 // Updates from the release repository (RT_UPDATE_REPO, paths.h): at start a background look at its latest release; the
 // launcher shows one line next to the version when there's a newer one, and on a click downloads it, puts it in place
 // and offers a restart. Nothing happens without that click, and the look is skipped with "Check for updates" off
-// (larecomp.ini check_updates = 0).
+// (larecomp.ini check_updates = 0) or when RecompLauncher started the game (RECOMPLAUNCHER=1: it brings the releases).
 //   Windows: the release zip, unpacked over this folder - each file that changes renamed to <name>.old first (an exe or
 //   a DLL in use can be renamed, not overwritten; the .old files go at the next start), files the player may have
 //   changed in mods/ kept.
@@ -282,10 +282,17 @@ static void start_thread(void *(*fn)(void *)) {
 #endif
 }
 
+// RecompLauncher started the game (RECOMPLAUNCHER=1): it installs the releases, so no look here (and no checkbox)
+bool update_by_launcher(void) {
+    const char *rl = getenv("RECOMPLAUNCHER");
+    return rl && !strcmp(rl, "1");
+}
+
 void update_check_start(void) {
     static bool started;
     if (started) return;
     started = true;
+    if (update_by_launcher()) { LOG("[update] started by RecompLauncher: it brings the updates, no look here\n"); return; }
     if (!g_settings.check_updates && !getenv("LARECOMP_UPDATE_AS")) return;
     atomic_store(&g_state, UPD_CHECKING);
     start_thread(check_thread);
