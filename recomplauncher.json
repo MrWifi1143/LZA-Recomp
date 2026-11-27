@@ -94,7 +94,7 @@
         },
         {
           "path": "{install}/larecomp.ini",
-          "if": "{install}/lasrecomp"
+          "if": "{install}/ZARecomp"
         },
         {
           "path": "{local}/zarecomp/larecomp.ini"
@@ -114,7 +114,7 @@
       },
       {
         "path": "{install}",
-        "if": "{install}/lasrecomp"
+        "if": "{install}/ZARecomp"
       },
       {
         "path": "{local}/zarecomp"
@@ -127,7 +127,7 @@
       },
       {
         "path": "{install}/save",
-        "if": "{install}/lasrecomp"
+        "if": "{install}/ZARecomp"
       },
       {
         "path": "{local}/zarecomp/save"
@@ -140,7 +140,7 @@
       },
       {
         "path": "{install}",
-        "if": "{install}/lasrecomp"
+        "if": "{install}/ZARecomp"
       },
       {
         "path": "{local}/zarecomp"
