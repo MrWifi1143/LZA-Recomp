@@ -42,7 +42,7 @@
       "format": "ini",
       "file": [
         { "path": "{install}/larecomp.ini", "if": "{install}/PLARecomp.exe" },
-        { "path": "{install}/larecomp.ini", "if": "{install}/lasrecomp" },
+        { "path": "{install}/larecomp.ini", "if": "{install}/PLARecomp" },
         { "path": "{local}/plarecomp/larecomp.ini" }
       ]
     }
@@ -51,17 +51,17 @@
   "folders": {
     "data": [
       { "path": "{install}", "if": "{install}/PLARecomp.exe" },
-      { "path": "{install}", "if": "{install}/lasrecomp" },
+      { "path": "{install}", "if": "{install}/PLARecomp" },
       { "path": "{local}/plarecomp" }
     ],
     "saves": [
       { "path": "{install}/save", "if": "{install}/PLARecomp.exe" },
-      { "path": "{install}/save", "if": "{install}/lasrecomp" },
+      { "path": "{install}/save", "if": "{install}/PLARecomp" },
       { "path": "{local}/plarecomp/save" }
     ],
     "logs": [
       { "path": "{install}", "if": "{install}/PLARecomp.exe" },
-      { "path": "{install}", "if": "{install}/lasrecomp" },
+      { "path": "{install}", "if": "{install}/PLARecomp" },
       { "path": "{local}/plarecomp" }
     ]
   },
