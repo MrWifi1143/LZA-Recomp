@@ -234,10 +234,10 @@ void rt_restart_process(int to_launcher) {
     CloseHandle(pi.hProcess);
 #else
     char *av[66], self[4096];
-    ssize_t sl = readlink("/proc/self/exe", self, sizeof self - 1);  // (the program's own path: execv of /proc/self/exe
-    if (sl > 0) self[sl] = 0;                                        // would name the new process "exe")
-    else snprintf(self, sizeof self, "%s", g_argv[0]);
-    av[0] = g_argv[0];
+    // (the program's own path, LARECOMP_SELF when the release runs it through lib/ld-linux-x86-64.so.2, where
+    // /proc/self/exe is the loader: plat_exec starts it through the loader again, with --library-path)
+    if (!plat_exe_path(self, sizeof self)) snprintf(self, sizeof self, "%s", g_argv[0]);
+    av[0] = self;
     // (an AppImage: the AppImage file again - this program's path is inside its mount, gone once this one exits, and
     // an update (runtime/update.c) has put the new version in the AppImage's place)
     const char *appimage = getenv("APPIMAGE");
@@ -246,7 +246,7 @@ void rt_restart_process(int to_launcher) {
     av[n + 1] = NULL;
     pid_t pid = fork();
     if (pid == 0) {  // (a new process: this one's GPU device, audio and files close with it)
-        execv(self, av);
+        plat_exec(av);
         execvp(g_argv[0], av);
         _exit(127);
     }
